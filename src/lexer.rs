@@ -301,7 +301,7 @@ impl Lexer {
                                     ErrorKind::UnterminatedComment,
                                     start_line,
                                     start_col,
-                                    "Comentario de bloque /* ... */ sin cerrar",
+                                    "Unterminated block comment /* ... */",
                                 ));
                             }
                         }
@@ -398,7 +398,7 @@ impl Lexer {
                         ErrorKind::InvalidSyntax,
                         start_line,
                         start_col,
-                        "exponente de notación científica sin dígitos",
+                        "scientific notation exponent has no digits",
                     ));
                 }
             }
@@ -415,7 +415,7 @@ impl Lexer {
                     ErrorKind::InvalidSyntax,
                     start_line,
                     start_col,
-                    format!("Número float inválido: '{}'", raw),
+                    format!("Invalid float number: '{}'", raw),
                 )
             })?;
             Ok(Token::Float(n))
@@ -425,7 +425,7 @@ impl Lexer {
                     ErrorKind::InvalidSyntax,
                     start_line,
                     start_col,
-                    format!("Número entero inválido: '{}'", raw),
+                    format!("Invalid integer number: '{}'", raw),
                 )
             })?;
             Ok(Token::Int(n))
@@ -459,7 +459,7 @@ impl Lexer {
                             line,
                             col,
                             format!(
-                                "separador `_` en literal {} solo entre dígitos válidos",
+                                "separator `_` in {} literal only between valid digits",
                                 name
                             ),
                         ));
@@ -474,7 +474,7 @@ impl Lexer {
                 ErrorKind::InvalidSyntax,
                 line,
                 col,
-                format!("literal {} sin dígitos después del prefijo", name),
+                format!("literal {} has no digits after the prefix", name),
             ));
         }
         let raw: String = self.chars[digit_start..self.pos].iter().collect();
@@ -484,7 +484,10 @@ impl Lexer {
                 ErrorKind::InvalidSyntax,
                 line,
                 col,
-                format!("literal {} `{}` excede el rango de Int (i64)", name, clean),
+                format!(
+                    "literal {} `{}` exceeds the range of Int (i64)",
+                    name, clean
+                ),
             )
         })?;
         Ok(Token::Int(n))
@@ -508,7 +511,7 @@ impl Lexer {
                         ErrorKind::InvalidSyntax,
                         line,
                         col,
-                        "separador `_` en número solo entre dígitos (ejemplo: `1_000_000`)",
+                        "separator `_` in number only between digits (example: `1_000_000`)",
                     ));
                 }
                 self.advance(); // consume '_'
@@ -558,7 +561,7 @@ impl Lexer {
                             ErrorKind::UnexpectedChar(c),
                             self.line,
                             self.column,
-                            "\\u{...} acepta hasta 6 dígitos hex (codepoint máximo U+10FFFF)",
+                            "\\u{...} accepts up to 6 hex digits (maximum codepoint U+10FFFF)",
                         ));
                     }
                 }
@@ -567,7 +570,7 @@ impl Lexer {
                         ErrorKind::UnexpectedChar(other),
                         self.line,
                         self.column,
-                        format!("Dígito hex inválido en \\u{{...}}: `{}`", other),
+                        format!("Invalid hex digit in \\u{{...}}: `{}`", other),
                     ));
                 }
                 None => {
@@ -575,7 +578,7 @@ impl Lexer {
                         ErrorKind::UnterminatedString,
                         start_line,
                         start_col,
-                        "Secuencia `\\u{` sin cerrar",
+                        "Unterminated `\\u{` sequence",
                     ));
                 }
             }
@@ -585,7 +588,7 @@ impl Lexer {
                 ErrorKind::UnexpectedChar('}'),
                 start_line,
                 start_col,
-                "\\u{} vacío — requiere al menos un dígito hex",
+                "\\u{} is empty — requires at least one hex digit",
             ));
         }
         let codepoint = u32::from_str_radix(&hex, 16).map_err(|_| {
@@ -593,7 +596,7 @@ impl Lexer {
                 ErrorKind::UnexpectedChar('?'),
                 start_line,
                 start_col,
-                format!("`\\u{{{}}}`: hex inválido", hex),
+                format!("`\\u{{{}}}`: invalid hex", hex),
             )
         })?;
         char::from_u32(codepoint).ok_or_else(|| {
@@ -602,7 +605,7 @@ impl Lexer {
                 start_line,
                 start_col,
                 format!(
-                    "`\\u{{{}}}` (0x{:X}) no es un codepoint Unicode escalar válido (surrogates D800-DFFF rechazados, máximo 10FFFF)",
+                    "`\\u{{{}}}` (0x{:X}) is not a valid Unicode scalar codepoint (surrogates D800-DFFF rejected, maximum 10FFFF)",
                     hex, codepoint
                 ),
             )
@@ -628,7 +631,7 @@ impl Lexer {
                         self.line,
                         self.column,
                         format!(
-                            "\\x requiere 2 dígitos hex, se encontró `{}` (después de {} dígitos)",
+                            "\\x requires 2 hex digits, found `{}` (after {} digits)",
                             other,
                             hex.len()
                         ),
@@ -639,7 +642,7 @@ impl Lexer {
                         ErrorKind::UnterminatedString,
                         start_line,
                         start_col,
-                        "\\x sin cerrar",
+                        "Unterminated \\x",
                     ));
                 }
             }
@@ -649,7 +652,7 @@ impl Lexer {
                 ErrorKind::UnexpectedChar('?'),
                 start_line,
                 start_col,
-                format!("`\\x{}`: hex inválido", hex),
+                format!("`\\x{}`: invalid hex", hex),
             )
         })?;
         if byte > 0x7F {
@@ -658,7 +661,7 @@ impl Lexer {
                 start_line,
                 start_col,
                 format!(
-                    "`\\x{}` (0x{:X}) está fuera del rango ASCII (0x00-0x7F). Usá \\u{{...}} para chars no-ASCII.",
+                    "`\\x{}` (0x{:X}) is outside the ASCII range (0x00-0x7F). Use \\u{{...}} for non-ASCII chars.",
                     hex, byte
                 ),
             ));
@@ -720,7 +723,7 @@ impl Lexer {
                                 ErrorKind::UnexpectedChar(other),
                                 self.line,
                                 self.column,
-                                format!("Secuencia de escape inválida: '\\{}'", other),
+                                format!("Invalid escape sequence: '\\{}'", other),
                             ));
                         }
                         None => {
@@ -728,7 +731,7 @@ impl Lexer {
                                 ErrorKind::UnterminatedString,
                                 start_line,
                                 start_col,
-                                "String sin cerrar (terminó después de '\\')",
+                                "Unterminated string (ended after '\\')",
                             ));
                         }
                     }
@@ -738,9 +741,9 @@ impl Lexer {
                         ErrorKind::UnterminatedString,
                         start_line,
                         start_col,
-                        "String sin cerrar — salto de línea antes de la comilla de cierre",
+                        "Unterminated string — newline before closing quote",
                     )
-                    .with_hint("Usá \\n para incluir un salto de línea dentro del string"));
+                    .with_hint("Use \\n to include a newline inside the string"));
                 }
                 Some(c) => {
                     s.push(c);
@@ -751,7 +754,7 @@ impl Lexer {
                         ErrorKind::UnterminatedString,
                         start_line,
                         start_col,
-                        "String sin cerrar — falta la comilla de cierre",
+                        "Unterminated string — missing closing quote",
                     ));
                 }
             }
@@ -814,7 +817,7 @@ impl Lexer {
                                 ErrorKind::UnexpectedChar(other),
                                 self.line,
                                 self.column,
-                                format!("Secuencia de escape inválida: '\\{}'", other),
+                                format!("Invalid escape sequence: '\\{}'", other),
                             ));
                         }
                         None => {
@@ -822,7 +825,7 @@ impl Lexer {
                                 ErrorKind::UnterminatedString,
                                 start_line,
                                 start_col,
-                                "String multilínea sin cerrar (terminó después de '\\')",
+                                "Unterminated multiline string (ended after '\\')",
                             ));
                         }
                     }
@@ -838,7 +841,7 @@ impl Lexer {
                         ErrorKind::UnterminatedString,
                         start_line,
                         start_col,
-                        "String multilínea sin cerrar — falta `\"\"\"` de cierre",
+                        "Unterminated multiline string — missing closing `\"\"\"`",
                     ));
                 }
             }
@@ -907,7 +910,7 @@ impl Lexer {
                         crate::error::ErrorKind::UnterminatedString,
                         self.line,
                         self.column,
-                        "literal `b\"...\"` sin cerrar".to_string(),
+                        "unterminated byte literal `b\"...\"`".to_string(),
                     ));
                 }
                 Some('"') => {
@@ -949,7 +952,7 @@ impl Lexer {
                                     crate::error::ErrorKind::InvalidSyntax,
                                     self.line,
                                     self.column,
-                                    "escape `\\xHH`: hex incompleto (falta primer dígito)"
+                                    "escape `\\xHH`: incomplete hex (missing first digit)"
                                         .to_string(),
                                 )
                             })?;
@@ -959,7 +962,7 @@ impl Lexer {
                                     crate::error::ErrorKind::InvalidSyntax,
                                     self.line,
                                     self.column,
-                                    "escape `\\xHH`: hex incompleto (falta segundo dígito)"
+                                    "escape `\\xHH`: incomplete hex (missing second digit)"
                                         .to_string(),
                                 )
                             })?;
@@ -970,7 +973,7 @@ impl Lexer {
                                         crate::error::ErrorKind::InvalidSyntax,
                                         self.line,
                                         self.column,
-                                        format!("escape `\\x{}{}` no es hex válido", h1, h2),
+                                        format!("escape `\\x{}{}` is not valid hex", h1, h2),
                                     )
                                 })?;
                             out.push(byte);
@@ -981,8 +984,8 @@ impl Lexer {
                                 self.line,
                                 self.column,
                                 format!(
-                                    "escape `\\{}` no soportado en literal de bytes; \
-                                     soportados: \\n, \\r, \\t, \\0, \\\\, \\\", \\xHH",
+                                    "escape `\\{}` not supported in byte literal; \
+                                     supported: \\n, \\r, \\t, \\0, \\\\, \\\", \\xHH",
                                     other
                                 ),
                             ));
@@ -992,7 +995,7 @@ impl Lexer {
                                 crate::error::ErrorKind::UnterminatedString,
                                 self.line,
                                 self.column,
-                                "literal `b\"...\"` termina con `\\` sin cerrar".to_string(),
+                                "byte literal `b\"...\"` ends with unterminated `\\`".to_string(),
                             ));
                         }
                     }
@@ -1098,7 +1101,7 @@ impl Lexer {
                         ErrorKind::UnexpectedChar('!'),
                         line,
                         column,
-                        "'!' solo es válido como parte de '!='",
+                        "'!' is only valid as part of '!='",
                     ));
                 }
             }
@@ -1262,7 +1265,7 @@ impl Lexer {
                         ErrorKind::InvalidSyntax,
                         line,
                         column,
-                        "se esperaba un identificador después de `'` (label)".to_string(),
+                        "expected an identifier after `'` (label)".to_string(),
                     ));
                 }
                 let name: String = self.chars[start_pos..self.pos].iter().collect();
@@ -1284,7 +1287,7 @@ impl Lexer {
                     ErrorKind::UnexpectedChar(other),
                     line,
                     column,
-                    format!("Carácter inesperado: '{}'", other),
+                    format!("Unexpected character: '{}'", other),
                 ));
             }
         };
@@ -1346,7 +1349,7 @@ mod tests {
     /// Helper: tokenize and return only the `Token`s (no positions).
     fn toks(src: &str) -> Vec<Token> {
         tokenize(src)
-            .expect("la fuente debe tokenizar sin error")
+            .expect("source must tokenize without error")
             .into_iter()
             .map(|t| t.token)
             .collect()
@@ -1532,8 +1535,8 @@ mod tests {
         // `\z` is not a supported escape → clear error.
         let err = tokenize(r#"b"\z""#).unwrap_err();
         assert!(
-            err.message.contains("escape") && err.message.contains("no soportado"),
-            "esperaba mensaje de escape no soportado, fue: {}",
+            err.message.contains("escape") && err.message.contains("not supported"),
+            "expected escape not-supported message, was: {}",
             err.message
         );
     }
@@ -1545,7 +1548,7 @@ mod tests {
         let err = tokenize("🚀").unwrap_err();
         assert!(
             matches!(err.kind, ErrorKind::UnexpectedChar('🚀')),
-            "esperaba UnexpectedChar('🚀'), fue: {:?}",
+            "expected UnexpectedChar('🚀'), was: {:?}",
             err.kind,
         );
     }
@@ -1629,7 +1632,7 @@ mod tests {
 
     #[test]
     fn triple_string_unclosed_is_error() {
-        let src = "\"\"\"sin cerrar";
+        let src = "\"\"\"unterminated";
         let res = tokenize(src);
         let err = res.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnterminatedString));
@@ -1694,8 +1697,8 @@ mod tests {
     fn f9_escape_unicode_empty_is_error() {
         let err = tokenize(r#""\u{}""#).unwrap_err();
         assert!(
-            err.message.contains("vacío"),
-            "esperaba mensaje sobre `\\u{{}}` vacío, fue: {}",
+            err.message.contains("empty"),
+            "expected message about empty `\\u{{}}`, was: {}",
             err.message
         );
     }
@@ -1706,8 +1709,8 @@ mod tests {
         // (the `"`) and reports an invalid digit inside `\u{...}`.
         let err = tokenize(r#""\u{ABC""#).unwrap_err();
         assert!(
-            err.message.contains("hex inválido") || err.message.contains("Dígito hex inválido"),
-            "esperaba mensaje sobre dígito hex inválido, fue: {}",
+            err.message.contains("invalid hex") || err.message.contains("Invalid hex digit"),
+            "expected message about invalid hex digit, was: {}",
             err.message
         );
     }
@@ -1718,8 +1721,8 @@ mod tests {
         // Unicode scalar.
         let err = tokenize(r#""\u{D800}""#).unwrap_err();
         assert!(
-            err.message.contains("escalar"),
-            "esperaba mensaje sobre codepoint escalar, fue: {}",
+            err.message.contains("scalar"),
+            "expected message about scalar codepoint, was: {}",
             err.message
         );
     }
@@ -1729,8 +1732,8 @@ mod tests {
         // 7 hex digits exceed the allowed maximum (6, up to 10FFFF).
         let err = tokenize(r#""\u{1234567}""#).unwrap_err();
         assert!(
-            err.message.contains("6 dígitos") || err.message.contains("10FFFF"),
-            "esperaba mensaje sobre límite de dígitos, fue: {}",
+            err.message.contains("6 hex digits") || err.message.contains("10FFFF"),
+            "expected message about hex digit limit, was: {}",
             err.message
         );
     }
@@ -1754,7 +1757,7 @@ mod tests {
         let err = tokenize(r#""\x80""#).unwrap_err();
         assert!(
             err.message.contains("ASCII") && err.message.contains("\\u"),
-            "esperaba mensaje sobre rango ASCII + sugerencia \\u, fue: {}",
+            "expected message about ASCII range + \\u suggestion, was: {}",
             err.message
         );
     }
@@ -1763,8 +1766,8 @@ mod tests {
     fn f9_escape_hex_byte_too_few_digits_is_error() {
         let err = tokenize(r#""\x4""#).unwrap_err();
         assert!(
-            err.message.contains("2 dígitos"),
-            "esperaba mensaje sobre 2 dígitos, fue: {}",
+            err.message.contains("2 hex digits"),
+            "expected message about 2 hex digits, was: {}",
             err.message
         );
     }
@@ -1830,7 +1833,7 @@ mod tests {
 
     #[test]
     fn unterminated_string_errors() {
-        let res = tokenize(r#""sin cerrar"#);
+        let res = tokenize(r#""unterminated"#);
         assert!(res.is_err());
         let err = res.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnterminatedString));
@@ -1838,7 +1841,7 @@ mod tests {
 
     #[test]
     fn unterminated_block_comment_errors() {
-        let res = tokenize("/* sin cerrar");
+        let res = tokenize("/* unterminated");
         assert!(res.is_err());
         assert!(matches!(
             res.unwrap_err().kind,
@@ -1994,8 +1997,8 @@ print("Hola, {name}!")"#;
 
     /// Helper: tokenize a single expression and return the first token.
     fn first_token_of(src: &str) -> Token {
-        let toks = tokenize(src).expect("debe tokenizar");
-        toks.into_iter().next().expect("al menos un token").token
+        let toks = tokenize(src).expect("must tokenize");
+        toks.into_iter().next().expect("at least one token").token
     }
 
     #[test]
@@ -2013,8 +2016,8 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn num_separator_double_or_terminal_is_error() {
-        assert!(tokenize("1__0").is_err(), "doble underscore");
-        assert!(tokenize("1_000_").is_err(), "underscore al final");
+        assert!(tokenize("1__0").is_err(), "double underscore");
+        assert!(tokenize("1_000_").is_err(), "trailing underscore");
     }
 
     #[test]
@@ -2040,9 +2043,9 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn num_exponent_without_digits_is_error() {
-        assert!(tokenize("1e").is_err(), "`e` solo sin dígitos");
-        assert!(tokenize("1e+").is_err(), "`e+` sin dígitos");
-        assert!(tokenize("1e-").is_err(), "`e-` sin dígitos");
+        assert!(tokenize("1e").is_err(), "`e` alone has no digits");
+        assert!(tokenize("1e+").is_err(), "`e+` has no digits");
+        assert!(tokenize("1e-").is_err(), "`e-` has no digits");
     }
 
     #[test]

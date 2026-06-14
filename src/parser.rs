@@ -470,7 +470,7 @@ impl Parser {
         if matches!(self.peek(), Token::DotDot | Token::DotDotEq) {
             return Err(self.error(
                 ErrorKind::InvalidSyntax,
-                "los rangos no se encadenan — usá paréntesis si querés un rango de rangos",
+                "ranges do not chain — use parentheses if you want a range of ranges",
             ));
         }
         Ok(Expr::Range {
@@ -648,7 +648,7 @@ impl Parser {
                         if n < 0 {
                             return Err(self.error(
                                 ErrorKind::InvalidSyntax,
-                                "índice de tupla debe ser no-negativo",
+                                "tuple index must be non-negative",
                             ));
                         }
                         self.advance(); // consume '.'
@@ -668,18 +668,17 @@ impl Parser {
                     // dropping the whole stmt. Enables fine completion
                     // after `user.<typo or EOF>` — the LSP uses the
                     // `object` type to suggest fields/methods.
-                    let field =
-                        match self.expect_ident("se esperaba nombre de campo después de '.'") {
-                            Ok(f) => f,
-                            Err(e) => {
-                                if self.recovery_mode {
-                                    self.push_recovered(e);
-                                    String::new()
-                                } else {
-                                    return Err(e);
-                                }
+                    let field = match self.expect_ident("expected field name after '.'") {
+                        Ok(f) => f,
+                        Err(e) => {
+                            if self.recovery_mode {
+                                self.push_recovered(e);
+                                String::new()
+                            } else {
+                                return Err(e);
                             }
-                        };
+                        }
+                    };
                     expr = Expr::Field {
                         object: Box::new(expr),
                         field,
@@ -706,7 +705,7 @@ impl Parser {
                             return Err(self.error(
                                 ErrorKind::InvalidSyntax,
                                 format!(
-                                    "`{}` espera exactamente 1 argumento, recibió {}",
+                                    "`{}` expects exactly 1 argument, got {}",
                                     name,
                                     args.len()
                                 ),
@@ -791,7 +790,7 @@ impl Parser {
                             } else {
                                 Err(self.error(
                                     ErrorKind::UnexpectedToken,
-                                    "se esperaba ']', '..' o '..=' en el contenido del indexing",
+                                    "expected ']', '..' or '..=' in indexing content",
                                 ))
                             }
                         }
@@ -799,7 +798,7 @@ impl Parser {
                     self.no_struct_literal = prev_no_struct;
                     self.in_slice_context = prev_slice;
                     expr = bracket_result?;
-                    self.expect(&Token::RBracket, "se esperaba ']' para cerrar el indexing")?;
+                    self.expect(&Token::RBracket, "expected ']' to close indexing")?;
                 }
                 Token::LBrace => {
                     let ident_info = match &expr {
@@ -814,10 +813,10 @@ impl Parser {
                         if self.looks_like_struct_lit_body() {
                             return Err(self.error(
                                 ErrorKind::UnexpectedToken,
-                                "los struct literals no se permiten \
-                                 directamente en condiciones de \
-                                 if/while/for/match — envolvélo en \
-                                 paréntesis: `(User { id: 1 })`",
+                                "struct literals are not allowed \
+                                 directly in if/while/for/match \
+                                 conditions — wrap it in \
+                                 parentheses: `(User { id: 1 })`",
                             ));
                         }
                         break;
@@ -844,7 +843,7 @@ impl Parser {
     /// `false` (each value is delimited by `,` or `}`), so we allow
     /// nesting: `Order { user: User { id: 1, name: "x" } }`.
     fn parse_struct_lit_body(&mut self, type_name: String, span: Span) -> FitzResult<Expr> {
-        self.expect(&Token::LBrace, "se esperaba '{'")?;
+        self.expect(&Token::LBrace, "expected '{'")?;
         let prev = std::mem::replace(&mut self.no_struct_literal, false);
         let result = self.parse_struct_lit_fields(type_name, span);
         self.no_struct_literal = prev;
@@ -876,13 +875,13 @@ impl Parser {
             if self.is_at_end() {
                 return Err(self.error(
                     ErrorKind::MissingClosingBrace,
-                    "se esperaba '}' para cerrar el struct literal",
+                    "expected '}' to close the struct literal",
                 ));
             }
-            let field_name = self.expect_ident("se esperaba nombre de campo en struct literal")?;
+            let field_name = self.expect_ident("expected field name in struct literal")?;
             self.expect(
                 &Token::Colon,
-                "se esperaba ':' después del nombre del campo en struct literal",
+                "expected ':' after field name in struct literal",
             )?;
             self.skip_newlines();
             let value = self.expression()?;
@@ -899,7 +898,7 @@ impl Parser {
                 _ => {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
-                        "se esperaba ',', salto de línea o '}' entre campos del struct literal",
+                        "expected ',', newline, or '}' between struct literal fields",
                     ));
                 }
             }
@@ -1036,7 +1035,7 @@ impl Parser {
             Token::EOF | Token::RBrace => Ok(()),
             _ => Err(self.error(
                 ErrorKind::UnexpectedToken,
-                "se esperaba salto de línea o fin de bloque entre sentencias",
+                "expected newline or end of block between statements",
             )),
         }
     }
@@ -1093,14 +1092,14 @@ impl Parser {
                     unreachable!()
                 };
                 self.advance();
-                self.expect(&Token::Colon, "se esperaba ':' después del label")?;
+                self.expect(&Token::Colon, "expected ':' after label")?;
                 match self.peek() {
                     Token::Loop => self.parse_loop_with_label(span, Some(label)),
                     Token::While => self.parse_while_with_label(span, Some(label)),
                     Token::For => self.parse_for_with_label(span, Some(label)),
                     _ => Err(self.error(
                         ErrorKind::UnexpectedToken,
-                        "se esperaba `loop`, `while` o `for` después del label",
+                        "expected `loop`, `while`, or `for` after label",
                     )),
                 }
             }
@@ -1115,13 +1114,11 @@ impl Parser {
     /// end to alias the namespace (`import foo as f` → binding `f`
     /// instead of the last segment).
     fn parse_import(&mut self, span: Span) -> FitzResult<Stmt> {
-        self.expect(&Token::Import, "se esperaba 'import'")?;
+        self.expect(&Token::Import, "expected 'import'")?;
         let path = self.parse_module_path()?;
         let alias = if matches!(self.peek(), Token::As) {
             self.advance();
-            Some(self.expect_ident(
-                "se esperaba un identificador después de 'as' en 'import ... as ...'",
-            )?)
+            Some(self.expect_ident("expected an identifier after 'as' in 'import ... as ...'")?)
         } else {
             None
         };
@@ -1133,11 +1130,11 @@ impl Parser {
     /// Accepts trailing comma. PreF8.4: each name may carry
     /// `as <ident>` for aliasing (`from foo import bar as b, baz as z`).
     fn parse_from_import(&mut self, span: Span) -> FitzResult<Stmt> {
-        self.expect(&Token::From, "se esperaba 'from'")?;
+        self.expect(&Token::From, "expected 'from'")?;
         let path = self.parse_module_path()?;
         self.expect(
             &Token::Import,
-            "se esperaba 'import' después del path en 'from ... import ...'",
+            "expected 'import' after path in 'from ... import ...'",
         )?;
 
         // Mini-batch Mln — multi-line via parens. If a `(` follows
@@ -1163,7 +1160,7 @@ impl Parser {
             }
             self.expect(
                 &Token::RParen,
-                "se esperaba ')' para cerrar `from ... import (...)`",
+                "expected ')' to close `from ... import (...)`",
             )?;
             return Ok(Stmt::FromImport { path, names, span });
         }
@@ -1194,14 +1191,14 @@ impl Parser {
     /// `is_first` only changes the error message of the first ident.
     fn parse_from_import_name(&mut self, is_first: bool) -> FitzResult<(String, Option<String>)> {
         let name = self.expect_ident(if is_first {
-            "se esperaba al menos un identificador después de 'import'"
+            "expected at least one identifier after 'import'"
         } else {
-            "se esperaba identificador después de ',' en 'from ... import'"
+            "expected identifier after ',' in 'from ... import'"
         })?;
         let alias = if matches!(self.peek(), Token::As) {
             self.advance();
             Some(self.expect_ident(
-                "se esperaba un identificador después de 'as' en 'from ... import ... as ...'",
+                "expected an identifier after 'as' in 'from ... import ... as ...'",
             )?)
         } else {
             None
@@ -1213,28 +1210,25 @@ impl Parser {
     /// Always has at least one element. Serves both `import` and
     /// `from ... import`.
     fn parse_module_path(&mut self) -> FitzResult<Vec<String>> {
-        let first = self.expect_ident("se esperaba nombre de módulo (identificador)")?;
+        let first = self.expect_ident("expected module name (identifier)")?;
         let mut segments = vec![first];
         while matches!(self.peek(), Token::Dot) {
             self.advance();
-            let next = self.expect_ident("se esperaba nombre de módulo después de '.'")?;
+            let next = self.expect_ident("expected module name after '.'")?;
             segments.push(next);
         }
         Ok(segments)
     }
 
     fn parse_assign_with_let(&mut self, span: Span) -> FitzResult<Stmt> {
-        self.expect(&Token::Let, "se esperaba 'let'")?;
+        self.expect(&Token::Let, "expected 'let'")?;
         // Mini-batch T — destructuring `let (a, b) = expr`. Detected
         // by peeking `(`. The pattern allows nesting: `let ((x, y),
         // z) = ...`. No type annotation for MVP simplicity (the
         // checker infers from the RHS).
         if matches!(self.peek(), Token::LParen) {
             let pattern = self.parse_pattern()?;
-            self.expect(
-                &Token::Eq,
-                "se esperaba '=' en la declaración con destructuring",
-            )?;
+            self.expect(&Token::Eq, "expected '=' in destructuring declaration")?;
             let value = self.expression()?;
             return Ok(Stmt::Destructure {
                 pattern,
@@ -1243,9 +1237,9 @@ impl Parser {
             });
         }
         let (name, name_span) =
-            self.expect_ident_with_span("se esperaba nombre de variable después de 'let'")?;
+            self.expect_ident_with_span("expected variable name after 'let'")?;
         let type_ = self.parse_optional_type_annotation()?;
-        self.expect(&Token::Eq, "se esperaba '=' en la declaración")?;
+        self.expect(&Token::Eq, "expected '=' in declaration")?;
         let value = self.expression()?;
         Ok(Stmt::Assign {
             target: AssignTarget::Ident(name, name_span),
@@ -1279,13 +1273,13 @@ impl Parser {
                 _ => {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
-                        "anotación de tipo solo se admite al declarar una variable",
+                        "type annotation is only allowed when declaring a variable",
                     ));
                 }
             };
             self.advance(); // consume ':'
             let type_ = self.parse_type_expr()?;
-            self.expect(&Token::Eq, "se esperaba '=' en la asignación")?;
+            self.expect(&Token::Eq, "expected '=' in assignment")?;
             let value = self.expression()?;
             return Ok(Stmt::Assign {
                 target: AssignTarget::Ident(name, name_span),
@@ -1309,8 +1303,8 @@ impl Parser {
                 _ => {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
-                        "destino de asignación no soportado (solo identificador, \
-                         `expr.campo` o `expr[indice]`)",
+                        "unsupported assignment target (only identifier, \
+                         `expr.field`, or `expr[index]`)",
                     ));
                 }
             };
@@ -1384,8 +1378,8 @@ impl Parser {
                 _ => {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
-                        "destino de asignación compuesta no soportado (solo identificador, \
-                         `expr.campo` o `expr[indice]`)",
+                        "unsupported compound assignment target (only identifier, \
+                         `expr.field`, or `expr[index]`)",
                     ));
                 }
             };
@@ -1471,7 +1465,7 @@ impl Parser {
                     }
                     items.push(self.parse_type_expr()?);
                 }
-                self.expect(&Token::RParen, "se esperaba ')' para cerrar el tipo tupla")?;
+                self.expect(&Token::RParen, "expected ')' to close the tuple type")?;
                 let mut t = TypeExpr::Tuple(items);
                 if self.eat(&Token::Question) {
                     t = TypeExpr::Nullable(Box::new(t));
@@ -1481,7 +1475,7 @@ impl Parser {
             // No comma → just grouping parens.
             self.expect(
                 &Token::RParen,
-                "se esperaba ')' para cerrar el tipo entre paréntesis",
+                "expected ')' to close the parenthesized type",
             )?;
             let mut t = first;
             if self.eat(&Token::Question) {
@@ -1489,7 +1483,7 @@ impl Parser {
             }
             return Ok(t);
         }
-        let name = self.expect_ident("se esperaba un nombre de tipo")?;
+        let name = self.expect_ident("expected a type name")?;
         // Contextual keyword: `Fn(...)` → function type.
         if name == "Fn" && matches!(self.peek(), Token::LParen) {
             return self.parse_fn_type();
@@ -1501,7 +1495,7 @@ impl Parser {
                 return Err(self.error(
                     ErrorKind::UnexpectedToken,
                     format!(
-                        "genérico `{}<>` vacío: se esperaba al menos un argumento de tipo",
+                        "empty generic `{}<>`: expected at least one type argument",
                         name
                     ),
                 ));
@@ -1535,7 +1529,7 @@ impl Parser {
                 _ => {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
-                        format!("se esperaba '>' para cerrar `{}<...>`", name),
+                        format!("expected '>' to close `{}<...>`", name),
                     ));
                 }
             }
@@ -1551,7 +1545,7 @@ impl Parser {
 
     /// `Fn` already consumed; parses `(P1, P2, ...) -> R`.
     fn parse_fn_type(&mut self) -> FitzResult<TypeExpr> {
-        self.expect(&Token::LParen, "se esperaba '(' después de `Fn`")?;
+        self.expect(&Token::LParen, "expected '(' after `Fn`")?;
         self.skip_newlines();
         let mut params: Vec<TypeExpr> = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
@@ -1567,10 +1561,10 @@ impl Parser {
             }
         }
         self.skip_newlines();
-        self.expect(&Token::RParen, "se esperaba ')' para cerrar `Fn(...)`")?;
+        self.expect(&Token::RParen, "expected ')' to close `Fn(...)`")?;
         self.expect(
             &Token::Arrow,
-            "se esperaba '->' con el tipo de retorno después de `Fn(...)`",
+            "expected '->' with the return type after `Fn(...)`",
         )?;
         let ret = self.parse_type_expr()?;
         Ok(TypeExpr::Function {
@@ -1580,7 +1574,7 @@ impl Parser {
     }
 
     fn parse_return(&mut self, span: Span) -> FitzResult<Stmt> {
-        self.expect(&Token::Return, "se esperaba 'return'")?;
+        self.expect(&Token::Return, "expected 'return'")?;
         // `return` with no value returns implicit null. Detect the
         // valid statement terminators: end of line, block close, or
         // end of file.
@@ -1679,12 +1673,9 @@ impl Parser {
 
     fn parse_fndef(&mut self, span: Span) -> FitzResult<Stmt> {
         let is_async = self.eat(&Token::Async);
-        self.expect(&Token::Fn, "se esperaba 'fn'")?;
-        let name = self.expect_ident("se esperaba nombre de función después de 'fn'")?;
-        self.expect(
-            &Token::LParen,
-            "se esperaba '(' después del nombre de función",
-        )?;
+        self.expect(&Token::Fn, "expected 'fn'")?;
+        let name = self.expect_ident("expected function name after 'fn'")?;
+        self.expect(&Token::LParen, "expected '(' after function name")?;
         let params = self.parse_params()?;
         let return_type = self.parse_optional_return_type()?;
 
@@ -1700,7 +1691,7 @@ impl Parser {
             _ => {
                 return Err(self.error(
                     ErrorKind::UnexpectedToken,
-                    "se esperaba '{' o '=>' para el cuerpo de la función",
+                    "expected '{' or '=>' for the function body",
                 ));
             }
         };
@@ -1733,10 +1724,10 @@ impl Parser {
         } else {
             false
         };
-        self.expect(&Token::Fn, "se esperaba 'fn'")?;
+        self.expect(&Token::Fn, "expected 'fn'")?;
         self.expect(
             &Token::LParen,
-            "se esperaba '(' después de 'fn' en función anónima",
+            "expected '(' after 'fn' in anonymous function",
         )?;
         let params = self.parse_params()?;
         let _return_type = self.parse_optional_return_type()?;
@@ -1752,7 +1743,7 @@ impl Parser {
             _ => {
                 return Err(self.error(
                     ErrorKind::UnexpectedToken,
-                    "se esperaba '{' o '=>' para el cuerpo de la función anónima",
+                    "expected '{' or '=>' for the anonymous function body",
                 ));
             }
         };
@@ -1799,7 +1790,7 @@ impl Parser {
                     if saw_varargs {
                         return Err(self.error(
                             ErrorKind::UnexpectedToken,
-                            "solo puede haber un parámetro variádico, y debe ser el último",
+                            "only one variadic parameter is allowed, and it must be last",
                         ));
                     }
                     self.advance(); // consume `..`
@@ -1810,20 +1801,19 @@ impl Parser {
                     if saw_varargs {
                         return Err(self.error(
                             ErrorKind::UnexpectedToken,
-                            "después de un parámetro variádico no puede haber más parámetros",
+                            "no more parameters allowed after a variadic parameter",
                         ));
                     }
                     false
                 };
-            let (name, name_span) =
-                self.expect_ident_with_span("se esperaba nombre de parámetro")?;
+            let (name, name_span) = self.expect_ident_with_span("expected parameter name")?;
             let type_ = self.parse_optional_type_annotation()?;
             // Fp — default value `= <expr>`. Varargs do not allow a default.
             let default = if matches!(self.peek(), Token::Eq) {
                 if varargs {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
-                        format!("el parámetro variádico `{}` no puede tener default", name),
+                        format!("variadic parameter `{}` cannot have a default", name),
                     ));
                 }
                 self.advance(); // consume `=`
@@ -1840,8 +1830,8 @@ impl Parser {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
                         format!(
-                            "el parámetro `{}` no tiene default pero uno anterior sí — \
-                             en Fitz, una vez que un param tiene default, todos los siguientes también",
+                            "parameter `{}` has no default but a previous one does — \
+                             in Fitz, once a param has a default, all following ones must too",
                             name
                         ),
                     ));
@@ -1856,10 +1846,7 @@ impl Parser {
             if params.iter().any(|p| p.name == name) {
                 return Err(self.error(
                     ErrorKind::UnexpectedToken,
-                    format!(
-                        "el parámetro `{}` está duplicado en la lista de parámetros",
-                        name
-                    ),
+                    format!("parameter `{}` is duplicated in the parameter list", name),
                 ));
             }
             params.push(Param {
@@ -1881,10 +1868,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect(
-            &Token::RParen,
-            "se esperaba ')' para cerrar la lista de parámetros",
-        )?;
+        self.expect(&Token::RParen, "expected ')' to close the parameter list")?;
         Ok(params)
     }
 
@@ -1911,7 +1895,7 @@ impl Parser {
     /// prefer to abort the whole block and let the parent loop
     /// realign at the next sync point.
     fn parse_block(&mut self) -> FitzResult<Vec<Stmt>> {
-        self.expect(&Token::LBrace, "se esperaba '{'")?;
+        self.expect(&Token::LBrace, "expected '{'")?;
         let mut stmts = Vec::new();
         loop {
             self.skip_newlines();
@@ -1922,7 +1906,7 @@ impl Parser {
             if self.is_at_end() {
                 return Err(self.error(
                     ErrorKind::MissingClosingBrace,
-                    "se esperaba '}' para cerrar el bloque",
+                    "expected '}' to close the block",
                 ));
             }
             if self.recovery_mode && self.recovered_errors.len() >= MAX_RECOVERED_ERRORS {
@@ -1968,7 +1952,7 @@ impl Parser {
     }
 
     fn parse_while_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
-        self.expect(&Token::While, "se esperaba 'while'")?;
+        self.expect(&Token::While, "expected 'while'")?;
         // The condition does not allow a struct literal at the top
         // level — the next `{` opens the while body. Inside parens
         // it's fine.
@@ -1988,7 +1972,7 @@ impl Parser {
     }
 
     fn parse_loop_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
-        self.expect(&Token::Loop, "se esperaba 'loop'")?;
+        self.expect(&Token::Loop, "expected 'loop'")?;
         let body = self.parse_block()?;
         Ok(Stmt::Loop { body, label, span })
     }
@@ -1999,7 +1983,7 @@ impl Parser {
     /// `label` for `'name: loop { ... }`.
     fn parse_loop_expr(&mut self, label: Option<String>) -> FitzResult<Expr> {
         let span = self.cur_span();
-        self.expect(&Token::Loop, "se esperaba 'loop'")?;
+        self.expect(&Token::Loop, "expected 'loop'")?;
         let body = self.parse_block()?;
         Ok(Expr::Loop { body, label, span })
     }
@@ -2012,17 +1996,14 @@ impl Parser {
     }
 
     fn parse_for_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
-        self.expect(&Token::For, "se esperaba 'for'")?;
+        self.expect(&Token::For, "expected 'for'")?;
         // Mini-batch Md: the `for` var is now a Pattern. Reuses
         // `parse_pattern` (same one used by match arms), which
         // covers Ident, Wildcard, Tuple — the 3 valid cases in
         // `for`. Other patterns (literals, Ok/Err, Range) are
         // rejected by the checker.
         let var = self.parse_pattern()?;
-        self.expect(
-            &Token::In,
-            "se esperaba 'in' después de la variable de 'for'",
-        )?;
+        self.expect(&Token::In, "expected 'in' after 'for' variable")?;
         // The iterable does not allow a struct literal at the top
         // level — the next `{` opens the `for` body. Inside parens
         // or lists it's fine: `for u in [User { id: 1 }]`.
@@ -2045,7 +2026,7 @@ impl Parser {
     /// statement: the next `if` wrapped in `Stmt::Expr`.
     fn parse_if_expr(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
-        self.expect(&Token::If, "se esperaba 'if'")?;
+        self.expect(&Token::If, "expected 'if'")?;
         let condition = self.expression_no_struct_lit()?;
         let then = self.parse_block()?;
         let else_ = if self.eat(&Token::Else) {
@@ -2074,15 +2055,12 @@ impl Parser {
     /// explicit debt.
     fn parse_match_expr(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
-        self.expect(&Token::Match, "se esperaba 'match'")?;
+        self.expect(&Token::Match, "expected 'match'")?;
         // The scrutinee does not allow a struct literal at the top
         // level — the next `{` opens the arms block. Inside parens
         // it's fine.
         let value = self.expression_no_struct_lit()?;
-        self.expect(
-            &Token::LBrace,
-            "se esperaba '{' después de la expresión de match",
-        )?;
+        self.expect(&Token::LBrace, "expected '{' after match expression")?;
         let mut arms: Vec<MatchArm> = Vec::new();
         loop {
             self.skip_newlines();
@@ -2093,7 +2071,7 @@ impl Parser {
             if self.is_at_end() {
                 return Err(self.error(
                     ErrorKind::MissingClosingBrace,
-                    "se esperaba '}' para cerrar match",
+                    "expected '}' to close match",
                 ));
             }
             let pattern = self.parse_or_pattern()?;
@@ -2104,7 +2082,7 @@ impl Parser {
             } else {
                 None
             };
-            self.expect(&Token::FatArrow, "se esperaba '=>' después del patrón")?;
+            self.expect(&Token::FatArrow, "expected '=>' after pattern")?;
             // Sp.2 — the arm body may be:
             //   1. `return <expr>` / `break <expr>` / `continue` → Stmt directly.
             //   2. `{ <stmts> }` → block of stmts (parse_block).
@@ -2137,7 +2115,7 @@ impl Parser {
                 _ => {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
-                        "se esperaba ',' o salto de línea entre brazos de match",
+                        "expected ',' or newline between match arms",
                     ));
                 }
             }
@@ -2190,7 +2168,7 @@ impl Parser {
             ) {
                 return Err(self.error(
                     ErrorKind::InvalidSyntax,
-                    "or-patterns no admiten bindings (usá '_' o desdoblá el arm)",
+                    "or-patterns do not allow bindings (use '_' or split the arm)",
                 ));
             }
         }
@@ -2220,13 +2198,10 @@ impl Parser {
                     }
                     subs.push(self.parse_or_pattern()?);
                 }
-                self.expect(
-                    &Token::RParen,
-                    "se esperaba ')' para cerrar el tuple pattern",
-                )?;
+                self.expect(&Token::RParen, "expected ')' to close the tuple pattern")?;
                 return Ok(Pattern::Tuple(subs));
             }
-            self.expect(&Token::RParen, "se esperaba ')' para cerrar el pattern")?;
+            self.expect(&Token::RParen, "expected ')' to close the pattern")?;
             return Ok(first);
         }
         // Literals. Clone the peek before advancing so we don't fight
@@ -2274,7 +2249,7 @@ impl Parser {
                     _ => {
                         return Err(self.error(
                             ErrorKind::InvalidSyntax,
-                            "se esperaba número después de '-' en patrón",
+                            "expected number after '-' in pattern",
                         ));
                     }
                 }
@@ -2287,14 +2262,10 @@ impl Parser {
             if name == "Ok" || name == "Err" {
                 let is_ok = name == "Ok";
                 self.advance();
-                self.expect(
-                    &Token::LParen,
-                    "se esperaba '(' después de Ok/Err en patrón",
-                )?;
-                let (binding, binding_span) = self.expect_ident_with_span(
-                    "se esperaba identificador para el binding de Ok/Err",
-                )?;
-                self.expect(&Token::RParen, "se esperaba ')' al final del patrón Ok/Err")?;
+                self.expect(&Token::LParen, "expected '(' after Ok/Err in pattern")?;
+                let (binding, binding_span) =
+                    self.expect_ident_with_span("expected identifier for Ok/Err binding")?;
+                self.expect(&Token::RParen, "expected ')' at end of Ok/Err pattern")?;
                 // `_` inside is a wildcard (does not bind): closes
                 // the old 3.3 debt where `_` was bound as a var.
                 return Ok(match (is_ok, binding.as_str()) {
@@ -2306,7 +2277,7 @@ impl Parser {
             }
         }
         // General case: identifier or wildcard.
-        let (name, name_span) = self.expect_ident_with_span("se esperaba patrón")?;
+        let (name, name_span) = self.expect_ident_with_span("expected pattern")?;
         if name == "_" {
             Ok(Pattern::Wildcard)
         } else {
@@ -2341,7 +2312,7 @@ impl Parser {
                     _ => {
                         return Err(self.error(
                             ErrorKind::InvalidSyntax,
-                            "se esperaba Int después de '-' en patrón de rango",
+                            "expected Int after '-' in range pattern",
                         ));
                     }
                 }
@@ -2349,7 +2320,7 @@ impl Parser {
             _ => {
                 return Err(self.error(
                     ErrorKind::InvalidSyntax,
-                    "patrón de rango requiere Int en ambos extremos (Float y otros tipos no soportados)",
+                    "range pattern requires Int at both ends (Float and other types not supported)",
                 ));
             }
         };
@@ -2371,12 +2342,9 @@ impl Parser {
     /// `?` nullable suffix. Nullability lives inside `TypeExpr` as
     /// `TypeExpr::Nullable(...)`.
     fn parse_typedef(&mut self, span: Span) -> FitzResult<Stmt> {
-        self.expect(&Token::Type, "se esperaba 'type'")?;
-        let name = self.expect_ident("se esperaba nombre del tipo")?;
-        self.expect(
-            &Token::LBrace,
-            "se esperaba '{' después del nombre del tipo",
-        )?;
+        self.expect(&Token::Type, "expected 'type'")?;
+        let name = self.expect_ident("expected type name")?;
+        self.expect(&Token::LBrace, "expected '{' after type name")?;
         let mut fields: Vec<Field> = Vec::new();
         let mut methods: Vec<MethodDef> = Vec::new();
         loop {
@@ -2394,7 +2362,7 @@ impl Parser {
             if self.is_at_end() {
                 return Err(self.error(
                     ErrorKind::MissingClosingBrace,
-                    "se esperaba '}' para cerrar 'type'",
+                    "expected '}' to close 'type'",
                 ));
             }
             // Phase 10.3.a — per-field decorators (`@primary`,
@@ -2412,18 +2380,15 @@ impl Parser {
                 if !field_decorators.is_empty() {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
-                        "decoradores sobre métodos de un `type` no se soportan (solo sobre fields)",
+                        "decorators on methods of a `type` are not supported (only on fields)",
                     ));
                 }
                 let method_span = self.cur_span();
                 let method = self.parse_method_def(method_span)?;
                 methods.push(method);
             } else {
-                let field_name = self.expect_ident("se esperaba nombre de campo o `fn`")?;
-                self.expect(
-                    &Token::Colon,
-                    "se esperaba ':' después del nombre del campo",
-                )?;
+                let field_name = self.expect_ident("expected field name or `fn`")?;
+                self.expect(&Token::Colon, "expected ':' after field name")?;
                 let type_ = self.parse_type_expr()?;
                 let default = if self.eat(&Token::Eq) {
                     Some(self.expression()?)
@@ -2455,12 +2420,9 @@ impl Parser {
         // `async`/`fn`.
         let is_static = self.eat(&Token::Static);
         let is_async = self.eat(&Token::Async);
-        self.expect(&Token::Fn, "se esperaba 'fn'")?;
-        let name = self.expect_ident("se esperaba nombre del método después de 'fn'")?;
-        self.expect(
-            &Token::LParen,
-            "se esperaba '(' después del nombre del método",
-        )?;
+        self.expect(&Token::Fn, "expected 'fn'")?;
+        let name = self.expect_ident("expected method name after 'fn'")?;
+        self.expect(&Token::LParen, "expected '(' after method name")?;
         let params = self.parse_params()?;
         let return_type = self.parse_optional_return_type()?;
         let body = match self.peek() {
@@ -2474,7 +2436,7 @@ impl Parser {
             _ => {
                 return Err(self.error(
                     ErrorKind::UnexpectedToken,
-                    "se esperaba '{' o '=>' para el cuerpo del método",
+                    "expected '{' or '=>' for the method body",
                 ));
             }
         };
@@ -2571,7 +2533,7 @@ impl Parser {
             }
             _ => Err(self.error(
                 ErrorKind::UnexpectedToken,
-                "después de un decorador debe venir `fn`, `async fn` o `type`",
+                "after a decorator there must come `fn`, `async fn`, or `type`",
             )),
         }
     }
@@ -2586,8 +2548,8 @@ impl Parser {
     /// compatible: `@server()` and `@get("/x")` keep working the
     /// same.
     fn parse_one_decorator(&mut self) -> FitzResult<Decorator> {
-        self.expect(&Token::At, "se esperaba '@'")?;
-        let name = self.expect_ident("se esperaba nombre de decorador después de '@'")?;
+        self.expect(&Token::At, "expected '@'")?;
+        let name = self.expect_ident("expected decorator name after '@'")?;
         // If `(` follows, parse args; otherwise it's a decorator
         // without args. The next significant token picks the branch
         // (without skipping newlines — the `(` must be on the same
@@ -2647,7 +2609,7 @@ impl Parser {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
                         format!(
-                            "argumento por nombre '{}=' ya fue dado en el mismo decorador",
+                            "named argument '{}=' was already given in the same decorator",
                             key
                         ),
                     ));
@@ -2658,8 +2620,8 @@ impl Parser {
                 if !kwargs.is_empty() {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
-                        "los argumentos posicionales no pueden ir después de \
-                         argumentos por nombre (key=value)"
+                        "positional arguments cannot come after \
+                         named arguments (key=value)"
                             .to_string(),
                     ));
                 }
@@ -2678,10 +2640,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect(
-            &Token::RParen,
-            "se esperaba ')' para cerrar los argumentos del decorador",
-        )?;
+        self.expect(&Token::RParen, "expected ')' to close decorator arguments")?;
         Ok((args, kwargs))
     }
 
@@ -2745,41 +2704,37 @@ impl Parser {
         // The per-item logic (Fp.3: named arg vs positional + the
         // `saw_named` flag for ordering) lives in the closure.
         let mut saw_named = false;
-        self.parse_comma_separated(
-            &Token::RParen,
-            "se esperaba ')' para cerrar la llamada",
-            |p| {
-                // Fp.3 — `name: value` with Ident + Colon lookahead.
-                // Same pattern as decorator kwargs (eval already
-                // does it for `@server(port=3000)`). The parser
-                // does NOT check here whether the name corresponds
-                // to a real param — that's done by the checker and
-                // the evaluator/codegen when dispatching the call.
-                let (start_line, start_col) = p.current_pos();
-                let is_named =
-                    matches!(p.peek(), Token::Ident(_)) && matches!(p.peek_at(1), Token::Colon);
-                if is_named {
-                    let name = p.expect_ident("se esperaba nombre de argumento").unwrap();
-                    p.advance(); // consume `:`
-                    let value = p.expression()?;
-                    saw_named = true;
-                    Ok(Expr::NamedArg {
-                        name,
-                        value: Box::new(value),
-                        span: Span::new(start_line, start_col),
-                    })
-                } else {
-                    if saw_named {
-                        return Err(p.error(
-                            ErrorKind::UnexpectedToken,
-                            "no se pueden mezclar args posicionales después de args nombrados — \
-                             los nombrados van al final",
-                        ));
-                    }
-                    p.expression()
+        self.parse_comma_separated(&Token::RParen, "expected ')' to close the call", |p| {
+            // Fp.3 — `name: value` with Ident + Colon lookahead.
+            // Same pattern as decorator kwargs (eval already
+            // does it for `@server(port=3000)`). The parser
+            // does NOT check here whether the name corresponds
+            // to a real param — that's done by the checker and
+            // the evaluator/codegen when dispatching the call.
+            let (start_line, start_col) = p.current_pos();
+            let is_named =
+                matches!(p.peek(), Token::Ident(_)) && matches!(p.peek_at(1), Token::Colon);
+            if is_named {
+                let name = p.expect_ident("expected argument name").unwrap();
+                p.advance(); // consume `:`
+                let value = p.expression()?;
+                saw_named = true;
+                Ok(Expr::NamedArg {
+                    name,
+                    value: Box::new(value),
+                    span: Span::new(start_line, start_col),
+                })
+            } else {
+                if saw_named {
+                    return Err(p.error(
+                        ErrorKind::UnexpectedToken,
+                        "cannot mix positional args after named args — \
+                             named args go at the end",
+                    ));
                 }
-            },
-        )
+                p.expression()
+            }
+        })
     }
 
     /// "Leaf" expression: literal, identifier, parens, `if`,
@@ -2881,18 +2836,18 @@ impl Parser {
                         self.no_struct_literal = prev2;
                         items.push(r?);
                     }
-                    self.expect(&Token::RParen, "se esperaba ')' para cerrar la tupla")?;
+                    self.expect(&Token::RParen, "expected ')' to close the tuple")?;
                     return Ok(Expr::Tuple(items, tok_span));
                 }
                 // No comma → just grouping parens.
-                self.expect(&Token::RParen, "se esperaba ')' para cerrar el paréntesis")?;
+                self.expect(&Token::RParen, "expected ')' to close parenthesis")?;
                 Ok(first)
             }
             other => Err(FitzError::new(
                 ErrorKind::UnexpectedToken,
                 tok.line,
                 tok.column,
-                format!("Se esperaba una expresión, se encontró '{:?}'", other),
+                format!("Expected an expression, found '{:?}'", other),
             )),
         }
     }
@@ -2902,7 +2857,7 @@ impl Parser {
     /// multiline lists).
     fn parse_list_literal(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
-        self.expect(&Token::LBracket, "se esperaba '['")?;
+        self.expect(&Token::LBracket, "expected '['")?;
         let prev = std::mem::replace(&mut self.no_struct_literal, false);
         let result = self.parse_list_literal_items(span);
         self.no_struct_literal = prev;
@@ -2939,7 +2894,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect(&Token::RBracket, "se esperaba ']' para cerrar la lista")?;
+        self.expect(&Token::RBracket, "expected ']' to close the list")?;
         Ok(Expr::List(items, span))
     }
 
@@ -2954,7 +2909,7 @@ impl Parser {
             self.parse_comprehension_clauses(&Token::RBracket, "list comprehension")?;
         self.expect(
             &Token::RBracket,
-            "se esperaba ']' para cerrar la list comprehension",
+            "expected ']' to close the list comprehension",
         )?;
         Ok(Expr::ListComp {
             expr: Box::new(expr),
@@ -2985,11 +2940,11 @@ impl Parser {
         Vec<(crate::ast::Pattern, Expr)>,
         Option<Box<Expr>>,
     )> {
-        self.expect(&Token::For, format!("se esperaba 'for' en {}", context))?;
+        self.expect(&Token::For, format!("expected 'for' in {}", context))?;
         let var = self.parse_pattern()?;
         self.expect(
             &Token::In,
-            format!("se esperaba 'in' después de la variable en {}", context),
+            format!("expected 'in' after variable in {}", context),
         )?;
         self.skip_newlines();
         let iter = self.expression()?;
@@ -3002,10 +2957,7 @@ impl Parser {
             let extra_var = self.parse_pattern()?;
             self.expect(
                 &Token::In,
-                format!(
-                    "se esperaba 'in' después de la variable extra en {}",
-                    context
-                ),
+                format!("expected 'in' after extra variable in {}", context),
             )?;
             self.skip_newlines();
             let extra_iter = self.expression()?;
@@ -3032,7 +2984,7 @@ impl Parser {
     /// something hashable at runtime.
     fn parse_map_literal(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
-        self.expect(&Token::LBrace, "se esperaba '{'")?;
+        self.expect(&Token::LBrace, "expected '{'")?;
         let prev = std::mem::replace(&mut self.no_struct_literal, false);
         let result = self.parse_map_literal_pairs(span);
         self.no_struct_literal = prev;
@@ -3049,7 +3001,7 @@ impl Parser {
         // First pair: `key: value`.
         self.skip_newlines();
         let key = self.expression()?;
-        self.expect(&Token::Colon, "se esperaba ':' entre clave y valor en mapa")?;
+        self.expect(&Token::Colon, "expected ':' between key and value in map")?;
         self.skip_newlines();
         let value = self.expression()?;
         self.skip_newlines();
@@ -3063,7 +3015,7 @@ impl Parser {
                 self.parse_comprehension_clauses(&Token::RBrace, "map comprehension")?;
             self.expect(
                 &Token::RBrace,
-                "se esperaba '}' para cerrar la map comprehension",
+                "expected '}' to close the map comprehension",
             )?;
             return Ok(Expr::MapComp {
                 key: Box::new(key),
@@ -3093,19 +3045,16 @@ impl Parser {
         // the first item, so consume it manually here.
         self.expect(
             &Token::Comma,
-            "se esperaba ',' o '}' después del primer par del mapa",
+            "expected ',' or '}' after the first map pair",
         )?;
-        let rest = self.parse_comma_separated(
-            &Token::RBrace,
-            "se esperaba '}' para cerrar el mapa",
-            |p| {
+        let rest =
+            self.parse_comma_separated(&Token::RBrace, "expected '}' to close the map", |p| {
                 let k = p.expression()?;
-                p.expect(&Token::Colon, "se esperaba ':' entre clave y valor en mapa")?;
+                p.expect(&Token::Colon, "expected ':' between key and value in map")?;
                 p.skip_newlines();
                 let v = p.expression()?;
                 Ok((k, v))
-            },
-        )?;
+            })?;
         pairs.extend(rest);
         Ok(Expr::Map(pairs, span))
     }
@@ -3222,7 +3171,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                     ErrorKind::InvalidSyntax,
                     line,
                     interp_col,
-                    "Interpolación de string sin '}' de cierre",
+                    "String interpolation missing closing '}'",
                 ));
             }
             let interp_src: String = chars[expr_start..i].iter().collect();
@@ -3271,7 +3220,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                     ErrorKind::InvalidSyntax,
                     line,
                     sub_col_base,
-                    format!("Tokens extra dentro de interpolación: '{}'", expr_src),
+                    format!("Extra tokens inside interpolation: '{}'", expr_src),
                 ));
             }
             // Mini-batch Fm — if there was a `:spec`, parse it into FormatSpec.
@@ -3281,7 +3230,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                         ErrorKind::InvalidSyntax,
                         line,
                         sub_col_base + expr_src.len() + 1,
-                        format!("Format spec inválido `{}`: {}", spec, msg),
+                        format!("Invalid format spec `{}`: {}", spec, msg),
                     )
                 })?)
             } else {
@@ -3298,7 +3247,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                 ErrorKind::InvalidSyntax,
                 line,
                 content_col + i,
-                "'}' suelto en string — escapá como '\\}' para incluirlo literal",
+                "stray '}' in string — escape it as '\\}' to include it literally",
             ));
         }
 
@@ -3546,7 +3495,7 @@ fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
         spec.width = Some(
             width_str
                 .parse::<usize>()
-                .map_err(|_| format!("width inválido: `{}`", width_str))?,
+                .map_err(|_| format!("invalid width: `{}`", width_str))?,
         );
     }
     if i < chars.len() && (chars[i] == ',' || chars[i] == '_') {
@@ -3560,13 +3509,13 @@ fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
             i += 1;
         }
         if i == prec_start {
-            return Err("precision tras `.` requiere al menos un dígito".into());
+            return Err("precision after `.` requires at least one digit".into());
         }
         let prec_str: String = chars[prec_start..i].iter().collect();
         spec.precision = Some(
             prec_str
                 .parse::<usize>()
-                .map_err(|_| format!("precision inválida: `{}`", prec_str))?,
+                .map_err(|_| format!("invalid precision: `{}`", prec_str))?,
         );
     }
     if i < chars.len() {
@@ -3622,7 +3571,7 @@ mod tests {
 
     /// Helper: tokenize the source and create a Parser ready for tests.
     fn parser(src: &str) -> Parser {
-        let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
+        let tokens = tokenize(src).expect("source must tokenize without error");
         Parser::new(tokens)
     }
 
@@ -3630,8 +3579,8 @@ mod tests {
     /// assuming it's valid. Useful for decorator tests that need to
     /// see the whole AST.
     fn parse_ok(src: &str) -> Program {
-        let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
-        parse(tokens).expect("la fuente debe parsear sin error")
+        let tokens = tokenize(src).expect("source must tokenize without error");
+        parse(tokens).expect("source must parse without error")
     }
 
     #[test]
@@ -3696,24 +3645,24 @@ mod tests {
     #[test]
     fn expect_returns_ok_on_match() {
         let mut p = parser("(");
-        assert!(p.expect(&Token::LParen, "se esperaba '('").is_ok());
+        assert!(p.expect(&Token::LParen, "expected '('").is_ok());
         assert!(p.is_at_end());
     }
 
     #[test]
     fn expect_returns_err_with_token_position_on_mismatch() {
         let mut p = parser("42");
-        let err = p.expect(&Token::LParen, "se esperaba '('").unwrap_err();
+        let err = p.expect(&Token::LParen, "expected '('").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
         assert_eq!(err.line, 1);
         assert_eq!(err.column, 1);
-        assert!(err.message.contains("se esperaba '('"));
+        assert!(err.message.contains("expected '('"));
     }
 
     #[test]
     fn expect_ident_extracts_name() {
         let mut p = parser("user");
-        let name = p.expect_ident("se esperaba identificador").unwrap();
+        let name = p.expect_ident("expected identifier").unwrap();
         assert_eq!(name, "user");
         assert!(p.is_at_end());
     }
@@ -3722,7 +3671,7 @@ mod tests {
     fn expect_ident_fails_on_keyword() {
         // 'fn' is a keyword, not an Ident — should fail.
         let mut p = parser("fn");
-        let err = p.expect_ident("se esperaba identificador").unwrap_err();
+        let err = p.expect_ident("expected identifier").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
@@ -3802,7 +3751,7 @@ mod tests {
             // The `left` sub-node keeps its own span.
             assert_eq!(left.span().column, 1);
         } else {
-            panic!("se esperaba BinOp, se obtuvo {:?}", e);
+            panic!("expected BinOp, got {:?}", e);
         }
     }
 
@@ -3816,7 +3765,7 @@ mod tests {
         if let Expr::Call { callee, .. } = &e {
             assert_eq!(callee.span().column, 1);
         } else {
-            panic!("se esperaba Call, se obtuvo {:?}", e);
+            panic!("expected Call, got {:?}", e);
         }
     }
 
@@ -3830,7 +3779,7 @@ mod tests {
         if let Expr::Field { object, .. } = &e {
             assert_eq!(object.span().column, 1);
         } else {
-            panic!("se esperaba Field, se obtuvo {:?}", e);
+            panic!("expected Field, got {:?}", e);
         }
     }
 
@@ -3845,7 +3794,7 @@ mod tests {
             assert_eq!(object.span().column, 1);
             assert_eq!(index.span().column, 4);
         } else {
-            panic!("se esperaba Index, se obtuvo {:?}", e);
+            panic!("expected Index, got {:?}", e);
         }
     }
 
@@ -3867,7 +3816,7 @@ mod tests {
             Expr::Await(inner, _) => {
                 assert_eq!(*inner, Expr::Ident("x".into(), Span::ZERO));
             }
-            other => panic!("se esperaba Await, se obtuvo {:?}", other),
+            other => panic!("expected Await, got {:?}", other),
         }
     }
 
@@ -3879,11 +3828,11 @@ mod tests {
             Expr::Await(inner, _) => {
                 assert!(
                     matches!(*inner, Expr::Call { .. }),
-                    "se esperaba Await(Call), inner fue {:?}",
+                    "expected Await(Call), inner was {:?}",
                     inner
                 );
             }
-            other => panic!("se esperaba Await, se obtuvo {:?}", other),
+            other => panic!("expected Await, got {:?}", other),
         }
     }
 
@@ -3896,9 +3845,9 @@ mod tests {
                 Expr::Call { callee, .. } => {
                     assert!(matches!(*callee, Expr::Field { .. }));
                 }
-                other => panic!("se esperaba Call adentro de Await, fue {:?}", other),
+                other => panic!("expected Call inside Await, was {:?}", other),
             },
-            other => panic!("se esperaba Await, se obtuvo {:?}", other),
+            other => panic!("expected Await, got {:?}", other),
         }
     }
 
@@ -3911,11 +3860,11 @@ mod tests {
             Expr::Try(inner, _) => {
                 assert!(
                     matches!(*inner, Expr::Await(..)),
-                    "se esperaba Try(Await(..)), fue {:?}",
+                    "expected Try(Await(..)), was {:?}",
                     inner
                 );
             }
-            other => panic!("se esperaba Try, se obtuvo {:?}", other),
+            other => panic!("expected Try, got {:?}", other),
         }
     }
 
@@ -3928,7 +3877,7 @@ mod tests {
                 assert_eq!(field, "name");
                 assert!(matches!(*object, Expr::Await(..)));
             }
-            other => panic!("se esperaba Field, se obtuvo {:?}", other),
+            other => panic!("expected Field, got {:?}", other),
         }
     }
 
@@ -3941,9 +3890,9 @@ mod tests {
                 Expr::Await(inner, _) => {
                     assert_eq!(*inner, Expr::Ident("x".into(), Span::ZERO));
                 }
-                other => panic!("se esperaba Await anidado, fue {:?}", other),
+                other => panic!("expected nested Await, was {:?}", other),
             },
-            other => panic!("se esperaba Await externo, se obtuvo {:?}", other),
+            other => panic!("expected outer Await, got {:?}", other),
         }
     }
 
@@ -3958,7 +3907,7 @@ mod tests {
             // The receiver keeps its own span at column 1.
             assert_eq!(inner.span().column, 1);
         } else {
-            panic!("se esperaba Await, se obtuvo {:?}", e);
+            panic!("expected Await, got {:?}", e);
         }
     }
 
@@ -3980,7 +3929,7 @@ mod tests {
                 assert_eq!(args.len(), 1);
                 assert!(matches!(&args[0], TypeExpr::Named(n) if n == "Int"));
             }
-            other => panic!("se esperaba FnDef con return Future<Int>, fue {:?}", other),
+            other => panic!("expected FnDef with return Future<Int>, was {:?}", other),
         }
     }
 
@@ -4247,10 +4196,10 @@ mod tests {
                         op: UnaryOpKind::Not,
                         ..
                     } => {}
-                    other => panic!("esperaba UnaryOp Not, fue {:?}", other),
+                    other => panic!("expected UnaryOp Not, was {:?}", other),
                 }
             }
-            other => panic!("esperaba BinOp Eq, fue {:?}", other),
+            other => panic!("expected BinOp Eq, was {:?}", other),
         }
     }
 
@@ -4262,7 +4211,7 @@ mod tests {
             Stmt::Assign { .. } | Stmt::Expr(_, _) => {
                 // Stmt::If se modela como Stmt::Expr(Expr::If, _).
             }
-            other => panic!("esperaba Stmt::Expr(If), fue {:?}", other),
+            other => panic!("expected Stmt::Expr(If), was {:?}", other),
         }
     }
 
@@ -4281,9 +4230,9 @@ mod tests {
                 Expr::BinOp {
                     op: BinOpKind::Mod, ..
                 } => {}
-                other => panic!("esperaba BinOp Mod en right, fue {:?}", other),
+                other => panic!("expected BinOp Mod in right, was {:?}", other),
             },
-            other => panic!("esperaba BinOp Add raíz, fue {:?}", other),
+            other => panic!("expected BinOp Add root, was {:?}", other),
         }
     }
 
@@ -4301,9 +4250,9 @@ mod tests {
                 Expr::BinOp {
                     op: BinOpKind::Mod, ..
                 } => {}
-                other => panic!("esperaba BinOp Mod en left, fue {:?}", other),
+                other => panic!("expected BinOp Mod in left, was {:?}", other),
             },
-            other => panic!("esperaba BinOp Mul raíz, fue {:?}", other),
+            other => panic!("expected BinOp Mul root, was {:?}", other),
         }
     }
 
@@ -4334,7 +4283,7 @@ mod tests {
                 assert!(matches!(*index, Expr::Int(0, _)));
                 assert!(matches!(value, Expr::Int(99, _)));
             }
-            other => panic!("esperaba Stmt::Assign Index, fue {:?}", other),
+            other => panic!("expected Stmt::Assign Index, was {:?}", other),
         }
     }
 
@@ -4351,7 +4300,7 @@ mod tests {
                 assert!(matches!(*index, Expr::Str(ref s, _) if s == "a"));
                 assert!(matches!(value, Expr::Int(10, _)));
             }
-            other => panic!("esperaba Stmt::Assign Index, fue {:?}", other),
+            other => panic!("expected Stmt::Assign Index, was {:?}", other),
         }
     }
 
@@ -4372,7 +4321,7 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("esperaba Stmt::Assign Index, fue {:?}", other),
+            other => panic!("expected Stmt::Assign Index, was {:?}", other),
         }
     }
 
@@ -4390,9 +4339,9 @@ mod tests {
             } => {
                 assert!(matches!(*start, Expr::Int(0, _)));
                 assert!(matches!(*end, Expr::Int(10, _)));
-                assert!(inclusive, "..= debe parsear como inclusive");
+                assert!(inclusive, "..= must parse as inclusive");
             }
-            other => panic!("esperaba Expr::Range, fue {:?}", other),
+            other => panic!("expected Expr::Range, was {:?}", other),
         }
     }
 
@@ -4401,9 +4350,9 @@ mod tests {
         let expr = parse_expr("0..10").unwrap();
         match expr {
             Expr::Range { inclusive, .. } => {
-                assert!(!inclusive, ".. (sin =) debe parsear como exclusive");
+                assert!(!inclusive, ".. (without =) must parse as exclusive");
             }
-            other => panic!("esperaba Expr::Range, fue {:?}", other),
+            other => panic!("expected Expr::Range, was {:?}", other),
         }
     }
 
@@ -4421,9 +4370,9 @@ mod tests {
                     end: 59,
                     inclusive: true,
                 } => {}
-                other => panic!("esperaba Range inclusive 0..=59, fue {:?}", other),
+                other => panic!("expected inclusive Range 0..=59, was {:?}", other),
             },
-            other => panic!("esperaba Stmt::Assign con Match, fue {:?}", other),
+            other => panic!("expected Stmt::Assign with Match, was {:?}", other),
         }
     }
 
@@ -4694,21 +4643,21 @@ mod tests {
         // xs\n.a()\n.b()\n.c() → Call(Field(Call(Field(Call(Field(xs, a)), b)), c))
         let e = parse_expr("xs\n  .a()\n  .b()\n  .c()").unwrap();
         let Expr::Call { callee, .. } = e else {
-            panic!("se esperaba Call externo")
+            panic!("expected outer Call")
         };
         let Expr::Field { object, field, .. } = *callee else {
-            panic!("callee externo debía ser Field")
+            panic!("outer callee should have been Field")
         };
         assert_eq!(field, "c");
         let Expr::Call { callee, .. } = *object else {
-            panic!("nivel 2 debía ser Call")
+            panic!("level 2 should have been Call")
         };
         let Expr::Field { object, field, .. } = *callee else {
-            panic!("callee nivel 2 debía ser Field")
+            panic!("level 2 callee should have been Field")
         };
         assert_eq!(field, "b");
         let Expr::Call { callee, .. } = *object else {
-            panic!("nivel 3 debía ser Call")
+            panic!("level 3 should have been Call")
         };
         let Expr::Field {
             object: receptor,
@@ -4716,7 +4665,7 @@ mod tests {
             ..
         } = *callee
         else {
-            panic!("callee nivel 3 debía ser Field")
+            panic!("level 3 callee should have been Field")
         };
         assert_eq!(field, "a");
         assert_eq!(*receptor, Expr::Ident("xs".into(), Span::ZERO));
@@ -4762,14 +4711,14 @@ mod tests {
             parse_program_str("let nombres = users\n  .filter(activo)\n  .map(nombre)").unwrap();
         assert_eq!(program.len(), 1);
         let Stmt::Assign { value, .. } = &program[0] else {
-            panic!("se esperaba Assign")
+            panic!("expected Assign")
         };
         // The value must be a Call with a Field callee.
         let Expr::Call { callee, .. } = value else {
-            panic!("se esperaba Call en RHS")
+            panic!("expected Call in RHS")
         };
         let Expr::Field { field, .. } = callee.as_ref() else {
-            panic!("callee debía ser Field")
+            panic!("callee should have been Field")
         };
         assert_eq!(field, "map");
     }
@@ -4779,7 +4728,7 @@ mod tests {
         // Should not become a continuation of anything: a lone
         // `.foo()` starting a line is still an error (Dot is not primary).
         let result = parse_program_str(".foo()");
-        assert!(result.is_err(), "se esperaba error de parseo");
+        assert!(result.is_err(), "expected parse error");
     }
 
     // -----------------------------------------------------------------------
@@ -4795,7 +4744,7 @@ mod tests {
     /// statement, and return that statement.
     fn parse_one_stmt(src: &str) -> Stmt {
         let program = parse_program_str(src).expect("parseo OK");
-        assert_eq!(program.len(), 1, "se esperaba una sola sentencia");
+        assert_eq!(program.len(), 1, "expected a single statement");
         program.into_iter().next().unwrap()
     }
 
@@ -4915,9 +4864,9 @@ mod tests {
                 let Some(b) = body else {
                     panic!("body esperado")
                 };
-                assert!(matches!(b, Expr::Map(..)), "body debería ser Map: {:?}", b);
+                assert!(matches!(b, Expr::Map(..)), "body should be Map: {:?}", b);
             }
-            other => panic!("se esperaba ReturnStatus, fue: {:?}", other),
+            other => panic!("expected ReturnStatus, was: {:?}", other),
         }
     }
 
@@ -4939,7 +4888,7 @@ mod tests {
         // the full expr (which would fail later anyway).
         match parse_one_stmt("return get_status() ") {
             Stmt::Return(Expr::Call { .. }, _) => {}
-            other => panic!("se esperaba Return(Call), fue: {:?}", other),
+            other => panic!("expected Return(Call), was: {:?}", other),
         }
     }
 
@@ -4966,7 +4915,7 @@ mod tests {
                     &vec![Stmt::Return(Expr::Null(Span::ZERO), Span::ZERO)]
                 );
             }
-            _ => panic!("se esperaba FnDef"),
+            _ => panic!("expected FnDef"),
         }
     }
 
@@ -4992,8 +4941,8 @@ mod tests {
         // Simple stmt at line 1, col 1 → span must be (1, 1).
         let stmt = parse_one_stmt("let x = 42");
         let span = stmt.span();
-        assert_eq!(span.line, 1, "esperaba línea 1, fue {}", span.line);
-        assert_eq!(span.column, 1, "esperaba col 1, fue {}", span.column);
+        assert_eq!(span.line, 1, "expected line 1, was {}", span.line);
+        assert_eq!(span.column, 1, "expected col 1, was {}", span.column);
     }
 
     #[test]
@@ -5008,14 +4957,14 @@ mod tests {
         assert_eq!(
             (s0.line, s0.column),
             (2, 3),
-            "esperaba (2,3) para `let`, fue ({},{})",
+            "expected (2,3) for `let`, was ({},{})",
             s0.line,
             s0.column
         );
         assert_eq!(
             (s1.line, s1.column),
             (3, 1),
-            "esperaba (3,1) para `return`, fue ({},{})",
+            "expected (3,1) for `return`, was ({},{})",
             s1.line,
             s1.column
         );
@@ -5069,7 +5018,7 @@ mod tests {
                 assert_eq!(body.len(), 1);
                 assert!(matches!(body[0], Stmt::Assign { .. }));
             }
-            other => panic!("se esperaba Stmt::While, se obtuvo {:?}", other),
+            other => panic!("expected Stmt::While, got {:?}", other),
         }
     }
 
@@ -5080,7 +5029,7 @@ mod tests {
             Stmt::While { body, .. } => {
                 assert!(matches!(body[..], [Stmt::Break(_, _, _)]));
             }
-            _ => panic!("se esperaba while"),
+            _ => panic!("expected while"),
         }
     }
 
@@ -5092,7 +5041,7 @@ mod tests {
                 assert_eq!(body.len(), 1);
                 assert!(matches!(body[0], Stmt::Assign { .. }));
             }
-            _ => panic!("se esperaba Stmt::Loop"),
+            _ => panic!("expected Stmt::Loop"),
         }
     }
 
@@ -5492,7 +5441,7 @@ mod tests {
                 assert!(!is_async);
                 assert!(decorators.is_empty());
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -5501,7 +5450,7 @@ mod tests {
         let stmt = parse_one_stmt("fn main() { return 0 }");
         match stmt {
             Stmt::FnDef { params, .. } => assert!(params.is_empty()),
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -5510,7 +5459,7 @@ mod tests {
         let stmt = parse_one_stmt("fn noop() { }");
         match stmt {
             Stmt::FnDef { body, .. } => assert!(body.is_empty()),
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -5529,7 +5478,7 @@ mod tests {
                 assert!(is_async);
                 assert_eq!(return_type, Some(TypeExpr::named("User")));
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -5538,7 +5487,7 @@ mod tests {
         let stmt = parse_one_stmt("async fn double(n) => n * 2");
         match stmt {
             Stmt::FnDef { is_async, .. } => assert!(is_async),
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -5556,7 +5505,7 @@ mod tests {
                 assert_eq!(params[0].name, "a");
                 assert_eq!(params[1].name, "b");
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -5760,7 +5709,7 @@ mod tests {
         // that the translation is active.
         assert!(
             err.column > 1,
-            "se esperaba columna > 1, se obtuvo {} (msg: {})",
+            "expected column > 1, got {} (msg: {})",
             err.column,
             err.message,
         );
@@ -5807,10 +5756,7 @@ mod tests {
                 assert_eq!(then.len(), 1);
                 assert!(else_.is_none());
             }
-            other => panic!(
-                "se esperaba Stmt::Expr(If, Span::ZERO), se obtuvo {:?}",
-                other
-            ),
+            other => panic!("expected Stmt::Expr(If, Span::ZERO), got {:?}", other),
         }
     }
 
@@ -5821,7 +5767,7 @@ mod tests {
             Stmt::Expr(Expr::If { else_: Some(e), .. }, _) => {
                 assert_eq!(e.len(), 1);
             }
-            other => panic!("se esperaba If con else, se obtuvo {:?}", other),
+            other => panic!("expected If with else, got {:?}", other),
         }
     }
 
@@ -5850,10 +5796,10 @@ mod tests {
                     ) => {
                         assert_eq!(inner_else.len(), 1);
                     }
-                    other => panic!("se esperaba if anidado, se obtuvo {:?}", other),
+                    other => panic!("expected nested if, got {:?}", other),
                 }
             }
-            other => panic!("se esperaba If, se obtuvo {:?}", other),
+            other => panic!("expected If, got {:?}", other),
         }
     }
 
@@ -5869,10 +5815,7 @@ mod tests {
             } => {
                 assert_eq!(name, "status");
             }
-            other => panic!(
-                "se esperaba Assign con If como valor, se obtuvo {:?}",
-                other
-            ),
+            other => panic!("expected Assign with If as value, got {:?}", other),
         }
     }
 
@@ -5884,7 +5827,7 @@ mod tests {
             Stmt::Expr(Expr::If { then, .. }, _) => {
                 assert_eq!(then.len(), 2);
             }
-            other => panic!("se esperaba If, se obtuvo {:?}", other),
+            other => panic!("expected If, got {:?}", other),
         }
     }
 
@@ -5901,7 +5844,7 @@ mod tests {
                 );
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -5921,7 +5864,7 @@ mod tests {
                     Pattern::ErrBinding("e".into(), Span::default())
                 );
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -5936,7 +5879,7 @@ mod tests {
                 assert_eq!(arms[0].pattern, Pattern::OkWildcard);
                 assert_eq!(arms[1].pattern, Pattern::ErrWildcard);
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -5946,7 +5889,7 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => assert_eq!(arms.len(), 3),
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -5964,7 +5907,7 @@ mod tests {
                 assert_eq!(name, "Empty");
                 assert!(fields.is_empty());
             }
-            other => panic!("se esperaba TypeDef, se obtuvo {:?}", other),
+            other => panic!("expected TypeDef, got {:?}", other),
         }
     }
 
@@ -5981,7 +5924,7 @@ mod tests {
                 assert!(!fields[0].type_.is_nullable());
                 assert!(fields[0].default.is_none());
             }
-            other => panic!("se esperaba TypeDef, se obtuvo {:?}", other),
+            other => panic!("expected TypeDef, got {:?}", other),
         }
     }
 
@@ -6002,7 +5945,7 @@ mod tests {
                 assert!(!fields[2].type_.is_nullable());
                 assert_eq!(fields[2].default, Some(Expr::Bool(true, Span::ZERO)));
             }
-            other => panic!("se esperaba TypeDef, se obtuvo {:?}", other),
+            other => panic!("expected TypeDef, got {:?}", other),
         }
     }
 
@@ -6039,7 +5982,7 @@ mod tests {
                 assert_eq!(decorators[0].name, "get");
                 assert_eq!(decorators[0].args, vec![Expr::Str("/".into(), Span::ZERO)]);
             }
-            other => panic!("se esperaba FnDef con decorators, se obtuvo {:?}", other),
+            other => panic!("expected FnDef with decorators, got {:?}", other),
         }
     }
 
@@ -6069,7 +6012,7 @@ mod tests {
                     vec![Expr::Str("/users".into(), Span::ZERO)]
                 );
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6098,7 +6041,7 @@ mod tests {
                     );
                 }
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
         match del {
             Stmt::FnDef { decorators, .. } => {
@@ -6109,7 +6052,7 @@ mod tests {
                     vec![Expr::Str("/users".into(), Span::ZERO)]
                 );
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6124,7 +6067,7 @@ mod tests {
                 assert_eq!(decorators[0].name, "server");
                 assert!(decorators[0].args.is_empty());
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6144,7 +6087,7 @@ mod tests {
                     ]
                 );
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6164,7 +6107,7 @@ mod tests {
                     vec![Expr::Str("admin".into(), Span::ZERO)]
                 );
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6182,7 +6125,7 @@ mod tests {
                 assert!(decorators[0].args.is_empty());
                 assert!(decorators[0].kwargs.is_empty());
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6197,7 +6140,7 @@ mod tests {
                 assert!(decorators[0].args.is_empty());
                 assert!(decorators[0].kwargs.is_empty());
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6224,7 +6167,7 @@ mod tests {
             Stmt::FnDef { decorators, .. } => {
                 assert_eq!(decorators[0].name, "patch");
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6234,7 +6177,7 @@ mod tests {
 
     #[test]
     fn decorator_without_kwargs_leaves_empty_vector() {
-        // Regresión: `@get("/x")` mantiene `kwargs = []`.
+        // Regression: `@get("/x")` keeps `kwargs = []`.
         let stmt = parse_one_stmt("@get(\"/x\")\nfn h() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6242,7 +6185,7 @@ mod tests {
                 assert_eq!(decorators[0].args.len(), 1);
                 assert!(decorators[0].kwargs.is_empty());
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6257,7 +6200,7 @@ mod tests {
                 assert_eq!(decorators[0].kwargs[0].0, "docs");
                 assert_eq!(decorators[0].kwargs[0].1, Expr::Bool(false, Span::ZERO));
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6278,7 +6221,7 @@ mod tests {
                 assert_eq!(d.kwargs[1].0, "docs");
                 assert_eq!(d.kwargs[1].1, Expr::Bool(false, Span::ZERO));
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6288,8 +6231,8 @@ mod tests {
         let err = parse_program_str("@get(a=1, \"/x\")\nfn h() => 0").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(
-            err.message.contains("posicionales"),
-            "esperaba mensaje sobre orden positional/kwarg, fue: {}",
+            err.message.contains("positional"),
+            "expected message about positional/kwarg order, was: {}",
             err.message
         );
     }
@@ -6301,7 +6244,7 @@ mod tests {
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(
             err.message.contains("host"),
-            "esperaba que el mensaje cite la clave duplicada, fue: {}",
+            "expected message to cite the duplicated key, was: {}",
             err.message
         );
     }
@@ -6325,7 +6268,7 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -6893,7 +6836,7 @@ mod tests {
                 );
                 assert_eq!(body.len(), 1);
             }
-            other => panic!("se esperaba For, se obtuvo {:?}", other),
+            other => panic!("expected For, got {:?}", other),
         }
     }
 
@@ -6915,7 +6858,7 @@ mod tests {
                     )
                 );
             }
-            other => panic!("se esperaba For, se obtuvo {:?}", other),
+            other => panic!("expected For, got {:?}", other),
         }
     }
 
@@ -6928,7 +6871,7 @@ mod tests {
                 // The body has a single statement: an if/else with break/continue.
                 assert_eq!(body.len(), 1);
             }
-            other => panic!("se esperaba For, se obtuvo {:?}", other),
+            other => panic!("expected For, got {:?}", other),
         }
     }
 
@@ -6969,7 +6912,7 @@ mod tests {
                 );
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -6998,7 +6941,7 @@ mod tests {
                     }
                 );
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7018,7 +6961,7 @@ mod tests {
                     }
                 );
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7031,7 +6974,7 @@ mod tests {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms[0].pattern, Pattern::Int(42));
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7060,7 +7003,7 @@ mod tests {
                 );
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7079,7 +7022,7 @@ mod tests {
                     ])
                 );
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7092,7 +7035,7 @@ mod tests {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms[0].pattern, Pattern::Int(1));
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7115,7 +7058,7 @@ mod tests {
                     ])
                 );
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7131,7 +7074,7 @@ mod tests {
                     Pattern::Or(vec![Pattern::OkWildcard, Pattern::ErrWildcard])
                 );
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7141,7 +7084,7 @@ mod tests {
         let src = "match n { 1 | x => \"x\" }";
         let err = parse_program_str(src).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
-        assert!(err.message.contains("or-patterns no admiten bindings"));
+        assert!(err.message.contains("or-patterns do not allow bindings"));
     }
 
     #[test]
@@ -7166,7 +7109,7 @@ mod tests {
                 assert!(arms[0].guard.is_some());
                 assert!(arms[1].guard.is_none());
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7182,7 +7125,7 @@ mod tests {
                 );
                 assert!(arms[0].guard.is_some());
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7202,7 +7145,7 @@ mod tests {
                 ));
                 assert!(arms[0].guard.is_some());
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7215,7 +7158,7 @@ mod tests {
                 assert!(matches!(arms[0].pattern, Pattern::Or(_)));
                 assert!(arms[0].guard.is_some());
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7228,7 +7171,7 @@ mod tests {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert!(arms[0].guard.is_some());
             }
-            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+            other => panic!("expected Match, got {:?}", other),
         }
     }
 
@@ -7256,10 +7199,10 @@ mod tests {
                         assert!(matches!(*left, Expr::Ident(ref n, _) if n == "x"));
                         assert!(matches!(*right, Expr::Int(5, _)));
                     }
-                    other => panic!("se esperaba BinOp, fue {:?}", other),
+                    other => panic!("expected BinOp, was {:?}", other),
                 }
             }
-            other => panic!("se esperaba Stmt::Assign, fue {:?}", other),
+            other => panic!("expected Stmt::Assign, was {:?}", other),
         }
     }
 
@@ -7274,7 +7217,7 @@ mod tests {
             } => {
                 assert_eq!(op, BinOpKind::Sub);
             }
-            other => panic!("se esperaba Stmt::Assign con BinOp Sub, fue {:?}", other),
+            other => panic!("expected Stmt::Assign with BinOp Sub, was {:?}", other),
         }
     }
 
@@ -7289,7 +7232,7 @@ mod tests {
             } => {
                 assert_eq!(op, BinOpKind::Mul);
             }
-            other => panic!("se esperaba Stmt::Assign con BinOp Mul, fue {:?}", other),
+            other => panic!("expected Stmt::Assign with BinOp Mul, was {:?}", other),
         }
     }
 
@@ -7304,7 +7247,7 @@ mod tests {
             } => {
                 assert_eq!(op, BinOpKind::Div);
             }
-            other => panic!("se esperaba Stmt::Assign con BinOp Div, fue {:?}", other),
+            other => panic!("expected Stmt::Assign with BinOp Div, was {:?}", other),
         }
     }
 
@@ -7328,7 +7271,7 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("se esperaba Stmt::Assign Field, fue {:?}", other),
+            other => panic!("expected Stmt::Assign Field, was {:?}", other),
         }
     }
 
@@ -7351,7 +7294,7 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("se esperaba Stmt::Assign Index, fue {:?}", other),
+            other => panic!("expected Stmt::Assign Index, was {:?}", other),
         }
     }
 
@@ -7373,10 +7316,7 @@ mod tests {
                 // right is `a + b * 2` too
                 assert!(matches!(*right, Expr::BinOp { .. }));
             }
-            other => panic!(
-                "se esperaba Stmt::Assign con RHS compuesto, fue {:?}",
-                other
-            ),
+            other => panic!("expected Stmt::Assign with compound RHS, was {:?}", other),
         }
     }
 
@@ -7399,7 +7339,7 @@ mod tests {
                 assert_eq!(fields.len(), 2);
                 assert!(methods.is_empty());
             }
-            other => panic!("se esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -7421,7 +7361,7 @@ mod tests {
                 assert!(methods[0].return_type.is_some());
                 assert!(!methods[0].is_async);
             }
-            other => panic!("se esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -7438,7 +7378,7 @@ mod tests {
                 assert_eq!(methods[0].params.len(), 1);
                 assert_eq!(methods[0].params[0].name, "target");
             }
-            other => panic!("se esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -7453,7 +7393,7 @@ mod tests {
             Stmt::TypeDef { methods, .. } => {
                 assert!(methods[0].is_async);
             }
-            other => panic!("se esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -7469,7 +7409,7 @@ mod tests {
                 assert_eq!(methods[0].body.len(), 1);
                 assert!(matches!(methods[0].body[0], Stmt::Return(_, _)));
             }
-            other => panic!("se esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -7489,7 +7429,7 @@ mod tests {
                 assert_eq!(fields.len(), 2, "fields: {:?}", fields);
                 assert_eq!(methods.len(), 2);
             }
-            other => panic!("se esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -7528,7 +7468,7 @@ mod tests {
                 assert_eq!(fields[1].0, "name");
                 assert_eq!(fields[1].1, Expr::Str("x".into(), Span::ZERO));
             }
-            other => panic!("se esperaba Assign(StructLit), se obtuvo {:?}", other),
+            other => panic!("expected Assign(StructLit), got {:?}", other),
         }
     }
 
@@ -7546,7 +7486,7 @@ mod tests {
                 assert_eq!(type_name, "Empty");
                 assert!(fields.is_empty());
             }
-            other => panic!("se esperaba StructLit vacío, se obtuvo {:?}", other),
+            other => panic!("expected empty StructLit, got {:?}", other),
         }
     }
 
@@ -7561,7 +7501,7 @@ mod tests {
             } => {
                 assert_eq!(fields.len(), 2);
             }
-            other => panic!("se esperaba StructLit, se obtuvo {:?}", other),
+            other => panic!("expected StructLit, got {:?}", other),
         }
     }
 
@@ -7577,7 +7517,7 @@ mod tests {
             } => {
                 assert_eq!(fields.len(), 2);
             }
-            other => panic!("se esperaba StructLit multilínea, se obtuvo {:?}", other),
+            other => panic!("expected multiline StructLit, got {:?}", other),
         }
     }
 
@@ -7604,10 +7544,10 @@ mod tests {
                         assert_eq!(inner_name, "User");
                         assert_eq!(inner_fields.len(), 2);
                     }
-                    other => panic!("se esperaba StructLit anidado, se obtuvo {:?}", other),
+                    other => panic!("expected nested StructLit, got {:?}", other),
                 }
             }
-            other => panic!("se esperaba Assign(StructLit), se obtuvo {:?}", other),
+            other => panic!("expected Assign(StructLit), got {:?}", other),
         }
     }
 
@@ -7624,7 +7564,7 @@ mod tests {
                 assert!(matches!(fields[0].1, Expr::BinOp { .. }));
                 assert!(matches!(fields[1].1, Expr::Call { .. }));
             }
-            other => panic!("se esperaba StructLit, se obtuvo {:?}", other),
+            other => panic!("expected StructLit, got {:?}", other),
         }
     }
 
@@ -7639,7 +7579,7 @@ mod tests {
                 assert_eq!(args.len(), 1);
                 assert!(matches!(args[0], Expr::StructLit { .. }));
             }
-            other => panic!("se esperaba Call con StructLit arg, se obtuvo {:?}", other),
+            other => panic!("expected Call with StructLit arg, got {:?}", other),
         }
     }
 
@@ -7658,7 +7598,7 @@ mod tests {
                 assert!(matches!(items[0], Expr::StructLit { .. }));
                 assert!(matches!(items[1], Expr::StructLit { .. }));
             }
-            other => panic!("se esperaba List con StructLits, se obtuvo {:?}", other),
+            other => panic!("expected List with StructLits, got {:?}", other),
         }
     }
 
@@ -7669,9 +7609,9 @@ mod tests {
         match stmt {
             Stmt::FnDef { body, .. } => match &body[0] {
                 Stmt::Return(Expr::StructLit { .. }, _) => {}
-                other => panic!("se esperaba Return(StructLit), se obtuvo {:?}", other),
+                other => panic!("expected Return(StructLit), got {:?}", other),
             },
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -7687,7 +7627,7 @@ mod tests {
             } => {
                 assert!(matches!(*index, Expr::StructLit { .. }));
             }
-            other => panic!("se esperaba Index con StructLit, se obtuvo {:?}", other),
+            other => panic!("expected Index with StructLit, got {:?}", other),
         }
     }
 
@@ -7701,8 +7641,8 @@ mod tests {
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
         assert!(
-            msg.contains("paréntesis") || msg.contains("parentesis"),
-            "el error debería mencionar paréntesis, fue: {}",
+            msg.contains("parentheses") || msg.contains("parenthesis"),
+            "the error should mention parentheses, was: {}",
             err.message
         );
     }
@@ -7713,8 +7653,8 @@ mod tests {
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
         assert!(
-            msg.contains("paréntesis") || msg.contains("parentesis"),
-            "el error debería mencionar paréntesis, fue: {}",
+            msg.contains("parentheses") || msg.contains("parenthesis"),
+            "the error should mention parentheses, was: {}",
             err.message
         );
     }
@@ -7725,8 +7665,8 @@ mod tests {
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
         assert!(
-            msg.contains("paréntesis") || msg.contains("parentesis"),
-            "el error debería mencionar paréntesis, fue: {}",
+            msg.contains("parentheses") || msg.contains("parenthesis"),
+            "the error should mention parentheses, was: {}",
             err.message
         );
     }
@@ -7737,8 +7677,8 @@ mod tests {
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
         assert!(
-            msg.contains("paréntesis") || msg.contains("parentesis"),
-            "el error debería mencionar paréntesis, fue: {}",
+            msg.contains("parentheses") || msg.contains("parenthesis"),
+            "the error should mention parentheses, was: {}",
             err.message
         );
     }
@@ -7747,16 +7687,16 @@ mod tests {
     fn if_with_struct_literal_wrapped_in_parens_parses() {
         // With parens yes: the condition sees a full struct literal.
         let src = "if (User { id: 1 }) == other { print(x) }";
-        let stmts = parse_program_str(src).expect("debería parsear con paréntesis");
+        let stmts = parse_program_str(src).expect("should parse with parentheses");
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
             Stmt::Expr(Expr::If { condition, .. }, _) => match condition.as_ref() {
                 Expr::BinOp { left, .. } => {
                     assert!(matches!(**left, Expr::StructLit { .. }));
                 }
-                other => panic!("se esperaba BinOp como condición, se obtuvo {:?}", other),
+                other => panic!("expected BinOp as condition, got {:?}", other),
             },
-            other => panic!("se esperaba If, se obtuvo {:?}", other),
+            other => panic!("expected If, got {:?}", other),
         }
     }
 
@@ -7774,7 +7714,7 @@ mod tests {
                 assert_eq!(condition, Expr::Ident("x".into(), Span::ZERO));
                 assert_eq!(body.len(), 1);
             }
-            other => panic!("se esperaba While, se obtuvo {:?}", other),
+            other => panic!("expected While, got {:?}", other),
         }
     }
 
@@ -7792,7 +7732,7 @@ mod tests {
                 assert!(matches!(iter, Expr::List(_, _)));
                 assert_eq!(body.len(), 1);
             }
-            other => panic!("se esperaba For, se obtuvo {:?}", other),
+            other => panic!("expected For, got {:?}", other),
         }
     }
 
@@ -7803,7 +7743,7 @@ mod tests {
         // (`Ident :`).
         // The parser must distinguish and let the block through without error.
         let src = "if x { y: Int = 1 }";
-        let stmts = parse_program_str(src).expect("debería parsear");
+        let stmts = parse_program_str(src).expect("should parse");
         assert_eq!(stmts.len(), 1);
     }
 
@@ -7848,7 +7788,7 @@ mod tests {
     fn ok_without_arguments_is_arity_error() {
         let err = parse_expr("Ok()").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
-        assert!(err.message.contains("`Ok`") && err.message.contains("1 argumento"));
+        assert!(err.message.contains("`Ok`") && err.message.contains("1 argument"));
     }
 
     #[test]
@@ -7944,7 +7884,7 @@ mod tests {
                 Pattern::ErrBinding("e".into(), Span::default())
             );
         } else {
-            panic!("se esperaba un match");
+            panic!("expected a match");
         }
     }
 
@@ -8123,7 +8063,7 @@ mod tests {
         let err = parse_program_str("from utils import (a, b\n").unwrap_err();
         assert!(
             err.message.contains("')'") || err.message.contains("import"),
-            "esperaba mensaje sobre `)` o import, fue: {}",
+            "expected message about `)` or import, was: {}",
             err.message
         );
     }
@@ -8232,7 +8172,7 @@ mod tests {
     fn parse_assign_type(src: &str) -> TypeExpr {
         match parse_one_stmt(src) {
             Stmt::Assign { type_: Some(t), .. } => t,
-            other => panic!("se esperaba Stmt::Assign con tipo, se obtuvo {:?}", other),
+            other => panic!("expected Stmt::Assign with type, got {:?}", other),
         }
     }
 
@@ -8343,7 +8283,7 @@ mod tests {
                     }),
                 );
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -8368,7 +8308,7 @@ mod tests {
                     TypeExpr::Nullable(Box::new(TypeExpr::named("Str"))),
                 );
             }
-            other => panic!("se esperaba TypeDef, se obtuvo {:?}", other),
+            other => panic!("expected TypeDef, got {:?}", other),
         }
     }
 
@@ -8477,7 +8417,7 @@ mod tests {
     /// Helper that tokenizes and runs `parse_with_recovery`. Returns
     /// `(stmts, errors)`.
     fn parse_recovering(src: &str) -> (Program, Vec<FitzError>) {
-        let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
+        let tokens = tokenize(src).expect("source must tokenize without error");
         parse_with_recovery(tokens)
     }
 
@@ -8547,7 +8487,7 @@ mod tests {
                     } if n == "b"
                 ));
             }
-            other => panic!("se esperaba Stmt::Expr(Expr::If), recibió {:?}", other),
+            other => panic!("expected Stmt::Expr(Expr::If), got {:?}", other),
         }
     }
 
@@ -8563,7 +8503,7 @@ mod tests {
                 assert_eq!(span.line, 1);
                 assert_eq!(span.column, 1);
             }
-            other => panic!("se esperaba Stmt::Error, recibió {:?}", other),
+            other => panic!("expected Stmt::Error, got {:?}", other),
         }
     }
 
@@ -8619,7 +8559,7 @@ mod tests {
                 assert_eq!(body.len(), 1);
                 assert!(matches!(body[0], Stmt::Error(_)));
             }
-            other => panic!("se esperaba Stmt::FnDef, recibió {:?}", other),
+            other => panic!("expected Stmt::FnDef, got {:?}", other),
         }
         assert!(matches!(
             stmts[1],
@@ -8650,7 +8590,7 @@ mod tests {
         let stmts = parse(tokenize(src).expect("tokenize")).expect("parse");
         match stmts.into_iter().next().expect("al menos un stmt") {
             Stmt::Assign { value, .. } => value,
-            other => panic!("se esperaba Stmt::Assign, recibió {:?}", other),
+            other => panic!("expected Stmt::Assign, got {:?}", other),
         }
     }
 
@@ -8670,7 +8610,7 @@ mod tests {
                 assert!(matches!(*iter, Expr::Ident(ref n, _) if n == "xs"));
                 assert!(filter.is_none());
             }
-            other => panic!("se esperaba ListComp, recibió {:?}", other),
+            other => panic!("expected ListComp, got {:?}", other),
         }
     }
 
@@ -8685,10 +8625,10 @@ mod tests {
                     assert!(matches!(subs[0], Pattern::Ident(ref n, _) if n == "a"));
                     assert!(matches!(subs[1], Pattern::Ident(ref n, _) if n == "b"));
                 } else {
-                    panic!("esperaba Pattern::Tuple, vio {:?}", var);
+                    panic!("expected Pattern::Tuple, saw {:?}", var);
                 }
             }
-            other => panic!("se esperaba ListComp, recibió {:?}", other),
+            other => panic!("expected ListComp, got {:?}", other),
         }
     }
 
@@ -8697,9 +8637,9 @@ mod tests {
         let v = parse_first_let_value("let ys = [x for x in xs if x > 0]");
         match v {
             Expr::ListComp { filter, .. } => {
-                assert!(filter.is_some(), "filter inline debe estar presente");
+                assert!(filter.is_some(), "inline filter must be present");
             }
-            other => panic!("se esperaba ListComp, recibió {:?}", other),
+            other => panic!("expected ListComp, got {:?}", other),
         }
     }
 
@@ -8710,7 +8650,7 @@ mod tests {
             Expr::ListComp { iter, .. } => {
                 assert!(matches!(*iter, Expr::Range { .. }));
             }
-            other => panic!("se esperaba ListComp, recibió {:?}", other),
+            other => panic!("expected ListComp, got {:?}", other),
         }
     }
 
@@ -8722,7 +8662,7 @@ mod tests {
         let v = parse_first_let_value("let xs = [42]");
         match v {
             Expr::List(items, _) => assert_eq!(items.len(), 1),
-            other => panic!("se esperaba List, recibió {:?}", other),
+            other => panic!("expected List, got {:?}", other),
         }
     }
 
@@ -8736,7 +8676,7 @@ mod tests {
                 StrPart::Expr(_, spec) => spec,
                 _ => None,
             }),
-            other => panic!("se esperaba StrInterp, recibió {:?}", other),
+            other => panic!("expected StrInterp, got {:?}", other),
         }
     }
 
@@ -8795,9 +8735,9 @@ mod tests {
         match value {
             Expr::StrInterp(parts, _) => {
                 let has_none = parts.iter().any(|p| matches!(p, StrPart::Expr(_, None)));
-                assert!(has_none, "esperaba StrPart::Expr(_, None) sin spec");
+                assert!(has_none, "expected StrPart::Expr(_, None) without spec");
             }
-            other => panic!("se esperaba StrInterp, recibió {:?}", other),
+            other => panic!("expected StrInterp, got {:?}", other),
         }
     }
 
@@ -8816,9 +8756,9 @@ mod tests {
                     assert!(matches!(subs[0], Pattern::Ident(ref n, _) if n == "k"));
                     assert!(matches!(subs[1], Pattern::Ident(ref n, _) if n == "v"));
                 }
-                other => panic!("esperaba Pattern::Tuple, dio {:?}", other),
+                other => panic!("expected Pattern::Tuple, gave {:?}", other),
             },
-            other => panic!("esperaba Stmt::For, dio {:?}", other),
+            other => panic!("expected Stmt::For, gave {:?}", other),
         }
     }
 
@@ -8830,7 +8770,7 @@ mod tests {
             Stmt::For { var, .. } => {
                 assert!(matches!(var, Pattern::Wildcard));
             }
-            other => panic!("esperaba Stmt::For, dio {:?}", other),
+            other => panic!("expected Stmt::For, gave {:?}", other),
         }
     }
 
@@ -8842,7 +8782,7 @@ mod tests {
             Stmt::For { var, .. } => {
                 assert_eq!(var, Pattern::Ident("x".into(), Span::default()));
             }
-            other => panic!("esperaba Stmt::For, dio {:?}", other),
+            other => panic!("expected Stmt::For, gave {:?}", other),
         }
     }
 
@@ -8855,13 +8795,13 @@ mod tests {
             Stmt::FnDef { params, .. } => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "x");
-                assert!(params[0].default.is_some(), "esperaba default");
+                assert!(params[0].default.is_some(), "expected default");
                 if let Some(Expr::Int(5, _)) = params[0].default {
                 } else {
-                    panic!("esperaba default Int(5), dio {:?}", params[0].default);
+                    panic!("expected default Int(5), gave {:?}", params[0].default);
                 }
             }
-            other => panic!("esperaba FnDef, dio {:?}", other),
+            other => panic!("expected FnDef, gave {:?}", other),
         }
     }
 
@@ -8873,10 +8813,10 @@ mod tests {
                 assert_eq!(params.len(), 1);
                 match &params[0].default {
                     Some(Expr::Str(s, _)) => assert_eq!(s, "amigo"),
-                    other => panic!("esperaba Str default, dio {:?}", other),
+                    other => panic!("expected Str default, gave {:?}", other),
                 }
             }
-            other => panic!("esperaba FnDef, dio {:?}", other),
+            other => panic!("expected FnDef, gave {:?}", other),
         }
     }
 
@@ -8886,10 +8826,10 @@ mod tests {
         match stmt {
             Stmt::FnDef { params, .. } => {
                 assert_eq!(params.len(), 2);
-                assert!(params[0].default.is_none(), "a NO debe tener default");
-                assert!(params[1].default.is_some(), "b SÍ debe tener default");
+                assert!(params[0].default.is_none(), "a must NOT have default");
+                assert!(params[1].default.is_some(), "b MUST have default");
             }
-            other => panic!("esperaba FnDef, dio {:?}", other),
+            other => panic!("expected FnDef, gave {:?}", other),
         }
     }
 
@@ -8898,11 +8838,11 @@ mod tests {
         // Python rule: once a param has a default, all following
         // params must have defaults too. `fn f(a = 1, b)` must be rejected.
         let result = parse_program_str("fn f(a: Int = 1, b: Int) -> Int { return a + b }");
-        assert!(result.is_err(), "esperaba error, dio {:?}", result);
+        assert!(result.is_err(), "expected error, gave {:?}", result);
         let msg = result.unwrap_err().message;
         assert!(
             msg.contains("default") && msg.contains("b"),
-            "mensaje esperado contener 'default' y 'b', fue: {}",
+            "expected message to contain 'default' and 'b', was: {}",
             msg
         );
     }
@@ -8917,7 +8857,7 @@ mod tests {
                 assert!(params[0].type_.is_none());
                 assert!(params[0].default.is_some());
             }
-            other => panic!("esperaba FnDef, dio {:?}", other),
+            other => panic!("expected FnDef, gave {:?}", other),
         }
     }
 
@@ -8929,32 +8869,29 @@ mod tests {
         match stmt {
             Stmt::FnDef { params, .. } => {
                 assert_eq!(params.len(), 1);
-                assert!(params[0].varargs, "esperaba varargs=true");
+                assert!(params[0].varargs, "expected varargs=true");
                 assert_eq!(params[0].name, "xs");
             }
-            other => panic!("esperaba FnDef, dio {:?}", other),
+            other => panic!("expected FnDef, gave {:?}", other),
         }
     }
 
     #[test]
     fn fp2_varargs_only_last_is_error() {
         let result = parse_program_str("fn f(...xs: Int, ...ys: Int) -> Int { return 0 }");
-        assert!(result.is_err(), "esperaba error por varargs duplicado");
+        assert!(result.is_err(), "expected error for duplicate varargs");
     }
 
     #[test]
     fn fp2_param_after_varargs_is_error() {
         let result = parse_program_str("fn f(...xs: Int, y: Int) -> Int { return 0 }");
-        assert!(
-            result.is_err(),
-            "esperaba error por param después de varargs"
-        );
+        assert!(result.is_err(), "expected error for param after varargs");
     }
 
     #[test]
     fn fp2_varargs_with_default_is_error() {
         let result = parse_program_str("fn f(...xs: Int = 5) -> Int { return 0 }");
-        assert!(result.is_err(), "esperaba error por varargs con default");
+        assert!(result.is_err(), "expected error for varargs with default");
     }
 
     #[test]
@@ -8966,7 +8903,7 @@ mod tests {
                 assert!(!params[0].varargs);
                 assert!(params[1].varargs);
             }
-            other => panic!("esperaba FnDef, dio {:?}", other),
+            other => panic!("expected FnDef, gave {:?}", other),
         }
     }
 
@@ -8983,20 +8920,20 @@ mod tests {
                     if let Expr::NamedArg { name, .. } = &args[0] {
                         assert_eq!(name, "name");
                     } else {
-                        panic!("esperaba NamedArg, dio {:?}", args[0]);
+                        panic!("expected NamedArg, gave {:?}", args[0]);
                     }
                 } else {
-                    panic!("esperaba Call, dio {:?}", value);
+                    panic!("expected Call, gave {:?}", value);
                 }
             }
-            other => panic!("esperaba Assign, dio {:?}", other),
+            other => panic!("expected Assign, gave {:?}", other),
         }
     }
 
     #[test]
     fn fp3_positional_after_named_is_error() {
         let result = parse_program_str("let r = f(name: 1, 2)");
-        assert!(result.is_err(), "esperaba error positional-tras-named");
+        assert!(result.is_err(), "expected error positional-after-named");
     }
 
     // ---- Mini-batch Sp.2 — return in match arm ----
@@ -9014,10 +8951,10 @@ mod tests {
                 // Arm 1: pattern Wildcard → Stmt::Expr("other").
                 assert!(matches!(arms[1].body[0], Stmt::Expr(..)));
             } else {
-                panic!("esperaba Stmt::Expr(Match), dio {:?}", body[0]);
+                panic!("expected Stmt::Expr(Match), gave {:?}", body[0]);
             }
         } else {
-            panic!("esperaba FnDef");
+            panic!("expected FnDef");
         }
     }
 
@@ -9036,7 +8973,7 @@ mod tests {
                 assert!(matches!(arm.body[0], Stmt::Expr(..)));
             }
         } else {
-            panic!("esperaba Match");
+            panic!("expected Match");
         }
     }
 
@@ -9056,10 +8993,10 @@ mod tests {
                 assert_eq!(decorators[0].args.len(), 1);
                 match &decorators[0].args[0] {
                     Expr::Str(s, _) => assert_eq!(s, "users"),
-                    other => panic!("esperaba Expr::Str, fue {:?}", other),
+                    other => panic!("expected Expr::Str, was {:?}", other),
                 }
             }
-            other => panic!("esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -9072,7 +9009,7 @@ mod tests {
                 assert_eq!(decorators[0].name, "table");
                 assert!(decorators[0].args.is_empty());
             }
-            other => panic!("esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -9085,7 +9022,7 @@ mod tests {
                 assert_eq!(decorators[0].name, "table");
                 assert_eq!(decorators[1].name, "soft_delete");
             }
-            other => panic!("esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -9102,7 +9039,7 @@ mod tests {
                 assert_eq!(fields[1].name, "name");
                 assert!(fields[1].decorators.is_empty());
             }
-            other => panic!("esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -9122,7 +9059,7 @@ mod tests {
                 assert!(names.contains(&"name"));
                 assert!(names.contains(&"sql_type"));
             }
-            other => panic!("esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -9136,7 +9073,7 @@ mod tests {
                 assert_eq!(fields[0].decorators[1].name, "unique");
                 assert_eq!(fields[0].decorators[2].name, "index");
             }
-            other => panic!("esperaba TypeDef, fue {:?}", other),
+            other => panic!("expected TypeDef, was {:?}", other),
         }
     }
 
@@ -9144,12 +9081,12 @@ mod tests {
 
     #[test]
     fn fn_def_with_duplicate_params_is_error() {
-        let tokens = tokenize("fn f(a: Int, a: Int) => a").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar params duplicados");
+        let tokens = tokenize("fn f(a: Int, a: Int) => a").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject duplicated params");
         let msg = err.to_string();
         assert!(
-            msg.contains("duplicado") && msg.contains('a'),
-            "esperaba mensaje que cite duplicado y nombre del param, fue: {}",
+            msg.contains("duplicated") && msg.contains('a'),
+            "expected message that cites duplicated and param name, was: {}",
             msg
         );
     }
@@ -9157,12 +9094,12 @@ mod tests {
     #[test]
     fn fn_def_with_duplicate_params_without_type_is_error() {
         // Must also be caught when there is no type annotation.
-        let tokens = tokenize("fn g(x, y, x) => 0").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar params duplicados");
+        let tokens = tokenize("fn g(x, y, x) => 0").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject duplicated params");
         let msg = err.to_string();
         assert!(
-            msg.contains("duplicado"),
-            "esperaba mensaje sobre duplicado, fue: {}",
+            msg.contains("duplicated"),
+            "expected message about duplicated, was: {}",
             msg
         );
     }
@@ -9171,24 +9108,24 @@ mod tests {
     fn decorator_over_let_is_error() {
         // The parser only accepts decorators on `fn`, `async fn` or `type`.
         // `@x(1)\nlet y = 2` must fail with a clear message.
-        let tokens = tokenize("@get(\"/x\")\nlet y = 2").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar decorator sobre let");
+        let tokens = tokenize("@get(\"/x\")\nlet y = 2").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject decorator over let");
         let msg = err.to_string();
         assert!(
             msg.contains("decorador") || msg.contains("`fn`") || msg.contains("`type`"),
-            "esperaba mensaje sobre destino del decorador, fue: {}",
+            "expected message about decorator target, was: {}",
             msg
         );
     }
 
     #[test]
     fn decorator_over_bare_expression_is_error() {
-        let tokens = tokenize("@table(\"x\")\n42").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar decorator sobre expresión");
+        let tokens = tokenize("@table(\"x\")\n42").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject decorator over expression");
         let msg = err.to_string();
         assert!(
             msg.contains("decorador") || msg.contains("`fn`") || msg.contains("`type`"),
-            "esperaba mensaje sobre destino del decorador, fue: {}",
+            "expected message about decorator target, was: {}",
             msg
         );
     }
@@ -9199,45 +9136,45 @@ mod tests {
         // tokenize, not in parse, but it still counts as an error path of
         // pipeline lex-parse.
         let res = tokenize("let x = \"\\q\"");
-        assert!(res.is_err(), "esperaba error de escape inválido");
+        assert!(res.is_err(), "expected invalid escape error");
         let msg = res.unwrap_err().to_string();
         assert!(
             msg.contains("escape") || msg.contains("\\q"),
-            "esperaba mensaje sobre escape inválido, fue: {}",
+            "expected message about invalid escape, was: {}",
             msg
         );
     }
 
     #[test]
     fn parens_unclosed_in_expression_is_error() {
-        let tokens = tokenize("let x = (1 + 2").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar paréntesis sin cerrar");
+        let tokens = tokenize("let x = (1 + 2").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject unclosed parenthesis");
         let msg = err.to_string();
         assert!(
             !msg.is_empty(),
-            "esperaba mensaje no vacío para paréntesis sin cerrar"
+            "expected non-empty message for unclosed parenthesis"
         );
     }
 
     #[test]
     fn brace_unclosed_in_block_is_error() {
-        let tokens = tokenize("fn f() {\n  let x = 1").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar llave sin cerrar");
+        let tokens = tokenize("fn f() {\n  let x = 1").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject unclosed brace");
         let msg = err.to_string();
         assert!(
             !msg.is_empty(),
-            "esperaba mensaje no vacío para llave sin cerrar"
+            "expected non-empty message for unclosed brace"
         );
     }
 
     #[test]
     fn bracket_unclosed_in_list_literal_is_error() {
-        let tokens = tokenize("let xs = [1, 2, 3").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar corchete sin cerrar");
+        let tokens = tokenize("let xs = [1, 2, 3").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject unclosed bracket");
         let msg = err.to_string();
         assert!(
             !msg.is_empty(),
-            "esperaba mensaje no vacío para corchete sin cerrar"
+            "expected non-empty message for unclosed bracket"
         );
     }
 
@@ -9245,12 +9182,12 @@ mod tests {
     fn nested_brackets_mismatched_is_error() {
         // `[1, [2, 3]` — one bracket inside and one outside, the
         // outer one is missing its close.
-        let tokens = tokenize("let xs = [1, [2, 3]").expect("debe tokenizar");
-        let err = parse(tokens).expect_err("debe rechazar anidación mal balanceada");
+        let tokens = tokenize("let xs = [1, [2, 3]").expect("must tokenize");
+        let err = parse(tokens).expect_err("must reject mismatched nesting");
         let msg = err.to_string();
         assert!(
             !msg.is_empty(),
-            "esperaba mensaje no vacío para anidación mal balanceada"
+            "expected non-empty message for mismatched nesting"
         );
     }
 
@@ -9259,8 +9196,8 @@ mod tests {
     /// Extract the first `Expr::StrInterp` from the `Program` and
     /// return its parts. Helper for the V1 tests.
     fn first_strinterp_parts(src: &str) -> Vec<StrPart> {
-        let tokens = tokenize(src).expect("debe tokenizar");
-        let program = parse(tokens).expect("debe parsear");
+        let tokens = tokenize(src).expect("must tokenize");
+        let program = parse(tokens).expect("must parse");
         for stmt in program {
             match stmt {
                 Stmt::Expr(Expr::Call { args, .. }, _) => {
@@ -9277,7 +9214,7 @@ mod tests {
                 _ => {}
             }
         }
-        panic!("no se encontró StrInterp en el program");
+        panic!("did not find StrInterp in the program");
     }
 
     #[test]
@@ -9291,18 +9228,18 @@ mod tests {
                 StrPart::Expr(e, _) => Some(e),
                 _ => None,
             })
-            .expect("debe haber un StrPart::Expr");
+            .expect("must have a StrPart::Expr");
         let span = ident.span();
         assert_eq!(
             span.line, 1,
-            "span.line del Ident interno debería ser 1, fue {}",
+            "span.line of inner Ident should be 1, was {}",
             span.line
         );
         // The `{` is at col 13 (after `print("hola `), the `n` of
         // `nombre` starts at col 14.
         assert_eq!(
             span.column, 14,
-            "span.column del Ident interno debería ser 14, fue {}",
+            "span.column of inner Ident should be 14, was {}",
             span.column
         );
     }
@@ -9318,7 +9255,7 @@ mod tests {
                 StrPart::Expr(e, _) => Some(e),
                 _ => None,
             })
-            .expect("debe haber un StrPart::Expr");
+            .expect("must have a StrPart::Expr");
         match expr {
             Expr::BinOp { left, right, .. } => {
                 // `a` is at col 12, `b` at col 16.
@@ -9327,7 +9264,7 @@ mod tests {
                 assert_eq!(right.span().line, 1);
                 assert_eq!(right.span().column, 16, "col de `b`");
             }
-            other => panic!("esperaba BinOp, recibió {:?}", other),
+            other => panic!("expected BinOp, got {:?}", other),
         }
     }
 
@@ -9341,14 +9278,14 @@ mod tests {
                 StrPart::Expr(e, _) => Some(e),
                 _ => None,
             })
-            .expect("debe haber un StrPart::Expr");
+            .expect("must have a StrPart::Expr");
         match expr {
             Expr::Call { callee, args, .. } => {
                 // `f` is at col 12, `x` at col 14.
                 assert_eq!(callee.span().column, 12);
                 assert_eq!(args.first().expect("un arg").span().column, 14);
             }
-            other => panic!("esperaba Call, recibió {:?}", other),
+            other => panic!("expected Call, got {:?}", other),
         }
     }
 
@@ -9362,13 +9299,13 @@ mod tests {
                 StrPart::Expr(e, _) => Some(e),
                 _ => None,
             })
-            .expect("debe haber un StrPart::Expr");
+            .expect("must have a StrPart::Expr");
         match expr {
             Expr::Field { object, .. } => {
                 // `u` is at col 15.
                 assert_eq!(object.span().column, 15);
             }
-            other => panic!("esperaba Field, recibió {:?}", other),
+            other => panic!("expected Field, got {:?}", other),
         }
     }
 }
