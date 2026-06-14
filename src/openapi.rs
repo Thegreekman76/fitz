@@ -732,12 +732,12 @@ fn build_responses_with_auth(
     // existing entries (rare case: handler that returns 401 manually
     // via `return 401 { ... }`).
     if auth != crate::http::AuthSpec::None && !resp.contains_key("401") {
-        resp.insert("401".into(), auth_error_response("Autenticación requerida"));
+        resp.insert("401".into(), auth_error_response("Authentication required"));
     }
     if auth == crate::http::AuthSpec::Admin && !resp.contains_key("403") {
         resp.insert(
             "403".into(),
-            auth_error_response("Permiso denegado (admin)"),
+            auth_error_response("Permission denied (admin)"),
         );
     }
     // Q.4: add entries for each custom status code detected in the
@@ -885,7 +885,7 @@ pub fn type_expr_to_schema(t: &TypeExpr) -> Value {
             s
         }
         TypeExpr::Function { .. } => json!({
-            "description": format!("{} (función Fitz, no serializable)", t.display_name()),
+            "description": format!("{} (Fitz function, not serializable)", t.display_name()),
         }),
         // Tuples (T mini-batch): JSON has no tuples, we serialize as
         // a prefix-typed array. OpenAPI 3.1 schema supports
@@ -1082,7 +1082,7 @@ mod tests {
         assert_eq!(obj.get("type"), Some(&json!("object")));
         // The description explains that the keys are not Str.
         let desc = obj.get("description").unwrap().as_str().unwrap();
-        assert!(desc.contains("Map<Int, Str>"), "description fue: {}", desc);
+        assert!(desc.contains("Map<Int, Str>"), "description was: {}", desc);
     }
 
     #[test]
@@ -1272,7 +1272,7 @@ mod tests {
         let responses = &schema["paths"]["/u/{id}"]["get"]["responses"];
         assert!(
             responses.get("404").is_some(),
-            "esperaba 404 en el schema, fue: {:?}",
+            "expected 404 in the schema, was: {:?}",
             responses
         );
     }
@@ -1296,7 +1296,7 @@ mod tests {
         let responses = &schema["paths"]["/u/{id}"]["get"]["responses"];
         assert!(
             responses.get("404").is_some(),
-            "esperaba 404 en el schema, fue: {:?}",
+            "expected 404 in the schema, was: {:?}",
             responses
         );
     }
@@ -1326,7 +1326,7 @@ mod tests {
             !codes
                 .iter()
                 .any(|c| *c == "400" || *c == "404" || *c == "401"),
-            "esperaba sin codes específicos del Ident dinámico, fue: {:?}",
+            "expected no specific codes from dynamic Ident, was: {:?}",
             codes
         );
     }
@@ -1336,7 +1336,7 @@ mod tests {
         let src = "\
             @get(\"/p\")\n\
             fn protected() -> Str {\n\
-                return 401 {\"msg\": \"no autorizado\"}\n\
+                return 401 {\"msg\": \"unauthorized\"}\n\
             }\n\
         ";
         let schema = schema_for(src);
@@ -1354,7 +1354,7 @@ mod tests {
             @get(\"/u/{id}\")\n\
             fn h(id: Int) -> Str {\n\
                 if (id == 0) {\n\
-                    return 404 {\"msg\": \"no encontrado\"}\n\
+                    return 404 {\"msg\": \"not found\"}\n\
                 }\n\
                 return \"ok\"\n\
             }\n\
@@ -1630,11 +1630,11 @@ mod tests {
         let responses = schema["paths"]["/users/{id}"]["get"]["responses"]
             .as_object()
             .unwrap();
-        assert!(responses.contains_key("200"), "esperaba 200 (Ok)");
-        assert!(responses.contains_key("500"), "esperaba 500 (Err fallback)");
+        assert!(responses.contains_key("200"), "expected 200 (Ok)");
+        assert!(responses.contains_key("500"), "expected 500 (Err fallback)");
         assert!(
             responses.contains_key("404"),
-            "esperaba 404 (Err con status literal)"
+            "expected 404 (Err with literal status)"
         );
     }
 
@@ -1667,16 +1667,16 @@ mod tests {
 type User { id: Int, name: Str, role: Str }\n\
 @auth_provider\n\
 fn check(headers: Map<Str, Str>) -> Result<User> {\n\
-    return Err(\"sin auth\")\n\
+    return Err(\"no auth\")\n\
 }\n\
 @get(\"/public\")\n\
-fn public_route() -> Str => \"sin auth\"\n\
+fn public_route() -> Str => \"no auth\"\n\
 @authenticated\n\
 @get(\"/me\")\n\
 fn me(user: User) -> Str => user.name\n\
 @admin\n\
 @get(\"/admin\")\n\
-fn admin_route(user: User) -> Str => \"hola admin\"\n\
+fn admin_route(user: User) -> Str => \"hello admin\"\n\
 ";
 
     #[test]
@@ -1685,7 +1685,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         let security_schemes = schema["components"]["securitySchemes"].as_object();
         assert!(
             security_schemes.is_some(),
-            "components.securitySchemes ausente — esperaba bearerAuth",
+            "components.securitySchemes missing — expected bearerAuth",
         );
         let bearer = &schema["components"]["securitySchemes"]["bearerAuth"];
         assert_eq!(bearer["type"], json!("http"));
@@ -1699,7 +1699,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         let op = &schema["paths"]["/public"]["get"];
         assert!(
             op.get("security").is_none(),
-            "handler público debería NO tener `security`, fue: {:?}",
+            "public handler should NOT have `security`, was: {:?}",
             op,
         );
         // Doesn't emit 401/403 either (not a wrapper auth case).
@@ -1713,17 +1713,20 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         let schema = schema_for(AUTH_SCHEMA_SRC);
         let op = &schema["paths"]["/me"]["get"];
         // security: [{ bearerAuth: [] }]
-        let sec = op["security"].as_array().expect("security debe ser array");
+        let sec = op["security"].as_array().expect("security must be array");
         assert_eq!(sec.len(), 1);
         assert!(
             sec[0].get("bearerAuth").is_some(),
-            "primer requirement debería ser bearerAuth, fue: {:?}",
+            "first requirement should be bearerAuth, was: {:?}",
             sec[0],
         );
         // responses includes 401 (auth) but NOT 403 (not admin).
         let resp = op["responses"].as_object().unwrap();
-        assert!(resp.contains_key("401"), "@authenticated emite 401");
-        assert!(!resp.contains_key("403"), "@authenticated NO emite 403");
+        assert!(resp.contains_key("401"), "@authenticated emits 401");
+        assert!(
+            !resp.contains_key("403"),
+            "@authenticated does NOT emit 403"
+        );
         // 200 from the happy path must still be there.
         assert!(resp.contains_key("200"));
     }
@@ -1732,12 +1735,12 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     fn auth_schema_admin_handler_emits_401_and_403() {
         let schema = schema_for(AUTH_SCHEMA_SRC);
         let op = &schema["paths"]["/admin"]["get"];
-        let sec = op["security"].as_array().expect("security debe ser array");
+        let sec = op["security"].as_array().expect("security must be array");
         assert_eq!(sec.len(), 1);
         assert!(sec[0].get("bearerAuth").is_some());
         let resp = op["responses"].as_object().unwrap();
-        assert!(resp.contains_key("401"), "@admin emite 401");
-        assert!(resp.contains_key("403"), "@admin emite 403");
+        assert!(resp.contains_key("401"), "@admin emits 401");
+        assert!(resp.contains_key("403"), "@admin emits 403");
         // 401 and 403 are objects with shape `{"error": <string>}`.
         let r401_schema = &resp["401"]["content"]["application/json"]["schema"];
         assert_eq!(r401_schema["type"], json!("object"));
@@ -1756,7 +1759,7 @@ fn x() -> Str => \"ok\"\n\
         let schema = schema_for(src);
         assert!(
             schema["components"].get("securitySchemes").is_none(),
-            "programas sin auth NO deberían emitir securitySchemes",
+            "programs without auth should NOT emit securitySchemes",
         );
     }
 }

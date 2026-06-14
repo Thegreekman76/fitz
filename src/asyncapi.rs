@@ -282,7 +282,7 @@ pub fn generate_asyncapi_with_version(
             "application/json"
         };
         let recv_summary = if recv_is_bytes {
-            "Frame binario raw ↔ Fitz `Bytes`".to_string()
+            "Raw binary frame ↔ Fitz `Bytes`".to_string()
         } else {
             format!("Frame text JSON ↔ Fitz `{}`", recv_name)
         };
@@ -293,7 +293,7 @@ pub fn generate_asyncapi_with_version(
                 "msg".into(),
                 json!({
                     "name": recv_name,
-                    "title": format!("Mensaje de `{}`", ch.handler_name),
+                    "title": format!("Message of `{}`", ch.handler_name),
                     "summary": recv_summary,
                     "contentType": recv_content_type,
                     "payload": recv_schema,
@@ -321,7 +321,7 @@ pub fn generate_asyncapi_with_version(
                 "application/json"
             };
             let send_summary = if send_is_bytes {
-                "Frame binario raw ↔ Fitz `Bytes`".to_string()
+                "Raw binary frame ↔ Fitz `Bytes`".to_string()
             } else {
                 format!("Frame text JSON ↔ Fitz `{}`", send_name)
             };
@@ -329,7 +329,7 @@ pub fn generate_asyncapi_with_version(
                 "msg_in".into(),
                 json!({
                     "name": recv_name,
-                    "title": format!("Mensaje IN (cliente → server) de `{}`", ch.handler_name),
+                    "title": format!("Message IN (client → server) of `{}`", ch.handler_name),
                     "summary": recv_summary,
                     "contentType": recv_content_type,
                     "payload": recv_schema,
@@ -339,7 +339,7 @@ pub fn generate_asyncapi_with_version(
                 "msg_out".into(),
                 json!({
                     "name": send_name,
-                    "title": format!("Mensaje OUT (server → cliente) de `{}`", ch.handler_name),
+                    "title": format!("Message OUT (server → client) of `{}`", ch.handler_name),
                     "summary": send_summary,
                     "contentType": send_content_type,
                     "payload": send_schema,
@@ -350,11 +350,11 @@ pub fn generate_asyncapi_with_version(
             (*path).to_string(),
             json!({
                 "address": path,
-                "title": format!("Canal WebSocket `{}`", ch.handler_name),
+                "title": format!("WebSocket channel `{}`", ch.handler_name),
                 "description": match ch.auth {
-                    AuthSpec::None => "Sin auth — abierto a cualquier cliente.".to_string(),
-                    AuthSpec::Authenticated => "Requiere bearer token (validado pre-upgrade por el `@auth_provider`).".to_string(),
-                    AuthSpec::Admin => "Requiere bearer token + rol admin (validado pre-upgrade).".to_string(),
+                    AuthSpec::None => "No auth — open to any client.".to_string(),
+                    AuthSpec::Authenticated => "Requires bearer token (validated pre-upgrade by the `@auth_provider`).".to_string(),
+                    AuthSpec::Admin => "Requires bearer token + admin role (validated pre-upgrade).".to_string(),
                 },
                 "messages": messages,
             }),
@@ -384,7 +384,7 @@ pub fn generate_asyncapi_with_version(
         receive_op.insert(
             "summary".into(),
             json!(format!(
-                "El handler `{}` recibe mensajes del cliente via `conn.recv()`.",
+                "The handler `{}` receives messages from the client via `conn.recv()`.",
                 ch.handler_name
             )),
         );
@@ -403,7 +403,7 @@ pub fn generate_asyncapi_with_version(
         send_op.insert(
             "summary".into(),
             json!(format!(
-                "El handler `{}` envía mensajes al cliente via `conn.send()` o `conn.broadcast()`.",
+                "The handler `{}` sends messages to the client via `conn.send()` or `conn.broadcast()`.",
                 ch.handler_name
             )),
         );
@@ -441,7 +441,7 @@ pub fn generate_asyncapi_with_version(
         json!({
             "title": "Fitz API",
             "version": version.unwrap_or("0.1.0"),
-            "description": "Canales WebSocket auto-generados desde decoradores `@ws(\"/path\")` del programa Fitz.",
+            "description": "WebSocket channels auto-generated from `@ws(\"/path\")` decorators in the Fitz program.",
         }),
     );
     root.insert("channels".into(), Value::Object(channels_obj));
@@ -515,8 +515,8 @@ mod tests {
                    async fn echo(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
         let ops = s["operations"].as_object().expect("operations object");
-        assert!(ops.contains_key("receiveEcho"), "esperaba receiveEcho");
-        assert!(ops.contains_key("sendEcho"), "esperaba sendEcho");
+        assert!(ops.contains_key("receiveEcho"), "expected receiveEcho");
+        assert!(ops.contains_key("sendEcho"), "expected sendEcho");
         let recv = &ops["receiveEcho"];
         assert_eq!(recv["action"], json!("receive"));
         let send = &ops["sendEcho"];
@@ -533,7 +533,7 @@ mod tests {
         // Nominal type → $ref to components/schemas.
         assert!(
             payload["$ref"].is_string(),
-            "esperaba $ref, fue: {:?}",
+            "expected $ref, was: {:?}",
             payload
         );
     }
@@ -592,7 +592,7 @@ mod tests {
         assert!(messages["msg_out"].is_object());
         assert!(
             messages["msg"].is_null(),
-            "no debería existir `msg` único en bidir asimétrico"
+            "single `msg` should not exist in asymmetric bidir"
         );
         // msg_in payload is Str (recv).
         assert_eq!(messages["msg_in"]["payload"]["type"], json!("string"));
@@ -612,12 +612,12 @@ mod tests {
         let send_msg_ref = send["messages"][0]["$ref"].as_str().unwrap();
         assert!(
             recv_msg_ref.ends_with("/messages/msg_in"),
-            "receive debería apuntar a msg_in, fue: {}",
+            "receive should point to msg_in, was: {}",
             recv_msg_ref
         );
         assert!(
             send_msg_ref.ends_with("/messages/msg_out"),
-            "send debería apuntar a msg_out, fue: {}",
+            "send should point to msg_out, was: {}",
             send_msg_ref
         );
     }
@@ -658,8 +658,8 @@ mod tests {
             .as_str()
             .expect("summary string");
         assert!(
-            summary.contains("binario") || summary.contains("Bytes"),
-            "summary debería mencionar binario o Bytes, fue: {}",
+            summary.contains("binary") || summary.contains("Bytes"),
+            "summary should mention binary or Bytes, was: {}",
             summary
         );
     }
