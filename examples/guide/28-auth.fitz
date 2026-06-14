@@ -143,7 +143,7 @@ fn admin_list(user: User) -> List<User> {
 //
 //   # 4. Llamar /admin/users con un token de Alan (user) → 403.
 //   curl localhost:43928/admin/users -H 'Authorization: Bearer <TOKEN_ALAN>'
-//   # → 403 + {"error":"acceso prohibido — se requiere rol admin"}
+//   # → 403 + {"error":"access forbidden — admin role required"}
 //
 //   # 5. Llamar /me sin token → 401.
 //   curl localhost:43928/me

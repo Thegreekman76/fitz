@@ -497,7 +497,7 @@ impl ServerConfig {
     pub fn to_socket_addr(&self) -> Result<std::net::SocketAddr, String> {
         let ip: std::net::IpAddr = self.host.parse().map_err(|_| {
             format!(
-                "host '{}' no es una IP válida (esperado IPv4/IPv6 literal)",
+                "host '{}' is not a valid IP (expected IPv4/IPv6 literal)",
                 self.host
             )
         })?;
@@ -701,7 +701,7 @@ where
         let registry = cell
             .borrow_mut()
             .take()
-            .expect("with_active_registry instaló un registry — debería estar presente");
+            .expect("with_active_registry installed a registry — it should be present");
         *cell.borrow_mut() = prev;
         (out, registry)
     })
@@ -735,7 +735,7 @@ where
         let registry = cell
             .borrow_mut()
             .take()
-            .expect("with_active_registry_async instaló un registry — debería estar presente");
+            .expect("with_active_registry_async installed a registry — it should be present");
         *cell.borrow_mut() = prev;
         registry
     });
@@ -880,7 +880,7 @@ pub fn set_health_handler(
         let slot = match kind {
             "healthz" => &mut reg.healthz_handler,
             "readyz" => &mut reg.readyz_handler,
-            other => unreachable!("kind inválido para set_health_handler: {}", other),
+            other => unreachable!("invalid kind for set_health_handler: {}", other),
         };
         if let Some(existing) = slot {
             return Err(SetHealthHandlerError::Duplicate(existing.name.clone()));
@@ -980,31 +980,31 @@ impl PathError {
     pub fn message(&self) -> String {
         match self {
             PathError::NotAStringLiteral => {
-                "el path de un decorator HTTP debe ser un string literal \
+                "the path of an HTTP decorator must be a string literal \
                  (`@get(\"/users\")`)"
                     .to_string()
             }
             PathError::MustStartWithSlash => {
-                "el path de un decorator HTTP debe arrancar con '/'".to_string()
+                "the path of an HTTP decorator must start with '/'".to_string()
             }
             PathError::UnsupportedInterpolation(what) => format!(
-                "path param '{{{}}}': solo se admiten identificadores simples \
-                 como '{{id}}', no expresiones",
+                "path param '{{{}}}': only simple identifiers like \
+                 '{{id}}' are allowed, not expressions",
                 what
             ),
             PathError::DuplicateParam(name) => format!(
-                "path param '{{{}}}' aparece más de una vez en el path",
+                "path param '{{{}}}' appears more than once in the path",
                 name
             ),
             PathError::QueryKeyNameMismatch { key, name } => format!(
-                "query param `?{key}={{{name}}}`: la key y el nombre del \
-                 param deben coincidir — usá `?{name}={{{name}}}` o renombrá \
-                 el parámetro del handler"
+                "query param `?{key}={{{name}}}`: the key and the param \
+                 name must match — use `?{name}={{{name}}}` or rename \
+                 the handler parameter"
             ),
             PathError::MalformedQueryTemplate(t) => format!(
-                "template de query mal formado adentro del path: `?{t}` — \
-                 esperado `?key={{name}}&otra_key={{otro_name}}` con \
-                 identificadores simples"
+                "malformed query template inside the path: `?{t}` — \
+                 expected `?key={{name}}&other_key={{other_name}}` with \
+                 simple identifiers"
             ),
         }
     }
@@ -1240,7 +1240,7 @@ pub async fn await_if_future(value: Value) -> crate::error::FitzResult<Value> {
 ///     directly (no wrapping). This allows handlers that don't use
 ///     `Result` and return `Str`, `Int`, `Instance`, etc.
 ///   - Non-serializable types (Function, Builtin, Type, Module,
-///     Range) → status 500, `{"error": "valor no serializable: <type>"}`.
+///     Range) → status 500, `{"error": "value not serializable: <type>"}`.
 pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
     // Custom status code (spec): the handler did `return 401 { ... }`
     // and the evaluator emitted `Value::HttpResponse`. Direct
@@ -1297,7 +1297,7 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
                         };
                     } else {
                         return HandlerOutcome::internal_error(format!(
-                            "status code inválido en Err: {} (debe estar en 100..1000)",
+                            "invalid status code in Err: {} (must be in 100..1000)",
                             s
                         ));
                     }
@@ -1320,7 +1320,7 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
 /// Serializes a `Value` to `serde_json::Value`. Total for the
 /// "data" types of the language; opaque types (Function, Type,
 /// Module, Range, Builtin) return `Err` with a message like
-/// "valor no serializable: <type>".
+/// "value not serializable: <type>".
 ///
 /// Important: `Result` is NOT specially handled here — that decision
 /// lives in `value_to_outcome` (which maps Ok→200, Err→500). If a
@@ -1337,7 +1337,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
             // explicitly.
             serde_json::Number::from_f64(*f)
                 .map(J::Number)
-                .ok_or_else(|| format!("float no serializable como JSON: {}", f))?
+                .ok_or_else(|| format!("float not serializable as JSON: {}", f))?
         }
         Value::Str(s) => J::String(s.clone()),
         Value::Bool(b) => J::Bool(*b),
@@ -1380,7 +1380,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                     Value::Str(s) => s.clone(),
                     other => {
                         return Err(format!(
-                            "claves de Map en JSON deben ser Str, se encontró {}",
+                            "Map keys in JSON must be Str, found {}",
                             other.type_name()
                         ));
                     }
@@ -1414,7 +1414,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         | Value::Module { .. }
         | Value::Range { .. } => {
             return Err(format!(
-                "valor no serializable a JSON: {}",
+                "value not serializable to JSON: {}",
                 value.type_name(),
             ));
         }
@@ -1424,7 +1424,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // it's a codegen/runtime bug, not the user's.
         Value::HttpResponse { .. } => {
             return Err(
-                "HttpResponse no es serializable a JSON fuera de un handler HTTP".to_string(),
+                "HttpResponse is not serializable to JSON outside an HTTP handler".to_string(),
             );
         }
         // Pending Future: not serializable. If a Future reaches a
@@ -1434,7 +1434,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // generated through another route).
         Value::Future(_) => {
             return Err(
-                "Future pendiente no es serializable — falta `.await` en algún lado del handler"
+                "pending Future is not serializable — missing `.await` somewhere in the handler"
                     .to_string(),
             );
         }
@@ -1445,9 +1445,9 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // `.expose()`.
         Value::Secret(_) => {
             return Err(
-                "Secret<T> no es serializable a JSON (auto-redaction para prevenir leaks de credenciales). \
-                 Usá `.expose()` para desempacar el inner si realmente lo necesitás cruzar HTTP — \
-                 pero en ese caso es mejor pasar el valor crudo sin envolver en Secret en primer lugar.".to_string(),
+                "Secret<T> is not serializable to JSON (auto-redaction to prevent credential leaks). \
+                 Use `.expose()` to unwrap the inner if you really need it to cross HTTP — \
+                 but in that case it's better to pass the raw value without wrapping in Secret in the first place.".to_string(),
             );
         }
         // Phase 9.w.2 — `WsConn` is a live handle to a WS
@@ -1456,7 +1456,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // of a msg/Result).
         Value::WsConn(_) => {
             return Err(
-                "WsConn no es serializable a JSON — los handlers `@ws` consumen el conn vía `recv()`/`send()`/`broadcast()`, no lo retornan".to_string(),
+                "WsConn is not serializable to JSON — `@ws` handlers consume the conn via `recv()`/`send()`/`broadcast()`, they don't return it".to_string(),
             );
         }
         // Phase 10.1.b — `DbConn` is a handle to a TCP connection
@@ -1465,13 +1465,13 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // of the resultset.
         Value::DbConn(_) => {
             return Err(
-                "DbConn no es serializable a JSON — los handlers consumen el conn vía `query()`/`exec()`, no lo retornan".to_string(),
+                "DbConn is not serializable to JSON — handlers consume the conn via `query()`/`exec()`, they don't return it".to_string(),
             );
         }
         // Phase 10.3.b2 — Opaque `QueryBuilder`, non-serializable.
         Value::QueryBuilder(_) => {
             return Err(
-                "QueryBuilder no es serializable a JSON — terminá la cadena con `.all(db)` / `.first(db)` para obtener el resultado".to_string(),
+                "QueryBuilder is not serializable to JSON — finish the chain with `.all(db)` / `.first(db)` to obtain the result".to_string(),
             );
         }
         // v0.10.24 — Date/DateTime/Uuid serialize as canonical JSON
@@ -1486,7 +1486,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // the serializer, the handler returned it by mistake.
         Value::NativeFn(_) => {
             return Err(
-                "función nativa no es serializable — `next` solo se puede invocar, no devolver"
+                "native function is not serializable — `next` can only be invoked, not returned"
                     .to_string(),
             );
         }
@@ -1497,7 +1497,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // value.
         Value::CorsConfig(_) => {
             return Err(
-                "CorsConfig no es serializable — se usa como argumento de `@middleware(cors(...))`, no como valor".to_string(),
+                "CorsConfig is not serializable — it is used as an argument to `@middleware(cors(...))`, not as a value".to_string(),
             );
         }
         // PyObject (Phase 8.1+, feature `python`): opaque. The
@@ -1507,7 +1507,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         #[cfg(feature = "python")]
         Value::PyObject(_) => {
             return Err(
-                "PyObject no es serializable a JSON — convertí el valor Python a un tipo Fitz antes de devolverlo".to_string(),
+                "PyObject is not serializable to JSON — convert the Python value to a Fitz type before returning it".to_string(),
             );
         }
     })
@@ -1587,7 +1587,7 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
         Value::Type { name, fields, .. } => (name.clone(), fields.clone()),
         other => {
             return Err(format!(
-                "json_to_instance recibió un {} en lugar de un Type",
+                "json_to_instance received a {} instead of a Type",
                 other.type_name(),
             ));
         }
@@ -1598,7 +1598,7 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
         serde_json::Value::Object(map) => map,
         other => {
             return Err(format!(
-                "body para '{}' debe ser un objeto JSON, se recibió {}",
+                "body for '{}' must be a JSON object, received {}",
                 type_name,
                 json_shape_name(other),
             ));
@@ -1617,9 +1617,8 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
         .collect();
     if !extras.is_empty() {
         return Err(format!(
-            "body para '{}': campo{} no declarado{}: {}",
+            "body for '{}': undeclared field{}: {}",
             type_name,
-            if extras.len() == 1 { "" } else { "s" },
             if extras.len() == 1 { "" } else { "s" },
             extras.join(", "),
         ));
@@ -1644,9 +1643,9 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
                 Ok(v) => out.push((field.name.clone(), v)),
                 Err(_) => {
                     return Err(format!(
-                        "body para '{}': el campo '{}' tiene un default que no se \
-                         puede evaluar sin contexto (Fase 4.3); pasalo explícito \
-                         en el body",
+                        "body for '{}': field '{}' has a default that cannot be \
+                         evaluated without context (Phase 4.3); pass it explicitly \
+                         in the body",
                         type_name, field.name,
                     ));
                 }
@@ -1655,7 +1654,7 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
             out.push((field.name.clone(), Value::Null));
         } else {
             return Err(format!(
-                "body para '{}': falta el campo '{}'",
+                "body for '{}': missing field '{}'",
                 type_name, field.name,
             ));
         }
@@ -1670,7 +1669,7 @@ fn json_shape_name(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "número",
+        serde_json::Value::Number(_) => "number",
         serde_json::Value::String(_) => "string",
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
@@ -1718,21 +1717,21 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
         "Int" => raw
             .parse::<i64>()
             .map(Value::Int)
-            .map_err(|_| format!("se esperaba Int, recibió '{}'", raw)),
+            .map_err(|_| format!("expected Int, received '{}'", raw)),
         "Float" => raw
             .parse::<f64>()
             .map(Value::Float)
-            .map_err(|_| format!("se esperaba Float, recibió '{}'", raw)),
+            .map_err(|_| format!("expected Float, received '{}'", raw)),
         "Bool" => match raw {
             "true" => Ok(Value::Bool(true)),
             "false" => Ok(Value::Bool(false)),
             other => Err(format!(
-                "se esperaba Bool ('true' o 'false'), recibió '{}'",
+                "expected Bool ('true' or 'false'), received '{}'",
                 other
             )),
         },
         other => Err(format!(
-            "tipo '{}' no soportado para path params (usá Int/Float/Str/Bool)",
+            "type '{}' not supported for path params (use Int/Float/Str/Bool)",
             other
         )),
     }
@@ -2298,7 +2297,7 @@ fn map_health_value_to_response(value: Value) -> axum::response::Response {
             // this). We treat it as healthy with a stderr warning so
             // probes are not broken by a codegen bug.
             eprintln!(
-                "[probe] handler retornó valor de tipo inesperado {} — tratando como OK",
+                "[probe] handler returned value of unexpected type {} — treating as OK",
                 other.type_name()
             );
             (
@@ -2538,7 +2537,7 @@ fn build_ws_method_router(
                 None => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "ruta WS no encontrada en el registry",
+                        "WS route not found in the registry",
                     )
                         .into_response();
                 }
@@ -2596,7 +2595,7 @@ fn build_ws_method_router(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             axum::Json(serde_json::json!({
                                 "error": format!(
-                                    "ruta WS '{}' exige auth pero no hay @auth_provider — bug del registry",
+                                    "WS route '{}' requires auth but there is no @auth_provider — registry bug",
                                     route.handler_name
                                 )
                             })),
@@ -2634,7 +2633,7 @@ fn build_ws_method_router(
                                         return (
                                             StatusCode::INTERNAL_SERVER_ERROR,
                                             axum::Json(serde_json::json!({
-                                                "error": format!("@auth_provider falló: {}", e.message)
+                                                "error": format!("@auth_provider failed: {}", e.message)
                                             })),
                                         )
                                             .into_response();
@@ -2643,7 +2642,7 @@ fn build_ws_method_router(
                                 None => {
                                     return (
                                         StatusCode::INTERNAL_SERVER_ERROR,
-                                        "Future del provider ya consumido (bug)",
+                                        "provider Future already consumed (bug)",
                                     )
                                         .into_response();
                                 }
@@ -2653,7 +2652,7 @@ fn build_ws_method_router(
                             return (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 axum::Json(serde_json::json!({
-                                    "error": format!("provider async no devolvió Future: {}", other.type_name())
+                                    "error": format!("async provider did not return a Future: {}", other.type_name())
                                 })),
                             )
                                 .into_response();
@@ -2678,7 +2677,7 @@ fn build_ws_method_router(
                                 return (
                                     StatusCode::FORBIDDEN,
                                     axum::Json(serde_json::json!({
-                                        "error": "acceso prohibido — se requiere rol admin"
+                                        "error": "access forbidden — admin role required"
                                     })),
                                 )
                                     .into_response();
@@ -2708,12 +2707,12 @@ fn build_ws_method_router(
                             if !allowed {
                                 let msg = match &actual_role {
                                     Some(r) => format!(
-                                        "acceso prohibido — role '{}' no autorizado (requeridos: {})",
+                                        "access forbidden — role '{}' not authorized (required: {})",
                                         r,
                                         route.required_roles.join(", "),
                                     ),
                                     None => format!(
-                                        "acceso prohibido — role faltante (requeridos: {})",
+                                        "access forbidden — missing role (required: {})",
                                         route.required_roles.join(", "),
                                     ),
                                 };
@@ -2742,7 +2741,7 @@ fn build_ws_method_router(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             axum::Json(serde_json::json!({
                                 "error": format!(
-                                    "@auth_provider devolvió shape inesperado: {}",
+                                    "@auth_provider returned unexpected shape: {}",
                                     other.type_name()
                                 )
                             })),
@@ -2768,7 +2767,7 @@ fn build_ws_method_router(
                 _ => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "WS handler no es Value::Function — bug del registro",
+                        "WS handler is not Value::Function — registration bug",
                     )
                         .into_response();
                 }
@@ -2815,7 +2814,7 @@ fn build_ws_method_router(
                         // Unclassified param — registration bug.
                         // Log and close the conn.
                         eprintln!(
-                            "WS handler '{}': param '{}' sin clasificación, cerrando conn",
+                            "WS handler '{}': param '{}' unclassified, closing conn",
                             handler_name, name,
                         );
                         broadcaster.unregister(&endpoint, conn_id);
@@ -2842,7 +2841,7 @@ fn build_ws_method_router(
                         // close.
                     }
                     Err(e) => {
-                        eprintln!("WS handler '{}' falló: {}", handler_name, e.message,);
+                        eprintln!("WS handler '{}' failed: {}", handler_name, e.message,);
                     }
                 }
                 // Cleanup: unregister from the broadcaster + close
@@ -3227,16 +3226,16 @@ async fn run_middleware_chain(
             }
             Ok(other) => {
                 return Some(HandlerOutcome::internal_error(format!(
-                    "middleware '{}' devolvió un valor inesperado ({}); \
-                     debe devolver `null` para continuar o `return <status> {{ ... }}` \
-                     para cortocircuitar",
+                    "middleware '{}' returned an unexpected value ({}); \
+                     it must return `null` to continue or `return <status> {{ ... }}` \
+                     to short-circuit",
                     mw.name,
                     other.type_name(),
                 )));
             }
             Err(err) => {
                 return Some(HandlerOutcome::internal_error(format!(
-                    "middleware '{}' falló: {}",
+                    "middleware '{}' failed: {}",
                     mw.name, err.message,
                 )));
             }
@@ -3303,15 +3302,15 @@ async fn run_post_middlewares(
             }
             Ok(other) => {
                 return HandlerOutcome::internal_error(format!(
-                    "middleware post '{}' devolvió un valor inesperado ({}); \
-                     debe devolver `Response` (un `return <status> {{ ... }}`)",
+                    "post middleware '{}' returned an unexpected value ({}); \
+                     it must return `Response` (a `return <status> {{ ... }}`)",
                     mw.name,
                     other.type_name(),
                 ));
             }
             Err(err) => {
                 return HandlerOutcome::internal_error(format!(
-                    "middleware post '{}' falló: {}",
+                    "post middleware '{}' failed: {}",
                     mw.name, err.message,
                 ));
             }
@@ -3353,7 +3352,7 @@ fn run_wrap_chain(
                     // body, hiding the error from server logs. Now
                     // it appears on both sides: response (client) +
                     // stderr (dev/ops).
-                    eprintln!("[fitz HTTP] handler `{}` falló: {}", handler_name, err);
+                    eprintln!("[fitz HTTP] handler `{}` failed: {}", handler_name, err);
                     HandlerOutcome::internal_error(err.message)
                 }
             };
@@ -3410,13 +3409,13 @@ fn run_wrap_chain(
                 HandlerOutcome::json(status, payload)
             }
             Ok(other) => HandlerOutcome::internal_error(format!(
-                "middleware wrap '{}' devolvió un valor inesperado ({}); \
-                 debe devolver `Response` (un `return <status> {{ ... }}`)",
+                "wrap middleware '{}' returned an unexpected value ({}); \
+                 it must return `Response` (a `return <status> {{ ... }}`)",
                 current.name,
                 other.type_name(),
             )),
             Err(err) => HandlerOutcome::internal_error(format!(
-                "middleware wrap '{}' falló: {}",
+                "wrap middleware '{}' failed: {}",
                 current.name, err.message,
             )),
         }
@@ -3435,7 +3434,7 @@ async fn handle_task(
 ) -> HandlerOutcome {
     let Some(route) = registry.routes.get(route_idx) else {
         return HandlerOutcome::internal_error(format!(
-            "ruta {} no existe en el registry",
+            "route {} does not exist in the registry",
             route_idx,
         ));
     };
@@ -3493,7 +3492,7 @@ async fn handle_task(
             Ok(v) => v,
             Err(e) => {
                 return HandlerOutcome::internal_error(format!(
-                    "`@auth_provider` '{}' falló: {}",
+                    "`@auth_provider` '{}' failed: {}",
                     provider.name, e.message,
                 ));
             }
@@ -3510,14 +3509,14 @@ async fn handle_task(
                             Ok(v) => v,
                             Err(e) => {
                                 return HandlerOutcome::internal_error(format!(
-                                    "`@auth_provider` '{}' falló al await-ear: {}",
+                                    "`@auth_provider` '{}' failed while awaiting: {}",
                                     provider.name, e.message,
                                 ));
                             }
                         },
                         None => {
                             return HandlerOutcome::internal_error(format!(
-                                "`@auth_provider` '{}': Future ya consumido (bug del dispatcher)",
+                                "`@auth_provider` '{}': Future already consumed (dispatcher bug)",
                                 provider.name,
                             ));
                         }
@@ -3525,7 +3524,7 @@ async fn handle_task(
                 }
                 other => {
                     return HandlerOutcome::internal_error(format!(
-                        "`@auth_provider` '{}' async no devolvió Future, devolvió: {}",
+                        "async `@auth_provider` '{}' did not return Future, returned: {}",
                         provider.name,
                         other.type_name(),
                     ));
@@ -3554,7 +3553,7 @@ async fn handle_task(
                         return HandlerOutcome::json(
                             403,
                             serde_json::json!({
-                                "error": "acceso prohibido — se requiere rol admin",
+                                "error": "access forbidden — admin role required",
                             }),
                         );
                     }
@@ -3585,12 +3584,12 @@ async fn handle_task(
                     if !allowed {
                         let msg = match &actual_role {
                             Some(r) => format!(
-                                "acceso prohibido — role '{}' no autorizado (requeridos: {})",
+                                "access forbidden — role '{}' not authorized (required: {})",
                                 r,
                                 route.required_roles.join(", "),
                             ),
                             None => format!(
-                                "acceso prohibido — role faltante (requeridos: {})",
+                                "access forbidden — missing role (required: {})",
                                 route.required_roles.join(", "),
                             ),
                         };
@@ -3608,7 +3607,7 @@ async fn handle_task(
             }
             other => {
                 return HandlerOutcome::internal_error(format!(
-                    "`@auth_provider` '{}' debe devolver `Result<User>`, devolvió `{}`",
+                    "`@auth_provider` '{}' must return `Result<User>`, returned `{}`",
                     provider.name,
                     other.type_name(),
                 ));
@@ -3658,12 +3657,12 @@ async fn handle_task(
                 415,
                 serde_json::json!({
                     "error": format!(
-                        "Content-Type no soportado: '{}'. El handler espera JSON \
+                        "unsupported Content-Type: '{}'. The handler expects JSON \
                          (`application/json`), urlencoded \
-                         (`application/x-www-form-urlencoded`) o multipart \
-                         (`multipart/form-data`). Otros formatos quedan como \
-                         sub-paso futuro.",
-                        raw_ct.as_deref().unwrap_or("(sin header)")
+                         (`application/x-www-form-urlencoded`) or multipart \
+                         (`multipart/form-data`). Other formats remain as a \
+                         future sub-step.",
+                        raw_ct.as_deref().unwrap_or("(no header)")
                     ),
                 }),
             );
@@ -3679,7 +3678,7 @@ async fn handle_task(
                     return HandlerOutcome::json(
                         400,
                         serde_json::json!({
-                            "error": "multipart/form-data: falta el parámetro `boundary` en Content-Type"
+                            "error": "multipart/form-data: missing `boundary` parameter in Content-Type"
                         }),
                     );
                 }
@@ -3757,7 +3756,7 @@ async fn handle_task(
                     return HandlerOutcome::json(
                         400,
                         serde_json::json!({
-                            "error": format!("query param '{}': falta — es obligatorio", name),
+                            "error": format!("query param '{}': missing — it is required", name),
                         }),
                     );
                 }
@@ -3780,7 +3779,7 @@ async fn handle_task(
                         400,
                         serde_json::json!({
                             "error": format!(
-                                "header '{}': falta — es obligatorio",
+                                "header '{}': missing — it is required",
                                 hdr.http_name
                             ),
                         }),
@@ -3798,8 +3797,8 @@ async fn handle_task(
             args.push(auth_user.clone().unwrap_or(Value::Null));
         } else {
             return HandlerOutcome::internal_error(format!(
-                "parámetro '{}' del handler '{}' no es ni path param ni query param ni body ni header ni user de auth — \
-                 esto es un bug interno del registro",
+                "parameter '{}' of handler '{}' is not a path param, query param, body, header, or auth user — \
+                 this is an internal registration bug",
                 name, route.handler_name,
             ));
         }
@@ -3912,7 +3911,7 @@ async fn handle_task(
 fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
     use crate::value::shared;
     let s = std::str::from_utf8(bytes)
-        .map_err(|e| format!("body urlencoded inválido (UTF-8): {}", e))?;
+        .map_err(|e| format!("invalid urlencoded body (UTF-8): {}", e))?;
     let mut pairs: Vec<(Value, Value)> = Vec::new();
     if s.is_empty() {
         return Ok(Value::Map(shared(pairs)));
@@ -4002,14 +4001,14 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
         // sequence.
         let Some(split_idx) = find_bytes(body, b"\r\n\r\n") else {
             return Err(
-                "multipart: part malformada — falta `\\r\\n\\r\\n` entre headers y body"
+                "multipart: malformed part — missing `\\r\\n\\r\\n` between headers and body"
                     .to_string(),
             );
         };
         let headers_bytes = &body[..split_idx];
         let content_bytes = &body[split_idx + 4..];
         let headers_str = std::str::from_utf8(headers_bytes)
-            .map_err(|e| format!("multipart: headers no son ASCII/UTF-8 válido: {}", e))?;
+            .map_err(|e| format!("multipart: headers are not valid ASCII/UTF-8: {}", e))?;
 
         // Parse the part headers. We only care about
         // `Content-Disposition` (extract `name` and `filename`) and
@@ -4033,7 +4032,7 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
         }
 
         let Some(name) = name_field else {
-            return Err("multipart: part sin `name` en Content-Disposition".to_string());
+            return Err("multipart: part without `name` in Content-Disposition".to_string());
         };
 
         let value = match filename {
@@ -4042,7 +4041,7 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
                 // binary bytes without filename, error.
                 let s = std::str::from_utf8(content_bytes).map_err(|e| {
                     format!(
-                        "multipart: text field '{}' no es UTF-8 válido (use filename= para bytes binarios): {}",
+                        "multipart: text field '{}' is not valid UTF-8 (use filename= for binary bytes): {}",
                         name, e
                     )
                 })?;
@@ -4184,12 +4183,12 @@ fn url_decode(s: &str) -> Result<String, String> {
             '%' => {
                 let h1 = chars
                     .next()
-                    .ok_or_else(|| format!("urlencoded: %XX incompleto en offset {}", idx))?;
+                    .ok_or_else(|| format!("urlencoded: incomplete %XX at offset {}", idx))?;
                 let h2 = chars
                     .next()
-                    .ok_or_else(|| format!("urlencoded: %XX incompleto en offset {}", idx))?;
+                    .ok_or_else(|| format!("urlencoded: incomplete %XX at offset {}", idx))?;
                 let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
-                    .map_err(|_| format!("urlencoded: %{}{} no es hex válido", h1, h2))?;
+                    .map_err(|_| format!("urlencoded: %{}{} is not valid hex", h1, h2))?;
                 // Accumulate bytes for multi-byte UTF-8 chars.
                 out.push(byte as char);
                 idx += 3;
@@ -4208,12 +4207,12 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
     // handler declares `body: User`.
     if bytes.is_empty() {
         return Err(format!(
-            "body requerido para el parámetro '{}' pero la request no trajo body",
+            "body required for parameter '{}' but the request had no body",
             bp.name,
         ));
     }
     let json: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| format!("body no es JSON válido: {}", e))?;
+        serde_json::from_slice(bytes).map_err(|e| format!("body is not valid JSON: {}", e))?;
     match &bp.declared_type {
         Some(t) => json_to_instance(&json, t),
         None => Ok(json_to_value(&json)),
@@ -4387,7 +4386,7 @@ async fn shutdown_signal(
     shutdown_timeout_secs: u64,
 ) {
     let _ = tokio::signal::ctrl_c().await;
-    eprintln!("\n[shutdown] SIGINT recibido — flippeando draining state");
+    eprintln!("\n[shutdown] SIGINT received — flipping draining state");
     draining.store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Grace period: give K8s time to notice the 503 and reroute
@@ -4851,7 +4850,7 @@ mod tests {
         );
         let t = parse_path_template(&e).unwrap();
         assert_eq!(t.path, "/items");
-        assert!(t.params.is_empty(), "no debería haber path params");
+        assert!(t.params.is_empty(), "there should be no path params");
         assert_eq!(
             t.query_params,
             vec!["limit".to_string(), "offset".to_string()]
@@ -4891,7 +4890,7 @@ mod tests {
         let err = parse_path_template(&e).unwrap_err();
         assert!(
             matches!(err, PathError::QueryKeyNameMismatch { .. }),
-            "esperaba QueryKeyNameMismatch, fue: {:?}",
+            "expected QueryKeyNameMismatch, was: {:?}",
             err
         );
     }
@@ -4903,7 +4902,7 @@ mod tests {
         let err = parse_path_template(&e).unwrap_err();
         assert!(
             matches!(err, PathError::MalformedQueryTemplate(_)),
-            "esperaba MalformedQueryTemplate, fue: {:?}",
+            "expected MalformedQueryTemplate, was: {:?}",
             err
         );
     }
@@ -4977,7 +4976,7 @@ mod tests {
     async fn value_to_json_map_non_string_key_is_error() {
         let v = Value::Map(shared(vec![(Value::Int(1), Value::Int(10))]));
         let err = value_to_json(&v).unwrap_err();
-        assert!(err.contains("claves de Map en JSON"));
+        assert!(err.contains("Map keys in JSON"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4998,8 +4997,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn value_to_json_nested_result_is_tagged() {
-        // `Ok(42)` adentro de otra cosa (no debería pasar en el output
-        // directo del handler, pero queremos un comportamiento total).
+        // `Ok(42)` nested inside something else (shouldn't happen in the
+        // handler's direct output, but we want total behavior).
         let ok = Value::Result(ResultVariant::Ok(Box::new(Value::Int(42))));
         assert_eq!(value_to_json(&ok).unwrap(), serde_json::json!({ "Ok": 42 }));
 
@@ -5045,13 +5044,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn outcome_of_err_is_500_with_error_obj() {
-        let v = Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "no encontrado".into(),
-        ))));
+        let v = Value::Result(ResultVariant::Err(Box::new(Value::Str("not found".into()))));
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 500);
-        // Body is `{"error":"no encontrado"}` (serde_json order).
-        assert_eq!(out.body, "{\"error\":\"no encontrado\"}");
+        // Body is `{"error":"not found"}` (serde_json order).
+        assert_eq!(out.body, "{\"error\":\"not found\"}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5092,7 +5089,7 @@ mod tests {
         // rules.
         let body = Value::new_instance(
             "Error".into(),
-            vec![("message".into(), Value::Str("no autorizado".into()))],
+            vec![("message".into(), Value::Str("unauthorized".into()))],
         );
         let v = Value::HttpResponse {
             status: 401,
@@ -5101,7 +5098,7 @@ mod tests {
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 401);
         let parsed: serde_json::Value = serde_json::from_str(&out.body).unwrap();
-        assert_eq!(parsed, serde_json::json!({ "message": "no autorizado" }));
+        assert_eq!(parsed, serde_json::json!({ "message": "unauthorized" }));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5122,7 +5119,7 @@ mod tests {
     async fn outcome_of_http_response_with_body_map_serializes_to_object() {
         // Body = map literal with string keys → JSON object.
         let body = Value::new_map(vec![
-            (Value::Str("error".into()), Value::Str("falló".into())),
+            (Value::Str("error".into()), Value::Str("failed".into())),
             (Value::Str("code".into()), Value::Int(42)),
         ]);
         let v = Value::HttpResponse {
@@ -5132,7 +5129,7 @@ mod tests {
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 500);
         let parsed: serde_json::Value = serde_json::from_str(&out.body).unwrap();
-        assert_eq!(parsed, serde_json::json!({ "error": "falló", "code": 42 }));
+        assert_eq!(parsed, serde_json::json!({ "error": "failed", "code": 42 }));
     }
 
     // ---- coerce_path_param ----
@@ -5228,8 +5225,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_invokes_handler_and_returns_outcome() {
-        // `@get("/") fn hello() => "hola"`
-        let src = "@get(\"/\")\nfn hello() => \"hola\"";
+        // `@get("/") fn hello() => "hello"`
+        let src = "@get(\"/\")\nfn hello() => \"hello\"";
         let registry = registry_from_source(src).await;
         let outcome = handle_task(
             &registry,
@@ -5241,7 +5238,7 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.status, 200);
-        assert_eq!(outcome.body, "\"hola\"");
+        assert_eq!(outcome.body, "\"hello\"");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5268,7 +5265,7 @@ mod tests {
         let src = "@get(\"/users/{id}\")\nfn h(id: Int) => id";
         let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
-        params.insert("id".into(), "no-es-int".into());
+        params.insert("id".into(), "not-an-int".into());
         let outcome = handle_task(
             &registry,
             0,
@@ -5355,11 +5352,11 @@ mod tests {
         // middleware's.
         let src = "\
             fn auth(req) {\n\
-                return 401 {\"error\": \"no autorizado\"}\n\
+                return 401 {\"error\": \"unauthorized\"}\n\
             }\n\
             @middleware(auth)\n\
             @get(\"/\")\n\
-            fn h() => \"NO DEBERIA APARECER\"\n\
+            fn h() => \"SHOULD NOT APPEAR\"\n\
         ";
         let registry = registry_from_source(src).await;
         let outcome = handle_task(
@@ -5372,8 +5369,8 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.status, 401);
-        assert!(outcome.body.contains("no autorizado"));
-        assert!(!outcome.body.contains("NO DEBERIA APARECER"));
+        assert!(outcome.body.contains("unauthorized"));
+        assert!(!outcome.body.contains("SHOULD NOT APPEAR"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5490,7 +5487,7 @@ mod tests {
         assert_eq!(outcome.status, 500);
         assert!(outcome.body.contains("loco"));
         assert!(
-            outcome.body.contains("valor inesperado") || outcome.body.contains("cortocircuitar")
+            outcome.body.contains("unexpected value") || outcome.body.contains("short-circuit")
         );
     }
 
@@ -5790,7 +5787,7 @@ mod tests {
             0,
             HashMap::new(),
             HashMap::new(),
-            b"esto-no-es-json".to_vec(),
+            b"this-is-not-json".to_vec(),
             HashMap::new(),
         )
         .await;
@@ -5826,7 +5823,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn server_config_to_socket_addr_invalid_host_is_error() {
         let c = ServerConfig {
-            host: "no-es-ip".into(),
+            host: "not-an-ip".into(),
             port: 80,
             enable_docs: true,
             api_version: None,
@@ -5836,7 +5833,7 @@ mod tests {
             prometheus_enabled: false,
         };
         let err = c.to_socket_addr().unwrap_err();
-        assert!(err.contains("no-es-ip"));
+        assert!(err.contains("not-an-ip"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5915,7 +5912,7 @@ mod tests {
                 assert_eq!(items[0], Value::Int(1));
                 assert_eq!(items[2], Value::Str("tres".into()));
             }
-            _ => panic!("se esperaba List"),
+            _ => panic!("expected List"),
         }
     }
 
@@ -5934,7 +5931,7 @@ mod tests {
                     .map(|(k, v)| {
                         let k = match k {
                             Value::Str(s) => s.clone(),
-                            _ => panic!("clave no Str"),
+                            _ => panic!("key not Str"),
                         };
                         (k, v.clone())
                     })
@@ -5942,7 +5939,7 @@ mod tests {
                 assert_eq!(as_map.get("a"), Some(&Value::Int(1)));
                 assert_eq!(as_map.get("b"), Some(&Value::Str("x".into())));
             }
-            _ => panic!("se esperaba Map"),
+            _ => panic!("expected Map"),
         }
     }
 
@@ -5995,7 +5992,7 @@ mod tests {
                 assert_eq!(fields[1].0, "name");
                 assert_eq!(fields[1].1, Value::Str("ana".into()));
             }
-            _ => panic!("se esperaba Instance"),
+            _ => panic!("expected Instance"),
         }
     }
 
@@ -6008,7 +6005,7 @@ mod tests {
         let json = serde_json::json!({ "id": 1 });
         let err = json_to_instance(&json, &t).unwrap_err();
         assert!(err.contains("name"));
-        assert!(err.contains("falta"));
+        assert!(err.contains("missing"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6017,7 +6014,7 @@ mod tests {
         let json = serde_json::json!({ "id": 1, "rogue": "x" });
         let err = json_to_instance(&json, &t).unwrap_err();
         assert!(err.contains("rogue"));
-        assert!(err.contains("no declarado"));
+        assert!(err.contains("undeclared"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6034,7 +6031,7 @@ mod tests {
                 assert_eq!(fields[1].0, "email");
                 assert_eq!(fields[1].1, Value::Null);
             }
-            _ => panic!("se esperaba Instance"),
+            _ => panic!("expected Instance"),
         }
     }
 
@@ -6055,7 +6052,7 @@ mod tests {
                 assert_eq!(fields[1].0, "active");
                 assert_eq!(fields[1].1, Value::Bool(true));
             }
-            _ => panic!("se esperaba Instance"),
+            _ => panic!("expected Instance"),
         }
     }
 
@@ -6064,7 +6061,7 @@ mod tests {
         let t = type_value("User", vec![("id", "Int", false, None)]);
         let json = serde_json::json!([1, 2, 3]);
         let err = json_to_instance(&json, &t).unwrap_err();
-        assert!(err.contains("objeto"));
+        assert!(err.contains("object"));
         assert!(err.contains("array"));
     }
 
@@ -6087,7 +6084,7 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.status, 400);
-        assert!(outcome.body.contains("body requerido"));
+        assert!(outcome.body.contains("body required"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6573,7 +6570,7 @@ mod tests {
             .iter()
             .find(|(n, _)| n == "access-control-allow-headers")
             .map(|(_, v)| v.clone())
-            .expect("preflight debe traer Access-Control-Allow-Headers");
+            .expect("preflight must carry Access-Control-Allow-Headers");
         // Content-Type from the first handler is preserved with
         // its original casing. Authorization is added from the
         // second. "content-type" from the second is NOT duplicated
@@ -6581,7 +6578,7 @@ mod tests {
         let comma_count = allowed_headers.matches(',').count();
         assert_eq!(
             comma_count, 1,
-            "esperaba 2 headers (1 coma), got: {}",
+            "expected 2 headers (1 comma), got: {}",
             allowed_headers
         );
         assert!(allowed_headers.to_lowercase().contains("content-type"));
@@ -6729,7 +6726,7 @@ mod tests {
         ";
         let (status, body) = run_oneshot(src, axum::http::Method::POST, "/users").await;
         assert_eq!(status, 400);
-        assert!(body.contains("body requerido"));
+        assert!(body.contains("body required"));
     }
 
     // ---- 7.6 headers as handler params ----
@@ -6754,8 +6751,8 @@ mod tests {
         let (status, body) =
             run_oneshot_with_headers(src, axum::http::Method::GET, "/protected", &[]).await;
         assert_eq!(status, 400);
-        assert!(body.contains("Authorization"), "body fue: {}", body);
-        assert!(body.contains("obligatorio"), "body fue: {}", body);
+        assert!(body.contains("Authorization"), "body was: {}", body);
+        assert!(body.contains("required"), "body was: {}", body);
     }
 
     #[tokio::test]
@@ -6957,7 +6954,7 @@ mod tests {
         assert_eq!(
             r,
             Some((format!("bearer.{}", jwt), jwt.to_string())),
-            "el token debería preservar dots internos típicos de JWT"
+            "the token should preserve internal dots typical of JWT"
         );
     }
 
@@ -7055,12 +7052,12 @@ mod tests {
         assert_eq!(status, 200);
         assert!(
             body.contains("data-url=\"/openapi.json\""),
-            "esperaba que el HTML referenciara /openapi.json, body fue:\n{}",
+            "expected the HTML to reference /openapi.json, body was:\n{}",
             body
         );
         assert!(
             body.contains("@scalar/api-reference"),
-            "esperaba que el HTML cargara el bundle de Scalar, body fue:\n{}",
+            "expected the HTML to load the Scalar bundle, body was:\n{}",
             body
         );
     }
@@ -7078,7 +7075,7 @@ mod tests {
         // The user declared their own `@get("/docs")`. The Scalar
         // UI auto-register yields — the user's route is what
         // responds.
-        let src = "@get(\"/docs\")\nfn custom() => \"docs-personalizada\"";
+        let src = "@get(\"/docs\")\nfn custom() => \"custom-docs\"";
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
         let auto_schema = serde_json::json!({ "openapi": "3.1.0" });
@@ -7100,7 +7097,7 @@ mod tests {
 
         assert_eq!(status, 200);
         // User's body, not Scalar's HTML.
-        assert_eq!(body, "\"docs-personalizada\"");
+        assert_eq!(body, "\"custom-docs\"");
         assert!(!body.contains("@scalar/api-reference"));
     }
 
@@ -7141,12 +7138,12 @@ mod tests {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(
             body.contains("/asyncapi.json"),
-            "esperaba referencia a /asyncapi.json (el fetch del schema), body fue: {}",
+            "expected reference to /asyncapi.json (the schema fetch), body was: {}",
             &body[..body.len().min(400)]
         );
         assert!(
             body.contains("@asyncapi/react-component"),
-            "esperaba carga del bundle @asyncapi/react-component, body fue: {}",
+            "expected load of @asyncapi/react-component bundle, body was: {}",
             &body[..body.len().min(400)]
         );
     }
@@ -7272,8 +7269,8 @@ mod tests {
         assert_eq!(outcome.status, 500);
         let body_str = outcome.body.to_string();
         assert!(
-            body_str.contains("inválido") && body_str.contains("50"),
-            "esperaba mensaje claro, fue: {}",
+            body_str.contains("invalid") && body_str.contains("50"),
+            "expected a clear message, was: {}",
             body_str
         );
     }
@@ -7358,7 +7355,7 @@ mod tests {
         .await;
         assert_eq!(
             outcome.status, 200,
-            "esperaba 200, fue {} con body {}",
+            "expected 200, was {} with body {}",
             outcome.status, outcome.body
         );
     }
@@ -7381,7 +7378,7 @@ mod tests {
         assert_eq!(outcome.status, 415);
         assert!(
             outcome.body.contains("text/plain") && outcome.body.contains("application/json"),
-            "esperaba mensaje claro, fue: {}",
+            "expected a clear message, was: {}",
             outcome.body
         );
     }
@@ -7409,7 +7406,7 @@ mod tests {
         assert_eq!(outcome.status, 415);
         assert!(
             outcome.body.contains("octet-stream"),
-            "esperaba que el msg cite el CT recibido, fue: {}",
+            "expected the msg to cite the received CT, was: {}",
             outcome.body
         );
     }
@@ -7490,7 +7487,7 @@ mod tests {
         assert_eq!(outcome.status, 200);
         assert!(
             outcome.body.contains("wrapped"),
-            "esperaba body con `wrapped`, fue: {}",
+            "expected body with `wrapped`, was: {}",
             outcome.body
         );
     }
@@ -7532,12 +7529,12 @@ mod tests {
         .await;
         assert_eq!(
             outcome.status, 200,
-            "esperaba 200, fue {} con body {}",
+            "expected 200, was {} with body {}",
             outcome.status, outcome.body
         );
         assert!(
             outcome.body.contains("\"name\":\"Fitz\"") && outcome.body.contains("\"age\":\"25\""),
-            "esperaba name/age en body, fue: {}",
+            "expected name/age in body, was: {}",
             outcome.body
         );
     }
@@ -7546,7 +7543,7 @@ mod tests {
     async fn mp_urlencoded_with_url_encoding() {
         let reg = registry_with_post_body_route();
         // "hola mundo" + "Fitz Roy" with encoding (spaces as +).
-        let body = b"greeting=hola+mundo&place=Fitz%20Roy".to_vec();
+        let body = b"greeting=hello+world&place=Fitz%20Roy".to_vec();
         let mut headers = std::collections::HashMap::new();
         headers.insert(
             "content-type".into(),
@@ -7563,13 +7560,13 @@ mod tests {
         .await;
         assert_eq!(outcome.status, 200);
         assert!(
-            outcome.body.contains("\"greeting\":\"hola mundo\""),
-            "esperaba `+` decodificado a espacio: {}",
+            outcome.body.contains("\"greeting\":\"hello world\""),
+            "expected `+` decoded to space: {}",
             outcome.body
         );
         assert!(
             outcome.body.contains("\"place\":\"Fitz Roy\""),
-            "esperaba `%20` decodificado a espacio: {}",
+            "expected `%20` decoded to space: {}",
             outcome.body
         );
     }
@@ -7617,7 +7614,7 @@ mod tests {
         assert_eq!(outcome.status, 400);
         assert!(
             outcome.body.contains("boundary"),
-            "esperaba mención de boundary, fue: {}",
+            "expected mention of boundary, was: {}",
             outcome.body
         );
     }
@@ -7651,9 +7648,9 @@ mod tests {
     fn value_to_json_bytes_emits_base64() {
         // Mini-batch Bytes + quick win F13: `Value::Bytes` is
         // serialized as a base64 string (not as an array of Int).
-        let v = Value::Bytes(b"hola".to_vec());
+        let v = Value::Bytes(b"hello".to_vec());
         let j = value_to_json(&v).unwrap();
-        assert_eq!(j, serde_json::json!("aG9sYQ=="));
+        assert_eq!(j, serde_json::json!("aGVsbG8="));
     }
 
     #[test]
@@ -7694,7 +7691,7 @@ mod tests {
         // Structure: --<b>\r\n<hdr>\r\n\r\n<body>\r\n--<b>--
         let boundary = "----foo";
         let body =
-            "------foo\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nhola\r\n------foo--"
+            "------foo\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nhello\r\n------foo--"
                 .to_string();
         let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
         match result {
@@ -7702,9 +7699,9 @@ mod tests {
                 let pairs = entries.lock();
                 assert_eq!(pairs.len(), 1);
                 assert_eq!(pairs[0].0, Value::Str("msg".into()));
-                assert_eq!(pairs[0].1, Value::Str("hola".into()));
+                assert_eq!(pairs[0].1, Value::Str("hello".into()));
             }
-            other => panic!("esperaba Value::Map, fue: {:?}", other),
+            other => panic!("expected Value::Map, was: {:?}", other),
         }
     }
 
@@ -7716,7 +7713,7 @@ mod tests {
         let body = "------foo\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents here\r\n------foo--";
         let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
         let Value::Map(entries) = result else {
-            panic!("esperaba Value::Map");
+            panic!("expected Value::Map");
         };
         let pairs = entries.lock();
         assert_eq!(pairs.len(), 1);
@@ -7735,7 +7732,7 @@ mod tests {
                 // (Vec<u8>), not Value::Str. Enables binary files.
                 assert_eq!(fld[2].1, Value::Bytes(b"file contents here".to_vec()));
             }
-            other => panic!("esperaba Value::Instance(File), fue: {:?}", other),
+            other => panic!("expected Value::Instance(File), was: {:?}", other),
         }
     }
 
@@ -7743,15 +7740,15 @@ mod tests {
     fn mp2_parse_multipart_mixed_text_and_file() {
         // Form with one text field + one file field.
         let boundary = "X";
-        let body = "--X\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nMi título\r\n--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\ncontenido\r\n--X--";
+        let body = "--X\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nMy title\r\n--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\ncontent\r\n--X--";
         let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
         let Value::Map(entries) = result else {
-            panic!("esperaba Value::Map");
+            panic!("expected Value::Map");
         };
         let pairs = entries.lock();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, Value::Str("title".into()));
-        assert_eq!(pairs[0].1, Value::Str("Mi título".into()));
+        assert_eq!(pairs[0].1, Value::Str("My title".into()));
         assert_eq!(pairs[1].0, Value::Str("doc".into()));
         assert!(matches!(pairs[1].1, Value::Instance { .. }));
     }
@@ -7768,9 +7765,9 @@ mod tests {
         body.push(0xff);
         body.push(0xfe);
         body.extend_from_slice(b"\r\n--X--");
-        let result = parse_multipart_body(&body, boundary).expect("parse OK con binary");
+        let result = parse_multipart_body(&body, boundary).expect("parse OK with binary");
         let Value::Map(entries) = result else {
-            panic!("esperaba Value::Map");
+            panic!("expected Value::Map");
         };
         let pairs = entries.lock();
         assert_eq!(pairs.len(), 1);
@@ -7781,7 +7778,7 @@ mod tests {
                 assert_eq!(fld[2].0, "content");
                 assert_eq!(fld[2].1, Value::Bytes(vec![0xff, 0xfe]));
             }
-            other => panic!("esperaba Instance(File), fue: {:?}", other),
+            other => panic!("expected Instance(File), was: {:?}", other),
         }
     }
 
@@ -7793,10 +7790,10 @@ mod tests {
         let mut body = b"--X\r\nContent-Disposition: form-data; name=\"raw\"\r\n\r\n".to_vec();
         body.push(0xff);
         body.extend_from_slice(b"\r\n--X--");
-        let err = parse_multipart_body(&body, boundary).expect_err("esperaba error");
+        let err = parse_multipart_body(&body, boundary).expect_err("expected error");
         assert!(
             err.contains("UTF-8") && err.contains("filename="),
-            "esperaba mención de UTF-8 + workaround filename=, fue: {}",
+            "expected mention of UTF-8 + filename= workaround, was: {}",
             err
         );
     }
@@ -7954,19 +7951,19 @@ fn check(headers: Map<Str, Str>) -> Result<User> {\n\
             if (token == \"Bearer user-token\") {\n\
                 return Ok(User { id: 2, name: \"Alice\", role: \"user\" })\n\
             }\n\
-            return Err(\"token inválido\")\n\
+            return Err(\"invalid token\")\n\
         }\n\
-        Err(_) => return Err(\"falta Authorization\")\n\
+        Err(_) => return Err(\"Authorization missing\")\n\
     }\n\
 }\n\
 @get(\"/public\")\n\
-fn public_route() -> Str => \"sin auth\"\n\
+fn public_route() -> Str => \"no auth\"\n\
 @authenticated\n\
 @get(\"/me\")\n\
 fn me(user: User) -> Str => user.name\n\
 @admin\n\
 @get(\"/admin\")\n\
-fn admin_route(user: User) -> Str => \"hola admin\"\n\
+fn admin_route(user: User) -> Str => \"hello admin\"\n\
 ";
 
     #[tokio::test(flavor = "current_thread")]
@@ -7976,19 +7973,19 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         // program declares `@auth_provider`.
         let (status, body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/public").await;
         assert_eq!(status, 200);
-        assert_eq!(body, "\"sin auth\"");
+        assert_eq!(body, "\"no auth\"");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_authenticated_without_header_returns_401() {
         // Without an `Authorization` header → provider emits
-        // `Err("falta...")` → wrapper converts to 401 with
-        // `{"error": "falta..."}`.
+        // `Err("Authorization missing")` → wrapper converts to 401
+        // with `{"error": "Authorization missing"}`.
         let (status, body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/me").await;
         assert_eq!(status, 401);
         assert!(
-            body.contains("falta Authorization"),
-            "esperaba mención de Authorization en body, fue: {}",
+            body.contains("Authorization missing"),
+            "expected mention of Authorization in body, was: {}",
             body
         );
     }
@@ -7996,7 +7993,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     #[tokio::test(flavor = "current_thread")]
     async fn auth_authenticated_invalid_token_returns_401() {
         // Header present but unknown token →
-        // Err("token inválido") → 401.
+        // Err("invalid token") → 401.
         let (status, body) = run_oneshot_with_headers(
             AUTH_E2E_SOURCE,
             axum::http::Method::GET,
@@ -8006,8 +8003,8 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         .await;
         assert_eq!(status, 401);
         assert!(
-            body.contains("token inválido"),
-            "esperaba 'token inválido' en body, fue: {}",
+            body.contains("invalid token"),
+            "expected 'invalid token' in body, was: {}",
             body
         );
     }
@@ -8032,7 +8029,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     #[tokio::test(flavor = "current_thread")]
     async fn auth_admin_with_non_admin_role_returns_403() {
         // Valid token but `user.role == "user"` (not "admin") →
-        // wrapper emits 403 with "se requiere rol admin".
+        // wrapper emits 403 with "admin role required".
         let (status, body) = run_oneshot_with_headers(
             AUTH_E2E_SOURCE,
             axum::http::Method::GET,
@@ -8043,7 +8040,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         assert_eq!(status, 403);
         assert!(
             body.contains("admin"),
-            "esperaba mención de admin en body, fue: {}",
+            "expected mention of admin in body, was: {}",
             body
         );
     }
@@ -8059,7 +8056,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         )
         .await;
         assert_eq!(status, 200);
-        assert_eq!(body, "\"hola admin\"");
+        assert_eq!(body, "\"hello admin\"");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8092,9 +8089,9 @@ fn check(headers: Map<Str, Str>) -> Result<User> {\n\
             if (token == \"Bearer viewer-token\") {\n\
                 return Ok(User { id: 3, name: \"View\", role: \"viewer\" })\n\
             }\n\
-            return Err(\"token inválido\")\n\
+            return Err(\"invalid token\")\n\
         }\n\
-        Err(_) => return Err(\"falta Authorization\")\n\
+        Err(_) => return Err(\"Authorization missing\")\n\
     }\n\
 }\n\
 @requires(\"editor\")\n\
@@ -8131,7 +8128,7 @@ fn multi_route(user: User) -> Str => user.name\n\
         assert_eq!(status, 403);
         assert!(
             body.contains("viewer") && body.contains("editor"),
-            "esperaba mención del role actual y requerido en body, fue: {}",
+            "expected mention of actual and required role in body, was: {}",
             body
         );
     }
@@ -8203,10 +8200,10 @@ fn h(user: User) -> Str => user.role\n\
             crate::evaluator::eval(program).await
         })
         .await;
-        let err = res.expect_err("esperaba error por @auth_provider duplicado");
+        let err = res.expect_err("expected error due to duplicate @auth_provider");
         assert!(
             err.message.contains("@auth_provider duplicado"),
-            "esperaba mención de provider duplicado, fue: {}",
+            "expected mention of duplicate provider, was: {}",
             err.message
         );
     }
@@ -8229,10 +8226,10 @@ fn me(user: User) -> Str => \"x\"\n\
             crate::evaluator::eval(program).await
         })
         .await;
-        let err = res.expect_err("esperaba error por @authenticated sin @auth_provider");
+        let err = res.expect_err("expected error due to @authenticated without @auth_provider");
         assert!(
             err.message.contains("@auth_provider") && err.message.contains("antes"),
-            "esperaba mención de @auth_provider y orden, fue: {}",
+            "expected mention of @auth_provider and order, was: {}",
             err.message
         );
     }
@@ -8270,7 +8267,7 @@ fn me(user: User) -> Str => \"x\"\n\
             crate::evaluator::eval(program).await
         })
         .await;
-        res.expect("eval del programa de test falló");
+        res.expect("eval of test program failed");
         let registry = std::sync::Arc::new(registry);
         let metas = registry.metas();
         let router = build_router(&metas, registry, None);
@@ -8319,8 +8316,8 @@ fn me(user: User) -> Str => \"x\"\n\
 
         use futures_util::{SinkExt, StreamExt};
         // Send text. The Fitz payload is JSON of the Str, which
-        // ends up as `"hola"` (with quotes).
-        ws.send(tungstenite::Message::text("\"hola\""))
+        // ends up as `"hello"` (with quotes).
+        ws.send(tungstenite::Message::text("\"hello\""))
             .await
             .expect("send");
 
@@ -8332,9 +8329,9 @@ fn me(user: User) -> Str => \"x\"\n\
             .expect("ok");
         match resp {
             tungstenite::Message::Text(t) => {
-                assert_eq!(t.as_str(), "\"eco-hola\"");
+                assert_eq!(t.as_str(), "\"eco-hello\"");
             }
-            other => panic!("esperaba text, fue {:?}", other),
+            other => panic!("expected text, was {:?}", other),
         }
     }
 
@@ -8361,7 +8358,7 @@ fn me(user: User) -> Str => \"x\"\n\
         use futures_util::{SinkExt, StreamExt};
         // Give the server a moment to register both conns.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        a.send(tungstenite::Message::text("\"hola\""))
+        a.send(tungstenite::Message::text("\"hello\""))
             .await
             .expect("send");
 
@@ -8377,10 +8374,10 @@ fn me(user: User) -> Str => \"x\"\n\
             .expect("ok");
         match (ra, rb) {
             (tungstenite::Message::Text(ta), tungstenite::Message::Text(tb)) => {
-                assert_eq!(ta.as_str(), "\"all-hola\"");
-                assert_eq!(tb.as_str(), "\"all-hola\"");
+                assert_eq!(ta.as_str(), "\"all-hello\"");
+                assert_eq!(tb.as_str(), "\"all-hello\"");
             }
-            other => panic!("esperaba texts, fue {:?}", other),
+            other => panic!("expected texts, was {:?}", other),
         }
     }
 
@@ -8392,7 +8389,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let src = "type User { id: Int, name: Str, role: Str }\n\
                    @auth_provider\n\
                    fn check(h: Map<Str, Str>) -> Result<User> {\n\
-                       return Err(\"no autenticado\")\n\
+                       return Err(\"not authenticated\")\n\
                    }\n\
                    @authenticated\n\
                    @ws(\"/chat\")\n\
@@ -8404,7 +8401,7 @@ fn me(user: User) -> Str => \"x\"\n\
         // tokio-tungstenite sees "non-101 response" as an error.
         assert!(
             r.is_err(),
-            "esperaba fallo de handshake (401), pero conectó OK",
+            "expected handshake failure (401), but it connected OK",
         );
     }
 
@@ -8428,7 +8425,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let mut ws = ws_connect(addr, "/cmd").await;
 
         use futures_util::{SinkExt, StreamExt};
-        ws.send(tungstenite::Message::text("\"hola\""))
+        ws.send(tungstenite::Message::text("\"hello\""))
             .await
             .expect("send");
         let resp = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
@@ -8440,9 +8437,9 @@ fn me(user: User) -> Str => \"x\"\n\
             tungstenite::Message::Text(t) => {
                 let v: serde_json::Value = serde_json::from_str(t.as_str()).expect("JSON valid");
                 assert_eq!(v["user"], serde_json::json!("system"));
-                assert_eq!(v["text"], serde_json::json!("got:hola"));
+                assert_eq!(v["text"], serde_json::json!("got:hello"));
             }
-            other => panic!("esperaba text, fue {:?}", other),
+            other => panic!("expected text, was {:?}", other),
         }
     }
 
@@ -8459,19 +8456,19 @@ fn me(user: User) -> Str => \"x\"\n\
                    fn check(h: Map<Str, Str>) -> Result<User> {\n\
                        let v: Str = match h.get(\"authorization\") {\n\
                            Ok(s) => s,\n\
-                           Err(_) => return Err(\"falta authorization\")\n\
+                           Err(_) => return Err(\"missing authorization\")\n\
                        }\n\
                        if (v == \"Bearer secret-tok\") {\n\
                            return Ok(User { id: 1, name: \"Ada\", role: \"user\" })\n\
                        }\n\
-                       return Err(\"token inválido\")\n\
+                       return Err(\"invalid token\")\n\
                    }\n\
                    @authenticated\n\
                    @ws(\"/chat\")\n\
                    async fn chat(conn: WsConn<Str>, user: User) -> Null {\n\
                        match conn.recv() {\n\
                            Ok(_) => {\n\
-                               let _ = conn.send(\"hola {user.name}\")\n\
+                               let _ = conn.send(\"hello {user.name}\")\n\
                                return null\n\
                            }\n\
                            Err(_) => return null\n\
@@ -8489,7 +8486,7 @@ fn me(user: User) -> Str => \"x\"\n\
         );
         let (mut ws, resp) = tokio_tungstenite::connect_async(req)
             .await
-            .expect("handshake debería pasar con bearer.secret-tok");
+            .expect("handshake should pass with bearer.secret-tok");
         // Verify the server echoed the selected subprotocol (RFC
         // 6455 §4.1 — without the echo, the browser would reject
         // the upgrade).
@@ -8500,11 +8497,11 @@ fn me(user: User) -> Str => \"x\"\n\
             .unwrap_or("");
         assert_eq!(
             echoed, "bearer.secret-tok",
-            "esperaba echo del subprotocol seleccionado en el handshake"
+            "expected echo of the selected subprotocol in the handshake"
         );
 
         use futures_util::{SinkExt, StreamExt};
-        ws.send(tungstenite::Message::text("\"hola\""))
+        ws.send(tungstenite::Message::text("\"hello\""))
             .await
             .expect("send");
         let resp_frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
@@ -8514,9 +8511,9 @@ fn me(user: User) -> Str => \"x\"\n\
             .expect("ok");
         match resp_frame {
             tungstenite::Message::Text(t) => {
-                assert_eq!(t.as_str(), "\"hola Ada\"");
+                assert_eq!(t.as_str(), "\"hello Ada\"");
             }
-            other => panic!("esperaba text, fue {:?}", other),
+            other => panic!("expected text, was {:?}", other),
         }
     }
 
@@ -8530,12 +8527,12 @@ fn me(user: User) -> Str => \"x\"\n\
                    fn check(h: Map<Str, Str>) -> Result<User> {\n\
                        let v: Str = match h.get(\"authorization\") {\n\
                            Ok(s) => s,\n\
-                           Err(_) => return Err(\"falta authorization\")\n\
+                           Err(_) => return Err(\"missing authorization\")\n\
                        }\n\
                        if (v == \"Bearer secret-tok\") {\n\
                            return Ok(User { id: 1, name: \"Ada\", role: \"user\" })\n\
                        }\n\
-                       return Err(\"token inválido\")\n\
+                       return Err(\"invalid token\")\n\
                    }\n\
                    @authenticated\n\
                    @ws(\"/chat\")\n\
@@ -8551,7 +8548,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let r = tokio_tungstenite::connect_async(req).await;
         assert!(
             r.is_err(),
-            "esperaba 401 con token inválido, pero conectó OK",
+            "expected 401 with invalid token, but it connected OK",
         );
     }
 
@@ -8593,7 +8590,7 @@ fn me(user: User) -> Str => \"x\"\n\
                 assert_eq!(v["user"], serde_json::json!("ada"));
                 assert_eq!(v["text"], serde_json::json!("re:hi"));
             }
-            other => panic!("esperaba text, fue {:?}", other),
+            other => panic!("expected text, was {:?}", other),
         }
     }
 
@@ -8607,10 +8604,10 @@ fn me(user: User) -> Str => \"x\"\n\
                    fn main() => 0\n\
                    @ws(\"/hb\")\n\
                    async fn hb(conn: WsConn<Str>) -> Null {\n\
-                       // Handler que no hace nada — la conn se mantiene\n\
-                       // viva esperando el primer recv() que nunca llegará\n\
-                       // (el cliente no envía). El heartbeat task del server\n\
-                       // debería enviar un Ping antes del timeout.\n\
+                       // Handler that does nothing — the conn stays\n\
+                       // alive waiting for the first recv() that never arrives\n\
+                       // (the client doesn't send). The server's heartbeat task\n\
+                       // should send a Ping before the timeout.\n\
                        match conn.recv() {\n\
                            Ok(_) => return null,\n\
                            Err(_) => return null,\n\
@@ -8713,7 +8710,7 @@ fn me(user: User) -> Str => \"x\"\n\
             tungstenite::Message::Binary(bs) => {
                 assert_eq!(bs.as_ref(), payload.as_slice());
             }
-            other => panic!("esperaba binary, fue {:?}", other),
+            other => panic!("expected binary, was {:?}", other),
         }
     }
 
@@ -8762,7 +8759,7 @@ fn me(user: User) -> Str => \"x\"\n\
                 assert_eq!(ba.as_ref(), payload.as_slice());
                 assert_eq!(bb.as_ref(), payload.as_slice());
             }
-            other => panic!("esperaba (binary, binary), fue {:?}", other),
+            other => panic!("expected (binary, binary), was {:?}", other),
         }
     }
 
@@ -8787,7 +8784,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let mut ws = ws_connect(addr, "/raw").await;
 
         use futures_util::{SinkExt, StreamExt};
-        ws.send(tungstenite::Message::text("hola"))
+        ws.send(tungstenite::Message::text("hello"))
             .await
             .expect("send text");
 
@@ -8800,7 +8797,7 @@ fn me(user: User) -> Str => \"x\"\n\
             tungstenite::Message::Binary(bs) => {
                 assert_eq!(bs.as_ref(), b"mismatch");
             }
-            other => panic!("esperaba binary `mismatch`, fue {:?}", other),
+            other => panic!("expected binary `mismatch`, was {:?}", other),
         }
     }
 
@@ -8837,8 +8834,8 @@ fn me(user: User) -> Str => \"x\"\n\
         assert!(line.contains("12.0ms"), "{line}");
         assert!(line.contains("GET /users/42 → 200"), "{line}");
         // Simple does not include UA or Content-Length.
-        assert!(!line.contains("UA="), "Simple no debe loguear UA: {line}");
-        assert!(!line.contains("len="), "Simple no debe loguear len: {line}");
+        assert!(!line.contains("UA="), "Simple must not log UA: {line}");
+        assert!(!line.contains("len="), "Simple must not log len: {line}");
     }
 
     #[test]
@@ -8958,7 +8955,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("crear Runtime tokio");
+            .expect("create tokio Runtime");
         metrics::with_local_recorder(&recorder, || {
             setup_and_run(&rt);
         });
@@ -8995,27 +8992,27 @@ fn me(user: User) -> Str => \"x\"\n\
         let counter_entry = captured
             .iter()
             .find(|(ck, _)| ck.key().name() == "http_requests_total")
-            .expect("esperaba counter http_requests_total");
+            .expect("expected counter http_requests_total");
         let histogram_entry = captured
             .iter()
             .find(|(ck, _)| ck.key().name() == "http_request_duration_seconds")
-            .expect("esperaba histogram http_request_duration_seconds");
+            .expect("expected histogram http_request_duration_seconds");
 
         match &counter_entry.1 {
             metrics_util::debugging::DebugValue::Counter(n) => assert_eq!(*n, 1),
-            other => panic!("Counter shape esperado, fue {:?}", other),
+            other => panic!("expected Counter shape, was {:?}", other),
         }
 
         match &histogram_entry.1 {
             metrics_util::debugging::DebugValue::Histogram(values) => {
                 assert!(
                     !values.is_empty(),
-                    "histogram debería tener al menos 1 observación"
+                    "histogram should have at least 1 observation"
                 );
                 let first = values[0].into_inner();
-                assert!(first >= 0.0, "duration_secs debería ser >= 0");
+                assert!(first >= 0.0, "duration_secs should be >= 0");
             }
-            other => panic!("Histogram shape esperado, fue {:?}", other),
+            other => panic!("expected Histogram shape, was {:?}", other),
         }
 
         let labels_counter: Vec<(String, String)> = counter_entry
@@ -9026,17 +9023,17 @@ fn me(user: User) -> Str => \"x\"\n\
             .collect();
         assert!(
             labels_counter.contains(&("method".to_string(), "GET".to_string())),
-            "esperaba label method=GET, fue {:?}",
+            "expected label method=GET, was {:?}",
             labels_counter
         );
         assert!(
             labels_counter.contains(&("path".to_string(), "/hello".to_string())),
-            "esperaba label path=/hello, fue {:?}",
+            "expected label path=/hello, was {:?}",
             labels_counter
         );
         assert!(
             labels_counter.contains(&("status".to_string(), "200".to_string())),
-            "esperaba label status=200, fue {:?}",
+            "expected label status=200, was {:?}",
             labels_counter
         );
 
@@ -9048,7 +9045,7 @@ fn me(user: User) -> Str => \"x\"\n\
             .collect();
         assert_eq!(
             labels_counter, labels_histo,
-            "labels Counter y Histogram deberían matchear bit-a-bit"
+            "Counter and Histogram labels should match bit-a-bit"
         );
     }
 
@@ -9080,7 +9077,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let counter_entry = captured
             .iter()
             .find(|(ck, _)| ck.key().name() == "http_requests_total")
-            .expect("esperaba counter http_requests_total");
+            .expect("expected counter http_requests_total");
         let labels: Vec<(String, String)> = counter_entry
             .0
             .key()
@@ -9089,12 +9086,12 @@ fn me(user: User) -> Str => \"x\"\n\
             .collect();
         assert!(
             labels.contains(&("path".to_string(), "/users/{id}".to_string())),
-            "path label debería ser template `/users/{{id}}`, fue {:?}",
+            "path label should be the template `/users/{{id}}`, was {:?}",
             labels
         );
         assert!(
             !labels.iter().any(|(k, v)| k == "path" && v == "/users/42"),
-            "path label NO debería contener el valor resuelto: {:?}",
+            "path label should NOT contain the resolved value: {:?}",
             labels
         );
     }
@@ -9126,12 +9123,12 @@ fn me(user: User) -> Str => \"x\"\n\
         let counter_entry = captured
             .iter()
             .find(|(ck, _)| ck.key().name() == "http_requests_total")
-            .expect("counter esperado");
+            .expect("expected counter");
         match &counter_entry.1 {
             metrics_util::debugging::DebugValue::Counter(n) => {
-                assert_eq!(*n, 3, "3 requests deberían acumular Counter=3");
+                assert_eq!(*n, 3, "3 requests should accumulate Counter=3");
             }
-            other => panic!("Counter shape esperado, fue {:?}", other),
+            other => panic!("expected Counter shape, was {:?}", other),
         }
     }
 
@@ -9163,7 +9160,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let counter_entry = captured
             .iter()
             .find(|(ck, _)| ck.key().name() == "http_requests_total")
-            .expect("counter esperado");
+            .expect("expected counter");
         let labels: Vec<(String, String)> = counter_entry
             .0
             .key()
@@ -9172,7 +9169,7 @@ fn me(user: User) -> Str => \"x\"\n\
             .collect();
         assert!(
             labels.contains(&("status".to_string(), "500".to_string())),
-            "esperaba status=500 (Err → 500), labels fueron {:?}",
+            "expected status=500 (Err → 500), labels were {:?}",
             labels
         );
     }

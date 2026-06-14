@@ -2101,12 +2101,12 @@ fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
     );
     assert_eq!(
         status, 415,
-        "esperaba 415, fue: status={} body={}",
+        "expected 415, was: status={} body={}",
         status, body
     );
     assert!(
-        body.contains("Content-Type no soportado"),
-        "esperaba `Content-Type no soportado`, fue: {}",
+        body.contains("unsupported Content-Type"),
+        "expected `unsupported Content-Type`, was: {}",
         body
     );
     assert!(
