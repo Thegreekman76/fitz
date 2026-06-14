@@ -136,7 +136,7 @@ pub async fn run_test_handler(handler: Value, is_async: bool, name: &str) -> Res
                     0,
                     0,
                     format!(
-                        "test async `{}` produjo un Future ya consumido (bug del dispatcher)",
+                        "async test `{}` produced an already-consumed Future (dispatcher bug)",
                         name
                     ),
                 )),
@@ -150,7 +150,7 @@ pub async fn run_test_handler(handler: Value, is_async: bool, name: &str) -> Res
             0,
             0,
             format!(
-                "test async `{}` devolvió `{}` en vez de Future — bug del dispatcher",
+                "async test `{}` returned `{}` instead of Future — dispatcher bug",
                 name,
                 other.type_name()
             ),
@@ -321,7 +321,7 @@ pub fn build_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("no se pudo construir el runtime tokio")
+        .expect("could not build tokio runtime")
 }
 
 // ---------------------------------------------------------------------------
@@ -490,8 +490,8 @@ fn process_decorator(
         0,
         0,
         format!(
-            "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command, @healthz, @readyz.",
+            "decorator '@{}' not implemented (on fn '{}'). \
+             Decorators supported today: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command, @healthz, @readyz.",
             deco.name, fn_name,
         ),
     )))
@@ -524,14 +524,14 @@ fn register_health_handler(
     // 1) No args nor kwargs (the checker already validated; defense).
     if !deco.args.is_empty() || !deco.kwargs.is_empty() {
         return Err(err(format!(
-            "@{kind} sobre fn '{fn_name}': no admite args ni kwargs."
+            "@{kind} on fn '{fn_name}': does not accept args or kwargs."
         )));
     }
     // 2) `handler` must be a Value::Function. The caller always passes
     //    us the fn resolved from the env; defense in case it changes.
     let Value::Function { is_async, .. } = handler else {
         return Err(err(format!(
-            "@{kind} sobre fn '{fn_name}': el handler no es una fn (bug del dispatcher)."
+            "@{kind} on fn '{fn_name}': the handler is not a fn (dispatcher bug)."
         )));
     };
     let handle = crate::http::HealthCheckHandle {
@@ -546,12 +546,12 @@ fn register_health_handler(
     match crate::http::set_health_handler(kind, handle) {
         Ok(()) => Ok(()),
         Err(crate::http::SetHealthHandlerError::NoRegistry) => Err(err(format!(
-            "@{kind} sobre fn '{fn_name}': no hay servidor HTTP en este programa. \
-             El decorator solo aplica cuando declarás `@server(...)` con handlers HTTP."
+            "@{kind} on fn '{fn_name}': no HTTP server in this program. \
+             The decorator only applies when you declare `@server(...)` with HTTP handlers."
         ))),
         Err(crate::http::SetHealthHandlerError::Duplicate(prev_name)) => Err(err(format!(
-            "@{kind} duplicado: la fn '{prev_name}' ya fue registrada como probe; '{fn_name}' es una segunda. \
-             Solo se admite una por programa."
+            "@{kind} duplicate: fn '{prev_name}' was already registered as probe; '{fn_name}' is a second one. \
+             Only one per program is supported."
         ))),
     }
 }
@@ -585,16 +585,16 @@ fn register_auth_provider(
     };
     if !deco.args.is_empty() || !deco.kwargs.is_empty() {
         return Err(err(format!(
-            "@auth_provider sobre fn '{}': no admite args ni kwargs. \
-             Sintaxis: `@auth_provider\\nfn nombre(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+            "@auth_provider on fn '{}': does not accept args or kwargs. \
+             Syntax: `@auth_provider\\nfn name(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
             fn_name,
         )));
     }
     if !has_active_registry() {
         return Err(err(format!(
-            "@auth_provider sobre fn '{}': no hay servidor HTTP activo en este \
-             contexto. Solo aplica ejecutando con `fitz run` un archivo con \
-             handlers HTTP.",
+            "@auth_provider on fn '{}': no active HTTP server in this \
+             context. Only applies when running with `fitz run` a file with \
+             HTTP handlers.",
             fn_name,
         )));
     }
@@ -626,8 +626,8 @@ fn register_auth_provider(
     };
     if let Err(existing) = crate::http::set_auth_provider(handle) {
         return Err(err(format!(
-            "@auth_provider duplicado: ya estaba registrado '{}' como provider; \
-             '{}' es un segundo provider. Solo se admite uno por programa.",
+            "@auth_provider duplicate: '{}' was already registered as provider; \
+             '{}' is a second provider. Only one per program is supported.",
             existing.name, fn_name,
         )));
     }
@@ -664,7 +664,7 @@ fn register_cron_job(
     // Str literal arg. We re-check defensively here.
     if deco.args.len() != 1 {
         return Err(err(format!(
-            "@cron sobre fn '{}': espera exactamente 1 argumento positional (cron expression Str).",
+            "@cron on fn '{}': expects exactly 1 positional argument (cron expression Str).",
             fn_name,
         )));
     }
@@ -672,7 +672,7 @@ fn register_cron_job(
         Expr::Str(s, _) => s.clone(),
         _ => {
             return Err(err(format!(
-                "@cron sobre fn '{}': el argumento debe ser un Str literal.",
+                "@cron on fn '{}': the argument must be a Str literal.",
                 fn_name,
             )));
         }
@@ -709,16 +709,16 @@ fn parse_cron_job_options(
                     Expr::Str(s, _) => s,
                     _ => {
                         return Err(format!(
-                            "@cron sobre fn '{}': kwarg `tz` debe ser un Str literal.",
+                            "@cron on fn '{}': kwarg `tz` must be a Str literal.",
                             fn_name
                         ));
                     }
                 };
                 options.tz = tz_str.parse::<chrono_tz::Tz>().map_err(|_| {
                     format!(
-                        "@cron sobre fn '{}': IANA timezone `{}` no reconocido. \
-                         Ejemplos válidos: `\"UTC\"`, `\"America/Argentina/Buenos_Aires\"`, \
-                         `\"Europe/Madrid\"`, `\"Asia/Tokyo\"`. Lista completa en \
+                        "@cron on fn '{}': IANA timezone `{}` not recognized. \
+                         Valid examples: `\"UTC\"`, `\"America/Argentina/Buenos_Aires\"`, \
+                         `\"Europe/Madrid\"`, `\"Asia/Tokyo\"`. Full list at \
                          https://en.wikipedia.org/wiki/List_of_tz_database_time_zones.",
                         fn_name, tz_str
                     )
@@ -732,7 +732,7 @@ fn parse_cron_job_options(
                     Expr::Bool(b, _) => *b,
                     _ => {
                         return Err(format!(
-                            "@cron sobre fn '{}': kwarg `catch_up` debe ser un Bool literal.",
+                            "@cron on fn '{}': kwarg `catch_up` must be a Bool literal.",
                             fn_name
                         ));
                     }
@@ -743,8 +743,8 @@ fn parse_cron_job_options(
             }
             other => {
                 return Err(format!(
-                    "@cron sobre fn '{}': kwarg `{}` no reconocido. \
-                     Aceptados: `tz`, `retry`, `catch_up`, `store`.",
+                    "@cron on fn '{}': kwarg `{}` not recognized. \
+                     Accepted: `tz`, `retry`, `catch_up`, `store`.",
                     fn_name, other
                 ));
             }
@@ -765,7 +765,7 @@ fn parse_retry_kwarg(
         Expr::Map(entries, _) => entries,
         _ => {
             return Err(format!(
-                "{} sobre fn '{}': kwarg `retry` debe ser un Map literal.",
+                "{} on fn '{}': kwarg `retry` must be a Map literal.",
                 deco_name, fn_name
             ));
         }
@@ -777,7 +777,7 @@ fn parse_retry_kwarg(
             Expr::Ident(s, _) => s.clone(),
             _ => {
                 return Err(format!(
-                    "{} sobre fn '{}': keys del Map `retry` deben ser identificadores o Str.",
+                    "{} on fn '{}': keys of `retry` Map must be identifiers or Str.",
                     deco_name, fn_name
                 ));
             }
@@ -786,13 +786,13 @@ fn parse_retry_kwarg(
             "max" => {
                 let n = extract_int_literal_runtime(v_expr).ok_or_else(|| {
                     format!(
-                        "{} sobre fn '{}': `retry.max` debe ser un Int literal.",
+                        "{} on fn '{}': `retry.max` must be an Int literal.",
                         deco_name, fn_name
                     )
                 })?;
                 if n < 0 {
                     return Err(format!(
-                        "{} sobre fn '{}': `retry.max` debe ser >= 0 (es {}).",
+                        "{} on fn '{}': `retry.max` must be >= 0 (is {}).",
                         deco_name, fn_name, n
                     ));
                 }
@@ -803,24 +803,24 @@ fn parse_retry_kwarg(
                     Expr::Str(s, _) => s,
                     _ => {
                         return Err(format!(
-                            "{} sobre fn '{}': `retry.backoff` debe ser un Str literal.",
+                            "{} on fn '{}': `retry.backoff` must be a Str literal.",
                             deco_name, fn_name
                         ));
                     }
                 };
                 cfg.backoff = crate::cron_jobs::BackoffKind::from_str_strict(s)
-                    .map_err(|e| format!("{} sobre fn '{}': {}", deco_name, fn_name, e))?;
+                    .map_err(|e| format!("{} on fn '{}': {}", deco_name, fn_name, e))?;
             }
             "initial_secs" => {
                 let n = extract_int_literal_runtime(v_expr).ok_or_else(|| {
                     format!(
-                        "{} sobre fn '{}': `retry.initial_secs` debe ser un Int literal.",
+                        "{} on fn '{}': `retry.initial_secs` must be an Int literal.",
                         deco_name, fn_name
                     )
                 })?;
                 if n < 1 {
                     return Err(format!(
-                        "{} sobre fn '{}': `retry.initial_secs` debe ser >= 1 (es {}).",
+                        "{} on fn '{}': `retry.initial_secs` must be >= 1 (is {}).",
                         deco_name, fn_name, n
                     ));
                 }
@@ -829,13 +829,13 @@ fn parse_retry_kwarg(
             "max_secs" => {
                 let n = extract_int_literal_runtime(v_expr).ok_or_else(|| {
                     format!(
-                        "{} sobre fn '{}': `retry.max_secs` debe ser un Int literal.",
+                        "{} on fn '{}': `retry.max_secs` must be an Int literal.",
                         deco_name, fn_name
                     )
                 })?;
                 if n < 1 {
                     return Err(format!(
-                        "{} sobre fn '{}': `retry.max_secs` debe ser >= 1 (es {}).",
+                        "{} on fn '{}': `retry.max_secs` must be >= 1 (is {}).",
                         deco_name, fn_name, n
                     ));
                 }
@@ -843,8 +843,8 @@ fn parse_retry_kwarg(
             }
             other => {
                 return Err(format!(
-                    "{} sobre fn '{}': key `{}` no reconocida en `retry`. \
-                     Aceptadas: `max`, `backoff`, `initial_secs`, `max_secs`.",
+                    "{} on fn '{}': key `{}` not recognized in `retry`. \
+                     Accepted: `max`, `backoff`, `initial_secs`, `max_secs`.",
                     deco_name, fn_name, other
                 ));
             }
@@ -869,15 +869,15 @@ fn resolve_store_kwarg(
     let value = match expr {
         Expr::Ident(name, _) => env.lock().get(name).ok_or_else(|| {
             format!(
-                "{} sobre fn '{}': variable `{}` no encontrada en el scope. \
-                 Pasá una conn DB (e.g. `store=db` con `let db = db.connect(...).await?`).",
+                "{} on fn '{}': variable `{}` not found in scope. \
+                 Pass a DB conn (e.g. `store=db` with `let db = db.connect(...).await?`).",
                 deco_name, fn_name, name
             )
         })?,
         _ => {
             return Err(format!(
-                "{} sobre fn '{}': kwarg `store` debe ser un identificador (e.g. `store=db`). \
-                 Expresiones complejas no se soportan en el MVP de iter2.",
+                "{} on fn '{}': kwarg `store` must be an identifier (e.g. `store=db`). \
+                 Complex expressions are not supported in the iter2 MVP.",
                 deco_name, fn_name
             ));
         }
@@ -892,15 +892,15 @@ fn resolve_store_kwarg(
         Value::Result(crate::value::ResultVariant::Ok(inner)) => match *inner {
             Value::DbConn(handle) => Ok(handle),
             other => Err(format!(
-                "{} sobre fn '{}': kwarg `store` debe resolver a un `DbConn`; \
-                 resolvió a `Result<{}>`.",
+                "{} on fn '{}': kwarg `store` must resolve to a `DbConn`; \
+                 resolved to `Result<{}>`.",
                 deco_name,
                 fn_name,
                 other.type_name()
             )),
         },
         Value::Result(crate::value::ResultVariant::Err(msg)) => Err(format!(
-            "{} sobre fn '{}': la conn DB falló al inicio: {}.",
+            "{} on fn '{}': DB conn failed at startup: {}.",
             deco_name,
             fn_name,
             match *msg {
@@ -909,8 +909,8 @@ fn resolve_store_kwarg(
             }
         )),
         other => Err(format!(
-            "{} sobre fn '{}': kwarg `store` debe resolver a un `DbConn` (resultado de \
-             `db.connect(...).await?`), resolvió a `{}`.",
+            "{} on fn '{}': kwarg `store` must resolve to a `DbConn` (result of \
+             `db.connect(...).await?`), resolved to `{}`.",
             deco_name,
             fn_name,
             other.type_name()
@@ -953,7 +953,7 @@ fn collect_route_auth(
             "authenticated" => {
                 if !deco.args.is_empty() || !deco.kwargs.is_empty() {
                     return Err(err(format!(
-                        "@authenticated sobre fn '{}': no admite args ni kwargs.",
+                        "@authenticated on fn '{}': does not accept args or kwargs.",
                         fn_name,
                     )));
                 }
@@ -964,7 +964,7 @@ fn collect_route_auth(
             "admin" => {
                 if !deco.args.is_empty() || !deco.kwargs.is_empty() {
                     return Err(err(format!(
-                        "@admin sobre fn '{}': no admite args ni kwargs.",
+                        "@admin on fn '{}': does not accept args or kwargs.",
                         fn_name,
                     )));
                 }
@@ -995,14 +995,14 @@ fn collect_required_roles(
         }
         if !deco.kwargs.is_empty() {
             return Err(err(format!(
-                "@requires sobre fn '{}': no admite kwargs (sintaxis: `@requires(\"role\")`).",
+                "@requires on fn '{}': does not accept kwargs (syntax: `@requires(\"role\")`).",
                 fn_name,
             )));
         }
         if deco.args.len() != 1 {
             return Err(err(format!(
-                "@requires sobre fn '{}': espera exactamente 1 arg (el role como Str literal), \
-                 recibió {}.",
+                "@requires on fn '{}': expects exactly 1 arg (the role as Str literal), \
+                 received {}.",
                 fn_name,
                 deco.args.len(),
             )));
@@ -1011,14 +1011,14 @@ fn collect_required_roles(
             crate::ast::Expr::Str(s, _) => s.clone(),
             other => {
                 return Err(err(format!(
-                    "@requires sobre fn '{}': el arg debe ser Str literal, recibió {:?}.",
+                    "@requires on fn '{}': the arg must be a Str literal, received {:?}.",
                     fn_name, other,
                 )));
             }
         };
         if roles.contains(&role) {
             return Err(err(format!(
-                "@requires sobre fn '{}': role '{}' duplicado en decorators apilados.",
+                "@requires on fn '{}': role '{}' duplicated in stacked decorators.",
                 fn_name, role,
             )));
         }
@@ -1124,8 +1124,8 @@ fn register_test(
 
     if !deco.args.is_empty() {
         return Err(err(format!(
-            "@test sobre fn '{}': no admite args posicionales en el MVP, \
-             recibió {}. Sintaxis: `@test fn {}() {{ ... }}`.",
+            "@test on fn '{}': does not accept positional args in the MVP, \
+             received {}. Syntax: `@test fn {}() {{ ... }}`.",
             fn_name,
             deco.args.len(),
             fn_name,
@@ -1133,16 +1133,16 @@ fn register_test(
     }
     if !deco.kwargs.is_empty() {
         return Err(err(format!(
-            "@test sobre fn '{}': no admite kwargs en el MVP. Sintaxis: \
+            "@test on fn '{}': does not accept kwargs in the MVP. Syntax: \
              `@test fn {}() {{ ... }}`.",
             fn_name, fn_name,
         )));
     }
     if !params.is_empty() {
         return Err(err(format!(
-            "@test sobre fn '{}': la fn debe tener 0 params (recibió {}). \
-             Los tests no reciben fixtures en el MVP — usá variables \
-             locales o helpers para preparar estado.",
+            "@test on fn '{}': the fn must have 0 params (received {}). \
+             Tests do not receive fixtures in the MVP — use local variables \
+             or helpers to prepare state.",
             fn_name,
             params.len(),
         )));
@@ -1160,7 +1160,7 @@ fn register_test(
     let is_async = match handler {
         Value::Function { is_async, .. } => *is_async,
         _ => unreachable!(
-            "@test sobre fn '{}': handler no es Value::Function",
+            "@test on fn '{}': handler is not Value::Function",
             fn_name
         ),
     };
@@ -1199,8 +1199,8 @@ fn collect_headers(
         // @header rejects positional args (everything goes via kwarg).
         if !deco.args.is_empty() {
             return Err(err(format!(
-                "@header sobre fn '{}': no admite args posicionales. \
-                 Usá `@header(name=\"X\")`.",
+                "@header on fn '{}': does not accept positional args. \
+                 Use `@header(name=\"X\")`.",
                 fn_name,
             )));
         }
@@ -1210,8 +1210,8 @@ fn collect_headers(
             .find(|(k, _)| k == "name")
             .ok_or_else(|| {
                 err(format!(
-                    "@header sobre fn '{}': falta el kwarg 'name' (nombre del header HTTP). \
-                     Ej: `@header(name=\"Authorization\")`.",
+                    "@header on fn '{}': missing kwarg 'name' (HTTP header name). \
+                     E.g.: `@header(name=\"Authorization\")`.",
                     fn_name,
                 ))
             })?;
@@ -1219,13 +1219,13 @@ fn collect_headers(
             Expr::Str(s, _) if !s.is_empty() => s.clone(),
             Expr::Str(_, _) => {
                 return Err(err(format!(
-                    "@header sobre fn '{}': el kwarg 'name' no puede ser un string vacío",
+                    "@header on fn '{}': kwarg 'name' cannot be an empty string",
                     fn_name,
                 )));
             }
             other => {
                 return Err(err(format!(
-                    "@header sobre fn '{}': el kwarg 'name' debe ser un Str literal, recibió {:?}",
+                    "@header on fn '{}': kwarg 'name' must be a Str literal, received {:?}",
                     fn_name, other,
                 )));
             }
@@ -1239,13 +1239,13 @@ fn collect_headers(
             Some((_, Expr::Str(s, _))) if !s.is_empty() => Some(s.clone()),
             Some((_, Expr::Str(_, _))) => {
                 return Err(err(format!(
-                    "@header(name=\"{}\") sobre fn '{}': el kwarg 'into' no puede ser un string vacío",
+                    "@header(name=\"{}\") on fn '{}': kwarg 'into' cannot be an empty string",
                     http_name, fn_name,
                 )));
             }
             Some((_, other)) => {
                 return Err(err(format!(
-                    "@header(name=\"{}\") sobre fn '{}': el kwarg 'into' debe ser un Str literal, recibió {:?}",
+                    "@header(name=\"{}\") on fn '{}': kwarg 'into' must be a Str literal, received {:?}",
                     http_name, fn_name, other,
                 )));
             }
@@ -1254,7 +1254,7 @@ fn collect_headers(
         // Extra kwargs: reject so we don't silently swallow typos.
         if let Some((k, _)) = deco.kwargs.iter().find(|(k, _)| k != "name" && k != "into") {
             return Err(err(format!(
-                "@header sobre fn '{}': kwarg '{}' no reconocido. Soportados: name, into.",
+                "@header on fn '{}': kwarg '{}' not recognized. Supported: name, into.",
                 fn_name, k,
             )));
         }
@@ -1264,7 +1264,7 @@ fn collect_headers(
         // Check that the param exists on the fn and is Str or Str?.
         let Some(p) = params.iter().find(|p| p.name == param_name) else {
             return Err(err(format!(
-                "@header(name=\"{}\"{}) sobre fn '{}': el handler no tiene un param llamado '{}'{}",
+                "@header(name=\"{}\"{}) on fn '{}': the handler has no param named '{}'{}",
                 http_name,
                 into_alias
                     .as_ref()
@@ -1273,7 +1273,7 @@ fn collect_headers(
                 fn_name,
                 param_name,
                 if into_alias.is_none() {
-                    " (derivado del header HTTP por convención lowercase + `-` → `_`)".to_string()
+                    " (derived from HTTP header by convention lowercase + `-` → `_`)".to_string()
                 } else {
                     String::new()
                 },
@@ -1285,16 +1285,16 @@ fn collect_headers(
                 TypeExpr::Named(n) if n == "Str" => true,
                 other => {
                     return Err(err(format!(
-                        "@header(name=\"{}\") sobre fn '{}': el param '{}' debe ser `Str` o `Str?`, \
-                         pero está declarado como `{}`",
+                        "@header(name=\"{}\") on fn '{}': param '{}' must be `Str` or `Str?`, \
+                         but is declared as `{}`",
                         http_name, fn_name, param_name, other.display_name(),
                     )));
                 }
             },
             Some(other) => {
                 return Err(err(format!(
-                    "@header(name=\"{}\") sobre fn '{}': el param '{}' debe ser `Str` o `Str?`, \
-                     pero está declarado como `{}`",
+                    "@header(name=\"{}\") on fn '{}': param '{}' must be `Str` or `Str?`, \
+                     but is declared as `{}`",
                     http_name,
                     fn_name,
                     param_name,
@@ -1303,8 +1303,8 @@ fn collect_headers(
             }
             None => {
                 return Err(err(format!(
-                    "@header(name=\"{}\") sobre fn '{}': el param '{}' necesita una anotación \
-                     de tipo (`Str` o `Str?`)",
+                    "@header(name=\"{}\") on fn '{}': param '{}' needs a type \
+                     annotation (`Str` or `Str?`)",
                     http_name, fn_name, param_name,
                 )));
             }
@@ -1314,7 +1314,7 @@ fn collect_headers(
             .any(|h| h.http_name.eq_ignore_ascii_case(&http_name))
         {
             return Err(err(format!(
-                "@header(name=\"{}\") sobre fn '{}': declarado dos veces (el match es case-insensitive)",
+                "@header(name=\"{}\") on fn '{}': declared twice (match is case-insensitive)",
                 http_name, fn_name,
             )));
         }
@@ -1336,16 +1336,16 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
 
     if !has_active_registry() {
         return Err(err(format!(
-            "@server sobre fn '{}': no hay servidor HTTP activo en este contexto. \
-             Los decoradores HTTP solo funcionan ejecutando el archivo con `fitz run`.",
+            "@server on fn '{}': no active HTTP server in this context. \
+             HTTP decorators only work when running the file with `fitz run`.",
             fn_name,
         )));
     }
 
     if deco.args.len() > 2 {
         return Err(err(format!(
-            "@server(...) sobre fn '{}': admite hasta 2 args positionals \
-             (port, host), recibió {}",
+            "@server(...) on fn '{}': accepts up to 2 positional args \
+             (port, host), received {}",
             fn_name,
             deco.args.len(),
         )));
@@ -1367,7 +1367,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
             Expr::Int(n, _) => {
                 if *n < 1 || *n > 65535 {
                     return Err(err(format!(
-                        "@server sobre fn '{}': port {} fuera de rango (debe estar entre 1 y 65535)",
+                        "@server on fn '{}': port {} out of range (must be between 1 and 65535)",
                         fn_name, n,
                     )));
                 }
@@ -1376,8 +1376,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
             }
             other => {
                 return Err(err(format!(
-                    "@server sobre fn '{}': primer argumento (port) debe ser Int literal, \
-                     recibió {:?}",
+                    "@server on fn '{}': first argument (port) must be Int literal, \
+                     received {:?}",
                     fn_name, other,
                 )));
             }
@@ -1391,8 +1391,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 // it to when the server is brought up.
                 if s.parse::<std::net::IpAddr>().is_err() {
                     return Err(err(format!(
-                        "@server sobre fn '{}': host '{}' no es una IP válida \
-                         (esperado IPv4 o IPv6 literal, sin resolver DNS)",
+                        "@server on fn '{}': host '{}' is not a valid IP \
+                         (expected IPv4 or IPv6 literal, without DNS resolution)",
                         fn_name, s,
                     )));
                 }
@@ -1401,8 +1401,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
             }
             other => {
                 return Err(err(format!(
-                    "@server sobre fn '{}': segundo argumento (host) debe ser Str literal, \
-                     recibió {:?}",
+                    "@server on fn '{}': second argument (host) must be Str literal, \
+                     received {:?}",
                     fn_name, other,
                 )));
             }
@@ -1429,8 +1429,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
             "port" => {
                 if port_set_via_positional {
                     return Err(err(format!(
-                        "@server sobre fn '{}': port pasado dos veces (positional + kwarg 'port'). \
-                         Usá uno solo de los dos formatos.",
+                        "@server on fn '{}': port passed twice (positional + kwarg 'port'). \
+                         Use only one of the two formats.",
                         fn_name,
                     )));
                 }
@@ -1438,7 +1438,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     Expr::Int(n, _) => {
                         if *n < 1 || *n > 65535 {
                             return Err(err(format!(
-                                "@server sobre fn '{}': port {} fuera de rango (debe estar entre 1 y 65535)",
+                                "@server on fn '{}': port {} out of range (must be between 1 and 65535)",
                                 fn_name, n,
                             )));
                         }
@@ -1446,7 +1446,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     }
                     other => {
                         return Err(err(format!(
-                            "@server sobre fn '{}': el kwarg 'port' debe ser Int literal, recibió {:?}",
+                            "@server on fn '{}': kwarg 'port' must be Int literal, received {:?}",
                             fn_name, other,
                         )));
                     }
@@ -1455,8 +1455,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
             "host" => {
                 if host_set_via_positional {
                     return Err(err(format!(
-                        "@server sobre fn '{}': host pasado dos veces (positional + kwarg 'host'). \
-                         Usá uno solo de los dos formatos.",
+                        "@server on fn '{}': host passed twice (positional + kwarg 'host'). \
+                         Use only one of the two formats.",
                         fn_name,
                     )));
                 }
@@ -1464,8 +1464,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     Expr::Str(s, _) => {
                         if s.parse::<std::net::IpAddr>().is_err() {
                             return Err(err(format!(
-                                "@server sobre fn '{}': host '{}' no es una IP válida \
-                                 (esperado IPv4 o IPv6 literal, sin resolver DNS)",
+                                "@server on fn '{}': host '{}' is not a valid IP \
+                                 (expected IPv4 or IPv6 literal, without DNS resolution)",
                                 fn_name, s,
                             )));
                         }
@@ -1473,7 +1473,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     }
                     other => {
                         return Err(err(format!(
-                            "@server sobre fn '{}': el kwarg 'host' debe ser Str literal, recibió {:?}",
+                            "@server on fn '{}': kwarg 'host' must be Str literal, received {:?}",
                             fn_name, other,
                         )));
                     }
@@ -1485,8 +1485,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 }
                 other => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'docs' debe ser Bool literal, \
-                         recibió {:?}",
+                        "@server on fn '{}': kwarg 'docs' must be Bool literal, \
+                         received {:?}",
                         fn_name, other,
                     )));
                 }
@@ -1497,14 +1497,14 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 }
                 Expr::Str(_, _) => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'api_version' no puede ser un string vacío",
+                        "@server on fn '{}': kwarg 'api_version' cannot be an empty string",
                         fn_name,
                     )));
                 }
                 other => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'api_version' debe ser Str literal, \
-                         recibió {:?}",
+                        "@server on fn '{}': kwarg 'api_version' must be Str literal, \
+                         received {:?}",
                         fn_name, other,
                     )));
                 }
@@ -1517,13 +1517,13 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 }
                 Expr::Int(n, _) => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'ws_heartbeat_secs' debe ser Int >= 0, recibió {}",
+                        "@server on fn '{}': kwarg 'ws_heartbeat_secs' must be Int >= 0, received {}",
                         fn_name, n,
                     )));
                 }
                 other => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'ws_heartbeat_secs' debe ser Int literal, recibió {:?}",
+                        "@server on fn '{}': kwarg 'ws_heartbeat_secs' must be Int literal, received {:?}",
                         fn_name, other,
                     )));
                 }
@@ -1538,13 +1538,13 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 }
                 Expr::Int(n, _) => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'shutdown_timeout_secs' debe ser Int >= 0, recibió {}",
+                        "@server on fn '{}': kwarg 'shutdown_timeout_secs' must be Int >= 0, received {}",
                         fn_name, n,
                     )));
                 }
                 other => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'shutdown_timeout_secs' debe ser Int literal, recibió {:?}",
+                        "@server on fn '{}': kwarg 'shutdown_timeout_secs' must be Int literal, received {:?}",
                         fn_name, other,
                     )));
                 }
@@ -1560,8 +1560,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 }
                 other => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'observability' debe ser Bool literal, \
-                         recibió {:?}",
+                        "@server on fn '{}': kwarg 'observability' must be Bool literal, \
+                         received {:?}",
                         fn_name, other,
                     )));
                 }
@@ -1579,16 +1579,16 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 }
                 other => {
                     return Err(err(format!(
-                        "@server sobre fn '{}': el kwarg 'prometheus' debe ser Bool literal, \
-                         recibió {:?}",
+                        "@server on fn '{}': kwarg 'prometheus' must be Bool literal, \
+                         received {:?}",
                         fn_name, other,
                     )));
                 }
             },
             other => {
                 return Err(err(format!(
-                    "@server sobre fn '{}': kwarg '{}' no reconocido. \
-                     Soportados: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
+                    "@server on fn '{}': kwarg '{}' not recognized. \
+                     Supported: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
                     fn_name, other,
                 )));
             }
@@ -1597,8 +1597,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
 
     if let Err(existing) = set_server_config(config) {
         return Err(err(format!(
-            "@server sobre fn '{}': el programa ya tenía un @server configurado \
-             ({}:{}). Solo se admite uno por programa.",
+            "@server on fn '{}': program already had a @server configured \
+             ({}:{}). Only one per program is supported.",
             fn_name, existing.host, existing.port,
         )));
     }
@@ -1695,21 +1695,21 @@ async fn collect_middlewares(
         // Order: `@middleware` only before the route decorator.
         if saw_route_decorator {
             return Err(err(format!(
-                "@middleware sobre fn '{}': debe apilarse ANTES del decorator de ruta \
-                 (`@middleware(...)` arriba de `@get`/`@post`/`@put`/`@delete`)",
+                "@middleware on fn '{}': must be stacked BEFORE the route decorator \
+                 (`@middleware(...)` above `@get`/`@post`/`@put`/`@delete`)",
                 fn_name,
             )));
         }
         if !deco.kwargs.is_empty() {
             return Err(err(format!(
-                "@middleware sobre fn '{}': no admite argumentos por nombre (kwargs)",
+                "@middleware on fn '{}': does not accept named arguments (kwargs)",
                 fn_name,
             )));
         }
         if deco.args.len() != 1 {
             return Err(err(format!(
-                "@middleware sobre fn '{}': espera exactamente un argumento \
-                 (la fn a aplicar), recibió {}",
+                "@middleware on fn '{}': expects exactly one argument \
+                 (the fn to apply), received {}",
                 fn_name,
                 deco.args.len(),
             )));
@@ -1740,10 +1740,10 @@ async fn collect_middlewares(
                     2 => classify_2_arg_middleware(&params[1]),
                     n => {
                         return Err(err(format!(
-                            "@middleware sobre fn '{}': la fn referenciada ({}) debe \
-                             tener 1 o 2 parámetros (1 = pre-process clásico que recibe \
-                             `Request`; 2 = post-process `(Request, Response)` o wrap-style \
-                             `(Request, Fn() -> Response)`); tiene {}",
+                            "@middleware on fn '{}': the referenced fn ({}) must \
+                             have 1 or 2 parameters (1 = classic pre-process receiving \
+                             `Request`; 2 = post-process `(Request, Response)` or wrap-style \
+                             `(Request, Fn() -> Response)`); has {}",
                             fn_name, label, n,
                         )));
                     }
@@ -1757,8 +1757,8 @@ async fn collect_middlewares(
             Value::CorsConfig(config) => {
                 if cors.is_some() {
                     return Err(err(format!(
-                        "@middleware sobre fn '{}': el handler ya tiene un `cors(...)` aplicado, \
-                         solo se admite uno por ruta",
+                        "@middleware on fn '{}': handler already has a `cors(...)` applied, \
+                         only one per route is supported",
                         fn_name,
                     )));
                 }
@@ -1766,8 +1766,8 @@ async fn collect_middlewares(
             }
             other => {
                 return Err(err(format!(
-                    "@middleware sobre fn '{}': el argumento debe ser una fn o un \
-                     `cors(...)`, recibió {}",
+                    "@middleware on fn '{}': the argument must be a fn or a \
+                     `cors(...)`, received {}",
                     fn_name,
                     other.type_name(),
                 )));
@@ -1800,8 +1800,8 @@ fn register_http_route(
     // support (7.6) may add them; for now, explicit cutoff.
     if let Some((key, _)) = deco.kwargs.first() {
         return Err(err(format!(
-            "@{} sobre fn '{}': los argumentos por nombre (recibió '{}=...') \
-             no están soportados sobre decoradores HTTP de ruta.",
+            "@{} on fn '{}': named arguments (received '{}=...') \
+             are not supported on HTTP route decorators.",
             deco.name, fn_name, key,
         )));
     }
@@ -1809,8 +1809,8 @@ fn register_http_route(
     // Validation 1: HTTP decorator needs exactly one arg (the path).
     if deco.args.len() != 1 {
         return Err(err(format!(
-            "@{}(...) sobre fn '{}' espera un único argumento (la ruta), \
-             recibió {}",
+            "@{}(...) on fn '{}' expects a single argument (the route), \
+             received {}",
             deco.name,
             fn_name,
             deco.args.len(),
@@ -1820,7 +1820,7 @@ fn register_http_route(
     // Validation 2: the path translates to an axum template.
     let template = parse_path_template(&deco.args[0]).map_err(|e| {
         err(format!(
-            "@{} sobre fn '{}': {}",
+            "@{} on fn '{}': {}",
             deco.name,
             fn_name,
             e.message()
@@ -1833,8 +1833,8 @@ fn register_http_route(
     for param_name in &template.params {
         if !params.iter().any(|p| &p.name == param_name) {
             return Err(err(format!(
-                "@{} sobre fn '{}': el path declara '{{{}}}' pero el handler \
-                 no tiene un parámetro con ese nombre",
+                "@{} on fn '{}': the path declares '{{{}}}' but the handler \
+                 has no parameter with that name",
                 deco.name, fn_name, param_name,
             )));
         }
@@ -1845,8 +1845,8 @@ fn register_http_route(
     // eval) and HTTP decorators have nowhere to register.
     if !has_active_registry() {
         return Err(err(format!(
-            "@{} sobre fn '{}': no hay servidor HTTP activo en este contexto. \
-             Los decoradores HTTP solo funcionan ejecutando el archivo con \
+            "@{} on fn '{}': no active HTTP server in this context. \
+             HTTP decorators only work when running the file with \
              `fitz run`.",
             deco.name, fn_name,
         )));
@@ -1859,8 +1859,8 @@ fn register_http_route(
     for qname in &template.query_params {
         if !params.iter().any(|p| &p.name == qname) {
             return Err(err(format!(
-                "@{} sobre fn '{}': el query param '{}' está en el path \
-                 pero el handler no tiene un parámetro con ese nombre",
+                "@{} on fn '{}': query param '{}' is in the path \
+                 but the handler has no parameter with that name",
                 deco.name, fn_name, qname,
             )));
         }
@@ -1890,9 +1890,9 @@ fn register_http_route(
     let auth_user_param_name: Option<String> = if has_auth_decorator {
         if !crate::http::has_auth_provider() {
             return Err(err(format!(
-                "@{} sobre fn '{}': el `@auth_provider` debe estar declarado antes \
-                 que cualquier handler con `@authenticated`/`@admin`/`@requires` en el archivo. \
-                 Movelo arriba de los handlers que lo usan.",
+                "@{} on fn '{}': `@auth_provider` must be declared before \
+                 any handler with `@authenticated`/`@admin`/`@requires` in the file. \
+                 Move it above the handlers that use it.",
                 deco.name, fn_name,
             )));
         }
@@ -1907,7 +1907,7 @@ fn register_http_route(
         if candidates.is_empty() {
             // Shouldn't happen — the checker validates that a User param exists.
             return Err(err(format!(
-                "@{} sobre fn '{}': falta param del tipo `User` (inyectado tras autenticación exitosa).",
+                "@{} on fn '{}': missing param of type `User` (injected after successful authentication).",
                 deco.name, fn_name,
             )));
         }
@@ -1938,10 +1938,10 @@ fn register_http_route(
                     Some(candidates[0].name.clone())
                 } else {
                     return Err(err(format!(
-                        "@{} sobre fn '{}': hay {} params que no son path/query/header \
-                         y ninguno tiene anotación `: {}` (return del `@auth_provider`). \
-                         Anotá el param que recibe el user con su tipo o reducí los params \
-                         no asignados.",
+                        "@{} on fn '{}': there are {} params that are not path/query/header \
+                         and none has annotation `: {}` (return of `@auth_provider`). \
+                         Annotate the param that receives the user with its type or reduce \
+                         unassigned params.",
                         deco.name,
                         fn_name,
                         candidates.len(),
@@ -1956,9 +1956,9 @@ fn register_http_route(
             1 => Some(by_type[0].name.clone()),
             _ => {
                 return Err(err(format!(
-                    "@{} sobre fn '{}': hay {} params anotados como `: {}`. \
-                     Un handler protegido admite a lo sumo un param del tipo User \
-                     (inyectado tras autenticación exitosa).",
+                    "@{} on fn '{}': there are {} params annotated as `: {}`. \
+                     A protected handler accepts at most one param of type User \
+                     (injected after successful authentication).",
                     deco.name,
                     fn_name,
                     by_type.len(),
@@ -1990,8 +1990,8 @@ fn register_http_route(
         }
         if body_param.is_some() {
             return Err(err(format!(
-                "@{} sobre fn '{}': solo se admite un parámetro body por handler \
-                 (encontrado '{}', ya había otro)",
+                "@{} on fn '{}': only one body parameter per handler is supported \
+                 (found '{}', another already existed)",
                 deco.name, fn_name, p.name,
             )));
         }
@@ -2108,16 +2108,16 @@ fn register_ws_route(
     // The `@ws` decorator does not accept kwargs.
     if let Some((key, _)) = deco.kwargs.first() {
         return Err(err(format!(
-            "@ws sobre fn '{}': los argumentos por nombre (recibió '{}=...') \
-             no están soportados.",
+            "@ws on fn '{}': named arguments (received '{}=...') \
+             are not supported.",
             fn_name, key,
         )));
     }
     // Expects 1 arg: the path.
     if deco.args.len() != 1 {
         return Err(err(format!(
-            "@ws(...) sobre fn '{}' espera un único argumento (la ruta), \
-             recibió {}",
+            "@ws(...) on fn '{}' expects a single argument (the route), \
+             received {}",
             fn_name,
             deco.args.len(),
         )));
@@ -2126,7 +2126,7 @@ fn register_ws_route(
         Expr::Str(s, _) => s.clone(),
         _ => {
             return Err(err(format!(
-                "@ws sobre fn '{}': el argumento debe ser un Str literal (path)",
+                "@ws on fn '{}': the argument must be a Str literal (path)",
                 fn_name,
             )));
         }
@@ -2134,8 +2134,8 @@ fn register_ws_route(
 
     if !has_active_registry() {
         return Err(err(format!(
-            "@ws sobre fn '{}': no hay servidor HTTP activo en este contexto. \
-             Los decoradores HTTP solo funcionan ejecutando el archivo con \
+            "@ws on fn '{}': no active HTTP server in this context. \
+             HTTP decorators only work when running the file with \
              `fitz run`.",
             fn_name,
         )));
@@ -2145,9 +2145,9 @@ fn register_ws_route(
     // already be registered (same gate as HTTP routes).
     if auth_spec != crate::http::AuthSpec::None && !crate::http::has_auth_provider() {
         return Err(err(format!(
-            "@ws sobre fn '{}': la ruta declara `@authenticated`/`@admin` pero \
-             no hay `@auth_provider` registrado antes en el archivo. Movelo \
-             arriba.",
+            "@ws on fn '{}': the route declares `@authenticated`/`@admin` but \
+             there is no `@auth_provider` registered earlier in the file. Move it \
+             above.",
             fn_name,
         )));
     }
@@ -2165,7 +2165,7 @@ fn register_ws_route(
             if name == "WsConn" && (args.len() == 1 || args.len() == 2) {
                 if ws_conn_param_name.is_some() {
                     return Err(err(format!(
-                        "@ws sobre fn '{}': el handler tiene más de un param `WsConn<T>` (debe ser exactamente uno)",
+                        "@ws on fn '{}': the handler has more than one `WsConn<T>` param (must be exactly one)",
                         fn_name,
                     )));
                 }
@@ -2181,7 +2181,7 @@ fn register_ws_route(
     }
     if ws_conn_param_name.is_none() {
         return Err(err(format!(
-            "@ws sobre fn '{}': el handler debe declarar un param `conn: WsConn<T>` (con T concreto). Sintaxis: `async fn {}(conn: WsConn<ChatMsg>) {{ ... }}`.",
+            "@ws on fn '{}': the handler must declare a param `conn: WsConn<T>` (with concrete T). Syntax: `async fn {}(conn: WsConn<ChatMsg>) {{ ... }}`.",
             fn_name, fn_name,
         )));
     }
@@ -2201,13 +2201,13 @@ fn register_ws_route(
             .collect();
         if candidates.is_empty() {
             return Err(err(format!(
-                "@ws + @authenticated sobre fn '{}': falta param del tipo `User` (inyectado tras autenticación exitosa).",
+                "@ws + @authenticated on fn '{}': missing param of type `User` (injected after successful authentication).",
                 fn_name,
             )));
         }
         if candidates.len() > 1 {
             return Err(err(format!(
-                "@ws + @authenticated sobre fn '{}': hay {} params extra (sólo se admite 1 user param).",
+                "@ws + @authenticated on fn '{}': there are {} extra params (only 1 user param is supported).",
                 fn_name,
                 candidates.len(),
             )));
@@ -2421,8 +2421,8 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
                 ErrorKind::InvalidSyntax,
                 0,
                 0,
-                "no se puede resolver `import`: el loader no está instalado \
-             (usar `eval` o `eval_with_base` como entrada)",
+                "cannot resolve `import`: loader is not installed \
+             (use `eval` or `eval_with_base` as entry point)",
             ))
         })?;
     let n = segments.len();
@@ -2483,7 +2483,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
                 0,
                 0,
                 format!(
-                    "no se encontró el módulo `{}` (buscado en `{}`)",
+                    "module `{}` not found (searched in `{}`)",
                     segments.join("."),
                     candidates[0].display(),
                 ),
@@ -2542,7 +2542,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
                 ErrorKind::InvalidSyntax,
                 0,
                 0,
-                format!("error leyendo el módulo `{}`: {}", canonical.display(), e,),
+                format!("error reading module `{}`: {}", canonical.display(), e,),
             )));
         }
     };
@@ -2712,25 +2712,25 @@ fn signal_to_error(signal: EvalSignal) -> FitzError {
             ErrorKind::InvalidSyntax,
             0,
             0,
-            format!("operación `?` falló con Err: {}", *e),
+            format!("operator `?` failed with Err: {}", *e),
         ),
         EvalSignal::Return(_) => FitzError::new(
             ErrorKind::ReturnOutsideFunction,
             0,
             0,
-            "`return` solo puede usarse adentro de una función",
+            "`return` can only be used inside a function",
         ),
         EvalSignal::Break(_, _) => FitzError::new(
             ErrorKind::BreakOutsideLoop,
             0,
             0,
-            "`break` solo puede usarse adentro de un loop",
+            "`break` can only be used inside a loop",
         ),
         EvalSignal::Continue(_) => FitzError::new(
             ErrorKind::ContinueOutsideLoop,
             0,
             0,
-            "`continue` solo puede usarse adentro de un loop",
+            "`continue` can only be used inside a loop",
         ),
     }
 }
@@ -2758,7 +2758,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ErrorKind::InvalidSyntax,
                     span.line, span.column,
                     format!(
-                        "el valor `{}` no matchea el pattern de destructuring",
+                        "value `{}` does not match the destructuring pattern",
                         v.type_name()
                     ),
                 )));
@@ -2810,7 +2810,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     if already_defined {
                         env.lock()
                             .assign(name, v)
-                            .expect("la variable existe — acabamos de chequear con has()");
+                            .expect("variable exists — just checked with has()");
                     } else {
                         env.lock().define(name.clone(), v);
                     }
@@ -2822,12 +2822,12 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                         other => {
                             return Err(EvalSignal::Error(FitzError::new(
                                 ErrorKind::TypeMismatch {
-                                    expected: "instancia de un tipo".into(),
+                                    expected: "type instance".into(),
                                     found: other.type_name().into(),
                                 },
                                 0, 0,
                                 format!(
-                                    "no se puede asignar a un campo de {} (no es una instancia)",
+                                    "cannot assign to a field of {} (not an instance)",
                                     other.type_name(),
                                 ),
                             )));
@@ -2850,7 +2850,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                                 ErrorKind::InvalidSyntax,
                                 0, 0,
                                 format!(
-                                    "el tipo `{}` no tiene un campo llamado `{}`",
+                                    "type `{}` has no field named `{}`",
                                     type_name, field
                                 ),
                             )));
@@ -2875,7 +2875,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                                         },
                                         0, 0,
                                         format!(
-                                            "el índice de una lista debe ser Int, recibió `{}`",
+                                            "list index must be Int, received `{}`",
                                             other.type_name()
                                         ),
                                     )));
@@ -2891,7 +2891,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                                     ErrorKind::InvalidSyntax,
                                     0, 0,
                                     format!(
-                                        "índice {} fuera de rango (lista de tamaño {})",
+                                        "index {} out of range (list of size {})",
                                         idx, len
                                     ),
                                 )));
@@ -2919,12 +2919,12 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                         other => {
                             return Err(EvalSignal::Error(FitzError::new(
                                 ErrorKind::TypeMismatch {
-                                    expected: "List o Map".into(),
+                                    expected: "List or Map".into(),
                                     found: other.type_name().into(),
                                 },
                                 0, 0,
                                 format!(
-                                    "no se puede asignar por índice a un valor de tipo `{}`",
+                                    "cannot assign by index to a value of type `{}`",
                                     other.type_name()
                                 ),
                             )));
@@ -2960,7 +2960,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     span.line,
                     span.column,
                     format!(
-                        "status code de `return` debe ser Int, fue: {}",
+                        "status code of `return` must be Int, was: {}",
                         status_v.type_name()
                     ),
                 )));
@@ -3042,8 +3042,8 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     0,
                     0,
                     format!(
-                        "@header sobre fn '{}': solo aplica sobre handlers HTTP \
-                         (apilar junto a `@get`/`@post`/`@put`/`@delete`).",
+                        "@header on fn '{}': only applies to HTTP handlers \
+                         (stack with `@get`/`@post`/`@put`/`@delete`).",
                         name,
                     ),
                 )));
@@ -3064,8 +3064,8 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     0,
                     0,
                     format!(
-                        "@middleware sobre fn '{}': solo aplica sobre handlers HTTP \
-                         (apilar junto a `@get`/`@post`/`@put`/`@delete`).",
+                        "@middleware on fn '{}': only applies to HTTP handlers \
+                         (stack with `@get`/`@post`/`@put`/`@delete`).",
                         name,
                     ),
                 )));
@@ -3096,8 +3096,8 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     0,
                     0,
                     format!(
-                        "@authenticated/@admin/@requires sobre fn '{}': solo aplica sobre \
-                         handlers HTTP (apilar junto a `@get`/`@post`/`@put`/`@delete`/`@ws`).",
+                        "@authenticated/@admin/@requires on fn '{}': only applies to \
+                         HTTP handlers (stack with `@get`/`@post`/`@put`/`@delete`/`@ws`).",
                         name,
                     ),
                 )));
@@ -3244,7 +3244,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     },
                     0, 0,
                     format!(
-                        "no se puede iterar sobre un valor de tipo `{}`",
+                        "cannot iterate over a value of type `{}`",
                         other.type_name()
                     ),
                 ))),
@@ -3279,7 +3279,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                         },
                         0, 0,
                         format!(
-                            "la condición de `while` debe ser Bool, no `{}`",
+                            "`while` condition must be Bool, not `{}`",
                             other.type_name()
                         ),
                     ))),
@@ -3324,8 +3324,8 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     0, 0,
-                    "`import python...` no se soporta en Fase 8.1; \
-                     usá `from python import <módulo>` para traer librerías Python al scope".to_string(),
+                    "`import python...` is not supported in Phase 8.1; \
+                     use `from python import <module>` to bring Python libraries into scope".to_string(),
                 )));
             }
             let module = load_module(path).await?;
@@ -3335,7 +3335,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             let binding_name = alias.clone().unwrap_or_else(|| {
                 path.last()
                     .cloned()
-                    .expect("parser garantiza al menos un segmento")
+                    .expect("parser guarantees at least one segment")
             });
             env.lock().define(binding_name, module);
             Ok(Value::Null)
@@ -3366,14 +3366,14 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             let module_label = path
                 .last()
                 .cloned()
-                .unwrap_or_else(|| "<sin nombre>".to_string());
+                .unwrap_or_else(|| "<unnamed>".to_string());
             for (name, alias) in names {
                 let v = module_env.lock().get(name).ok_or_else(|| {
                     EvalSignal::Error(FitzError::new(
                         ErrorKind::UndefinedVariable(name.clone()),
                         0, 0,
                         format!(
-                            "el módulo `{}` no exporta `{}`",
+                            "module `{}` does not export `{}`",
                             module_label, name,
                         ),
                     ))
@@ -3393,7 +3393,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "nodo `Stmt::Error` en el AST — la CLI strict no debería producirlo (bug del compilador, Fase 9.0.1)",
+            "`Stmt::Error` node in the AST — the strict CLI should not produce it (compiler bug, Phase 9.0.1)",
         ))),
     }
 }
@@ -3424,8 +3424,8 @@ async fn eval_python_from_import(
             0,
             0,
             format!(
-                "`from python.{} import ...` no se soporta en Fase 8.1; \
-                 usá `from python import {}` y accedé a sub-atributos con `.` (8.1.3)",
+                "`from python.{} import ...` is not supported in Phase 8.1; \
+                 use `from python import {}` and access sub-attributes with `.` (8.1.3)",
                 path[1..].join("."),
                 path[1],
             ),
@@ -3453,9 +3453,9 @@ async fn eval_python_from_import(
         ErrorKind::UndefinedVariable("python".to_string()),
         0,
         0,
-        "`from python import ...` requiere recompilar `fitz` con interop Python habilitada. \
-         Este binario se compiló sin la feature `python`. \
-         Recompilá con `cargo install --features python` (o `cargo build --features python`)."
+        "`from python import ...` requires recompiling `fitz` with Python interop enabled. \
+         This binary was compiled without the `python` feature. \
+         Recompile with `cargo install --features python` (or `cargo build --features python`)."
             .to_string(),
     )))
 }
@@ -3510,13 +3510,13 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
             }
             Value::Tuple(items) => Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::TypeMismatch {
-                    expected: format!("tupla de {} elementos", subs.len()),
-                    found: format!("tupla de {} elementos", items.len()),
+                    expected: format!("tuple of {} elements", subs.len()),
+                    found: format!("tuple of {} elements", items.len()),
                 },
                 0,
                 0,
                 format!(
-                    "tuple pattern del `for` espera {} elementos, recibió {}",
+                    "tuple pattern of `for` expects {} elements, received {}",
                     subs.len(),
                     items.len()
                 ),
@@ -3529,7 +3529,7 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
                 0,
                 0,
                 format!(
-                    "tuple pattern del `for` espera una tupla, recibió `{}`",
+                    "tuple pattern of `for` expects a tuple, received `{}`",
                     other.type_name()
                 ),
             ))),
@@ -3539,7 +3539,7 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
             0,
             0,
             format!(
-                "patrón `{:?}` no admitido en `for` (usá Ident, `_`, o Tuple)",
+                "pattern `{:?}` not supported in `for` (use Ident, `_`, or Tuple)",
                 other
             ),
         ))),
@@ -3574,7 +3574,7 @@ async fn run_list_comp(
                         s.line,
                         s.column,
                         format!(
-                            "el filtro `if` de la list comprehension debe ser `Bool`, no `{}`",
+                            "the `if` filter of the list comprehension must be `Bool`, not `{}`",
                             other.type_name()
                         ),
                     )));
@@ -3593,13 +3593,13 @@ async fn run_list_comp(
             let s = iter.span();
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::TypeMismatch {
-                    expected: "List o Range".into(),
+                    expected: "List or Range".into(),
                     found: other.type_name().into(),
                 },
                 s.line,
                 s.column,
                 format!(
-                    "list comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                    "list comprehension needs an iterable (`List` or `Range`), received `{}`",
                     other.type_name()
                 ),
             )));
@@ -3642,7 +3642,7 @@ async fn run_map_comp(
                         s.line,
                         s.column,
                         format!(
-                            "el filtro `if` de la map comprehension debe ser `Bool`, no `{}`",
+                            "the `if` filter of the map comprehension must be `Bool`, not `{}`",
                             other.type_name()
                         ),
                     )));
@@ -3662,13 +3662,13 @@ async fn run_map_comp(
             let s = iter.span();
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::TypeMismatch {
-                    expected: "List o Range".into(),
+                    expected: "List or Range".into(),
                     found: other.type_name().into(),
                 },
                 s.line,
                 s.column,
                 format!(
-                    "map comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                    "map comprehension needs an iterable (`List` or `Range`), received `{}`",
                     other.type_name()
                 ),
             )));
@@ -3844,7 +3844,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             ErrorKind::TypeError,
             span.line, span.column,
             format!(
-                "argumento nombrado `{}:` no puede aparecer fuera de una llamada",
+                "named argument `{}:` cannot appear outside a call",
                 name
             ),
         ))),
@@ -3889,7 +3889,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                             ErrorKind::InvalidSyntax,
                             span.line, span.column,
                             format!(
-                                "índice de tupla {} fuera de rango (tupla de {} elementos)",
+                                "tuple index {} out of range (tuple of {} elements)",
                                 index, items.len()
                             ),
                         ))
@@ -3902,7 +3902,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     },
                     span.line, span.column,
                     format!(
-                        "acceso `.{}` solo aplica a tuplas, recibí `{}`",
+                        "access `.{}` only applies to tuples, received `{}`",
                         index, other.type_name()
                     ),
                 ))),
@@ -3914,7 +3914,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             EvalSignal::Error(FitzError::new(
                 ErrorKind::UndefinedVariable(name.clone()),
                 span.line, span.column,
-                format!("variable `{}` no definida", name),
+                format!("undefined variable `{}`", name),
             ))
         }),
 
@@ -3955,7 +3955,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                                 let formatted = format_value_with_spec(&v, s)
                                     .map_err(|msg| EvalSignal::Error(FitzError::new(
                                         ErrorKind::TypeMismatch {
-                                            expected: "tipo compatible con format spec".into(),
+                                            expected: "type compatible with format spec".into(),
                                             found: v.type_name().into(),
                                         },
                                         e.span().line, e.span().column,
@@ -4015,7 +4015,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                                 ErrorKind::InvalidSyntax,
                                 span.line, span.column,
                                 format!(
-                                    "el tipo `{}` no tiene un campo llamado `{}`",
+                                    "type `{}` has no field named `{}`",
                                     type_name, field
                                 ),
                             ))
@@ -4027,7 +4027,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                             ErrorKind::UndefinedVariable(field.clone()),
                             span.line, span.column,
                             format!(
-                                "el módulo `{}` no exporta `{}`",
+                                "module `{}` does not export `{}`",
                                 name, field,
                             ),
                         ))
@@ -4061,8 +4061,8 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     },
                     span.line, span.column,
                     format!(
-                        "acceso a campo `.{}` sobre un valor de tipo `{}` — \
-                         solo se permite sobre instancias de tipos custom o módulos",
+                        "field access `.{}` on a value of type `{}` — \
+                         only allowed on custom type instances or modules",
                         field,
                         other.type_name()
                     ),
@@ -4097,7 +4097,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::UndefinedVariable(type_name.clone()),
                     span.line, span.column,
-                    format!("tipo `{}` no definido", type_name),
+                    format!("undefined type `{}`", type_name),
                 ))
             })?;
             let (declared_type_name, declared, resolved_defaults) = match ty {
@@ -4110,7 +4110,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         },
                         span.line, span.column,
                         format!(
-                            "`{}` no es un tipo — no se puede instanciar (es `{}`)",
+                            "`{}` is not a type — cannot instantiate (it is `{}`)",
                             type_name,
                             other.type_name()
                         ),
@@ -4129,7 +4129,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         ErrorKind::InvalidSyntax,
                         fs.line, fs.column,
                         format!(
-                            "el tipo `{}` no tiene un campo llamado `{}`",
+                            "type `{}` has no field named `{}`",
                             type_name, provided_name
                         ),
                     )));
@@ -4166,8 +4166,8 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         ErrorKind::InvalidSyntax,
                         span.line, span.column,
                         format!(
-                            "falta el campo `{}` al instanciar `{}` \
-                             (no tiene default y no es nullable)",
+                            "missing field `{}` when instantiating `{}` \
+                             (has no default and is not nullable)",
                             f.name, type_name
                         ),
                     )));
@@ -4301,7 +4301,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         },
                         cs.line, cs.column,
                         format!(
-                            "la condición de `if` debe ser Bool, no `{}`",
+                            "`if` condition must be Bool, not `{}`",
                             other.type_name()
                         ),
                     )));
@@ -4371,7 +4371,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                                 ErrorKind::TypeError,
                                 span.line, span.column,
                                 format!(
-                                    "el guard de un arm debe ser Bool, recibí {}",
+                                    "the guard of an arm must be Bool, received {}",
                                     other.type_name()
                                 ),
                             )));
@@ -4413,7 +4413,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
                 span.line, span.column,
-                "el `match` no matcheó ningún brazo",
+                "`match` did not match any arm",
             )))
         }
 
@@ -4464,7 +4464,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         None => Err(EvalSignal::Error(FitzError::new(
                             ErrorKind::InvalidSyntax,
                             await_span.line, await_span.column,
-                            "`.await` sobre un `Future` que ya fue consumido",
+                            "`.await` on a `Future` that was already consumed",
                         ))),
                     }
                 }
@@ -4475,7 +4475,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     },
                     await_span.line, await_span.column,
                     format!(
-                        "`.await` solo aplica a `Future<T>`, recibió `{}`",
+                        "`.await` only applies to `Future<T>`, received `{}`",
                         other.type_name()
                     ),
                 ))),
@@ -4496,7 +4496,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     },
                     try_span.line, try_span.column,
                     format!(
-                        "el operador `?` requiere un valor `Result`, recibió `{}`",
+                        "operator `?` requires a `Result` value, received `{}`",
                         other.type_name()
                     ),
                 ))),
@@ -4510,7 +4510,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "nodo `Expr::Error` en el AST — la CLI strict no debería producirlo (bug del compilador, Fase 9.0.1)",
+            "`Expr::Error` node in the AST — the strict CLI should not produce it (compiler bug, Phase 9.0.1)",
         ))),
     }
 }
@@ -4628,7 +4628,7 @@ fn resolve_named_args(
                     span.line,
                     span.column,
                     format!(
-                        "`{}` no tiene un parámetro llamado `{}`",
+                        "`{}` has no parameter named `{}`",
                         display_name, name
                     ),
                 ))
@@ -4640,7 +4640,7 @@ fn resolve_named_args(
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    format!("`{}`: el argumento `{}` está duplicado", display_name, name),
+                    format!("`{}`: argument `{}` is duplicated", display_name, name),
                 )));
             }
             slots[idx] = Some(value);
@@ -4651,7 +4651,7 @@ fn resolve_named_args(
                     span.line,
                     span.column,
                     format!(
-                        "`{}`: no se puede pasar un argumento posicional después de uno nombrado",
+                        "`{}`: cannot pass a positional argument after a named one",
                         display_name
                     ),
                 )));
@@ -4718,8 +4718,8 @@ async fn invoke_value_named(
                     span.line,
                     span.column,
                     format!(
-                        "`{}` tiene un parámetro variádico; los argumentos nombrados \
-                         no son compatibles con varargs en esta versión",
+                        "`{}` has a variadic parameter; named arguments \
+                         are not compatible with varargs in this version",
                         display_name
                     ),
                 )));
@@ -4739,7 +4739,7 @@ async fn invoke_value_named(
                                 span.line,
                                 span.column,
                                 format!(
-                                    "`{}`: falta el argumento `{}` (no tiene default)",
+                                    "`{}`: missing argument `{}` (no default)",
                                     display_name, param.name
                                 ),
                             ))
@@ -4779,14 +4779,14 @@ async fn invoke_value_named(
             ErrorKind::TypeError,
             span.line,
             span.column,
-            format!("el builtin `{}` no soporta argumentos nombrados", name),
+            format!("builtin `{}` does not support named arguments", name),
         ))),
         other => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeError,
             span.line,
             span.column,
             format!(
-                "`{}` no es invocable o no soporta argumentos nombrados (es {})",
+                "`{}` is not invokable or does not support named arguments (is {})",
                 display_name,
                 other.type_name()
             ),
@@ -4833,7 +4833,7 @@ fn dispatch_builtin_kwargs(
                                 span.line,
                                 span.column,
                                 format!(
-                                    "`{}` espera 1 solo argumento posicional (msg: Str) — recibió 2 sin nombre",
+                                    "`{}` expects 1 positional argument (msg: Str) — received 2 unnamed",
                                     display
                                 ),
                             )));
@@ -4849,7 +4849,7 @@ fn dispatch_builtin_kwargs(
                                     span.line,
                                     span.column,
                                     format!(
-                                        "`{}`: msg debe ser Str, recibió `{}`",
+                                        "`{}`: msg must be Str, received `{}`",
                                         display,
                                         other.type_name()
                                     ),
@@ -4879,7 +4879,7 @@ fn dispatch_builtin_kwargs(
                                 span.line,
                                 span.column,
                                 format!(
-                                    "`{}`: el kwarg `{}` está reservado (el logger lo emite automáticamente)",
+                                    "`{}`: kwarg `{}` is reserved (the logger emits it automatically)",
                                     display, key_name
                                 ),
                             )));
@@ -4906,7 +4906,7 @@ fn dispatch_builtin_kwargs(
                                     span.line,
                                     span.column,
                                     format!(
-                                        "`{}`: kwarg `{}` tiene tipo no serializable (`{}`). Soportados: Int, Float, Str, Bool, Null, Secret, List, Map",
+                                        "`{}`: kwarg `{}` has non-serializable type (`{}`). Supported: Int, Float, Str, Bool, Null, Secret, List, Map",
                                         display, key_name, other.type_name()
                                     ),
                                 )));
@@ -4921,7 +4921,7 @@ fn dispatch_builtin_kwargs(
                     span.line,
                     span.column,
                     format!(
-                        "`{}(msg, k: v, ...)` requiere el primer arg posicional (msg: Str)",
+                        "`{}(msg, k: v, ...)` requires the first positional arg (msg: Str)",
                         display
                     ),
                 ))
@@ -4943,7 +4943,7 @@ fn dispatch_builtin_kwargs(
                             return Err(EvalSignal::Error(FitzError::new(
                                 ErrorKind::InvalidSyntax,
                                 span.line, span.column,
-                                "`db.connect` espera solo 1 arg posicional (url: Str) — recibió 2 sin nombre".to_string(),
+                                "`db.connect` expects only 1 positional arg (url: Str) — received 2 unnamed".to_string(),
                             )));
                         }
                         match value {
@@ -4957,7 +4957,7 @@ fn dispatch_builtin_kwargs(
                                     span.line,
                                     span.column,
                                     format!(
-                                        "`db.connect` espera Str (URL Postgres), recibió `{}`",
+                                        "`db.connect` expects Str (Postgres URL), received `{}`",
                                         other.type_name()
                                     ),
                                 )));
@@ -4972,7 +4972,7 @@ fn dispatch_builtin_kwargs(
                                     span.line,
                                     span.column,
                                     format!(
-                                        "`db.connect(..., max_conns={})` fuera de rango [1, 1000]",
+                                        "`db.connect(..., max_conns={})` out of range [1, 1000]",
                                         n
                                     ),
                                 )));
@@ -4988,7 +4988,7 @@ fn dispatch_builtin_kwargs(
                                 span.line,
                                 span.column,
                                 format!(
-                                    "`db.connect(..., max_conns=N)` espera Int, recibió `{}`",
+                                    "`db.connect(..., max_conns=N)` expects Int, received `{}`",
                                     other.type_name()
                                 ),
                             )));
@@ -5000,7 +5000,7 @@ fn dispatch_builtin_kwargs(
                             span.line,
                             span.column,
                             format!(
-                                "`db.connect` no acepta kwarg `{}` (soportados: `max_conns`)",
+                                "`db.connect` does not accept kwarg `{}` (supported: `max_conns`)",
                                 other
                             ),
                         )));
@@ -5012,7 +5012,7 @@ fn dispatch_builtin_kwargs(
                     ErrorKind::InvalidSyntax,
                     span.line,
                     span.column,
-                    "`db.connect(url, max_conns=N)` requiere el primer arg posicional (url: Str)"
+                    "`db.connect(url, max_conns=N)` requires the first positional arg (url: Str)"
                         .to_string(),
                 ))
             })?;
@@ -5063,7 +5063,7 @@ fn dispatch_builtin_kwargs(
                             return Err(EvalSignal::Error(FitzError::new(
                                 ErrorKind::InvalidSyntax,
                                 span.line, span.column,
-                                "`DbConn.transaction` espera solo 1 arg posicional (closure) — recibió 2 sin nombre".to_string(),
+                                "`DbConn.transaction` expects only 1 positional arg (closure) — received 2 unnamed".to_string(),
                             )));
                         }
                         callback = Some(value.clone());
@@ -5079,7 +5079,7 @@ fn dispatch_builtin_kwargs(
                                     },
                                     span.line, span.column,
                                     format!(
-                                        "`DbConn.transaction(..., isolation=...)` espera Str, recibió `{}`",
+                                        "`DbConn.transaction(..., isolation=...)` expects Str, received `{}`",
                                         other.type_name()
                                     ),
                                 )));
@@ -5109,9 +5109,9 @@ fn dispatch_builtin_kwargs(
                                 span.line,
                                 span.column,
                                 format!(
-                                    "`isolation=\"{}\"` no es válido. Soportados: \
+                                    "`isolation=\"{}\"` is not valid. Supported: \
                                      SERIALIZABLE, REPEATABLE READ, READ COMMITTED, \
-                                     READ UNCOMMITTED (opcional ` READ ONLY`/` READ WRITE`)",
+                                     READ UNCOMMITTED (optional ` READ ONLY`/` READ WRITE`)",
                                     s
                                 ),
                             )));
@@ -5123,7 +5123,7 @@ fn dispatch_builtin_kwargs(
                             ErrorKind::InvalidSyntax,
                             span.line, span.column,
                             format!(
-                                "`DbConn.transaction` no acepta kwarg `{}` (soportado: `isolation`)",
+                                "`DbConn.transaction` does not accept kwarg `{}` (supported: `isolation`)",
                                 other
                             ),
                         )));
@@ -5134,7 +5134,7 @@ fn dispatch_builtin_kwargs(
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     span.line, span.column,
-                    "`DbConn.transaction(closure, isolation=...)` requiere el primer arg posicional (closure)".to_string(),
+                    "`DbConn.transaction(closure, isolation=...)` requires the first positional arg (closure)".to_string(),
                 ))
             })?;
             return db_conn_transaction(std::sync::Arc::clone(handle), callback, isolation, span)
@@ -5198,8 +5198,8 @@ async fn dispatch_method_named(
             span.line,
             span.column,
             format!(
-                "el método `.{}()` no acepta argumentos nombrados \
-                 (solo soportado en métodos custom sobre `type`)",
+                "method `.{}()` does not accept named arguments \
+                 (only supported on custom methods on `type`)",
                 method
             ),
         ))
@@ -5214,8 +5214,8 @@ async fn dispatch_method_named(
             span.line,
             span.column,
             format!(
-                "el método `.{}()` tiene un parámetro variádico; \
-                 los argumentos nombrados no son compatibles con varargs",
+                "method `.{}()` has a variadic parameter; \
+                 named arguments are not compatible with varargs",
                 method
             ),
         )));
@@ -5234,7 +5234,7 @@ async fn dispatch_method_named(
                         span.line,
                         span.column,
                         format!(
-                            "el método `.{}()`: falta el argumento `{}` (no tiene default)",
+                            "method `.{}()`: missing argument `{}` (no default)",
                             method, param.name
                         ),
                     ))
@@ -5262,9 +5262,9 @@ fn builtin_spawn_stub(_args: &[Value]) -> FitzResult<Value> {
         ErrorKind::InvalidSyntax,
         0,
         0,
-        "spawn: solo se puede usar como `spawn(fn_call)` directo, \
-         no como valor first-class (let s = spawn) en este MVP. \
-         El target debe ser una fn declarada con `@background`."
+        "spawn: can only be used as direct `spawn(fn_call)`, \
+         not as a first-class value (let s = spawn) in this MVP. \
+         The target must be a fn declared with `@background`."
             .to_string(),
     ))
 }
@@ -5308,7 +5308,7 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
     };
     if args.len() != 1 {
         return Err(err(format!(
-            "spawn: espera exactamente 1 argumento (un call a fn `@background`), recibió {}.",
+            "spawn: expects exactly 1 argument (a call to a fn `@background`), received {}.",
             args.len()
         )));
     }
@@ -5320,14 +5320,14 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
             Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => {
                 return Err(err(
-                    "spawn: el argumento debe ser un call literal a una fn `@background`."
+                    "spawn: the argument must be a literal call to a fn `@background`."
                         .to_string(),
                 ));
             }
         },
         _ => {
             return Err(err(
-                "spawn: el argumento debe ser un call literal a una fn `@background`.".to_string(),
+                "spawn: the argument must be a literal call to a fn `@background`.".to_string(),
             ));
         }
     };
@@ -5335,7 +5335,7 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
         Expr::Ident(name, _) => name.clone(),
         _ => {
             return Err(err(
-                "spawn: el callee del inner call debe ser una fn top-level con `@background`."
+                "spawn: the callee of the inner call must be a top-level fn with `@background`."
                     .to_string(),
             ));
         }
@@ -5344,7 +5344,7 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
     // does not exist → clear error (can happen with `fitz run --no-typecheck`).
     let handler = env.lock().get(&fn_name).ok_or_else(|| {
         err(format!(
-            "spawn: la fn `{}` no existe en este scope.",
+            "spawn: fn `{}` does not exist in this scope.",
             fn_name
         ))
     })?;
@@ -5384,7 +5384,7 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
                     ErrorKind::InvalidSyntax,
                     0,
                     0,
-                    "spawn: el task spawneado emitió un signal no-Error inesperado".to_string(),
+                    "spawn: the spawned task emitted an unexpected non-Error signal".to_string(),
                 )),
             },
         }
@@ -5399,7 +5399,7 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
                 ErrorKind::InvalidSyntax,
                 0,
                 0,
-                format!("spawn: la task spawneada falló: {}", join_err),
+                format!("spawn: spawned task failed: {}", join_err),
             )),
         }
     });
@@ -5462,21 +5462,21 @@ pub async fn invoke_value(
                     span.column,
                     if has_varargs {
                         format!(
-                            "`{}` espera al menos {} argumento(s), recibió {}",
+                            "`{}` expects at least {} argument(s), received {}",
                             display_name,
                             required,
                             arg_values.len(),
                         )
                     } else if required == params.len() {
                         format!(
-                            "`{}` espera {} argumento(s), recibió {}",
+                            "`{}` expects {} argument(s), received {}",
                             display_name,
                             params.len(),
                             arg_values.len(),
                         )
                     } else {
                         format!(
-                            "`{}` espera entre {} y {} argumento(s), recibió {}",
+                            "`{}` expects between {} and {} argument(s), received {}",
                             display_name,
                             required,
                             params.len(),
@@ -5512,7 +5512,7 @@ pub async fn invoke_value(
                     let default_expr = param
                         .default
                         .as_ref()
-                        .expect("params sin default ya fueron cubiertos por arity check");
+                        .expect("params without default already covered by arity check");
                     eval_expr(default_expr, call_env.clone()).await?
                 };
                 call_env.lock().define(param.name.clone(), value);
@@ -5573,13 +5573,13 @@ pub async fn invoke_value(
 
         other => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeMismatch {
-                expected: "función".into(),
+                expected: "function".into(),
                 found: other.type_name().into(),
             },
             span.line,
             span.column,
             format!(
-                "`{}` no es invocable (es {})",
+                "`{}` is not invokable (is {})",
                 display_name,
                 other.type_name()
             ),
@@ -5647,7 +5647,7 @@ async fn dispatch_method(
                     ErrorKind::InvalidSyntax,
                     span.line, span.column,
                     format!(
-                        "`{}` es un método estático: invocá como `{}.{}({})`, no como `<instancia>.{}({})`",
+                        "`{}` is a static method: invoke as `{}.{}({})`, not as `<instance>.{}({})`",
                         m.name, type_name, m.name,
                         m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
                         m.name,
@@ -5673,7 +5673,7 @@ async fn dispatch_method(
                     ErrorKind::InvalidSyntax,
                     span.line, span.column,
                     format!(
-                        "`{}.{}()` es un método de instancia: invocá como `<instancia>.{}({})`, no como `{}.{}({})`",
+                        "`{}.{}()` is an instance method: invoke as `<instance>.{}({})`, not as `{}.{}({})`",
                         type_name, m.name, m.name,
                         m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
                         type_name, m.name,
@@ -5699,7 +5699,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "el tipo `{}` no tiene un método estático llamado `{}`",
+                "type `{}` has no static method named `{}`",
                 type_name, method
             ),
         )));
@@ -5715,7 +5715,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`QueryBuilder` no tiene el método `{}` (soportados: where, order_by, limit, offset, all, first, count, sum, avg, min, max, group_by, update, delete)",
+                "`QueryBuilder` has no method `{}` (supported: where, order_by, limit, offset, all, first, count, sum, avg, min, max, group_by, update, delete)",
                 method,
             ),
         )));
@@ -5738,7 +5738,7 @@ async fn dispatch_method(
                     span.line,
                     span.column,
                     format!(
-                        "Secret.expose() no admite argumentos, recibió {}",
+                        "Secret.expose() does not accept arguments, received {}",
                         args.len()
                     ),
                 )));
@@ -5833,7 +5833,7 @@ async fn dispatch_method(
                     ErrorKind::InvalidSyntax,
                     span.line,
                     span.column,
-                    format!("`Range.len()` no toma args, recibió {}", args.len()),
+                    format!("`Range.len()` takes no args, received {}", args.len()),
                 )));
             }
             Ok(Value::Int((end - start).max(0)))
@@ -5949,7 +5949,7 @@ async fn dispatch_method(
                         span.line,
                         span.column,
                         format!(
-                            "`Int.to_str_base()` espera `Int`, recibió `{}`",
+                            "`Int.to_str_base()` expects `Int`, received `{}`",
                             other.type_name()
                         ),
                     )))
@@ -5966,7 +5966,7 @@ async fn dispatch_method(
                         span.line,
                         span.column,
                         format!(
-                            "`Int.to_str_base()` solo soporta bases 2, 8, 10 o 16; recibió {}",
+                            "`Int.to_str_base()` only supports bases 2, 8, 10 or 16; received {}",
                             base
                         ),
                     )))
@@ -6041,7 +6041,7 @@ async fn dispatch_method(
                     ErrorKind::UndefinedVariable(method.into()),
                     span.line,
                     span.column,
-                    format!("el módulo `{}` no exporta `{}`", name, method),
+                    format!("module `{}` does not export `{}`", name, method),
                 ))
             })?;
             invoke_value(value, args, method, span).await
@@ -6078,7 +6078,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`WsConn` no tiene el método `{}` (soportados: recv, send, broadcast, close)",
+                "`WsConn` has no method `{}` (supported: recv, send, broadcast, close)",
                 other,
             ),
         ))),
@@ -6114,7 +6114,7 @@ async fn dispatch_method(
                     span.line,
                     span.column,
                     format!(
-                        "`DbConn.transaction` espera 1 argumento (fn callback), recibió {}",
+                        "`DbConn.transaction` expects 1 argument (fn callback), received {}",
                         args.len()
                     ),
                 )));
@@ -6128,7 +6128,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`DbConn` no tiene el método `{}` (soportados: query, exec, close, is_closed, transaction)",
+                "`DbConn` has no method `{}` (supported: query, exec, close, is_closed, transaction)",
                 other,
             ),
         ))),
@@ -6164,7 +6164,7 @@ async fn dispatch_method(
             // Date + 00:00:00 UTC time → DateTime<Utc>.
             expect_arity("to_datetime", &args, 0, span)?;
             let dt = d.and_hms_opt(0, 0, 0)
-                .expect("00:00:00 siempre válida")
+                .expect("00:00:00 always valid")
                 .and_utc();
             Ok(Value::DateTime(dt))
         }
@@ -6192,7 +6192,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
+                "`Date` has no method `{}` (supported: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
                 other,
             ),
         ))),
@@ -6291,7 +6291,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
+                "`DateTime` has no method `{}` (supported: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
                 other,
             ),
         ))),
@@ -6311,7 +6311,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`Uuid` no tiene el método `{}` (soportados: to_str, is_nil)",
+                "`Uuid` has no method `{}` (supported: to_str, is_nil)",
                 other,
             ),
         ))),
@@ -6343,7 +6343,7 @@ fn date_format(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<V
                 span.line,
                 span.column,
                 format!(
-                    "`Date.format(fmt)` espera Str, recibió `{}`",
+                    "`Date.format(fmt)` expects Str, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -6369,7 +6369,7 @@ fn datetime_format(
                 span.line,
                 span.column,
                 format!(
-                    "`DateTime.format(fmt)` espera Str, recibió `{}`",
+                    "`DateTime.format(fmt)` expects Str, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -6396,7 +6396,7 @@ fn expect_int_arg(method: &str, args: &[Value], span: Span) -> EvalResult<i64> {
             span.line,
             span.column,
             format!(
-                "`{}(n)` espera `Int`, recibió `{}`",
+                "`{}(n)` expects `Int`, received `{}`",
                 method,
                 other.type_name()
             ),
@@ -6416,7 +6416,7 @@ fn neg_int_arg(args: &[Value], method: &str, span: Span) -> EvalResult<Vec<Value
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`{}({})` overflow: i64::MIN no tiene opuesto", method, n),
+            format!("`{}({})` overflow: i64::MIN has no opposite", method, n),
         ))),
     }
 }
@@ -6452,7 +6452,7 @@ fn date_add_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult
             span.line,
             span.column,
             format!(
-                "`Date.add_days({})` overflow: resultado fuera del rango NaiveDate",
+                "`Date.add_days({})` overflow: result out of NaiveDate range",
                 n
             ),
         ))),
@@ -6503,7 +6503,7 @@ fn date_add_months(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResu
             span.line,
             span.column,
             format!(
-                "`Date.add_months({})` overflow: resultado fuera del rango NaiveDate",
+                "`Date.add_months({})` overflow: result out of NaiveDate range",
                 n
             ),
         ))),
@@ -6524,7 +6524,7 @@ fn date_diff_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResul
                 span.line,
                 span.column,
                 format!(
-                    "`Date.diff_days(other)` espera `Date`, recibió `{}`",
+                    "`Date.diff_days(other)` expects `Date`, received `{}`",
                     v.type_name()
                 ),
             )));
@@ -6566,7 +6566,7 @@ fn datetime_add_duration(
             span.line,
             span.column,
             format!(
-                "`DateTime.{}({})` overflow: resultado fuera del rango DateTime",
+                "`DateTime.{}({})` overflow: result out of DateTime range",
                 method, n
             ),
         ))),
@@ -6589,7 +6589,7 @@ fn datetime_add_days(
             span.line,
             span.column,
             format!(
-                "`DateTime.add_days({})` overflow: resultado fuera del rango DateTime",
+                "`DateTime.add_days({})` overflow: result out of DateTime range",
                 n
             ),
         ))),
@@ -6640,7 +6640,7 @@ fn datetime_add_months(
             span.line,
             span.column,
             format!(
-                "`DateTime.add_months({})` overflow: resultado fuera del rango DateTime",
+                "`DateTime.add_months({})` overflow: result out of DateTime range",
                 n
             ),
         ))),
@@ -6670,7 +6670,7 @@ fn datetime_diff(
                 span.line,
                 span.column,
                 format!(
-                    "`DateTime.{}(other)` espera `DateTime`, recibió `{}`",
+                    "`DateTime.{}(other)` expects `DateTime`, received `{}`",
                     method,
                     v.type_name()
                 ),
@@ -6711,7 +6711,7 @@ fn datetime_in_tz(
                 span.line,
                 span.column,
                 format!(
-                    "`DateTime.in_tz(name)` espera `Str` (IANA tz name), recibió `{}`",
+                    "`DateTime.in_tz(name)` expects `Str` (IANA tz name), received `{}`",
                     v.type_name()
                 ),
             )));
@@ -6726,7 +6726,7 @@ fn datetime_in_tz(
         }
         Err(_) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
             Value::Str(format!(
-                "DateTime.in_tz: `{}` no es un nombre IANA válido (ej: `America/Argentina/Buenos_Aires`, `Europe/Paris`, `UTC`)",
+                "DateTime.in_tz: `{}` is not a valid IANA name (e.g.: `America/Argentina/Buenos_Aires`, `Europe/Paris`, `UTC`)",
                 tz_name
             )),
         )))),
@@ -6769,14 +6769,14 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             span.line,
             span.column,
             format!(
-                "`WsConn.recv()` no acepta argumentos, recibió {}",
+                "`WsConn.recv()` does not accept arguments, received {}",
                 args.len()
             ),
         )));
     }
     let handle = match receiver {
         Value::WsConn(h) => h,
-        _ => unreachable!("dispatch_method ya verificó WsConn"),
+        _ => unreachable!("dispatch_method already verified WsConn"),
     };
     if handle.closed.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
@@ -6807,14 +6807,14 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                 // T = Bytes + text frame → clear mismatch.
                 (true, crate::value::IncomingFrame::Text(_)) => {
                     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                        "WsConn.recv(): se esperaba frame binario (T = Bytes), llegó text"
+                        "WsConn.recv(): expected binary frame (T = Bytes), got text"
                             .to_string(),
                     )))))
                 }
                 // T ≠ Bytes + binary frame → clear mismatch.
                 (false, crate::value::IncomingFrame::Binary(_)) => {
                     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                        "WsConn.recv(): se esperaba frame text JSON, llegó binary (usá WsConn<Bytes> para frames binarios)"
+                        "WsConn.recv(): expected text JSON frame, got binary (use WsConn<Bytes> for binary frames)"
                             .to_string(),
                     )))))
                 }
@@ -6831,7 +6831,7 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                                         Err(EvalSignal::Error(e)) => {
                                             return Ok(Value::Result(ResultVariant::Err(Box::new(
                                                 Value::Str(format!(
-                                                    "WsConn.recv(): coerción al tipo `{}` falló: {}",
+                                                    "WsConn.recv(): coercion to type `{}` failed: {}",
                                                     annot.display_name(),
                                                     e.message,
                                                 )),
@@ -6845,7 +6845,7 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                             Ok(Value::Result(ResultVariant::Ok(Box::new(coerced))))
                         }
                         Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                            format!("WsConn.recv(): frame JSON inválido: {}", e),
+                            format!("WsConn.recv(): invalid JSON frame: {}", e),
                         ))))),
                     }
                 }
@@ -6856,7 +6856,7 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                 .closed
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                "WsConn cerrada por el peer".to_string(),
+                "WsConn closed by peer".to_string(),
             )))))
         }
         Err(msg) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
@@ -6875,7 +6875,7 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             span.line,
             span.column,
             format!(
-                "`WsConn.send(msg)` espera 1 argumento, recibió {}",
+                "`WsConn.send(msg)` expects 1 argument, received {}",
                 args.len()
             ),
         )));
@@ -6901,7 +6901,7 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             other => {
                 return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
                     format!(
-                        "WsConn.send(): SEND = Bytes pero el argumento es `{}`",
+                        "WsConn.send(): SEND = Bytes but the argument is `{}`",
                         other.type_name()
                     ),
                 )))));
@@ -6914,7 +6914,7 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                 Ok(s) => s,
                 Err(e) => {
                     return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                        format!("WsConn.send(): no serializable: {}", e),
+                        format!("WsConn.send(): not serializable: {}", e),
                     )))));
                 }
             },
@@ -6933,7 +6933,7 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                 .closed
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                "WsConn.send(): outbox cerrado (conn caída)".to_string(),
+                "WsConn.send(): outbox closed (conn dropped)".to_string(),
             )))))
         }
     }
@@ -6949,7 +6949,7 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
             span.line,
             span.column,
             format!(
-                "`WsConn.broadcast(msg)` espera 1 argumento, recibió {}",
+                "`WsConn.broadcast(msg)` expects 1 argument, received {}",
                 args.len()
             ),
         )));
@@ -6970,7 +6970,7 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
             other => {
                 return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
                     format!(
-                        "WsConn.broadcast(): SEND = Bytes pero el argumento es `{}`",
+                        "WsConn.broadcast(): SEND = Bytes but the argument is `{}`",
                         other.type_name()
                     ),
                 )))));
@@ -6984,7 +6984,7 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
                 Ok(s) => s,
                 Err(e) => {
                     return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                        format!("WsConn.broadcast(): no serializable: {}", e),
+                        format!("WsConn.broadcast(): not serializable: {}", e),
                     )))));
                 }
             },
@@ -7009,7 +7009,7 @@ fn ws_conn_close(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
             span.line,
             span.column,
             format!(
-                "`WsConn.close()` no acepta argumentos, recibió {}",
+                "`WsConn.close()` does not accept arguments, received {}",
                 args.len()
             ),
         )));
@@ -7072,14 +7072,14 @@ async fn invoke_custom_method(
             span.column,
             if required == method.params.len() {
                 format!(
-                    "el método `.{}()` espera {} argumento(s), recibió {}",
+                    "method `.{}()` expects {} argument(s), received {}",
                     method.name,
                     method.params.len(),
                     args.len(),
                 )
             } else {
                 format!(
-                    "el método `.{}()` espera entre {} y {} argumento(s), recibió {}",
+                    "method `.{}()` expects between {} and {} argument(s), received {}",
                     method.name,
                     required,
                     method.params.len(),
@@ -7106,7 +7106,7 @@ async fn invoke_custom_method(
         let v = if i < provided {
             arg_iter.next().unwrap()
         } else {
-            let de = p.default.as_ref().expect("ya cubierto por arity check");
+            let de = p.default.as_ref().expect("already covered by arity check");
             eval_expr(de, method_env.clone()).await?
         };
         method_env.lock().define(p.name.clone(), v);
@@ -7163,14 +7163,14 @@ async fn invoke_static_method(
             span.column,
             if required == method.params.len() {
                 format!(
-                    "el método estático `{}` espera {} argumento(s), recibió {}",
+                    "static method `{}` expects {} argument(s), received {}",
                     method.name,
                     method.params.len(),
                     args.len(),
                 )
             } else {
                 format!(
-                    "el método estático `{}` espera entre {} y {} argumento(s), recibió {}",
+                    "static method `{}` expects between {} and {} argument(s), received {}",
                     method.name,
                     required,
                     method.params.len(),
@@ -7187,7 +7187,7 @@ async fn invoke_static_method(
         let v = if i < provided {
             arg_iter.next().unwrap()
         } else {
-            let de = p.default.as_ref().expect("ya cubierto por arity check");
+            let de = p.default.as_ref().expect("already covered by arity check");
             eval_expr(de, method_env.clone()).await?
         };
         method_env.lock().define(p.name.clone(), v);
@@ -7243,7 +7243,7 @@ fn expect_arity(method: &str, args: &[Value], expected: usize, span: Span) -> Ev
             span.line,
             span.column,
             format!(
-                "`.{}()` espera {} argumento(s), recibió {}",
+                "`.{}()` expects {} argument(s), received {}",
                 method,
                 expected,
                 args.len(),
@@ -7266,7 +7266,7 @@ async fn invoke_callback(
     invoke_value(
         callback.clone(),
         vec![arg],
-        &format!("callback de .{}()", method),
+        &format!(".{}() callback", method),
         span,
     )
     .await
@@ -7299,7 +7299,7 @@ fn list_pop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "`.pop()` sobre lista vacía".to_string(),
+            "`.pop()` on empty list".to_string(),
         ))),
     }
 }
@@ -7346,7 +7346,7 @@ async fn list_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.filter()` tiene que devolver Bool, devolvió `{}`",
+                        "the `.filter()` callback must return Bool, returned `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -7381,7 +7381,7 @@ async fn list_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.find()` tiene que devolver Bool, devolvió `{}`",
+                        "the `.find()` callback must return Bool, returned `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -7389,7 +7389,7 @@ async fn list_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
         }
     }
     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-        "no encontrado".into(),
+        "not found".into(),
     )))))
 }
 
@@ -7429,7 +7429,7 @@ async fn list_any(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.any()` tiene que devolver Bool, devolvió `{}`",
+                        "the `.any()` callback must return Bool, returned `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -7465,7 +7465,7 @@ async fn list_all(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.all()` tiene que devolver Bool, devolvió `{}`",
+                        "the `.all()` callback must return Bool, returned `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -7501,7 +7501,7 @@ async fn list_count(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.count()` tiene que devolver Bool, devolvió `{}`",
+                        "the `.count()` callback must return Bool, returned `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -7539,7 +7539,7 @@ async fn list_flat_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalRes
                     },
                     span.line, span.column,
                     format!(
-                        "`.flat_map()` requiere callback que devuelva `List`: el elemento [{}] devolvió `{}`",
+                        "`.flat_map()` requires callback that returns `List`: element [{}] returned `{}`",
                         i, other.type_name(),
                     ),
                 )));
@@ -7549,7 +7549,7 @@ async fn list_flat_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalRes
     Ok(Value::new_list(out))
 }
 
-/// Mini-batch Ex2 — `xs.first()`: first element or `Err("no encontrado")`
+/// Mini-batch Ex2 — `xs.first()`: first element or `Err("not found")`
 /// if the list is empty. Returns `Result<T>` to be consistent with
 /// `find`/`find_index` (all accessors that can fail return Result).
 fn list_first(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -7562,7 +7562,7 @@ fn list_first(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     match g.first() {
         Some(v) => Ok(Value::Result(ResultVariant::Ok(Box::new(v.clone())))),
         None => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "lista vacía".into(),
+            "empty list".into(),
         ))))),
     }
 }
@@ -7578,14 +7578,14 @@ fn list_last(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     match g.last() {
         Some(v) => Ok(Value::Result(ResultVariant::Ok(Box::new(v.clone())))),
         None => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "lista vacía".into(),
+            "empty list".into(),
         ))))),
     }
 }
 
 /// Mini-batch Mb2 — Common helper for `min`/`max`/`sum`: extracts
 /// the receiver, validates homogeneous Int or Float. Returns
-/// `Err` with `lista vacía` when applicable to min/max; sum handles
+/// `Err` with `empty list` when applicable to min/max; sum handles
 /// it with a zero sentinel inside each branch. Returns
 /// `(items_snapshot, "Int"|"Float")` or a clear error.
 fn require_numeric_list(
@@ -7613,7 +7613,7 @@ fn require_numeric_list(
                 span.line,
                 span.column,
                 format!(
-                    "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                    "`.{}()` only applies to `List<Int>` or `List<Float>`, received `List<{}>`",
                     method,
                     snapshot[0].type_name(),
                 ),
@@ -7635,7 +7635,7 @@ fn require_numeric_list(
                 span.line,
                 span.column,
                 format!(
-                    "`.{}()` requiere elementos del mismo tipo: vi `{}` y `{}`",
+                    "`.{}()` requires elements of the same type: saw `{}` and `{}`",
                     method, first_kind, kind,
                 ),
             )));
@@ -7645,7 +7645,7 @@ fn require_numeric_list(
 }
 
 /// Mini-batch Mb2 — `xs.min()` / `xs.max()` on `List<Int>` or
-/// `List<Float>`. Return `Result<T>`: `Err("lista vacía")` if the
+/// `List<Float>`. Return `Result<T>`: `Err("empty list")` if the
 /// list has no elements. For `Float` we use `partial_cmp` returning
 /// `Equal` on NaN (deterministic, parallel to `sort`).
 fn list_min(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -7653,7 +7653,7 @@ fn list_min(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     let (snapshot, kind) = require_numeric_list(receiver, "min", span)?;
     if snapshot.is_empty() {
         return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "lista vacía".into(),
+            "empty list".into(),
         )))));
     }
     let best = match kind {
@@ -7691,7 +7691,7 @@ fn list_max(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     let (snapshot, kind) = require_numeric_list(receiver, "max", span)?;
     if snapshot.is_empty() {
         return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "lista vacía".into(),
+            "empty list".into(),
         )))));
     }
     let best = match kind {
@@ -7763,7 +7763,7 @@ fn list_sum(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
 
 /// Mini-batch Lx — `xs.find_index(pred)`: index of the first element
 /// satisfying the predicate. Returns `Result<Int>`: `Ok(i)` if found,
-/// `Err("no encontrado")` otherwise. Parallel to `find` (which
+/// `Err("not found")` otherwise. Parallel to `find` (which
 /// returns the element instead of the index).
 #[async_recursion]
 async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -7792,7 +7792,7 @@ async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalR
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.find_index()` tiene que devolver Bool, devolvió `{}`",
+                        "the `.find_index()` callback must return Bool, returned `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -7800,7 +7800,7 @@ async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalR
         }
     }
     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-        "no encontrado".into(),
+        "not found".into(),
     )))))
 }
 
@@ -7833,7 +7833,7 @@ fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                 span.line,
                 span.column,
                 format!(
-                    "`.sort()` requiere elementos del mismo tipo: vi `{}` y `{}`",
+                    "`.sort()` requires elements of the same type: saw `{}` and `{}`",
                     first_kind,
                     v.type_name(),
                 ),
@@ -7865,7 +7865,7 @@ fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                 span.line,
                 span.column,
                 format!(
-                    "`.sort()` no soporta `List<{}>` (solo Int/Float/Str/Bool)",
+                    "`.sort()` does not support `List<{}>` (only Int/Float/Str/Bool)",
                     other
                 ),
             )));
@@ -7928,7 +7928,7 @@ fn range_step_by(start: i64, end: i64, args: Vec<Value>, span: Span) -> EvalResu
                 span.line,
                 span.column,
                 format!(
-                    "`Range.step_by()` espera `Int`, recibió `{}`",
+                    "`Range.step_by()` expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -7939,7 +7939,7 @@ fn range_step_by(start: i64, end: i64, args: Vec<Value>, span: Span) -> EvalResu
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`Range.step_by()` requiere n > 0, recibió {}", step),
+            format!("`Range.step_by()` requires n > 0, received {}", step),
         )));
     }
     let items: Vec<Value> = (start..end)
@@ -7983,7 +7983,7 @@ fn list_zip(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                 },
                 span.line,
                 span.column,
-                format!("`zip` espera otra `List`, recibió `{}`", other.type_name()),
+                format!("`zip` expects another `List`, received `{}`", other.type_name()),
             )));
         }
     };
@@ -8016,7 +8016,7 @@ fn list_chain(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                 span.line,
                 span.column,
                 format!(
-                    "`chain` espera otra `List`, recibió `{}`",
+                    "`chain` expects another `List`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -8053,7 +8053,7 @@ fn list_flatten(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                     span.line,
                     span.column,
                     format!(
-                        "`.flatten()` requiere `List<List<T>>`: el elemento [{}] es `{}`",
+                        "`.flatten()` requires `List<List<T>>`: element [{}] is `{}`",
                         i,
                         other.type_name(),
                     ),
@@ -8124,7 +8124,7 @@ async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                         span.line,
                         span.column,
                         format!(
-                            "`.sort_by(cmp)` espera que cmp devuelva `Int`, recibió `{}`",
+                            "`.sort_by(cmp)` expects cmp to return `Int`, received `{}`",
                             other.type_name(),
                         ),
                     )));
@@ -8241,7 +8241,7 @@ fn list_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
                 span.line,
                 span.column,
                 format!(
-                    "`List.split_at()` espera `Int`, recibió `{}`",
+                    "`List.split_at()` expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -8289,7 +8289,7 @@ fn list_starts_or_ends_with(
                 span.line,
                 span.column,
                 format!(
-                    "`.{}()` espera una `List` como arg, recibió `{}`",
+                    "`.{}()` expects a `List` as arg, received `{}`",
                     method,
                     other.type_name(),
                 ),
@@ -8343,7 +8343,7 @@ fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                 span.line,
                 span.column,
                 format!(
-                    "`.insert_at()`: idx espera `Int`, recibió `{}`",
+                    "`.insert_at()`: idx expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -8355,7 +8355,7 @@ fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`.insert_at()` no acepta idx negativo: recibió {}", idx),
+            format!("`.insert_at()` does not accept negative idx: received {}", idx),
         )));
     }
     let snapshot: Vec<Value> = items.lock().clone();
@@ -8388,7 +8388,7 @@ fn list_remove_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                 span.line,
                 span.column,
                 format!(
-                    "`.remove_at()`: idx espera `Int`, recibió `{}`",
+                    "`.remove_at()`: idx expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -8437,7 +8437,7 @@ fn list_zip_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                 span.line,
                 span.column,
                 format!(
-                    "`.zip_to_map()` espera una `List`, recibió `{}`",
+                    "`.zip_to_map()` expects a `List`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -8475,7 +8475,7 @@ fn list_take(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                 },
                 span.line,
                 span.column,
-                format!("`.take()` espera `Int`, recibió `{}`", other.type_name()),
+                format!("`.take()` expects `Int`, received `{}`", other.type_name()),
             )));
         }
     };
@@ -8508,7 +8508,7 @@ fn list_drop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                 },
                 span.line,
                 span.column,
-                format!("`.drop()` espera `Int`, recibió `{}`", other.type_name()),
+                format!("`.drop()` expects `Int`, received `{}`", other.type_name()),
             )));
         }
     };
@@ -8598,7 +8598,7 @@ fn list_cycle(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                 },
                 span.line,
                 span.column,
-                format!("`.cycle()` espera `Int`, recibió `{}`", other.type_name()),
+                format!("`.cycle()` expects `Int`, received `{}`", other.type_name()),
             )));
         }
     };
@@ -8661,7 +8661,7 @@ fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                 },
                 span.line,
                 span.column,
-                format!("`.windows()` espera `Int`, recibió `{}`", other.type_name()),
+                format!("`.windows()` expects `Int`, received `{}`", other.type_name()),
             )));
         }
     };
@@ -8670,7 +8670,7 @@ fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`.windows()` requiere n > 0, recibió {}", n),
+            format!("`.windows()` requires n > 0, received {}", n),
         )));
     }
     let snapshot: Vec<Value> = items.lock().clone();
@@ -8740,7 +8740,7 @@ async fn list_zip_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRes
                 span.line,
                 span.column,
                 format!(
-                    "`.zip_with()` espera otra `List`, recibió `{}`",
+                    "`.zip_with()` expects another `List`, received `{}`",
                     v.type_name()
                 ),
             )));
@@ -8779,7 +8779,7 @@ async fn list_max_min_by(
     let snapshot: Vec<Value> = items.lock().clone();
     if snapshot.is_empty() {
         return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "lista vacía".into(),
+            "empty list".into(),
         )))));
     }
     let mut best: Option<(i64, Value)> = None;
@@ -8797,7 +8797,7 @@ async fn list_max_min_by(
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.{}()` tiene que devolver `Int`, devolvió `{}`",
+                        "the `.{}()` callback must return `Int`, returned `{}`",
                         method,
                         other.type_name(),
                     ),
@@ -8858,7 +8858,7 @@ async fn list_partition(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
                     span.line,
                     span.column,
                     format!(
-                        "la callback de `.partition()` tiene que devolver Bool, devolvió `{}`",
+                        "the `.partition()` callback must return Bool, returned `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -8905,7 +8905,7 @@ fn list_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
                     span.line,
                     span.column,
                     format!(
-                        "`.to_map()` requiere `List<(K, V)>`: el elemento [{}] es `{}` (aridad {})",
+                        "`.to_map()` requires `List<(K, V)>`: element [{}] is `{}` (arity {})",
                         i,
                         other.type_name(),
                         if let Value::Tuple(p) = &other {
@@ -8936,7 +8936,7 @@ fn map_get(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
         }
     }
     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-        format!("clave no encontrada: {}", key),
+        format!("key not found: {}", key),
     )))))
 }
 
@@ -9008,7 +9008,7 @@ async fn map_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
                     span.line,
                     span.column,
                     format!(
-                        "el callback de `Map.filter()` debe devolver Bool, recibió `{}`",
+                        "the `Map.filter()` callback must return Bool, received `{}`",
                         other.type_name(),
                     ),
                 )));
@@ -9090,7 +9090,7 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                 },
                 span.line,
                 span.column,
-                format!("`.merge()` espera Map, recibió {}", other.type_name()),
+                format!("`.merge()` expects Map, received {}", other.type_name()),
             )))
         }
     };
@@ -9172,7 +9172,7 @@ async fn map_merge_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
                 },
                 span.line,
                 span.column,
-                format!("`.merge_with()` espera Map, recibió `{}`", v.type_name()),
+                format!("`.merge_with()` expects Map, received `{}`", v.type_name()),
             )));
         }
     };
@@ -9257,7 +9257,7 @@ fn map_keys_sorted(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
             span.line,
             span.column,
             format!(
-                "`.keys_sorted()` solo soporta keys `Int`/`Float`/`Str`/`Bool`, recibió `{}`",
+                "`.keys_sorted()` only supports `Int`/`Float`/`Str`/`Bool` keys, received `{}`",
                 first_kind,
             ),
         )));
@@ -9272,7 +9272,7 @@ fn map_keys_sorted(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                 span.line,
                 span.column,
                 format!(
-                    "`.keys_sorted()` requiere keys del mismo tipo: vi `{}` y `{}`",
+                    "`.keys_sorted()` requires keys of the same type: saw `{}` and `{}`",
                     first_kind,
                     k.type_name(),
                 ),
@@ -9322,7 +9322,7 @@ fn fv_as_int(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     match receiver {
         Value::Int(n) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(n))))),
         other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            format!("as_int: el valor es {}, no Int", other.type_name()),
+            format!("as_int: value is {}, not Int", other.type_name()),
         ))))),
     }
 }
@@ -9337,7 +9337,7 @@ fn fv_as_float(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
             n as f64,
         ))))),
         other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            format!("as_float: el valor es {}, no Float", other.type_name()),
+            format!("as_float: value is {}, not Float", other.type_name()),
         ))))),
     }
 }
@@ -9347,7 +9347,7 @@ fn fv_as_str(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     match receiver {
         Value::Str(s) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(s))))),
         other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            format!("as_str: el valor es {}, no Str", other.type_name()),
+            format!("as_str: value is {}, not Str", other.type_name()),
         ))))),
     }
 }
@@ -9357,7 +9357,7 @@ fn fv_as_bool(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     match receiver {
         Value::Bool(b) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bool(b))))),
         other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            format!("as_bool: el valor es {}, no Bool", other.type_name()),
+            format!("as_bool: value is {}, not Bool", other.type_name()),
         ))))),
     }
 }
@@ -9367,7 +9367,7 @@ fn fv_as_bytes(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     match receiver {
         Value::Bytes(bs) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bytes(bs))))),
         other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            format!("as_bytes: el valor es {}, no Bytes", other.type_name()),
+            format!("as_bytes: value is {}, not Bytes", other.type_name()),
         ))))),
     }
 }
@@ -9410,7 +9410,7 @@ fn bytes_to_str(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
         Ok(s) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(s))))),
         Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
             format!(
-                "Bytes.to_str(): contenido no es UTF-8 válido en offset {}",
+                "Bytes.to_str(): content is not valid UTF-8 at offset {}",
                 e.utf8_error().valid_up_to()
             ),
         ))))),
@@ -9461,7 +9461,7 @@ fn str_one_str_arg(
                 span.line,
                 span.column,
                 format!(
-                    "`.{}()` espera un argumento `Str`, recibió `{}`",
+                    "`.{}()` expects a `Str` argument, received `{}`",
                     method,
                     other.type_name(),
                 ),
@@ -9524,7 +9524,7 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                 span.line,
                 span.column,
                 format!(
-                    "`Str.split_at()` espera `Int`, recibió `{}`",
+                    "`Str.split_at()` expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -9536,7 +9536,7 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
             span.line,
             span.column,
             format!(
-                "`Str.split_at()` no acepta índice negativo: recibió {}",
+                "`Str.split_at()` does not accept negative index: received {}",
                 idx
             ),
         )));
@@ -9654,7 +9654,7 @@ fn str_left(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                 },
                 span.line,
                 span.column,
-                format!("`Str.left()` espera `Int`, recibió `{}`", other.type_name()),
+                format!("`Str.left()` expects `Int`, received `{}`", other.type_name()),
             )));
         }
     };
@@ -9680,7 +9680,7 @@ fn str_right(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                 span.line,
                 span.column,
                 format!(
-                    "`Str.right()` espera `Int`, recibió `{}`",
+                    "`Str.right()` expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -9716,7 +9716,7 @@ fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                 span.line,
                 span.column,
                 format!(
-                    "`Str.center()`: arg 0 (width) espera `Int`, recibió `{}`",
+                    "`Str.center()`: arg 0 (width) expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -9733,7 +9733,7 @@ fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                 span.line,
                 span.column,
                 format!(
-                    "`Str.center()`: arg 1 (ch) espera `Str`, recibió `{}`",
+                    "`Str.center()`: arg 1 (ch) expects `Str`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -9745,7 +9745,7 @@ fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
             span.line,
             span.column,
             format!(
-                "`Str.center(width, ch)`: el char de relleno debe ser 1 caracter, recibió `\"{}\"`",
+                "`Str.center(width, ch)`: the fill char must be 1 character, received `\"{}\"`",
                 ch,
             ),
         )));
@@ -9787,7 +9787,7 @@ fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                 span.line,
                 span.column,
                 format!(
-                    "`.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`",
+                    "`.repeat_with()`: arg 0 (n) expects `Int`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -9804,7 +9804,7 @@ fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                 span.line,
                 span.column,
                 format!(
-                    "`.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`",
+                    "`.repeat_with()`: arg 1 (sep) expects `Str`, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -9815,7 +9815,7 @@ fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`.repeat_with()` no acepta n negativo: recibió {}", n),
+            format!("`.repeat_with()` does not accept negative n: received {}", n),
         )));
     }
     let parts: Vec<&str> = std::iter::repeat_n(s.as_str(), n as usize).collect();
@@ -9914,7 +9914,7 @@ fn str_replace(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
                 span.line,
                 span.column,
                 format!(
-                    "`.replace(old, new)` espera Str para el arg 1, recibió {}",
+                    "`.replace(old, new)` expects Str for arg 1, received {}",
                     other.type_name()
                 ),
             )))
@@ -9931,7 +9931,7 @@ fn str_replace(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
                 span.line,
                 span.column,
                 format!(
-                    "`.replace(old, new)` espera Str para el arg 2, recibió {}",
+                    "`.replace(old, new)` expects Str for arg 2, received {}",
                     other.type_name()
                 ),
             )))
@@ -9958,7 +9958,7 @@ fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                 },
                 span.line,
                 span.column,
-                format!("`.repeat()` espera Int, recibió {}", other.type_name()),
+                format!("`.repeat()` expects Int, received {}", other.type_name()),
             )))
         }
     };
@@ -9967,7 +9967,7 @@ fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`.repeat()` no acepta n negativo: recibió {}", n),
+            format!("`.repeat()` does not accept negative n: received {}", n),
         )));
     }
     Ok(Value::Str(s.repeat(n as usize)))
@@ -9999,7 +9999,7 @@ fn str_pad_args(
                 span.line,
                 span.column,
                 format!(
-                    "`.{}(width, ch)`: arg 0 espera `Int`, recibió `{}`",
+                    "`.{}(width, ch)`: arg 0 expects `Int`, received `{}`",
                     method,
                     other.type_name(),
                 ),
@@ -10017,7 +10017,7 @@ fn str_pad_args(
                 span.line,
                 span.column,
                 format!(
-                    "`.{}(width, ch)`: arg 1 espera `Str`, recibió `{}`",
+                    "`.{}(width, ch)`: arg 1 expects `Str`, received `{}`",
                     method,
                     other.type_name(),
                 ),
@@ -10029,7 +10029,7 @@ fn str_pad_args(
             ErrorKind::InvalidSyntax,
             span.line, span.column,
             format!(
-                "`.{}(width, ch)`: el char de relleno debe ser exactamente 1 caracter, recibió `\"{}\"` ({} chars)",
+                "`.{}(width, ch)`: the fill char must be exactly 1 character, received `\"{}\"` ({} chars)",
                 method, ch, ch.chars().count(),
             ),
         )));
@@ -10068,7 +10068,7 @@ fn str_pad_end(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
 
 /// Mini-batch Ex — `s.find(sub)`: position of the first occurrence.
 /// Returns `Result<Int>` — `Ok(i)` with the index (in chars, not
-/// bytes) if found, `Err("no encontrado")` if not. Empty sub matches
+/// bytes) if found, `Err("not found")` if not. Empty sub matches
 /// at position 0 (parallel to Python).
 fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("find", &args, 1, span)?;
@@ -10086,7 +10086,7 @@ fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                 },
                 span.line,
                 span.column,
-                format!("`.find()` espera Str, recibió {}", other.type_name()),
+                format!("`.find()` expects Str, received {}", other.type_name()),
             )))
         }
     };
@@ -10098,7 +10098,7 @@ fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
         )))))
     } else {
         Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "no encontrado".into(),
+            "not found".into(),
         )))))
     }
 }
@@ -10121,7 +10121,7 @@ fn str_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                 },
                 span.line,
                 span.column,
-                format!("`.index_of()` espera Str, recibió {}", other.type_name()),
+                format!("`.index_of()` expects Str, received {}", other.type_name()),
             )))
         }
     };
@@ -10132,7 +10132,7 @@ fn str_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
         )))))
     } else {
         Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "no encontrado".into(),
+            "not found".into(),
         )))))
     }
 }
@@ -10156,7 +10156,7 @@ fn str_last_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
                 span.line,
                 span.column,
                 format!(
-                    "`.last_index_of()` espera Str, recibió {}",
+                    "`.last_index_of()` expects Str, received {}",
                     other.type_name()
                 ),
             )))
@@ -10169,7 +10169,7 @@ fn str_last_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
         )))))
     } else {
         Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            "no encontrado".into(),
+            "not found".into(),
         )))))
     }
 }
@@ -10208,7 +10208,7 @@ fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
         Eq => Ok(Value::Bool(l == r)),
         NotEq => Ok(Value::Bool(l != r)),
         Lt | LtEq | Gt | GtEq => compare(op, l, r, span),
-        And | Or | Xor => unreachable!("And/Or/Xor se manejan en eval_logical antes de llegar acá"),
+        And | Or | Xor => unreachable!("And/Or/Xor are handled in eval_logical before getting here"),
         // Mini-batch Bits — Int only. The checker statically rejects
         // other types; the runtime emits TypeError if a non-Int value
         // arrives through the gradual mode.
@@ -10260,7 +10260,7 @@ fn eval_shift(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
             span.line,
             span.column,
             format!(
-                "shift fuera de rango: el segundo operando debe estar en 0..64, recibió {}",
+                "shift out of range: the second operand must be in 0..64, received {}",
                 b
             ),
         )));
@@ -10471,7 +10471,7 @@ fn expect_bool(v: &Value, op: &str, side: &str, span: Span) -> EvalResult<bool> 
             span.line,
             span.column,
             format!(
-                "operando {} de `{}` debe ser Bool, no `{}`",
+                "operand {} of `{}` must be Bool, not `{}`",
                 side,
                 op,
                 v.type_name()
@@ -10515,7 +10515,7 @@ fn type_error<T>(op: &str, l: &Value, r: &Value, span: Span) -> EvalResult<T> {
         span.line,
         span.column,
         format!(
-            "operación `{}` no soportada entre `{}` y `{}`",
+            "operation `{}` not supported between `{}` and `{}`",
             op,
             l.type_name(),
             r.type_name()
@@ -10528,7 +10528,7 @@ fn div_by_zero<T>(span: Span) -> EvalResult<T> {
         ErrorKind::DivisionByZero,
         span.line,
         span.column,
-        "división por cero",
+        "division by zero",
     )))
 }
 
@@ -10550,7 +10550,7 @@ fn expect_int_for_range(v: &Value, side: &str, span: Span) -> EvalResult<i64> {
             span.line,
             span.column,
             format!(
-                "el {} de un rango debe ser Int, no `{}`",
+                "the {} of a range must be Int, not `{}`",
                 side,
                 other.type_name()
             ),
@@ -10581,7 +10581,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                         span.line,
                         span.column,
                         format!(
-                            "el índice de una lista debe ser Int, no `{}`",
+                            "list index must be Int, not `{}`",
                             other.type_name()
                         ),
                     )))
@@ -10600,7 +10600,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                     ErrorKind::InvalidSyntax,
                     span.line,
                     span.column,
-                    format!("índice fuera de rango: {} en lista de tamaño {}", i, len,),
+                    format!("index out of range: {} in list of size {}", i, len,),
                 )));
             }
             Ok(borrowed[effective as usize].clone())
@@ -10621,7 +10621,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                         span.line,
                         span.column,
                         format!(
-                            "el índice de un Str debe ser Int, no `{}`",
+                            "Str index must be Int, not `{}`",
                             other.type_name()
                         ),
                     )))
@@ -10635,7 +10635,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                     ErrorKind::InvalidSyntax,
                     span.line,
                     span.column,
-                    format!("índice fuera de rango: {} en Str de tamaño {}", i, len,),
+                    format!("index out of range: {} in Str of size {}", i, len,),
                 )));
             }
             Ok(Value::Str(chars[effective as usize].to_string()))
@@ -10652,7 +10652,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                format!("clave no encontrada en mapa: {}", idx),
+                format!("key not found in map: {}", idx),
             )))
         }
         other => Err(EvalSignal::Error(FitzError::new(
@@ -10663,7 +10663,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             span.line,
             span.column,
             format!(
-                "el tipo `{}` no soporta indexing con `[]`",
+                "type `{}` does not support indexing with `[]`",
                 other.type_name()
             ),
         ))),
@@ -10703,7 +10703,7 @@ fn eval_slice(
                 span.line,
                 span.column,
                 format!(
-                    "el `{}` de un slice debe ser Int, recibió `{}`",
+                    "slice `{}` must be Int, received `{}`",
                     name,
                     other.type_name()
                 ),
@@ -10747,12 +10747,12 @@ fn eval_slice(
         }
         other => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeMismatch {
-                expected: "List o Str".into(),
+                expected: "List or Str".into(),
                 found: other.type_name().into(),
             },
             span.line,
             span.column,
-            format!("el tipo `{}` no soporta slicing", other.type_name()),
+            format!("type `{}` does not support slicing", other.type_name()),
         ))),
     }
 }
@@ -10861,11 +10861,11 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
                     Err(e) => Err(EvalSignal::Error(FitzError::new(
                         ErrorKind::TypeMismatch {
                             expected: "Date (ISO 8601 YYYY-MM-DD)".into(),
-                            found: format!("Str con valor inválido: {}", e),
+                            found: format!("Str with invalid value: {}", e),
                         },
                         0,
                         0,
-                        format!("Str `{}` no es Date ISO 8601 (YYYY-MM-DD): {}", s, e),
+                        format!("Str `{}` is not Date ISO 8601 (YYYY-MM-DD): {}", s, e),
                     ))),
                 };
             }
@@ -10881,12 +10881,12 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeMismatch {
                         expected: "DateTime (RFC 3339)".into(),
-                        found: format!("Str con valor inválido: {}", s),
+                        found: format!("Str with invalid value: {}", s),
                     },
                     0,
                     0,
                     format!(
-                        "Str `{}` no es DateTime RFC 3339 (ej: 2026-05-30T14:30:00Z)",
+                        "Str `{}` is not DateTime RFC 3339 (e.g.: 2026-05-30T14:30:00Z)",
                         s
                     ),
                 )));
@@ -10898,11 +10898,11 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
                         ErrorKind::TypeMismatch {
                             expected: "Uuid canonical (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
                                 .into(),
-                            found: format!("Str con valor inválido: {}", e),
+                            found: format!("Str with invalid value: {}", e),
                         },
                         0,
                         0,
-                        format!("Str `{}` no es UUID canonical: {}", s, e),
+                        format!("Str `{}` is not canonical UUID: {}", s, e),
                     ))),
                 };
             }
@@ -10960,8 +10960,8 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
                 0,
                 0,
                 format!(
-                    "no se puede coercer a `{}`: el dict no tiene el campo `{}` \
-                     (requerido por el tipo, no es nullable ni tiene default)",
+                    "cannot coerce to `{}`: dict has no field `{}` \
+                     (required by the type, not nullable and has no default)",
                     type_name, f.name,
                 ),
             )));
@@ -11013,7 +11013,7 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                 },
                 span.line,
                 span.column,
-                format!("no se puede negar un valor de tipo `{}`", other.type_name()),
+                format!("cannot negate a value of type `{}`", other.type_name()),
             ))),
         },
         UnaryOpKind::Not => match v {
@@ -11026,7 +11026,7 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                 span.line,
                 span.column,
                 format!(
-                    "el operador `not` requiere Bool, recibió `{}`",
+                    "operator `not` requires Bool, received `{}`",
                     other.type_name()
                 ),
             ))),
@@ -11042,7 +11042,7 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                 span.line,
                 span.column,
                 format!(
-                    "el operador `~` requiere Int, recibió `{}`",
+                    "operator `~` requires Int, received `{}`",
                     other.type_name()
                 ),
             ))),
@@ -11659,7 +11659,7 @@ fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`popcount(n)` espera 1 argumento, recibió {}", args.len()),
+            format!("`popcount(n)` expects 1 argument, received {}", args.len()),
         ));
     }
     match &args[0] {
@@ -11672,7 +11672,7 @@ fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`popcount(n)` espera `Int`, recibió `{}`",
+                "`popcount(n)` expects `Int`, received `{}`",
                 other.type_name()
             ),
         )),
@@ -11691,7 +11691,7 @@ fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`leading_zeros(n)` espera 1 argumento, recibió {}",
+                "`leading_zeros(n)` expects 1 argument, received {}",
                 args.len()
             ),
         ));
@@ -11706,7 +11706,7 @@ fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`leading_zeros(n)` espera `Int`, recibió `{}`",
+                "`leading_zeros(n)` expects `Int`, received `{}`",
                 other.type_name()
             ),
         )),
@@ -11724,7 +11724,7 @@ fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`trailing_zeros(n)` espera 1 argumento, recibió {}",
+                "`trailing_zeros(n)` expects 1 argument, received {}",
                 args.len()
             ),
         ));
@@ -11739,7 +11739,7 @@ fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`trailing_zeros(n)` espera `Int`, recibió `{}`",
+                "`trailing_zeros(n)` expects `Int`, received `{}`",
                 other.type_name()
             ),
         )),
@@ -11759,7 +11759,7 @@ fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`rotate_left(n, bits)` espera 2 args, recibió {}",
+                "`rotate_left(n, bits)` expects 2 args, received {}",
                 args.len()
             ),
         ));
@@ -11775,7 +11775,7 @@ fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`rotate_left(n, bits)`: arg 0 espera `Int`, recibió `{}`",
+                    "`rotate_left(n, bits)`: arg 0 expects `Int`, received `{}`",
                     other.type_name()
                 ),
             ))
@@ -11792,7 +11792,7 @@ fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`rotate_left(n, bits)`: arg 1 espera `Int`, recibió `{}`",
+                    "`rotate_left(n, bits)`: arg 1 expects `Int`, received `{}`",
                     other.type_name()
                 ),
             ))
@@ -11812,7 +11812,7 @@ fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`rotate_right(n, bits)` espera 2 args, recibió {}",
+                "`rotate_right(n, bits)` expects 2 args, received {}",
                 args.len()
             ),
         ));
@@ -11828,7 +11828,7 @@ fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`rotate_right(n, bits)`: arg 0 espera `Int`, recibió `{}`",
+                    "`rotate_right(n, bits)`: arg 0 expects `Int`, received `{}`",
                     other.type_name()
                 ),
             ))
@@ -11845,7 +11845,7 @@ fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`rotate_right(n, bits)`: arg 1 espera `Int`, recibió `{}`",
+                    "`rotate_right(n, bits)`: arg 1 expects `Int`, received `{}`",
                     other.type_name()
                 ),
             ))
@@ -11871,7 +11871,7 @@ fn builtin_math_abs(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`abs(x)` espera 1 argumento, recibió {}", args.len()),
+            format!("`abs(x)` expects 1 argument, received {}", args.len()),
         ));
     }
     match &args[0] {
@@ -11885,7 +11885,7 @@ fn builtin_math_abs(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`abs(x)` espera `Int` o `Float`, recibió `{}`",
+                "`abs(x)` expects `Int` or `Float`, received `{}`",
                 other.type_name()
             ),
         )),
@@ -11902,7 +11902,7 @@ fn builtin_math_min_max(args: &[Value], want_max: bool, name: &str) -> FitzResul
             0,
             0,
             format!(
-                "`{}(a, b)` espera 2 argumentos, recibió {}",
+                "`{}(a, b)` expects 2 arguments, received {}",
                 name,
                 args.len()
             ),
@@ -11938,7 +11938,7 @@ fn builtin_math_min_max(args: &[Value], want_max: bool, name: &str) -> FitzResul
                 0,
                 0,
                 format!(
-                "`{}(a, b)`: ambos args deben ser del mismo tipo Int o Float, recibió `{}` y `{}`",
+                "`{}(a, b)`: both args must be the same Int or Float type, received `{}` and `{}`",
                 name, other_a.type_name(), other_b.type_name(),
             ),
             ))
@@ -11963,7 +11963,7 @@ fn builtin_math_pow(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`pow(base, exp)` espera 2 args, recibió {}", args.len()),
+            format!("`pow(base, exp)` expects 2 args, received {}", args.len()),
         ));
     }
     let to_f = |v: &Value| -> Option<f64> {
@@ -11982,7 +11982,7 @@ fn builtin_math_pow(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`pow(base, exp)`: arg 0 espera `Int` o `Float`, recibió `{}`",
+                "`pow(base, exp)`: arg 0 expects `Int` or `Float`, received `{}`",
                 args[0].type_name()
             ),
         )
@@ -11996,7 +11996,7 @@ fn builtin_math_pow(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`pow(base, exp)`: arg 1 espera `Int` o `Float`, recibió `{}`",
+                "`pow(base, exp)`: arg 1 expects `Int` or `Float`, received `{}`",
                 args[1].type_name()
             ),
         )
@@ -12013,7 +12013,7 @@ fn builtin_math_sqrt(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`sqrt(x)` espera 1 argumento, recibió {}", args.len()),
+            format!("`sqrt(x)` expects 1 argument, received {}", args.len()),
         ));
     }
     let x = match &args[0] {
@@ -12028,7 +12028,7 @@ fn builtin_math_sqrt(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`sqrt(x)` espera `Int` o `Float`, recibió `{}`",
+                    "`sqrt(x)` expects `Int` or `Float`, received `{}`",
                     other.type_name()
                 ),
             ))
@@ -12046,7 +12046,7 @@ fn builtin_math_ceil(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`ceil(x)` espera 1 argumento, recibió {}", args.len()),
+            format!("`ceil(x)` expects 1 argument, received {}", args.len()),
         ));
     }
     match &args[0] {
@@ -12060,7 +12060,7 @@ fn builtin_math_ceil(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`ceil(x)` espera `Float` o `Int`, recibió `{}`",
+                "`ceil(x)` expects `Float` or `Int`, received `{}`",
                 other.type_name()
             ),
         )),
@@ -12076,7 +12076,7 @@ fn builtin_math_floor(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`floor(x)` espera 1 argumento, recibió {}", args.len()),
+            format!("`floor(x)` expects 1 argument, received {}", args.len()),
         ));
     }
     match &args[0] {
@@ -12090,7 +12090,7 @@ fn builtin_math_floor(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`floor(x)` espera `Float` o `Int`, recibió `{}`",
+                "`floor(x)` expects `Float` or `Int`, received `{}`",
                 other.type_name()
             ),
         )),
@@ -12106,7 +12106,7 @@ fn builtin_math_round(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`round(x)` espera 1 argumento, recibió {}", args.len()),
+            format!("`round(x)` expects 1 argument, received {}", args.len()),
         ));
     }
     match &args[0] {
@@ -12121,7 +12121,7 @@ fn builtin_math_round(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`round(x)` espera `Float` o `Int`, recibió `{}`",
+                "`round(x)` expects `Float` or `Int`, received `{}`",
                 other.type_name()
             ),
         )),
@@ -12137,7 +12137,7 @@ fn builtin_math_clamp(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`clamp(x, lo, hi)` espera 3 args, recibió {}", args.len()),
+            format!("`clamp(x, lo, hi)` expects 3 args, received {}", args.len()),
         ));
     }
     match (&args[0], &args[1], &args[2]) {
@@ -12154,7 +12154,7 @@ fn builtin_math_clamp(args: &[Value]) -> FitzResult<Value> {
             },
             0, 0,
             format!(
-                "`clamp(x, lo, hi)`: los 3 args deben ser del mismo tipo Int o Float, recibió `{}`, `{}`, `{}`",
+                "`clamp(x, lo, hi)`: the 3 args must be the same Int or Float type, received `{}`, `{}`, `{}`",
                 a.type_name(), b.type_name(), c.type_name(),
             ),
         )),
@@ -12188,7 +12188,7 @@ fn builtin_ws_broadcast(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`ws_broadcast(endpoint: Str, msg)` espera 2 argumentos, recibió {}",
+                "`ws_broadcast(endpoint: Str, msg)` expects 2 arguments, received {}",
                 args.len()
             ),
         ));
@@ -12201,7 +12201,7 @@ fn builtin_ws_broadcast(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`ws_broadcast`: el primer argumento debe ser `Str` (endpoint), recibió `{}`",
+                    "`ws_broadcast`: the first argument must be `Str` (endpoint), received `{}`",
                     other.type_name()
                 ),
             ));
@@ -12213,7 +12213,7 @@ fn builtin_ws_broadcast(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`ws_broadcast`: error serializando el mensaje a JSON: {}",
+                "`ws_broadcast`: error serializing message to JSON: {}",
                 e
             ),
         )
@@ -12257,7 +12257,7 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`sleep` espera 1 argumento (ms: Int), recibió {}",
+                "`sleep` expects 1 argument (ms: Int), received {}",
                 args.len()
             ),
         ));
@@ -12273,7 +12273,7 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`sleep` espera Int (milisegundos), recibió `{}`",
+                    "`sleep` expects Int (milliseconds), received `{}`",
                     other.type_name()
                 ),
             ));
@@ -12320,7 +12320,7 @@ fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`db.connect` espera 1 argumento (url: Str), recibió {}",
+                "`db.connect` expects 1 argument (url: Str), received {}",
                 args.len()
             ),
         ));
@@ -12336,7 +12336,7 @@ fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`db.connect` espera Str (URL Postgres), recibió `{}`",
+                    "`db.connect` expects Str (Postgres URL), received `{}`",
                     other.type_name()
                 ),
             ));
@@ -12382,7 +12382,7 @@ fn fitz_value_to_pg(v: &Value) -> Result<crate::db::PgValue, String> {
         )),
         Value::Uuid(u) => Ok(crate::db::PgValue::Text(u.to_string())),
         other => Err(format!(
-            "{} no se puede pasar como arg de query — solo Int/Float/Str/Bool/Bytes/Date/DateTime/Uuid/Null/List/Map<Str, Any> son marshalleables",
+            "{} cannot be passed as query arg — only Int/Float/Str/Bool/Bytes/Date/DateTime/Uuid/Null/List/Map<Str, Any> are marshallable",
             other.type_name()
         )),
     }
@@ -12410,7 +12410,7 @@ fn builtin_date_today(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`Date.today()` no acepta argumentos, recibió {}",
+                "`Date.today()` does not accept arguments, received {}",
                 args.len()
             ),
         ));
@@ -12431,7 +12431,7 @@ fn builtin_date_parse(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Date.parse(s)` espera 1 arg Str, recibió {}", args.len()),
+            format!("`Date.parse(s)` expects 1 Str arg, received {}", args.len()),
         ));
     }
     let s = match &args[0] {
@@ -12445,7 +12445,7 @@ fn builtin_date_parse(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`Date.parse(s)` espera Str, recibió `{}`",
+                    "`Date.parse(s)` expects Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -12460,7 +12460,7 @@ fn builtin_date_parse(args: &[Value]) -> FitzResult<Value> {
         )))),
         Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
             Value::Str(format!(
-                "Date.parse: `{}` no es ISO 8601 (YYYY-MM-DD): {}",
+                "Date.parse: `{}` is not ISO 8601 (YYYY-MM-DD): {}",
                 s, e
             )),
         )))),
@@ -12477,7 +12477,7 @@ fn builtin_date_from_ymd(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`Date.from_ymd(year, month, day)` espera 3 args Int, recibió {}",
+                "`Date.from_ymd(year, month, day)` expects 3 Int args, received {}",
                 args.len()
             ),
         ));
@@ -12495,7 +12495,7 @@ fn builtin_date_from_ymd(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`Date.from_ymd` arg {} espera Int, recibió `{}`",
+                    "`Date.from_ymd` arg {} expects Int, received `{}`",
                     i,
                     other.type_name()
                 ),
@@ -12510,7 +12510,7 @@ fn builtin_date_from_ymd(args: &[Value]) -> FitzResult<Value> {
         )))),
         None => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
             Value::Str(format!(
-                "Date.from_ymd: ({}, {}, {}) no es una fecha válida",
+                "Date.from_ymd: ({}, {}, {}) is not a valid date",
                 y, m, d
             )),
         )))),
@@ -12527,7 +12527,7 @@ fn builtin_datetime_now(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`DateTime.now()` no acepta argumentos, recibió {}",
+                "`DateTime.now()` does not accept arguments, received {}",
                 args.len()
             ),
         ));
@@ -12545,7 +12545,7 @@ fn builtin_datetime_parse(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`DateTime.parse(s)` espera 1 arg Str, recibió {}",
+                "`DateTime.parse(s)` expects 1 Str arg, received {}",
                 args.len()
             ),
         ));
@@ -12561,7 +12561,7 @@ fn builtin_datetime_parse(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`DateTime.parse(s)` espera Str, recibió `{}`",
+                    "`DateTime.parse(s)` expects Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -12577,7 +12577,7 @@ fn builtin_datetime_parse(args: &[Value]) -> FitzResult<Value> {
         )))),
         Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
             Value::Str(format!(
-                "DateTime.parse: `{}` no es RFC 3339 (ej: 2026-05-30T14:30:00Z): {}",
+                "DateTime.parse: `{}` is not RFC 3339 (e.g.: 2026-05-30T14:30:00Z): {}",
                 s, e
             )),
         )))),
@@ -12594,7 +12594,7 @@ fn builtin_datetime_from_timestamp(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`DateTime.from_timestamp(secs)` espera 1 arg Int (Unix epoch secs), recibió {}",
+                "`DateTime.from_timestamp(secs)` expects 1 Int arg (Unix epoch secs), received {}",
                 args.len()
             ),
         ));
@@ -12610,7 +12610,7 @@ fn builtin_datetime_from_timestamp(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`DateTime.from_timestamp` espera Int, recibió `{}`",
+                    "`DateTime.from_timestamp` expects Int, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -12638,7 +12638,7 @@ fn builtin_uuid_v4(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Uuid.v4()` no acepta argumentos, recibió {}", args.len()),
+            format!("`Uuid.v4()` does not accept arguments, received {}", args.len()),
         ));
     }
     Ok(Value::Uuid(uuid::Uuid::new_v4()))
@@ -12657,7 +12657,7 @@ fn builtin_uuid_v7(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Uuid.v7()` no acepta argumentos, recibió {}", args.len()),
+            format!("`Uuid.v7()` does not accept arguments, received {}", args.len()),
         ));
     }
     Ok(Value::Uuid(uuid::Uuid::now_v7()))
@@ -12676,7 +12676,7 @@ fn builtin_date_tomorrow(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`Date.tomorrow()` no acepta argumentos, recibió {}",
+                "`Date.tomorrow()` does not accept arguments, received {}",
                 args.len()
             ),
         ));
@@ -12698,7 +12698,7 @@ fn builtin_date_yesterday(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`Date.yesterday()` no acepta argumentos, recibió {}",
+                "`Date.yesterday()` does not accept arguments, received {}",
                 args.len()
             ),
         ));
@@ -12722,13 +12722,13 @@ fn builtin_datetime_epoch(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`DateTime.epoch()` no acepta argumentos, recibió {}",
+                "`DateTime.epoch()` does not accept arguments, received {}",
                 args.len()
             ),
         ));
     }
     let epoch =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch siempre válida");
+        chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch always valid");
     Ok(Value::DateTime(epoch))
 }
 
@@ -12741,7 +12741,7 @@ fn builtin_uuid_parse(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Uuid.parse(s)` espera 1 arg Str, recibió {}", args.len()),
+            format!("`Uuid.parse(s)` expects 1 Str arg, received {}", args.len()),
         ));
     }
     let s = match &args[0] {
@@ -12755,7 +12755,7 @@ fn builtin_uuid_parse(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`Uuid.parse(s)` espera Str, recibió `{}`",
+                    "`Uuid.parse(s)` expects Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -12767,7 +12767,7 @@ fn builtin_uuid_parse(args: &[Value]) -> FitzResult<Value> {
         )))),
         Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
             Value::Str(format!(
-                "Uuid.parse: `{}` no es UUID canonical (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): {}",
+                "Uuid.parse: `{}` is not canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): {}",
                 s, e
             )),
         )))),
@@ -12783,7 +12783,7 @@ fn builtin_uuid_nil(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Uuid.nil()` no acepta argumentos, recibió {}", args.len()),
+            format!("`Uuid.nil()` does not accept arguments, received {}", args.len()),
         ));
     }
     Ok(Value::Uuid(uuid::Uuid::nil()))
@@ -12979,7 +12979,7 @@ fn parse_db_query_args(
             0,
             0,
             format!(
-                "`DbConn.{method}` espera 2 argumentos (sql: Str, args: List), recibió {}",
+                "`DbConn.{method}` expects 2 arguments (sql: Str, args: List), received {}",
                 args.len()
             ),
         ));
@@ -12995,7 +12995,7 @@ fn parse_db_query_args(
                 0,
                 0,
                 format!(
-                    "`DbConn.{method}` primer arg debe ser Str (SQL), recibió `{}`",
+                    "`DbConn.{method}` first arg must be Str (SQL), received `{}`",
                     other.type_name()
                 ),
             ));
@@ -13012,7 +13012,7 @@ fn parse_db_query_args(
                 0,
                 0,
                 format!(
-                    "`DbConn.{method}` segundo arg debe ser List (args del query), recibió `{}`",
+                    "`DbConn.{method}` second arg must be List (query args), received `{}`",
                     other.type_name()
                 ),
             ));
@@ -13084,7 +13084,7 @@ fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRe
             0,
             0,
             format!(
-                "`DbConn.close` no espera argumentos, recibió {}",
+                "`DbConn.close` expects no arguments, received {}",
                 args.len()
             ),
         ));
@@ -13140,7 +13140,7 @@ fn db_conn_transaction(
             span.line,
             span.column,
             format!(
-                "`DbConn.transaction` espera una fn como argumento, recibió `{}`",
+                "`DbConn.transaction` expects a fn as argument, received `{}`",
                 callback.type_name()
             ),
         ));
@@ -13182,7 +13182,7 @@ fn db_conn_transaction(
                                 })?,
                                 None => {
                                     return Err(crate::db::DbError::Protocol(
-                                        "tx callback Future ya consumido (bug)".into(),
+                                        "tx callback Future already consumed (bug)".into(),
                                     ));
                                 }
                             }
@@ -13199,7 +13199,7 @@ fn db_conn_transaction(
                             Err(crate::db::DbError::Protocol("__tx_callback_err__".into()))
                         }
                         other => Err(crate::db::DbError::Protocol(format!(
-                            "DbConn.transaction callback debe retornar Result, retornó `{}`",
+                            "DbConn.transaction callback must return Result, returned `{}`",
                             other.type_name()
                         ))),
                     }
@@ -13242,7 +13242,7 @@ fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> Fi
             0,
             0,
             format!(
-                "`DbConn.is_closed` no espera argumentos, recibió {}",
+                "`DbConn.is_closed` expects no arguments, received {}",
                 args.len()
             ),
         ));
@@ -13356,7 +13356,7 @@ fn extract_db_handle_arg_for_auth(
             0,
             0,
             format!(
-                "`{}` espera `DbConn` como arg {}, recibió `{}`",
+                "`{}` expects `DbConn` as arg {}, received `{}`",
                 fn_name,
                 idx + 1,
                 other.type_name(),
@@ -13390,7 +13390,7 @@ fn extract_str_arg_for_auth(
             0,
             0,
             format!(
-                "`{}` espera `Str` para `{}` (arg {}), recibió `{}`",
+                "`{}` expects `Str` for `{}` (arg {}), received `{}`",
                 fn_name,
                 label,
                 idx + 1,
@@ -13425,7 +13425,7 @@ fn extract_int_arg_for_auth(
             0,
             0,
             format!(
-                "`{}` espera `Int` para `{}` (arg {}), recibió `{}`",
+                "`{}` expects `Int` for `{}` (arg {}), received `{}`",
                 fn_name,
                 label,
                 idx + 1,
@@ -13454,8 +13454,8 @@ fn builtin_auth_blacklist(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`auth.blacklist(db, jti, expires_at)` espera 3 args (DbConn, Str, Int), \
-                 recibió {}",
+                "`auth.blacklist(db, jti, expires_at)` expects 3 args (DbConn, Str, Int), \
+                 received {}",
                 args.len()
             ),
         ));
@@ -13501,7 +13501,7 @@ fn builtin_auth_is_blacklisted(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`auth.is_blacklisted(db, jti)` espera 2 args (DbConn, Str), recibió {}",
+                "`auth.is_blacklisted(db, jti)` expects 2 args (DbConn, Str), received {}",
                 args.len()
             ),
         ));
@@ -13548,7 +13548,7 @@ fn builtin_auth_cleanup_expired(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`auth.cleanup_expired(db)` espera 1 arg (DbConn), recibió {}",
+                "`auth.cleanup_expired(db)` expects 1 arg (DbConn), received {}",
                 args.len()
             ),
         ));
@@ -13675,7 +13675,7 @@ pub fn orm_dispatch_qb_method(
                     ErrorKind::InvalidSyntax,
                     span.line,
                     span.column,
-                    "downcast del QueryBuilder falló (bug del runtime)".to_string(),
+                    "QueryBuilder downcast failed (runtime bug)".to_string(),
                 ))
             })?;
             (*qb).clone()
@@ -13767,7 +13767,7 @@ fn type_value_to_state(type_value: Value, span: Span) -> FitzResult<QueryBuilder
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "se esperaba un `type` con `@table(...)`".to_string(),
+            "expected a `type` with `@table(...)`".to_string(),
         )),
     }
 }
@@ -13800,7 +13800,7 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
             span.line,
             span.column,
             format!(
-                "`.where(closure)` espera 1 argumento (fn(<param>) => <bool>), recibió {}",
+                "`.where(closure)` expects 1 argument (fn(<param>) => <bool>), received {}",
                 args.len()
             ),
         ));
@@ -13825,7 +13825,7 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
                 span.line,
                 span.column,
                 format!(
-                    "`.where(closure)` espera una función `fn(u) => <bool>`, recibió `{}`",
+                    "`.where(closure)` expects a function `fn(u) => <bool>`, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -13837,7 +13837,7 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
             span.line,
             span.column,
             format!(
-                "`.where(closure)` espera una closure con 1 parámetro (el row), recibió {}",
+                "`.where(closure)` expects a closure with 1 parameter (the row), received {}",
                 params.len()
             ),
         ));
@@ -13853,7 +13853,7 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                "`.where(closure)` MVP: el body del closure debe ser una sola expresión (sin let/if/etc.)".to_string(),
+                "`.where(closure)` MVP: the closure body must be a single expression (no let/if/etc.)".to_string(),
             ));
         }
     };
@@ -13953,7 +13953,7 @@ fn extract_db_handle_arg(
             span.line,
             span.column,
             format!(
-                "`.{method}(db)` espera 1 argumento (db: DbConn), recibió {}",
+                "`.{method}(db)` expects 1 argument (db: DbConn), received {}",
                 args.len()
             ),
         ));
@@ -13968,7 +13968,7 @@ fn extract_db_handle_arg(
             span.line,
             span.column,
             format!(
-                "`.{method}(db)` espera DbConn como primer arg, recibió `{}`",
+                "`.{method}(db)` expects DbConn as first arg, received `{}`",
                 other.type_name()
             ),
         )),
@@ -14028,7 +14028,7 @@ fn orm_qb_order_by(
             span.line,
             span.column,
             format!(
-                "`.order_by(closure)` espera 1 argumento, recibió {}",
+                "`.order_by(closure)` expects 1 argument, received {}",
                 args.len()
             ),
         ));
@@ -14044,7 +14044,7 @@ fn orm_qb_order_by(
                 span.line,
                 span.column,
                 format!(
-                    "`.order_by(closure)` espera `fn(u) => u.field` o `fn(u) => -u.field`, recibió `{}`",
+                    "`.order_by(closure)` expects `fn(u) => u.field` or `fn(u) => -u.field`, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -14055,7 +14055,7 @@ fn orm_qb_order_by(
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "`.order_by(closure)` espera una closure con 1 parámetro".to_string(),
+            "`.order_by(closure)` expects a closure with 1 parameter".to_string(),
         ));
     }
     let param_name = params[0].name.clone();
@@ -14066,7 +14066,7 @@ fn orm_qb_order_by(
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                "`.order_by(closure)` MVP: el body debe ser una sola expresión `u.field` o `-u.field`".to_string(),
+                "`.order_by(closure)` MVP: the body must be a single expression `u.field` or `-u.field`".to_string(),
             ));
         }
     };
@@ -14108,7 +14108,7 @@ fn orm_qb_order_by(
                                     ErrorKind::InvalidSyntax,
                                     span.line,
                                     span.column,
-                                    format!("`{param_name}.{col}.{method}(q)` espera 1 arg Str"),
+                                    format!("`{param_name}.{col}.{method}(q)` expects 1 Str arg"),
                                 ));
                             }
                             if !state.fields.iter().any(|f| f.name == *col) {
@@ -14116,7 +14116,7 @@ fn orm_qb_order_by(
                                     ErrorKind::InvalidSyntax,
                                     span.line,
                                     span.column,
-                                    format!("`.order_by`: field `{col}` no existe en el type"),
+                                    format!("`.order_by`: field `{col}` does not exist in the type"),
                                 ));
                             }
                             let sql_col = state
@@ -14135,7 +14135,7 @@ fn orm_qb_order_by(
                                         span.line,
                                         span.column,
                                         format!(
-                                            "`.{method}(q)` en order_by espera Str literal (MVP), recibió `{:?}`",
+                                            "`.{method}(q)` in order_by expects Str literal (MVP), received `{:?}`",
                                             other
                                         ),
                                     ));
@@ -14172,7 +14172,7 @@ fn orm_qb_order_by(
                         span.line,
                         span.column,
                         format!(
-                            "`.order_by`: field `{field}` no existe en el type (fields: {})",
+                            "`.order_by`: field `{field}` does not exist in the type (fields: {})",
                             state
                                 .fields
                                 .iter()
@@ -14196,7 +14196,7 @@ fn orm_qb_order_by(
                     span.line,
                     span.column,
                     format!(
-                        "`.order_by(closure)` solo admite `{param_name}.field` (opcionalmente prefijado con `-`)"
+                        "`.order_by(closure)` only allows `{param_name}.field` (optionally prefixed with `-`)"
                     ),
                 ));
             }
@@ -14206,7 +14206,7 @@ fn orm_qb_order_by(
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                "`.order_by(closure)`: el body debe ser `u.field` o `-u.field` (o `u.field.rank(\"query\")` para full-text — v0.10.32)".to_string(),
+                "`.order_by(closure)`: the body must be `u.field` or `-u.field` (or `u.field.rank(\"query\")` for full-text — v0.10.32)".to_string(),
             ));
         }
     };
@@ -14228,7 +14228,7 @@ fn extract_int_arg(args: &[Value], method: &str, span: Span) -> FitzResult<i64> 
             span.line,
             span.column,
             format!(
-                "`.{method}(n)` espera 1 argumento (n: Int), recibió {}",
+                "`.{method}(n)` expects 1 argument (n: Int), received {}",
                 args.len()
             ),
         ));
@@ -14242,7 +14242,7 @@ fn extract_int_arg(args: &[Value], method: &str, span: Span) -> FitzResult<i64> 
             },
             span.line,
             span.column,
-            format!("`.{method}(n)` espera Int, recibió `{}`", other.type_name()),
+            format!("`.{method}(n)` expects Int, received `{}`", other.type_name()),
         )),
     }
 }
@@ -14404,7 +14404,7 @@ fn fitz_list_to_pg_array(v: &Value, elem_oid: u32) -> Result<crate::db::PgValue,
         Value::List(items) => items.lock().clone(),
         other => {
             return Err(format!(
-                "esperaba List<T> para columna array, recibió {}",
+                "expected List<T> for array column, received {}",
                 other.type_name()
             ));
         }
@@ -14454,7 +14454,7 @@ fn field_from_closure(
                 span.line,
                 span.column,
                 format!(
-                    "agregado espera `fn(u) => u.field`, recibió `{}`",
+                    "aggregate expects `fn(u) => u.field`, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -14465,7 +14465,7 @@ fn field_from_closure(
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "el closure del agregado espera 1 parámetro".to_string(),
+            "the aggregate closure expects 1 parameter".to_string(),
         ));
     }
     let param_name = params[0].name.clone();
@@ -14476,7 +14476,7 @@ fn field_from_closure(
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                "el closure del agregado debe ser `fn(u) => u.field`".to_string(),
+                "the aggregate closure must be `fn(u) => u.field`".to_string(),
             ));
         }
     };
@@ -14487,7 +14487,7 @@ fn field_from_closure(
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                "el closure del agregado debe ser `u.field` (sin operadores ni literales)"
+                "the aggregate closure must be `u.field` (no operators or literals)"
                     .to_string(),
             ));
         }
@@ -14500,7 +14500,7 @@ fn field_from_closure(
                 span.line,
                 span.column,
                 format!(
-                    "el closure del agregado debe acceder al parámetro (`{}.field`)",
+                    "the aggregate closure must access the parameter (`{}.field`)",
                     param_name
                 ),
             ));
@@ -14512,7 +14512,7 @@ fn field_from_closure(
             span.line,
             span.column,
             format!(
-                "agregado: field `{field}` no existe en el type (fields: {})",
+                "aggregate: field `{field}` does not exist in the type (fields: {})",
                 fields
                     .iter()
                     .map(|f| f.name.as_str())
@@ -14557,7 +14557,7 @@ fn orm_qb_aggregate(
             span.line,
             span.column,
             format!(
-                "`.{}(closure, db)` espera 2 argumentos, recibió {}",
+                "`.{}(closure, db)` expects 2 arguments, received {}",
                 sql_func.to_lowercase(),
                 args.len()
             ),
@@ -14575,7 +14575,7 @@ fn orm_qb_aggregate(
                 span.line,
                 span.column,
                 format!(
-                    "`.{}(closure, db)` segundo arg debe ser DbConn, recibió `{}`",
+                    "`.{}(closure, db)` second arg must be DbConn, received `{}`",
                     sql_func.to_lowercase(),
                     other.type_name()
                 ),
@@ -14708,7 +14708,7 @@ fn orm_qb_avg(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzRes
             span.line,
             span.column,
             format!(
-                "`.avg(closure, db)` espera 2 argumentos, recibió {}",
+                "`.avg(closure, db)` expects 2 arguments, received {}",
                 args.len()
             ),
         ));
@@ -14725,7 +14725,7 @@ fn orm_qb_avg(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzRes
                 span.line,
                 span.column,
                 format!(
-                    "`.avg(closure, db)` segundo arg debe ser DbConn, recibió `{}`",
+                    "`.avg(closure, db)` second arg must be DbConn, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -14761,7 +14761,7 @@ fn orm_qb_group_by(
             span.line,
             span.column,
             format!(
-                "`.group_by(closure)` espera 1 argumento, recibió {}",
+                "`.group_by(closure)` expects 1 argument, received {}",
                 args.len()
             ),
         ));
@@ -14799,7 +14799,7 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
             span.line,
             span.column,
             format!(
-                "`Type.insert(db, record)` espera 2 argumentos, recibió {}",
+                "`Type.insert(db, record)` expects 2 arguments, received {}",
                 args.len()
             ),
         ));
@@ -14815,7 +14815,7 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
                 span.line,
                 span.column,
                 format!(
-                    "`Type.insert(db, record)` primer arg debe ser DbConn, recibió `{}`",
+                    "`Type.insert(db, record)` first arg must be DbConn, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -14832,7 +14832,7 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
                 span.line,
                 span.column,
                 format!(
-                    "`Type.insert(db, record)` segundo arg debe ser una instancia del type, recibió `{}`",
+                    "`Type.insert(db, record)` second arg must be an instance of the type, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -14845,7 +14845,7 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
             span.line,
             span.column,
             format!(
-                "`{}.insert(db, record)`: la instancia es de tipo `{}`, no de `{}`",
+                "`{}.insert(db, record)`: the instance is of type `{}`, not `{}`",
                 state.type_name, record_type_name, state.type_name
             ),
         ));
@@ -15000,7 +15000,7 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
                     None => {
                         return Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
                             Value::Str(
-                                "INSERT ... RETURNING no devolvió rows (inesperado)".to_string(),
+                                "INSERT ... RETURNING returned no rows (unexpected)".to_string(),
                             ),
                         ))));
                     }
@@ -15056,7 +15056,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
             span.line,
             span.column,
             format!(
-                "`Type.bulk_insert(rows, db)` o `Type.bulk_insert(rows, db, batch_size)` espera 2 o 3 args, recibió {}",
+                "`Type.bulk_insert(rows, db)` or `Type.bulk_insert(rows, db, batch_size)` expects 2 or 3 args, received {}",
                 args.len()
             ),
         ));
@@ -15073,7 +15073,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
                 span.line,
                 span.column,
                 format!(
-                    "`Type.bulk_insert(rows, db)` primer arg debe ser List<Type>, recibió `{}`",
+                    "`Type.bulk_insert(rows, db)` first arg must be List<Type>, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -15092,7 +15092,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
                 span.line,
                 span.column,
                 format!(
-                    "`Type.bulk_insert(rows, db)` segundo arg debe ser DbConn, recibió `{}`",
+                    "`Type.bulk_insert(rows, db)` second arg must be DbConn, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -15108,7 +15108,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
                     span.line,
                     span.column,
                     format!(
-                        "`Type.bulk_insert` batch_size debe ser Int > 0, recibió {}",
+                        "`Type.bulk_insert` batch_size must be Int > 0, received {}",
                         n
                     ),
                 ));
@@ -15122,7 +15122,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
                     span.line,
                     span.column,
                     format!(
-                        "`Type.bulk_insert` batch_size debe ser Int, recibió `{}`",
+                        "`Type.bulk_insert` batch_size must be Int, received `{}`",
                         other.type_name()
                     ),
                 ));
@@ -15153,7 +15153,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
                         span.line,
                         span.column,
                         format!(
-                            "`{}.bulk_insert`: rows[{}] es de tipo `{}`, esperaba `{}`",
+                            "`{}.bulk_insert`: rows[{}] is of type `{}`, expected `{}`",
                             state.type_name, i, type_name, state.type_name
                         ),
                     ));
@@ -15168,7 +15168,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
                     span.line,
                     span.column,
                     format!(
-                        "`{}.bulk_insert`: rows[{}] no es una instancia, es `{}`",
+                        "`{}.bulk_insert`: rows[{}] is not an instance, is `{}`",
                         state.type_name,
                         i,
                         other.type_name()
@@ -15357,7 +15357,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             span.line,
             span.column,
             format!(
-                "`.update(db, changes)` espera 2 argumentos, recibió {}",
+                "`.update(db, changes)` expects 2 arguments, received {}",
                 args.len()
             ),
         ));
@@ -15373,7 +15373,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
                 span.line,
                 span.column,
                 format!(
-                    "`.update(db, changes)` primer arg debe ser DbConn, recibió `{}`",
+                    "`.update(db, changes)` first arg must be DbConn, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -15390,7 +15390,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
                 span.line,
                 span.column,
                 format!(
-                    "`.update(db, changes)` segundo arg debe ser Map<Str, Any>, recibió `{}`",
+                    "`.update(db, changes)` second arg must be Map<Str, Any>, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -15401,7 +15401,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "`.update(db, changes)` sin `.where(...)` previo no se permite (afectaría toda la tabla); si querés update masivo, usá `.where(fn(_) => true).update(...)` explícito".to_string(),
+            "`.update(db, changes)` without prior `.where(...)` is not allowed (would affect the whole table); for bulk update use `.where(fn(_) => true).update(...)` explicitly".to_string(),
         ));
     }
 
@@ -15414,7 +15414,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "`.update(db, changes)`: el Map de changes está vacío".to_string(),
+            "`.update(db, changes)`: the changes Map is empty".to_string(),
         ));
     }
     let mut set_clauses = String::new();
@@ -15431,7 +15431,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
                     span.line,
                     span.column,
                     format!(
-                        "`.update`: las keys del Map deben ser Str, encontré `{}`",
+                        "`.update`: Map keys must be Str, found `{}`",
                         other.type_name()
                     ),
                 ));
@@ -15564,7 +15564,7 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
             span.line,
             span.column,
             format!(
-                "`.merge_jsonb(db, field, patch)` espera 3 args, recibió {}",
+                "`.merge_jsonb(db, field, patch)` expects 3 args, received {}",
                 args.len()
             ),
         ));
@@ -15580,7 +15580,7 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
                 span.line,
                 span.column,
                 format!(
-                    "`.merge_jsonb`: primer arg debe ser DbConn, recibió `{}`",
+                    "`.merge_jsonb`: first arg must be DbConn, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -15597,7 +15597,7 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
                 span.line,
                 span.column,
                 format!(
-                    "`.merge_jsonb`: segundo arg (field) debe ser Str literal, recibió `{}`",
+                    "`.merge_jsonb`: second arg (field) must be Str literal, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -15628,7 +15628,7 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
             span.line,
             span.column,
             format!(
-                "`.merge_jsonb`: field `{}` no es jsonb (tipo Fitz `Map<...>`); use `.update` regular para otros tipos",
+                "`.merge_jsonb`: field `{}` is not jsonb (Fitz type `Map<...>`); use regular `.update` for other types",
                 field_name
             ),
         ));
@@ -15648,7 +15648,7 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "`.merge_jsonb` sin `.where(...)` previo no se permite (afectaría toda la tabla)"
+            "`.merge_jsonb` without prior `.where(...)` is not allowed (would affect the whole table)"
                 .to_string(),
         ));
     }
@@ -15697,7 +15697,7 @@ fn orm_qb_delete(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "`.delete(db)` sin `.where(...)` previo no se permite (borraría toda la tabla); si querés delete masivo, usá `.where(fn(_) => true).delete(db)` explícito".to_string(),
+            "`.delete(db)` without prior `.where(...)` is not allowed (would erase the whole table); for bulk delete use `.where(fn(_) => true).delete(db)` explicitly".to_string(),
         ));
     }
     let sql = format!(
@@ -15744,7 +15744,7 @@ async fn orm_instance_navigate(
             span.line,
             span.column,
             format!(
-                "navigation `<instance>.<rel>(db?)` espera 0 args (QueryBuilder chain) o 1 arg (db, terminal), recibió {}",
+                "navigation `<instance>.<rel>(db?)` expects 0 args (QueryBuilder chain) or 1 arg (db, terminal), received {}",
                 args.len()
             ),
         )));
@@ -15772,7 +15772,7 @@ async fn orm_instance_navigate(
                     span.line,
                     span.column,
                     format!(
-                        "navigation: el type `{}` no tiene `@table(...)`",
+                        "navigation: type `{}` has no `@table(...)`",
                         instance_type_name
                     ),
                 )));
@@ -15800,7 +15800,7 @@ async fn orm_instance_navigate(
                     span.line,
                     span.column,
                     format!(
-                        "navigation: el type `{}` referenciado por la relación no tiene `@table(...)`",
+                        "navigation: type `{}` referenced by the relation has no `@table(...)`",
                         rel.target_type
                     ),
                 )));
@@ -15811,7 +15811,7 @@ async fn orm_instance_navigate(
                     span.line,
                     span.column,
                     format!(
-                        "navigation: el type `{}` referenciado por la relación no está definido",
+                        "navigation: type `{}` referenced by the relation is not defined",
                         rel.target_type
                     ),
                 )));
@@ -15840,7 +15840,7 @@ async fn orm_instance_navigate(
                     span.line,
                     span.column,
                     format!(
-                        "navigation BelongsTo: el type `{}` no declara `@primary` en exactamente un field (composite PK no soportada en navigation)",
+                        "navigation BelongsTo: type `{}` does not declare `@primary` on exactly one field (composite PK not supported in navigation)",
                         rel.target_type
                     ),
                 ))
@@ -15856,7 +15856,7 @@ async fn orm_instance_navigate(
                         span.line,
                         span.column,
                         format!(
-                            "navigation BelongsTo: la instancia de `{}` no tiene el field `{}` (FK)",
+                            "navigation BelongsTo: the `{}` instance has no field `{}` (FK)",
                             instance_type_name, rel.fk_field
                         ),
                     ))
@@ -15873,7 +15873,7 @@ async fn orm_instance_navigate(
                     span.line,
                     span.column,
                     format!(
-                        "navigation Has*: el type `{}` no declara `@primary` en exactamente un field (composite PK no soportada en navigation)",
+                        "navigation Has*: type `{}` does not declare `@primary` on exactly one field (composite PK not supported in navigation)",
                         instance_type_name
                     ),
                 ))
@@ -15888,7 +15888,7 @@ async fn orm_instance_navigate(
                         span.line,
                         span.column,
                         format!(
-                            "navigation Has*: la instancia de `{}` no tiene el field primary `{}`",
+                            "navigation Has*: the `{}` instance has no primary field `{}`",
                             instance_type_name, primary_this_owned
                         ),
                     ))
@@ -16028,21 +16028,21 @@ fn translate_method_call_to_sql(
                 Expr::Ident(name, _) if name == param_name => (inner_field.clone(), field.clone()),
                 _ => {
                     return Err(format!(
-                        "method call en `.where(...)` solo admite la forma `{param_name}.<field>.<método>(...)`"
+                        "method call in `.where(...)` only allows the form `{param_name}.<field>.<method>(...)`"
                     ));
                 }
             },
             _ => {
                 return Err(format!(
-                    "method call en `.where(...)` solo admite la forma `{param_name}.<field>.<método>(...)`"
+                    "method call in `.where(...)` only allows the form `{param_name}.<field>.<method>(...)`"
                 ));
             }
         },
-        _ => return Err("expresión no soportada en `.where(...)`".to_string()),
+        _ => return Err("expression not supported in `.where(...)`".to_string()),
     };
     if !fields.iter().any(|f| f.name == col_name) {
         return Err(format!(
-            "field `{col_name}` no existe en el type (fields: {})",
+            "field `{col_name}` does not exist in the type (fields: {})",
             fields
                 .iter()
                 .map(|f| f.name.as_str())
@@ -16060,7 +16060,7 @@ fn translate_method_call_to_sql(
         "is_null" => {
             if !args.is_empty() {
                 return Err(format!(
-                    "`{param_name}.{col_name}.is_null()` no acepta args"
+                    "`{param_name}.{col_name}.is_null()` does not accept args"
                 ));
             }
             Ok(format!("\"{}\" IS NULL", sql_col))
@@ -16068,7 +16068,7 @@ fn translate_method_call_to_sql(
         "is_not_null" => {
             if !args.is_empty() {
                 return Err(format!(
-                    "`{param_name}.{col_name}.is_not_null()` no acepta args"
+                    "`{param_name}.{col_name}.is_not_null()` does not accept args"
                 ));
             }
             Ok(format!("\"{}\" IS NOT NULL", sql_col))
@@ -16076,14 +16076,14 @@ fn translate_method_call_to_sql(
         "is_in" => {
             if args.len() != 1 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.is_in([...])` espera 1 arg (List literal)"
+                    "`{param_name}.{col_name}.is_in([...])` expects 1 arg (List literal)"
                 ));
             }
             let items = match &args[0] {
                 Expr::List(items, _) => items,
                 _ => {
                     return Err(
-                        "`is_in` MVP: el arg debe ser una List literal `[a, b, c]`".to_string(),
+                        "`is_in` MVP: the arg must be a List literal `[a, b, c]`".to_string(),
                     );
                 }
             };
@@ -16104,7 +16104,7 @@ fn translate_method_call_to_sql(
         "like" | "ilike" => {
             if args.len() != 1 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.{method}(pattern)` espera 1 arg",
+                    "`{param_name}.{col_name}.{method}(pattern)` expects 1 arg",
                 ));
             }
             let pat =
@@ -16121,15 +16121,15 @@ fn translate_method_call_to_sql(
             let field = fields
                 .iter()
                 .find(|f| f.name == col_name)
-                .ok_or_else(|| format!("field `{col_name}` no existe en el type"))?;
+                .ok_or_else(|| format!("field `{col_name}` does not exist in the type"))?;
             let elem_oid = list_elem_pg_oid(&field.type_).ok_or_else(|| {
                 format!(
-                    "`{param_name}.{col_name}.has(value)` requiere que `{col_name}` sea `List<Int|Float|Str|Bool>`"
+                    "`{param_name}.{col_name}.has(value)` requires `{col_name}` to be `List<Int|Float|Str|Bool>`"
                 )
             })?;
             if args.len() != 1 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.has(value)` espera 1 arg, recibió {}",
+                    "`{param_name}.{col_name}.has(value)` expects 1 arg, received {}",
                     args.len()
                 ));
             }
@@ -16140,7 +16140,7 @@ fn translate_method_call_to_sql(
                 (Expr::Bool(b, _), crate::db::oid::BOOL) => crate::db::PgValue::Bool(*b),
                 _ => {
                     return Err(format!(
-                        "`{param_name}.{col_name}.has(value)` MVP: el value debe ser literal del mismo tipo escalar del array"
+                        "`{param_name}.{col_name}.has(value)` MVP: the value must be literal of the same scalar type as the array"
                     ));
                 }
             };
@@ -16151,22 +16151,22 @@ fn translate_method_call_to_sql(
             let field = fields
                 .iter()
                 .find(|f| f.name == col_name)
-                .ok_or_else(|| format!("field `{col_name}` no existe en el type"))?;
+                .ok_or_else(|| format!("field `{col_name}` does not exist in the type"))?;
             let elem_oid = list_elem_pg_oid(&field.type_).ok_or_else(|| {
                 format!(
-                    "`{param_name}.{col_name}.{method}([...])` requiere que `{col_name}` sea `List<Int|Float|Str|Bool>`"
+                    "`{param_name}.{col_name}.{method}([...])` requires `{col_name}` to be `List<Int|Float|Str|Bool>`"
                 )
             })?;
             if args.len() != 1 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.{method}([...])` espera 1 arg (List literal)",
+                    "`{param_name}.{col_name}.{method}([...])` expects 1 arg (List literal)",
                 ));
             }
             let items = match &args[0] {
                 Expr::List(items, _) => items,
                 _ => {
                     return Err(format!(
-                        "`.{method}([...])` MVP: el arg debe ser List literal"
+                        "`.{method}([...])` MVP: the arg must be List literal"
                     ));
                 }
             };
@@ -16179,7 +16179,7 @@ fn translate_method_call_to_sql(
                     (Expr::Bool(b, _), crate::db::oid::BOOL) => crate::db::PgValue::Bool(*b),
                     _ => {
                         return Err(format!(
-                            "`.{method}([...])` MVP: cada item debe ser literal del tipo escalar del array"
+                            "`.{method}([...])` MVP: each item must be literal of the scalar type of the array"
                         ));
                     }
                 };
@@ -16220,14 +16220,14 @@ fn translate_method_call_to_sql(
             let field = fields
                 .iter()
                 .find(|f| f.name == col_name)
-                .ok_or_else(|| format!("field `{col_name}` no existe en el type"))?;
+                .ok_or_else(|| format!("field `{col_name}` does not exist in the type"))?;
             let is_jsonb_field = matches!(
                 &field.type_,
                 crate::ast::TypeExpr::Generic { name, .. } if name == "Map"
             );
             if !is_jsonb_field {
                 return Err(format!(
-                    "`.{method}(...)` requiere que `{col_name}` sea `Map<Str, ...>` (columna jsonb), pero es de otro tipo"
+                    "`.{method}(...)` requires `{col_name}` to be `Map<Str, ...>` (jsonb column), but it is another type"
                 ));
             }
             translate_jsonb_method(
@@ -16252,7 +16252,7 @@ fn translate_method_call_to_sql(
         "matches" | "plainto_matches" => {
             if args.len() != 1 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.{method}(query)` espera 1 arg Str"
+                    "`{param_name}.{col_name}.{method}(query)` expects 1 Str arg"
                 ));
             }
             let q =
@@ -16270,7 +16270,7 @@ fn translate_method_call_to_sql(
         "between" => {
             if args.len() != 2 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.between(low, high)` espera 2 args (low, high)"
+                    "`{param_name}.{col_name}.between(low, high)` expects 2 args (low, high)"
                 ));
             }
             let low =
@@ -16282,7 +16282,7 @@ fn translate_method_call_to_sql(
         "starts_with" | "ends_with" | "contains" => {
             if args.len() != 1 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.{method}(s)` espera 1 arg Str"
+                    "`{param_name}.{col_name}.{method}(s)` expects 1 Str arg"
                 ));
             }
             // W3 (v0.10.6) — two paths:
@@ -16324,8 +16324,8 @@ fn translate_method_call_to_sql(
             }
         }
         other => Err(format!(
-            "método `.{other}(...)` no soportado sobre fields en `.where(...)`. \
-             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches."
+            "method `.{other}(...)` not supported on fields in `.where(...)`. \
+             Supported: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches."
         )),
     }
 }
@@ -16361,7 +16361,7 @@ fn translate_jsonb_method(
         "has_key" | "get" => {
             // 1 arg: text key. Accepts Str literal or external Str var.
             if args.len() != 1 {
-                return Err(format!("`.{method}(key)` espera 1 arg Str (key del JSONB)"));
+                return Err(format!("`.{method}(key)` expects 1 Str arg (JSONB key)"));
             }
             let key_frag =
                 translate_expr_to_sql_with_env(&args[0], param_name, fields, meta, args_acc, env)?;
@@ -16378,14 +16378,14 @@ fn translate_jsonb_method(
             // 1 arg: List<Str> literal. Postgres ?&/?| expect text[].
             if args.len() != 1 {
                 return Err(format!(
-                    "`.{method}([keys...])` espera 1 arg (List literal de Str)"
+                    "`.{method}([keys...])` expects 1 arg (List literal of Str)"
                 ));
             }
             let items = match &args[0] {
                 Expr::List(items, _) => items,
                 _ => {
                     return Err(format!(
-                        "`.{method}([keys...])` MVP: el arg debe ser List literal `[a, b, c]`"
+                        "`.{method}([keys...])` MVP: the arg must be List literal `[a, b, c]`"
                     ));
                 }
             };
@@ -16406,7 +16406,7 @@ fn translate_jsonb_method(
                     Expr::Str(s, _) => s.clone(),
                     _ => {
                         return Err(format!(
-                            "`.{method}([keys...])` MVP: cada item debe ser string literal"
+                            "`.{method}([keys...])` MVP: each item must be a string literal"
                         ));
                     }
                 };
@@ -16430,14 +16430,14 @@ fn translate_jsonb_method(
             // `::jsonb` in SQL. Equivalent to the `@>` operator.
             if args.len() != 1 {
                 return Err(
-                    "`.contains_json(map)` espera 1 arg Map (subset jsonb a chequear)".to_string(),
+                    "`.contains_json(map)` expects 1 arg Map (jsonb subset to check)".to_string(),
                 );
             }
             let map_items = match &args[0] {
                 Expr::Map(items, _) => items,
                 _ => {
                     return Err(
-                        "`.contains_json(map)` MVP: el arg debe ser Map literal `{k: v, ...}`"
+                        "`.contains_json(map)` MVP: the arg must be Map literal `{k: v, ...}`"
                             .to_string(),
                     );
                 }
@@ -16451,7 +16451,7 @@ fn translate_jsonb_method(
                     Expr::Str(s, _) => s.clone(),
                     _ => {
                         return Err(
-                            "`.contains_json(map)` MVP: cada key del Map debe ser string literal"
+                            "`.contains_json(map)` MVP: each Map key must be a string literal"
                                 .to_string(),
                         );
                     }
@@ -16466,14 +16466,14 @@ fn translate_jsonb_method(
                     Expr::Null(_) => serde_json::Value::Null,
                     _ => {
                         return Err(format!(
-                            "`.contains_json(map)` MVP: value para key `{key}` debe ser literal primitivo (Int/Float/Str/Bool/Null)"
+                            "`.contains_json(map)` MVP: value for key `{key}` must be a primitive literal (Int/Float/Str/Bool/Null)"
                         ));
                     }
                 };
                 json_obj.insert(key, val);
             }
             let json_text = serde_json::to_string(&serde_json::Value::Object(json_obj))
-                .map_err(|e| format!(".contains_json: serialización JSON falló: {e}"))?;
+                .map_err(|e| format!(".contains_json: JSON serialization failed: {e}"))?;
             args_acc.push(crate::db::PgValue::Text(json_text));
             Ok(format!("\"{}\" @> ${}::jsonb", sql_col, args_acc.len()))
         }
@@ -16497,20 +16497,20 @@ fn translate_jsonb_method(
         "has_path" | "path_text" | "path_int" | "path_float" | "path_bool" => {
             if args.len() != 1 {
                 return Err(format!(
-                    "`.{method}([k1, k2, ...])` espera 1 arg (List literal de Str)"
+                    "`.{method}([k1, k2, ...])` expects 1 arg (List literal of Str)"
                 ));
             }
             let items = match &args[0] {
                 Expr::List(items, _) => items,
                 _ => {
                     return Err(format!(
-                        "`.{method}([k1, k2, ...])` MVP: el arg debe ser List literal `[a, b, c]`"
+                        "`.{method}([k1, k2, ...])` MVP: the arg must be List literal `[a, b, c]`"
                     ));
                 }
             };
             if items.is_empty() {
                 return Err(format!(
-                    "`.{method}([])` con path vacío no tiene semántica útil — usá `.is_not_null()` para chequear el field entero"
+                    "`.{method}([])` with empty path has no useful semantics — use `.is_not_null()` to check the whole field"
                 ));
             }
             let mut values: Vec<crate::db::PgValue> = Vec::with_capacity(items.len());
@@ -16519,7 +16519,7 @@ fn translate_jsonb_method(
                     Expr::Str(s, _) => s.clone(),
                     _ => {
                         return Err(format!(
-                            "`.{method}([k1, k2, ...])` MVP: cada key del path debe ser string literal"
+                            "`.{method}([k1, k2, ...])` MVP: each path key must be a string literal"
                         ));
                     }
                 };
@@ -16618,7 +16618,7 @@ pub fn translate_expr_to_sql_with_env(
                 BinOpKind::Mod => "%",
                 other => {
                     return Err(format!(
-                        "operador `{:?}` no soportado en `.where(...)` MVP",
+                        "operator `{:?}` not supported in `.where(...)` MVP",
                         other
                     ));
                 }
@@ -16632,7 +16632,7 @@ pub fn translate_expr_to_sql_with_env(
                 UnaryOpKind::Not => Ok(format!("(NOT {})", inner)),
                 UnaryOpKind::Neg => Ok(format!("(-{})", inner)),
                 UnaryOpKind::BitNot => {
-                    Err("operador `~` (bitwise NOT) no soportado en `.where(...)`".to_string())
+                    Err("operator `~` (bitwise NOT) not supported in `.where(...)`".to_string())
                 }
             }
         }
@@ -16648,7 +16648,7 @@ pub fn translate_expr_to_sql_with_env(
                     // Validate that the field exists in the type.
                     if !fields.iter().any(|f| f.name == *field) {
                         return Err(format!(
-                            "field `{field}` no existe en el type (fields disponibles: {})",
+                            "field `{field}` does not exist in the type (available fields: {})",
                             fields
                                 .iter()
                                 .map(|f| f.name.as_str())
@@ -16669,12 +16669,12 @@ pub fn translate_expr_to_sql_with_env(
                     // tests that don't resolve vars).
                     let e = env.ok_or_else(|| {
                         format!(
-                            "`{var_name}.{field}` no soportado en `.where(...)` sin closure env"
+                            "`{var_name}.{field}` not supported in `.where(...)` without closure env"
                         )
                     })?;
                     let v = e.lock().get(var_name).ok_or_else(|| {
                         format!(
-                            "variable `{var_name}` no está en scope del closure de `.where(...)`"
+                            "variable `{var_name}` is not in scope of the `.where(...)` closure"
                         )
                     })?;
                     let inner = match &v {
@@ -16691,21 +16691,21 @@ pub fn translate_expr_to_sql_with_env(
                             })?,
                         _ => {
                             return Err(format!(
-                                "`{var_name}.{field}` en `.where(...)`: `{var_name}` debe ser una instancia de un type, recibió `{}`",
+                                "`{var_name}.{field}` in `.where(...)`: `{var_name}` must be an instance of a type, received `{}`",
                                 v.type_name()
                             ));
                         }
                     };
                     let pg = fitz_value_to_pg(&inner).map_err(|msg| {
                         format!(
-                            "`{var_name}.{field}` no se puede usar como arg de query: {msg}"
+                            "`{var_name}.{field}` cannot be used as query arg: {msg}"
                         )
                     })?;
                     args_acc.push(pg);
                     Ok(format!("${}", args_acc.len()))
                 }
                 _ => Err(format!(
-                    "`.where(...)` solo admite field access sobre el parámetro `{param_name}.<col>` o sobre vars externas `<var>.<field>` (recibió expresión más compleja)"
+                    "`.where(...)` only allows field access on the parameter `{param_name}.<col>` or on external vars `<var>.<field>` (received more complex expression)"
                 )),
             }
         }
@@ -16737,7 +16737,7 @@ pub fn translate_expr_to_sql_with_env(
         Expr::Ident(name, _) => {
             if name == param_name {
                 Err(format!(
-                    "no podés comparar el row entero (`{name}`); accedé a un field específico"
+                    "cannot compare the whole row (`{name}`); access a specific field"
                 ))
             } else {
                 // Phase 10.b.9.b — external var captured by the closure.
@@ -16749,24 +16749,24 @@ pub fn translate_expr_to_sql_with_env(
                 match env {
                     Some(e) => {
                         let v = e.lock().get(name).ok_or_else(|| {
-                            format!("variable `{name}` no está en scope del closure de `.where(...)`")
+                            format!("variable `{name}` is not in scope of the `.where(...)` closure")
                         })?;
                         let pg = fitz_value_to_pg(&v).map_err(|msg| {
                             format!(
-                                "variable `{name}` no se puede usar como arg de query: {msg}"
+                                "variable `{name}` cannot be used as query arg: {msg}"
                             )
                         })?;
                         args_acc.push(pg);
                         Ok(format!("${}", args_acc.len()))
                     }
                     None => Err(format!(
-                        "variable `{name}` no soportada en `.where(...)` MVP — usá literales o `<param>.<field>`"
+                        "variable `{name}` not supported in `.where(...)` MVP — use literals or `<param>.<field>`"
                     )),
                 }
             }
         }
         other => Err(format!(
-            "expresión `{:?}` no soportada en `.where(...)` MVP",
+            "expression `{:?}` not supported in `.where(...)` MVP",
             std::mem::discriminant(other)
         )),
     }
@@ -16804,7 +16804,7 @@ fn pg_row_to_instance(
             .unwrap_or(f.name.as_str());
         let (pg, oid) = row.get_with_oid(sql_col).ok_or_else(|| {
             format!(
-                "la columna `{}` (field `{}` de `{}`) no está en el resultset",
+                "column `{}` (field `{}` of `{}`) is not in the resultset",
                 sql_col, f.name, type_name
             )
         })?;
@@ -16863,7 +16863,7 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`cors` espera 0 o 1 argumento (un Map de configuración), recibió {}",
+                "`cors` expects 0 or 1 argument (a configuration Map), received {}",
                 args.len()
             ),
         ));
@@ -16883,7 +16883,7 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
                     0,
                     0,
                     format!(
-                        "`cors` espera un Map de configuración, recibió `{}`",
+                        "`cors` expects a configuration Map, received `{}`",
                         other.type_name()
                     ),
                 ));
@@ -16901,7 +16901,7 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
                         0,
                         0,
                         format!(
-                            "`cors`: las keys del Map de configuración deben ser Str, recibió `{}`",
+                            "`cors`: configuration Map keys must be Str, received `{}`",
                             other.type_name()
                         ),
                     ));
@@ -16989,7 +16989,7 @@ fn cors_type_err(key: &str, expected: &str, found: &str) -> FitzError {
         0,
         0,
         format!(
-            "`cors`: la key '{}' espera {}, recibió `{}`",
+            "`cors`: key '{}' expects {}, received `{}`",
             key, expected, found
         ),
     )
@@ -17029,7 +17029,7 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`len` espera 1 argumento, recibió {}", args.len()),
+            format!("`len` expects 1 argument, received {}", args.len()),
         ));
     }
     let n: i64 = match &args[0] {
@@ -17041,12 +17041,12 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
         other => {
             return Err(FitzError::new(
                 ErrorKind::TypeMismatch {
-                    expected: "List, Map, Str, Bytes o Range".into(),
+                    expected: "List, Map, Str, Bytes or Range".into(),
                     found: other.type_name().into(),
                 },
                 0,
                 0,
-                format!("`len` no aplica a un valor de tipo `{}`", other.type_name()),
+                format!("`len` does not apply to a value of type `{}`", other.type_name()),
             ));
         }
     };
@@ -17064,7 +17064,7 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`bytes` espera 1 argumento, recibió {}", args.len()),
+            format!("`bytes` expects 1 argument, received {}", args.len()),
         ));
     }
     match &args[0] {
@@ -17076,7 +17076,7 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`bytes(s)` espera Str, recibió `{}`", other.type_name()),
+            format!("`bytes(s)` expects Str, received `{}`", other.type_name()),
         )),
     }
 }
@@ -17086,7 +17086,7 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
 //
 // Three builtins for reading environment variables from Fitz:
 //   - `env(key: Str) -> Result<Str>`: reads `std::env::var`. If the
-//     var exists → `Ok(value)`, otherwise → `Err("env var X no definida")`.
+//     var exists → `Ok(value)`, otherwise → `Err("env var X not defined")`.
 //     Forces the user to handle the missing case with `?` or `match`.
 //   - `env_or(key: Str, default: Str) -> Str`: same but with a
 //     default. Never fails.
@@ -17105,7 +17105,7 @@ fn builtin_env(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`env(key)` espera 1 argumento, recibió {}", args.len()),
+            format!("`env(key)` expects 1 argument, received {}", args.len()),
         ));
     }
     let key = match &args[0] {
@@ -17118,7 +17118,7 @@ fn builtin_env(args: &[Value]) -> FitzResult<Value> {
                 },
                 0,
                 0,
-                format!("`env(key)` espera Str, recibió `{}`", other.type_name()),
+                format!("`env(key)` expects Str, received `{}`", other.type_name()),
             ));
         }
     };
@@ -17127,7 +17127,7 @@ fn builtin_env(args: &[Value]) -> FitzResult<Value> {
             value,
         ))))),
         Err(_) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-            format!("env var `{}` no definida", key),
+            format!("env var `{}` not defined", key),
         ))))),
     }
 }
@@ -17142,7 +17142,7 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`env_or(key, default)` espera 2 argumentos, recibió {}",
+                "`env_or(key, default)` expects 2 arguments, received {}",
                 args.len()
             ),
         ));
@@ -17158,7 +17158,7 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`env_or(key, default)` espera Str como primer arg, recibió `{}`",
+                    "`env_or(key, default)` expects Str as first arg, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17175,7 +17175,7 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`env_or(key, default)` espera Str como segundo arg, recibió `{}`",
+                    "`env_or(key, default)` expects Str as second arg, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17191,7 +17191,7 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
 ///   1. Env var (`std::env::var(key)`).
 ///   2. Mounted file `/run/secrets/<key>` — K8s/Docker secrets
 ///      convention. On Windows the path doesn't exist → silent skip.
-///   3. If none: `Err("secret 'KEY' no encontrado")`.
+///   3. If none: `Err("secret 'KEY' not found")`.
 ///
 /// The value is wrapped in `Value::Secret(SecretInner(Box::new(...)))`
 /// so the rest of the language (print/Display/Debug/JSON) redacts it
@@ -17213,7 +17213,7 @@ fn builtin_secret(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`secret(key)` espera 1 argumento (Str), recibió {}",
+                "`secret(key)` expects 1 argument (Str), received {}",
                 args.len()
             ),
         ));
@@ -17229,7 +17229,7 @@ fn builtin_secret(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`secret(key)` espera Str como arg, recibió `{}`",
+                    "`secret(key)` expects Str as arg, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17255,7 +17255,7 @@ fn builtin_secret(args: &[Value]) -> FitzResult<Value> {
     // No source available — Err.
     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
         format!(
-            "secret '{}' no encontrado (chequeado: env var, /run/secrets/{})",
+            "secret '{}' not found (checked: env var, /run/secrets/{})",
             key, key
         ),
     )))))
@@ -17291,7 +17291,7 @@ fn builtin_config(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`config(key, default)` espera 2 argumentos (Str, T), recibió {}",
+                "`config(key, default)` expects 2 arguments (Str, T), received {}",
                 args.len()
             ),
         ));
@@ -17307,7 +17307,7 @@ fn builtin_config(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`config(key, default)` espera Str como primer arg, recibió `{}`",
+                    "`config(key, default)` expects Str as first arg, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17348,7 +17348,7 @@ fn builtin_config(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`config(key, default)` solo soporta defaults primitivos (Int/Float/Bool/Str), recibió `{}`",
+                    "`config(key, default)` only supports primitive defaults (Int/Float/Bool/Str), received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17478,7 +17478,7 @@ fn builtin_flag(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`flag(name)` espera 1 argumento (Str), recibió {}",
+                "`flag(name)` expects 1 argument (Str), received {}",
                 args.len()
             ),
         ));
@@ -17494,7 +17494,7 @@ fn builtin_flag(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`flag(name)` espera Str como arg, recibió `{}`",
+                    "`flag(name)` expects Str as arg, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17514,7 +17514,7 @@ fn builtin_flags_is_enabled(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`flags.is_enabled(name)` espera 1 argumento (Str), recibió {}",
+                "`flags.is_enabled(name)` expects 1 argument (Str), received {}",
                 args.len()
             ),
         ));
@@ -17530,7 +17530,7 @@ fn builtin_flags_is_enabled(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`flags.is_enabled(name)` espera Str como arg, recibió `{}`",
+                    "`flags.is_enabled(name)` expects Str as arg, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17549,7 +17549,7 @@ fn builtin_flags_list(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`flags.list()` no acepta argumentos, recibió {}",
+                "`flags.list()` does not accept arguments, received {}",
                 args.len()
             ),
         ));
@@ -17571,7 +17571,7 @@ fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`load_env(path)` espera 1 argumento, recibió {}",
+                "`load_env(path)` expects 1 argument, received {}",
                 args.len()
             ),
         ));
@@ -17587,7 +17587,7 @@ fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`load_env(path)` espera Str, recibió `{}`",
+                    "`load_env(path)` expects Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17611,7 +17611,7 @@ fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
 /// chars. If demand appears, a dedicated future mini-phase.
 fn parse_env_file(path: &str) -> Result<(), String> {
     let contents =
-        std::fs::read_to_string(path).map_err(|e| format!("no se pudo leer `{}`: {}", path, e))?;
+        std::fs::read_to_string(path).map_err(|e| format!("could not read `{}`: {}", path, e))?;
     for (line_no, raw_line) in contents.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -17619,7 +17619,7 @@ fn parse_env_file(path: &str) -> Result<(), String> {
         }
         let eq_idx = line.find('=').ok_or_else(|| {
             format!(
-                "{}:{}: línea sin `=` — formato esperado `KEY=VALUE`",
+                "{}:{}: line without `=` — expected format `KEY=VALUE`",
                 path,
                 line_no + 1
             )
@@ -17627,7 +17627,7 @@ fn parse_env_file(path: &str) -> Result<(), String> {
         let key = line[..eq_idx].trim();
         let mut value = line[eq_idx + 1..].trim().to_string();
         if key.is_empty() {
-            return Err(format!("{}:{}: key vacía antes del `=`", path, line_no + 1));
+            return Err(format!("{}:{}: empty key before `=`", path, line_no + 1));
         }
         // Strip wrapping double quotes (if the value opens and closes
         // with `"`). Useful for `KEY="value with spaces"`. No internal
@@ -17665,7 +17665,7 @@ fn parse_env_file(path: &str) -> Result<(), String> {
 
 /// `assert(cond: Bool, msg: Str?) -> Null` — the base assertion.
 /// If `cond` is `false`, emits `FitzError`. Without `msg`, generic
-/// message "aserción falló"; with `msg`, includes it at the end.
+/// message "assertion failed"; with `msg`, includes it at the end.
 ///
 /// Decision: the first arg must be strictly `Bool` (no Python/JS-style
 /// "truthy"/"falsy"). Passing `Int`/`Str`/etc. emits a clear type
@@ -17681,7 +17681,7 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`assert` espera 1 o 2 argumentos (cond: Bool, msg: Str?), recibió {}",
+                "`assert` expects 1 or 2 arguments (cond: Bool, msg: Str?), received {}",
                 args.len()
             ),
         ));
@@ -17697,7 +17697,7 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`assert` espera `Bool` como primer argumento, recibió `{}`",
+                    "`assert` expects `Bool` as first argument, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17714,7 +17714,7 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`assert` espera `Str` como segundo argumento (mensaje), recibió `{}`",
+                    "`assert` expects `Str` as second argument (message), received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17725,8 +17725,8 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
         return Ok(Value::Null);
     }
     let detail = match msg {
-        Some(m) => format!("aserción falló: {}", m),
-        None => "aserción falló".to_string(),
+        Some(m) => format!("assertion failed: {}", m),
+        None => "assertion failed".to_string(),
     };
     Err(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, detail))
 }
@@ -17744,7 +17744,7 @@ fn builtin_assert_eq(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`assert_eq` espera 2 argumentos (left, right), recibió {}",
+                "`assert_eq` expects 2 arguments (left, right), received {}",
                 args.len()
             ),
         ));
@@ -17757,7 +17757,7 @@ fn builtin_assert_eq(args: &[Value]) -> FitzResult<Value> {
         0,
         0,
         format!(
-            "assert_eq falló:\n  left:  {}\n  right: {}",
+            "assert_eq failed:\n  left:  {}\n  right: {}",
             args[0], args[1]
         ),
     ))
@@ -17775,7 +17775,7 @@ fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`assert_ne` espera 2 argumentos (left, right), recibió {}",
+                "`assert_ne` expects 2 arguments (left, right), received {}",
                 args.len()
             ),
         ));
@@ -17787,7 +17787,7 @@ fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
         ErrorKind::InvalidSyntax,
         0,
         0,
-        format!("assert_ne falló: ambos lados son iguales ({})", args[0]),
+        format!("assert_ne failed: both sides are equal ({})", args[0]),
     ))
 }
 
@@ -17801,8 +17801,8 @@ fn builtin_assert_throws_stub(_args: &[Value]) -> FitzResult<Value> {
         ErrorKind::InvalidSyntax,
         0,
         0,
-        "bug del evaluator: `assert_throws` stub invocado directamente. \
-         El dispatcher debería haberlo interceptado."
+        "evaluator bug: `assert_throws` stub invoked directly. \
+         The dispatcher should have intercepted it."
             .to_string(),
     ))
 }
@@ -17828,7 +17828,7 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
             span.line,
             span.column,
             format!(
-                "`assert_throws` espera 1 argumento (callback: fn), recibió {}",
+                "`assert_throws` expects 1 argument (callback: fn), received {}",
                 args.len()
             ),
         )));
@@ -17847,7 +17847,7 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
                 span.line,
                 span.column,
                 format!(
-                    "`assert_throws` espera una función como argumento, recibió `{}`",
+                    "`assert_throws` expects a function as argument, received `{}`",
                     other.type_name()
                 ),
             )));
@@ -17859,7 +17859,7 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
             span.line,
             span.column,
             format!(
-                "`assert_throws` espera una función con 0 params, recibió una con {}",
+                "`assert_throws` expects a function with 0 params, received one with {}",
                 param_count
             ),
         )));
@@ -17869,18 +17869,18 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "`assert_throws` no soporta callbacks `async fn` en el MVP. \
-             Usá `match` sobre el `Result` o un helper sync."
+            "`assert_throws` does not support `async fn` callbacks in the MVP. \
+             Use `match` on the `Result` or a sync helper."
                 .to_string(),
         )));
     }
-    match invoke_value(callback.clone(), vec![], "callback de assert_throws", span).await {
+    match invoke_value(callback.clone(), vec![], "assert_throws callback", span).await {
         Ok(_) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            "assert_throws falló: se esperaba que la fn tirara un error, \
-             pero retornó normalmente"
+            "assert_throws failed: expected the fn to throw an error, \
+             but it returned normally"
                 .to_string(),
         ))),
         Err(_) => Ok(Value::Null),
@@ -17941,7 +17941,7 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`jwt.encode` espera 2 o 3 argumentos (payload: Map, secret: Str, alg: Str?), recibió {}",
+                "`jwt.encode` expects 2 or 3 arguments (payload: Map, secret: Str, alg: Str?), received {}",
                 args.len()
             ),
         ));
@@ -17954,7 +17954,7 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
                     ErrorKind::TypeError,
                     0,
                     0,
-                    format!("`jwt.encode`: payload no serializable a JSON: {}", e),
+                    format!("`jwt.encode`: payload not serializable to JSON: {}", e),
                 ));
             }
         },
@@ -17967,7 +17967,7 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`jwt.encode`: payload debe ser Map, recibió `{}`",
+                    "`jwt.encode`: payload must be Map, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -17984,7 +17984,7 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`jwt.encode`: secret debe ser Str, recibió `{}`",
+                    "`jwt.encode`: secret must be Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -18002,7 +18002,7 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
                     0,
                     0,
                     format!(
-                        "`jwt.encode`: alg debe ser Str, recibió `{}`",
+                        "`jwt.encode`: alg must be Str, received `{}`",
                         other.type_name()
                     ),
                 ));
@@ -18021,7 +18021,7 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`jwt.encode`: alg `{}` no soportado en el MVP. Soportados: HS256, HS384, HS512.",
+                    "`jwt.encode`: alg `{}` not supported in the MVP. Supported: HS256, HS384, HS512.",
                     other
                 ),
             ));
@@ -18036,7 +18036,7 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
                 ErrorKind::TypeError,
                 0,
                 0,
-                format!("`jwt.encode`: fallo al firmar: {}", e),
+                format!("`jwt.encode`: failed to sign: {}", e),
             )
         })
 }
@@ -18055,7 +18055,7 @@ fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`jwt.decode` espera 2 o 3 argumentos (token: Str, secret: Str, alg: Str?), recibió {}",
+                "`jwt.decode` expects 2 or 3 arguments (token: Str, secret: Str, alg: Str?), received {}",
                 args.len()
             ),
         ));
@@ -18071,7 +18071,7 @@ fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`jwt.decode`: token debe ser Str, recibió `{}`",
+                    "`jwt.decode`: token must be Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -18088,7 +18088,7 @@ fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`jwt.decode`: secret debe ser Str, recibió `{}`",
+                    "`jwt.decode`: secret must be Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -18106,7 +18106,7 @@ fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
                     0,
                     0,
                     format!(
-                        "`jwt.decode`: alg debe ser Str, recibió `{}`",
+                        "`jwt.decode`: alg must be Str, received `{}`",
                         other.type_name()
                     ),
                 ));
@@ -18125,7 +18125,7 @@ fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`jwt.decode`: alg `{}` no soportado en el MVP. Soportados: HS256, HS384, HS512.",
+                    "`jwt.decode`: alg `{}` not supported in the MVP. Supported: HS256, HS384, HS512.",
                     other
                 ),
             ));
@@ -18163,7 +18163,7 @@ fn builtin_hash_password(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`hash.password` espera 1 argumento (plain: Str), recibió {}",
+                "`hash.password` expects 1 argument (plain: Str), received {}",
                 args.len()
             ),
         ));
@@ -18179,7 +18179,7 @@ fn builtin_hash_password(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`hash.password`: plain debe ser Str, recibió `{}`",
+                    "`hash.password`: plain must be Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -18196,7 +18196,7 @@ fn builtin_hash_password(args: &[Value]) -> FitzResult<Value> {
                 ErrorKind::TypeError,
                 0,
                 0,
-                format!("`hash.password`: fallo al hashear: {}", e),
+                format!("`hash.password`: failed to hash: {}", e),
             )
         })
 }
@@ -18214,7 +18214,7 @@ fn builtin_hash_verify(args: &[Value]) -> FitzResult<Value> {
             0,
             0,
             format!(
-                "`hash.verify` espera 2 argumentos (plain: Str, hashed: Str), recibió {}",
+                "`hash.verify` expects 2 arguments (plain: Str, hashed: Str), received {}",
                 args.len()
             ),
         ));
@@ -18230,7 +18230,7 @@ fn builtin_hash_verify(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`hash.verify`: plain debe ser Str, recibió `{}`",
+                    "`hash.verify`: plain must be Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -18247,7 +18247,7 @@ fn builtin_hash_verify(args: &[Value]) -> FitzResult<Value> {
                 0,
                 0,
                 format!(
-                    "`hash.verify`: hashed debe ser Str, recibió `{}`",
+                    "`hash.verify`: hashed must be Str, received `{}`",
                     other.type_name()
                 ),
             ));
@@ -18338,7 +18338,7 @@ fn expect_log_msg_positional(args: &[Value], display: &str) -> FitzResult<String
             0,
             0,
             format!(
-                "`{}` espera 1 argumento posicional (msg: Str) + kwargs opcionales (k: v), recibió {} posicionales",
+                "`{}` expects 1 positional argument (msg: Str) + optional kwargs (k: v), received {} positionals",
                 display,
                 args.len()
             ),
@@ -18354,7 +18354,7 @@ fn expect_log_msg_positional(args: &[Value], display: &str) -> FitzResult<String
             0,
             0,
             format!(
-                "`{}`: msg debe ser Str, recibió `{}`",
+                "`{}`: msg must be Str, received `{}`",
                 display,
                 other.type_name()
             ),
@@ -21501,7 +21501,7 @@ print(factorial(5))
         .await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("estático") && err.message.contains("C.make"),
+            err.message.contains("static") && err.message.contains("C.make"),
             "esperaba mensaje sugiriendo `C.make()`, fue: {}",
             err.message,
         );
@@ -22033,7 +22033,7 @@ let first_y = zs[0].1
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("operación `?` falló") && err.message.contains("boom"),
+            err.message.contains("operator `?` failed") && err.message.contains("boom"),
             "esperaba mensaje específico de `?`: {}",
             err.message,
         );
@@ -22045,7 +22045,7 @@ let first_y = zs[0].1
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("operación `?` falló") && err.message.contains("404"),
+            err.message.contains("operator `?` failed") && err.message.contains("404"),
             "esperaba 404 en el mensaje: {}",
             err.message,
         );
@@ -22712,7 +22712,7 @@ let r = match n {
             \tif (target == 1) {\n\
             \t\treturn Ok(User { id: 1, name: \"Fitz\" })\n\
             \t}\n\
-            \treturn Err(\"no encontrado\")\n\
+            \treturn Err(\"not found\")\n\
             }\n\
             \n\
             fn lookup_name(id) {\n\
@@ -22731,7 +22731,7 @@ let r = match n {
         );
         assert_eq!(
             env.lock().get("miss"),
-            Some(err_value(Value::Str("no encontrado".into()))),
+            Some(err_value(Value::Str("not found".into()))),
         );
     }
 
@@ -22740,7 +22740,7 @@ let r = match n {
         let src = "\
             fn divide(a, b) {\n\
             \tif (b == 0) {\n\
-            \t\treturn Err(\"división por cero\")\n\
+            \t\treturn Err(\"division by zero\")\n\
             \t}\n\
             \treturn Ok(a / b)\n\
             }\n\
@@ -22923,7 +22923,7 @@ let r = match n {
             xs.foo()\n\
         ";
         let err = parse_and_eval(src).await.unwrap_err();
-        assert!(err.message.contains("método"), "mensaje: {}", err.message);
+        assert!(err.message.contains("method"), "message: {}", err.message);
     }
 
     // -----------------------------------------------------------------------
@@ -22984,7 +22984,7 @@ let r = match n {
     async fn list_pop_on_empty_is_error() {
         let src = "let xs = []\nlet _ = xs.pop()\n";
         let err = parse_and_eval(src).await.unwrap_err();
-        assert!(err.message.contains("vacía"), "mensaje: {}", err.message);
+        assert!(err.message.contains("empty"), "message: {}", err.message);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -23035,7 +23035,7 @@ let r = match n {
         res.unwrap();
         assert_eq!(
             env.lock().get("r"),
-            Some(err_value(Value::Str("no encontrado".into()))),
+            Some(err_value(Value::Str("not found".into()))),
         );
     }
 
@@ -23841,7 +23841,7 @@ let r = match n {
         if let Value::Result(ResultVariant::Ok(inner)) = a {
             assert_eq!(*inner, Value::Int(2));
         }
-        // Err("no encontrado").
+        // Err("not found").
         assert!(matches!(b, Value::Result(ResultVariant::Err(_))));
     }
 
@@ -24265,9 +24265,9 @@ let r = match n {
             other => panic!("se esperaba Ok, se obtuvo {:?}", other),
         }
 
-        // miss is Err("no encontrado") — the message comes from list_find.
+        // miss is Err("not found") — the message comes from list_find.
         let miss = env.lock().get("miss").unwrap();
-        assert_eq!(miss, err_value(Value::Str("no encontrado".into())));
+        assert_eq!(miss, err_value(Value::Str("not found".into())));
     }
 
     // -----------------------------------------------------------------------
@@ -24489,7 +24489,7 @@ let r = match n {
             err.message
         );
         assert!(
-            err.message.contains("no se encontró"),
+            err.message.contains("not found"),
             "el mensaje debe decir 'no se encontró': {}",
             err.message
         );
@@ -26228,7 +26228,7 @@ let r = match n {
         let src = "@patch(\"/x\")\nfn h() => 0";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
-            err.message.contains("@patch") && err.message.contains("no implementado"),
+            err.message.contains("@patch") && err.message.contains("not implemented"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26263,7 +26263,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("'{id}'") && err.message.contains("parámetro"),
+            err.message.contains("'{id}'") && err.message.contains("parameter"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26355,7 +26355,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("solo se admite un parámetro body"),
+            err.message.contains("only one body parameter per handler"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26475,7 +26475,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("ya tenía un @server"),
+            err.message.contains("already had a @server"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26629,7 +26629,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("authorization") && err.message.contains("no tiene un param"),
+            err.message.contains("authorization") && err.message.contains("has no param named"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26747,7 +26747,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("into") && err.message.contains("vacío"),
+            err.message.contains("into") && err.message.contains("empty"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26812,7 +26812,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("api_version") && err.message.contains("vacío"),
+            err.message.contains("api_version") && err.message.contains("empty"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27158,7 +27158,7 @@ let r = match n {
         let e = first_runtime_error("print(10 / 0)").await;
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 10);
-        assert!(e.message.contains("división por cero"));
+        assert!(e.message.contains("division by zero"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27715,7 +27715,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("assert(false)").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("aserción falló"),
+            err.message.contains("assertion failed"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27820,7 +27820,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("assert_throws(fn() => 1 + 1)").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("tirara") && err.message.contains("retornó normalmente"),
+            err.message.contains("throw") && err.message.contains("returned normally"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27859,7 +27859,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("assert_throws(42)").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("función") || err.message.contains("Function"),
+            err.message.contains("function") || err.message.contains("Function"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27982,7 +27982,7 @@ let r = match n {
         let r = env.lock().get("r").unwrap();
         match r {
             Value::Result(ResultVariant::Err(b)) => {
-                assert_eq!(*b, Value::Str("lista vacía".into()))
+                assert_eq!(*b, Value::Str("empty list".into()))
             }
             other => panic!("esperaba Err, vi {:?}", other),
         }
@@ -29240,7 +29240,7 @@ let r = match n {
             type_name: "ApiErr".to_string(),
             fields: Arc::new(Mutex::new(vec![
                 ("status".to_string(), Value::Int(404)),
-                ("message".to_string(), Value::Str("no encontrado".into())),
+                ("message".to_string(), Value::Str("not found".into())),
             ])),
         };
         let err = Value::Result(ResultVariant::Err(Box::new(instance)));
@@ -29251,7 +29251,7 @@ let r = match n {
         let body_str = outcome.body.to_string();
         assert!(
             body_str.contains("\"status\":404")
-                && body_str.contains("\"message\":\"no encontrado\""),
+                && body_str.contains("\"message\":\"not found\""),
             "esperaba body de Instance serializada, fue: {}",
             body_str
         );
@@ -30848,7 +30848,7 @@ let r = match n {
             Value::Result(crate::value::ResultVariant::Err(boxed)) => {
                 if let Value::Str(msg) = boxed.as_ref() {
                     assert!(
-                        msg.contains("URL inválida") || msg.contains("postgres://"),
+                        msg.contains("invalid URL") || msg.contains("postgres://"),
                         "mensaje inesperado: {msg}"
                     );
                 } else {
@@ -31415,7 +31415,7 @@ let r = match n {
         let r = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args);
         assert!(r.is_err());
         let msg = r.unwrap_err();
-        assert!(msg.contains("path vacío"), "msg fue: {msg}");
+        assert!(msg.contains("empty path"), "msg was: {msg}");
     }
 
     #[test]
