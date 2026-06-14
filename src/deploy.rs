@@ -113,24 +113,24 @@ impl fmt::Display for DeployError {
             DeployError::MissingDockerfile { manifest_dir } => {
                 write!(
                     f,
-                    "no se encontró `Dockerfile` en `{}`. Corré `fitz docker init` para \
-                     generarlo (Fase 12.4) antes de deployar.",
+                    "could not find `Dockerfile` in `{}`. Run `fitz docker init` to \
+                     generate it (Phase 12.4) before deploying.",
                     manifest_dir.display()
                 )
             }
             DeployError::MissingComposeFile { manifest_dir } => {
                 write!(
                     f,
-                    "no se encontró `docker-compose.yml` en `{}`. Corré `fitz docker init` \
-                     para generarlo (Fase 12.4) antes de deployar.",
+                    "could not find `docker-compose.yml` in `{}`. Run `fitz docker init` \
+                     to generate it (Phase 12.4) before deploying.",
                     manifest_dir.display()
                 )
             }
             DeployError::DockerNotInstalled => {
                 write!(
                     f,
-                    "el binario `docker` no está en el PATH. Instalalo desde \
-                     https://docs.docker.com/get-docker/ antes de deployar."
+                    "the `docker` binary is not on the PATH. Install it from \
+                     https://docs.docker.com/get-docker/ before deploying."
                 )
             }
             DeployError::CommandFailed {
@@ -140,13 +140,13 @@ impl fmt::Display for DeployError {
             } => {
                 write!(
                     f,
-                    "`{} {}` falló con exit code {}",
+                    "`{} {}` failed with exit code {}",
                     bin,
                     args.join(" "),
                     exit_code
                 )
             }
-            DeployError::Io(e) => write!(f, "IO error invocando sub-proceso: {}", e),
+            DeployError::Io(e) => write!(f, "IO error invoking sub-process: {}", e),
         }
     }
 }
@@ -362,7 +362,7 @@ mod tests {
             Err(DeployError::MissingDockerfile { manifest_dir }) => {
                 assert_eq!(manifest_dir, dir.path());
             }
-            other => panic!("esperaba MissingDockerfile, recibí {:?}", other.err()),
+            other => panic!("expected MissingDockerfile, got {:?}", other.err()),
         }
     }
 
@@ -375,7 +375,7 @@ mod tests {
             Err(DeployError::MissingComposeFile { manifest_dir }) => {
                 assert_eq!(manifest_dir, dir.path());
             }
-            other => panic!("esperaba MissingComposeFile, recibí {:?}", other.err()),
+            other => panic!("expected MissingComposeFile, got {:?}", other.err()),
         }
     }
 

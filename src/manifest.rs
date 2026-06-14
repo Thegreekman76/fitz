@@ -178,37 +178,37 @@ impl fmt::Display for ManifestError {
         match self {
             ManifestError::InvalidName(n) => write!(
                 f,
-                "nombre de paquete inválido: `{n}`. Debe matchear \
-                 `^[a-z][a-z0-9_-]{{0,63}}$` (lowercase, empezar con \
-                 letra, contener solo letras/dígitos/`-`/`_`, máx 64 \
-                 caracteres)."
+                "invalid package name: `{n}`. Must match \
+                 `^[a-z][a-z0-9_-]{{0,63}}$` (lowercase, must start with \
+                 a letter, contain only letters/digits/`-`/`_`, max 64 \
+                 characters)."
             ),
-            ManifestError::Parse(e) => write!(f, "error parseando manifest: {e}"),
+            ManifestError::Parse(e) => write!(f, "error parsing manifest: {e}"),
             ManifestError::Serialize(e) => {
-                write!(f, "error serializando manifest: {e}")
+                write!(f, "error serializing manifest: {e}")
             }
             ManifestError::DepNotImplemented { name, reason } => {
                 write!(f, "dep `{name}`: {reason}")
             }
             ManifestError::DepPathNotFound { name, path } => {
-                write!(f, "dep `{name}`: el path `{}` no existe.", path.display())
+                write!(f, "dep `{name}`: path `{}` does not exist.", path.display())
             }
             ManifestError::DepManifestInvalid { name, path, source } => write!(
                 f,
-                "dep `{name}`: manifest en `{}` inválido — {source}",
+                "dep `{name}`: invalid manifest at `{}` — {source}",
                 path.display()
             ),
             ManifestError::DepMissingLib { name, path } => write!(
                 f,
-                "dep `{name}`: `{}` no tiene sección `[lib]`. Las path \
-                 deps son librerías; agregá:\n\n[lib]\nentry = \"src/lib.fitz\"\n",
+                "dep `{name}`: `{}` has no `[lib]` section. Path \
+                 deps are libraries; add:\n\n[lib]\nentry = \"src/lib.fitz\"\n",
                 path.display()
             ),
             ManifestError::DepInvalidShape { name } => write!(
                 f,
-                "dep `{name}`: debe especificar `path = \"...\"` o \
-                 `git = \"...\"` con `tag`/`rev` (versiones sueltas \
-                 tipo `\"1.0.0\"` llegan con el registry en 9.y.5)."
+                "dep `{name}`: must specify `path = \"...\"` or \
+                 `git = \"...\"` with `tag`/`rev` (loose versions \
+                 like `\"1.0.0\"` arrive with the registry in 9.y.5)."
             ),
             ManifestError::DepInvalidGitShape { name, reason } => {
                 write!(f, "dep `{name}` (git): {reason}")
@@ -342,7 +342,7 @@ pub fn add_dep_to_manifest(
     }
     let deps = doc["dependencies"]
         .as_table_mut()
-        .ok_or_else(|| ManifestError::InvalidName("[dependencies] no es una tabla".to_string()))?;
+        .ok_or_else(|| ManifestError::InvalidName("[dependencies] is not a table".to_string()))?;
 
     // Build the inline table for the new dep.
     let inline = build_inline_dep_table(spec);
@@ -503,9 +503,9 @@ fn resolve_single_dep(
     match dep {
         Dependency::Version(_) => Err(ManifestError::DepNotImplemented {
             name: name.to_string(),
-            reason: "las deps con versión suelta (`foo = \"1.0.0\"`) requieren \
-                     el registry, que llega en 9.y.5. Por ahora usá \
-                     `foo = { path = \"...\" }` o `foo = { git = \"...\", tag = \"...\" }`."
+            reason: "loose-version deps (`foo = \"1.0.0\"`) require \
+                     the registry, which arrives in 9.y.5. For now use \
+                     `foo = { path = \"...\" }` or `foo = { git = \"...\", tag = \"...\" }`."
                 .to_string(),
         }),
         Dependency::Detailed(d) => {
@@ -516,8 +516,8 @@ fn resolve_single_dep(
             if has_path && has_git {
                 return Err(ManifestError::DepInvalidGitShape {
                     name: name.to_string(),
-                    reason: "no se puede combinar `path` con `git` en la misma dep. \
-                             Usá uno u otro."
+                    reason: "cannot combine `path` with `git` in the same dep. \
+                             Use one or the other."
                         .to_string(),
                 });
             }
@@ -542,7 +542,7 @@ fn resolve_single_dep(
             if d.tag.is_some() || d.rev.is_some() {
                 return Err(ManifestError::DepInvalidGitShape {
                     name: name.to_string(),
-                    reason: "`tag`/`rev` requieren también `git = \"<url>\"`.".to_string(),
+                    reason: "`tag`/`rev` also require `git = \"<url>\"`.".to_string(),
                 });
             }
 
@@ -562,13 +562,13 @@ fn parse_git_ref(
     match (tag, rev) {
         (Some(_), Some(_)) => Err(ManifestError::DepInvalidGitShape {
             name: name.to_string(),
-            reason: "`tag` y `rev` son mutuamente exclusivos — elegí uno.".to_string(),
+            reason: "`tag` and `rev` are mutually exclusive — pick one.".to_string(),
         }),
         (Some(t), None) => {
             if t.trim().is_empty() {
                 return Err(ManifestError::DepInvalidGitShape {
                     name: name.to_string(),
-                    reason: "`tag` no puede ser vacío.".to_string(),
+                    reason: "`tag` cannot be empty.".to_string(),
                 });
             }
             Ok(crate::git_dep::GitRef::Tag(t.to_string()))
@@ -577,15 +577,15 @@ fn parse_git_ref(
             if r.trim().is_empty() {
                 return Err(ManifestError::DepInvalidGitShape {
                     name: name.to_string(),
-                    reason: "`rev` no puede ser vacío.".to_string(),
+                    reason: "`rev` cannot be empty.".to_string(),
                 });
             }
             Ok(crate::git_dep::GitRef::Rev(r.to_string()))
         }
         (None, None) => Err(ManifestError::DepInvalidGitShape {
             name: name.to_string(),
-            reason: "git deps requieren `tag = \"...\"` o `rev = \"...\"` para reproducibilidad. \
-                     `branch` no se soporta intencionalmente (mutables → builds no reproducibles)."
+            reason: "git deps require `tag = \"...\"` or `rev = \"...\"` for reproducibility. \
+                     `branch` is intentionally unsupported (mutable → non-reproducible builds)."
                 .to_string(),
         }),
     }
@@ -736,17 +736,20 @@ mod tests {
 
     #[test]
     fn invalid_names_fail() {
-        assert!(!is_valid_package_name(""), "vacío");
-        assert!(!is_valid_package_name("Foo"), "mayúscula inicial");
-        assert!(!is_valid_package_name("FOO"), "todas mayúsculas");
-        assert!(!is_valid_package_name("1foo"), "empieza con dígito");
-        assert!(!is_valid_package_name("-foo"), "empieza con guión");
-        assert!(!is_valid_package_name("_foo"), "empieza con guión bajo");
-        assert!(!is_valid_package_name("foo bar"), "espacio");
-        assert!(!is_valid_package_name("foo.bar"), "punto");
+        assert!(!is_valid_package_name(""), "empty");
+        assert!(!is_valid_package_name("Foo"), "leading uppercase");
+        assert!(!is_valid_package_name("FOO"), "all uppercase");
+        assert!(!is_valid_package_name("1foo"), "starts with digit");
+        assert!(!is_valid_package_name("-foo"), "starts with hyphen");
+        assert!(!is_valid_package_name("_foo"), "starts with underscore");
+        assert!(!is_valid_package_name("foo bar"), "space");
+        assert!(!is_valid_package_name("foo.bar"), "dot");
         assert!(!is_valid_package_name("foo/bar"), "slash");
-        assert!(!is_valid_package_name("foo@bar"), "arroba");
-        assert!(!is_valid_package_name(&"a".repeat(65)), "más de 64 chars");
+        assert!(!is_valid_package_name("foo@bar"), "at sign");
+        assert!(
+            !is_valid_package_name(&"a".repeat(65)),
+            "more than 64 chars"
+        );
     }
 
     #[test]
@@ -771,7 +774,7 @@ mod tests {
         let err = Manifest::new_default("Foo").unwrap_err();
         match err {
             ManifestError::InvalidName(n) => assert_eq!(n, "Foo"),
-            other => panic!("se esperaba InvalidName, fue {other:?}"),
+            other => panic!("expected InvalidName, got {other:?}"),
         }
     }
 
@@ -837,7 +840,7 @@ http-helpers = "0.3.2"
         assert_eq!(m.dependencies.len(), 2);
         match m.dependencies.get("fitz-uuid").unwrap() {
             Dependency::Version(v) => assert_eq!(v, "1.0.0"),
-            other => panic!("se esperaba Version, fue {other:?}"),
+            other => panic!("expected Version, got {other:?}"),
         }
     }
 
@@ -958,7 +961,7 @@ foo = "1.0.0"
         let m = Manifest::parse(toml_text).unwrap();
         match m.dependencies.get("foo").unwrap() {
             Dependency::Version(v) => assert_eq!(v, "1.0.0"),
-            other => panic!("se esperaba Version, fue {other:?}"),
+            other => panic!("expected Version, got {other:?}"),
         }
     }
 
@@ -979,7 +982,7 @@ utils = { path = "../utils" }
                 assert_eq!(d.path.as_deref(), Some("../utils"));
                 assert!(d.git.is_none());
             }
-            other => panic!("se esperaba Detailed, fue {other:?}"),
+            other => panic!("expected Detailed, got {other:?}"),
         }
     }
 
@@ -1002,7 +1005,7 @@ helpers = { git = "https://github.com/foo/bar", tag = "v1.0.0" }
                 assert_eq!(d.tag.as_deref(), Some("v1.0.0"));
                 assert!(d.path.is_none());
             }
-            other => panic!("se esperaba Detailed, fue {other:?}"),
+            other => panic!("expected Detailed, got {other:?}"),
         }
     }
 
@@ -1035,7 +1038,7 @@ entry = "src/lib.fitz"
             ),
         )
         .unwrap();
-        std::fs::write(dir.join("src/lib.fitz"), "// lib vacía\n").unwrap();
+        std::fs::write(dir.join("src/lib.fitz"), "// empty lib\n").unwrap();
         std::fs::canonicalize(&dir).unwrap()
     }
 
@@ -1070,7 +1073,7 @@ entry = "src/lib.fitz"
         );
         match &resolved[0].source {
             ResolvedDepSource::Path { declared } => assert_eq!(declared, "../utils"),
-            other => panic!("se esperaba ResolvedDepSource::Path, fue {other:?}"),
+            other => panic!("expected ResolvedDepSource::Path, got {other:?}"),
         }
     }
 
@@ -1157,7 +1160,7 @@ entry = "src/lib.fitz"
         assert!(updated.contains("foo = { path = \"../nuevo\" }"));
         assert!(
             !updated.contains("../viejo"),
-            "el path viejo no debió persistir:\n{updated}"
+            "the old path should not have persisted:\n{updated}"
         );
     }
 
@@ -1198,7 +1201,7 @@ entry = "src/lib.fitz"
         assert!(removed);
         assert!(
             !updated.contains("[dependencies]"),
-            "[dependencies] debió borrarse al quedar vacío:\n{updated}"
+            "[dependencies] should have been removed when left empty:\n{updated}"
         );
     }
 
@@ -1311,8 +1314,8 @@ entry = "src/lib.fitz"
         let msg = err.to_string();
         assert!(msg.contains("tag") && msg.contains("rev"), "msg: {msg}");
         assert!(
-            msg.contains("reproducibilidad"),
-            "msg debería citar reproducibilidad: {msg}"
+            msg.contains("reproducibility"),
+            "msg should cite reproducibility: {msg}"
         );
     }
 
@@ -1326,7 +1329,7 @@ entry = "src/lib.fitz"
         );
         let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("mutuamente exclusivos"), "msg: {msg}");
+        assert!(msg.contains("mutually exclusive"), "msg: {msg}");
     }
 
     #[test]
@@ -1339,7 +1342,7 @@ entry = "src/lib.fitz"
         );
         let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("`tag` no puede ser vacío"), "msg: {msg}");
+        assert!(msg.contains("`tag` cannot be empty"), "msg: {msg}");
     }
 
     #[test]
@@ -1357,7 +1360,7 @@ entry = "src/lib.fitz"
         );
         let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("no se puede combinar"), "msg: {msg}");
+        assert!(msg.contains("cannot combine"), "msg: {msg}");
     }
 
     #[test]
@@ -1368,7 +1371,7 @@ entry = "src/lib.fitz"
             .insert("x".to_string(), git_dep(None, None, Some("v1"), None));
         let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("requieren también `git"), "msg: {msg}");
+        assert!(msg.contains("also require `git"), "msg: {msg}");
     }
 
     #[test]

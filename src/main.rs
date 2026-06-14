@@ -2839,8 +2839,8 @@ fn add_dep_cmd(
                 }
                 (None, None) => {
                     eprintln!(
-                        "✗ `--git` requiere también `--tag <tag>` o `--rev <commit>` para \
-                         reproducibilidad. `branch` no se soporta intencionalmente."
+                        "✗ `--git` also requires `--tag <tag>` or `--rev <commit>` for \
+                         reproducibility. `branch` is intentionally unsupported."
                     );
                     std::process::exit(1);
                 }

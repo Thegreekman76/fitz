@@ -106,7 +106,7 @@ pub struct StubParseError {
 
 impl std::fmt::Display for StubParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "stub parse error línea {}: {}", self.line, self.message)
+        write!(f, "stub parse error line {}: {}", self.line, self.message)
     }
 }
 
@@ -184,17 +184,17 @@ where
 fn parse_fn_sig(s: &str, line_no: usize, is_async: bool) -> Result<StubFn, StubParseError> {
     let (name, rest) = take_ident(s).ok_or_else(|| StubParseError {
         line: line_no + 1,
-        message: format!("esperaba nombre de fn, fue: {}", s),
+        message: format!("expected fn name, found: {}", s),
     })?;
     let rest = rest.trim_start();
     let rest = rest.strip_prefix('(').ok_or_else(|| StubParseError {
         line: line_no + 1,
-        message: format!("esperaba `(` después de `def {}`", name),
+        message: format!("expected `(` after `def {}`", name),
     })?;
     let (params_str, after_paren) =
         take_balanced(rest, '(', ')').ok_or_else(|| StubParseError {
             line: line_no + 1,
-            message: "paréntesis sin cerrar en signature".to_string(),
+            message: "unclosed parenthesis in signature".to_string(),
         })?;
     let params = parse_params(params_str, line_no)?;
     // Ret type: `-> type`.
@@ -279,7 +279,7 @@ where
 {
     let (name, rest) = take_ident(s).ok_or_else(|| StubParseError {
         line: line_no + 1,
-        message: format!("esperaba nombre de class, fue: {}", s),
+        message: format!("expected class name, found: {}", s),
     })?;
     // Skip bases: `(Base, ...)`. We do not use them in the MVP.
     let after_name = rest.trim_start();
@@ -289,7 +289,7 @@ where
             None => {
                 return Err(StubParseError {
                     line: line_no + 1,
-                    message: "paréntesis de bases sin cerrar".to_string(),
+                    message: "unclosed parenthesis on bases".to_string(),
                 });
             }
         }
@@ -425,7 +425,7 @@ fn parse_type_atom(s: &str, line_no: usize) -> Result<(StubType, &str), StubPars
     if let Some(rest) = s.strip_prefix('"') {
         let end = rest.find('"').ok_or_else(|| StubParseError {
             line: line_no + 1,
-            message: "string forward-ref sin cerrar".to_string(),
+            message: "unclosed forward-ref string".to_string(),
         })?;
         let inner = &rest[..end];
         return Ok((StubType::Named(inner.to_string()), &rest[end + 1..]));
@@ -433,7 +433,7 @@ fn parse_type_atom(s: &str, line_no: usize) -> Result<(StubType, &str), StubPars
     if let Some(rest) = s.strip_prefix('\'') {
         let end = rest.find('\'').ok_or_else(|| StubParseError {
             line: line_no + 1,
-            message: "string forward-ref sin cerrar".to_string(),
+            message: "unclosed forward-ref string".to_string(),
         })?;
         let inner = &rest[..end];
         return Ok((StubType::Named(inner.to_string()), &rest[end + 1..]));
@@ -441,7 +441,7 @@ fn parse_type_atom(s: &str, line_no: usize) -> Result<(StubType, &str), StubPars
     // Identifier (possibly `module.Name`).
     let (name, after_name) = take_ident(s).ok_or_else(|| StubParseError {
         line: line_no + 1,
-        message: format!("esperaba identifier de tipo, fue: {:?}", s),
+        message: format!("expected type identifier, found: {:?}", s),
     })?;
     // If there is a `.`, consume `module.Name`. The canonical name is the
     // part after the last `.` (shorthand: module is optional in
@@ -463,7 +463,7 @@ fn parse_type_atom(s: &str, line_no: usize) -> Result<(StubType, &str), StubPars
         let (inner, after_close) =
             take_balanced(after_bracket, '[', ']').ok_or_else(|| StubParseError {
                 line: line_no + 1,
-                message: "brackets de generic sin cerrar".to_string(),
+                message: "unclosed generic brackets".to_string(),
             })?;
         let args = parse_type_args(inner, line_no)?;
         return Ok((StubType::Generic(full_name, args), after_close));
@@ -695,7 +695,7 @@ fn register_unknown_nominal(env: &mut TypeEnv, name: &str) -> TypeId {
     // dummy id (should not happen in practice — pyi_stub runs
     // sequentially).
     env.declare_nominal(name.to_string())
-        .unwrap_or_else(|_| panic!("declare_nominal falló inesperadamente"))
+        .unwrap_or_else(|_| panic!("declare_nominal failed unexpectedly"))
 }
 
 // ---------------------------------------------------------------------------
@@ -836,7 +836,7 @@ mod tests {
             assert_eq!(f.ret, StubType::Named("int".into()));
             assert!(!f.is_async);
         } else {
-            panic!("esperaba Fn, fue {:?}", items[0]);
+            panic!("expected Fn, got {:?}", items[0]);
         }
     }
 
@@ -872,7 +872,7 @@ mod tests {
             assert_eq!(c.fields[0].ty, StubType::Named("int".into()));
             assert_eq!(c.fields[2].name, "age");
         } else {
-            panic!("esperaba Class");
+            panic!("expected Class");
         }
     }
 
@@ -883,7 +883,7 @@ mod tests {
         let src = "class User:\n    id: int\n    def greet(self) -> str: ...\n";
         let items = parse(src);
         if let StubItem::Class(c) = &items[0] {
-            assert_eq!(c.fields.len(), 1, "el método no debería ser field");
+            assert_eq!(c.fields.len(), 1, "the method should not be a field");
         }
     }
 
@@ -894,7 +894,7 @@ mod tests {
             assert_eq!(v.name, "VERSION");
             assert_eq!(v.ty, StubType::Named("str".into()));
         } else {
-            panic!("esperaba Var");
+            panic!("expected Var");
         }
     }
 
@@ -969,7 +969,7 @@ mod tests {
                 assert_eq!(alts[0], StubType::Named("str".into()));
                 assert_eq!(alts[1], StubType::Named("None".into()));
             } else {
-                panic!("esperaba Union, fue {:?}", f.ret);
+                panic!("expected Union, got {:?}", f.ret);
             }
         }
     }

@@ -226,13 +226,13 @@ impl std::fmt::Display for PbsError {
         match self {
             PbsError::UnsupportedHostTriple => write!(
                 f,
-                "el host actual no está entre los triples soportados por \
-                 `--bundle-python`. Triples soportados: {}",
+                "the current host is not among the triples supported by \
+                 `--bundle-python`. Supported triples: {}",
                 supported_triples().join(", ")
             ),
             PbsError::CurlNotFound(e) => write!(
                 f,
-                "no se pudo invocar `curl` ({e}). Instalalo y asegurate que esté en el PATH."
+                "could not invoke `curl` ({e}). Install it and make sure it is on the PATH."
             ),
             PbsError::DownloadFailed {
                 url,
@@ -243,21 +243,21 @@ impl std::fmt::Display for PbsError {
                 if trimmed.is_empty() {
                     write!(
                         f,
-                        "falló la descarga del tarball PBS para `{triple}` desde {url}"
+                        "failed to download the PBS tarball for `{triple}` from {url}"
                     )
                 } else {
                     write!(
                         f,
-                        "falló la descarga del tarball PBS para `{triple}` desde {url}:\n{trimmed}"
+                        "failed to download the PBS tarball for `{triple}` from {url}:\n{trimmed}"
                     )
                 }
             }
             PbsError::NoHomeDir => write!(
                 f,
-                "no se pudo determinar el home directory para ubicar el cache. \
-                 Seteá `FITZ_CACHE_DIR=<path>` para apuntar a un directorio escribible."
+                "could not determine the home directory to locate the cache. \
+                 Set `FITZ_CACHE_DIR=<path>` to point to a writable directory."
             ),
-            PbsError::Io(e) => write!(f, "error de I/O sobre el cache PBS: {e}"),
+            PbsError::Io(e) => write!(f, "I/O error on the PBS cache: {e}"),
         }
     }
 }
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn pbs_release_is_yyyymmdd_string() {
         // Sanity check on the format of the pinned release.
-        assert_eq!(PBS_RELEASE.len(), 8, "release debería ser YYYYMMDD");
+        assert_eq!(PBS_RELEASE.len(), 8, "release should be YYYYMMDD");
         assert!(PBS_RELEASE.chars().all(|c| c.is_ascii_digit()));
     }
 
@@ -393,7 +393,7 @@ mod tests {
         for triple in supported_triples() {
             assert!(
                 s.contains(triple),
-                "el mensaje debería mencionar el triple {triple}"
+                "the message should mention the triple {triple}"
             );
         }
     }

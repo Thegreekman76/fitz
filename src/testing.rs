@@ -124,7 +124,7 @@ where
         let registry = cell
             .borrow_mut()
             .take()
-            .expect("with_active_test_registry instaló un registry — debería estar presente");
+            .expect("with_active_test_registry installed a registry — it should be present");
         *cell.borrow_mut() = prev;
         (out, registry)
     })
@@ -149,7 +149,7 @@ where
         let registry = cell
             .borrow_mut()
             .take()
-            .expect("with_active_test_registry_async instaló un registry — debería estar presente");
+            .expect("with_active_test_registry_async installed a registry — it should be present");
         *cell.borrow_mut() = prev;
         registry
     });
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn with_active_test_registry_installs_and_returns() {
         let prev = has_active_test_registry();
-        assert!(!prev, "el registry no debería estar instalado al arrancar");
+        assert!(!prev, "the registry should not be installed at startup");
 
         let (out, reg) = with_active_test_registry(|| {
             assert!(has_active_test_registry());
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(out, 42);
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.tests()[0].name, "smoke");
-        assert!(!has_active_test_registry(), "el registry se restauró");
+        assert!(!has_active_test_registry(), "the registry was restored");
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests {
             "ok"
         });
         assert_eq!(result, "ok");
-        assert!(current_test_source().is_none(), "se restauró al salir");
+        assert!(current_test_source().is_none(), "restored on exit");
     }
 
     #[test]

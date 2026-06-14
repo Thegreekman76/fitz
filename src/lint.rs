@@ -43,10 +43,10 @@ use crate::ast::{AssignTarget, BinOpKind, Expr, MatchArm, Param, Pattern, Progra
 /// A finding produced by some lint. The runner prints them
 /// cargo-clippy style:
 /// ```text
-/// warning: variable `x` declarada pero no usada
+/// warning: variable `x` declared but not used
 ///   --> src/main.fitz:3:5
-///   = nota: si es intencional, prefijá con `_` (ej. `_x`) o suprimí
-///          con `// @allow(unused_variable)` en la línea anterior.
+///   = note: if intentional, prefix with `_` (e.g. `_x`) or suppress
+///          with `// @allow(unused_variable)` on the previous line.
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LintFinding {
@@ -387,12 +387,12 @@ fn check_unused_var_in_stmt(
         } if !name.starts_with('_') && !uses.contains(name) => {
             findings.push(LintFinding {
                 name: "unused_variable",
-                message: format!("variable `{}` declarada pero no usada", name),
+                message: format!("variable `{}` declared but not used", name),
                 line: span.line,
                 column: span.column,
                 hint: Some(format!(
-                    "si es intencional, prefijá con `_` (ej. `_{}`) o suprimí con \
-                     `// @allow(unused_variable)` en la línea anterior.",
+                    "if intentional, prefix with `_` (e.g. `_{}`) or suppress with \
+                     `// @allow(unused_variable)` on the previous line.",
                     name
                 )),
                 fix: None,
@@ -436,12 +436,12 @@ fn lint_unused_imports(
                 if !binding.is_empty() && !uses.contains(&binding) {
                     findings.push(LintFinding {
                         name: "unused_import",
-                        message: format!("import `{}` declarado pero no usado", binding),
+                        message: format!("import `{}` declared but not used", binding),
                         line: span.line,
                         column: span.column,
                         hint: Some(
-                            "si es intencional, eliminá el `import` o suprimí con \
-                             `// @allow(unused_import)` en la línea anterior."
+                            "if intentional, remove the `import` or suppress with \
+                             `// @allow(unused_import)` on the previous line."
                                 .into(),
                         ),
                         fix: None,
@@ -454,12 +454,12 @@ fn lint_unused_imports(
                     if !uses.contains(&binding) {
                         findings.push(LintFinding {
                             name: "unused_import",
-                            message: format!("import `{}` declarado pero no usado", binding),
+                            message: format!("import `{}` declared but not used", binding),
                             line: span.line,
                             column: span.column,
                             hint: Some(
-                                "si es intencional, eliminá el `from import` o suprimí \
-                                 con `// @allow(unused_import)` en la línea anterior."
+                                "if intentional, remove the `from import` or suppress \
+                                 with `// @allow(unused_import)` on the previous line."
                                     .into(),
                             ),
                             fix: None,
@@ -493,13 +493,13 @@ fn lint_useless_match(program: &Program, findings: &mut Vec<LintFinding>) {
                     if is_catchall {
                         findings.push(LintFinding {
                             name: "useless_match",
-                            message: "`match` con un solo arm catch-all es equivalente a un `let`"
+                            message: "`match` with a single catch-all arm is equivalent to a `let`"
                                 .into(),
                             line: span.line,
                             column: span.column,
                             hint: Some(
-                                "reemplazá `match expr { _ => body }` con `body` directo, \
-                                 o `match expr { x => body }` con `let x = expr; body`."
+                                "replace `match expr { _ => body }` with `body` directly, \
+                                 or `match expr { x => body }` with `let x = expr; body`."
                                     .into(),
                             ),
                             fix: None,
@@ -546,12 +546,12 @@ fn lint_string_concat(_source: &str, program: &Program, findings: &mut Vec<LintF
                 {
                     findings.push(LintFinding {
                         name: "string_concat",
-                        message: "concatenación de strings literales — usá interpolación".into(),
+                        message: "concatenation of string literals — use interpolation".into(),
                         line: span.line,
                         column: span.column,
                         hint: Some(
-                            "reemplazá `\"a\" + \"b\"` con `\"ab\"` (o usá interpolación \
-                             `\"{a}{b}\"` si los lados son variables)."
+                            "replace `\"a\" + \"b\"` with `\"ab\"` (or use interpolation \
+                             `\"{a}{b}\"` if the sides are variables)."
                                 .into(),
                         ),
                         fix: None,
@@ -843,7 +843,7 @@ mod tests {
     fn unused_variable_used_does_not_flag() {
         let src = "let x = 5\nprint(x)";
         let findings = lint(src);
-        assert!(findings.is_empty(), "no debería flaguear: {:?}", findings);
+        assert!(findings.is_empty(), "should not flag: {:?}", findings);
     }
 
     #[test]
@@ -863,7 +863,7 @@ mod tests {
         let findings = lint(src);
         assert!(
             findings.is_empty(),
-            "@allow debería suprimir: {:?}",
+            "@allow should suppress: {:?}",
             findings
         );
     }

@@ -153,7 +153,7 @@ fn load_one_stub(
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "⚠ pyi-stubs: no se pudo leer `{}`: {} (fallback a PyAny opaco)",
+                "⚠ pyi-stubs: could not read `{}`: {} (falling back to opaque PyAny)",
                 stub_path.display(),
                 e
             );
@@ -164,7 +164,7 @@ fn load_one_stub(
         Ok(items) => items,
         Err(e) => {
             eprintln!(
-                "⚠ pyi-stubs: parse error en `{}`: {} (fallback a PyAny opaco)",
+                "⚠ pyi-stubs: parse error in `{}`: {} (falling back to opaque PyAny)",
                 stub_path.display(),
                 e
             );
@@ -416,7 +416,7 @@ class Order:
         assert_eq!(stubs.len(), 1);
         assert!(
             stubs[0].items.is_empty(),
-            "8-pyi.B skipea fns/vars; LoadedStub.items debería estar vacío"
+            "8-pyi.B skips fns/vars; LoadedStub.items should be empty"
         );
     }
 

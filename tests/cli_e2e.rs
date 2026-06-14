@@ -454,7 +454,7 @@ fn git_dep_sin_tag_ni_rev_aborta_pidiendo_uno() {
         stderr.contains("tag") && stderr.contains("rev"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("reproducibilidad"), "stderr: {stderr}");
+    assert!(stderr.contains("reproducibility"), "stderr: {stderr}");
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn path_dep_inexistente_aborta() {
     add_path_dep(&project, "missing-app", "ghost", "../no-existe");
     let (_stdout, stderr, code) = run_fitz(&["check"], &project);
     assert_eq!(code, 1);
-    assert!(stderr.contains("no existe"), "stderr: {stderr}");
+    assert!(stderr.contains("does not exist"), "stderr: {stderr}");
 }
 
 #[test]
@@ -933,7 +933,7 @@ fn add_git_sin_tag_ni_rev_aborta_pidiendo_uno() {
         stderr.contains("tag") && stderr.contains("rev"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("reproducibilidad"), "stderr: {stderr}");
+    assert!(stderr.contains("reproducibility"), "stderr: {stderr}");
 }
 
 #[test]
@@ -2129,7 +2129,7 @@ fn docker_init_distroless_y_server_no_emite_healthcheck_pero_comentario_claro() 
     let compose = std::fs::read_to_string(project.join("docker-compose.yml")).unwrap();
     // El comentario explicando por qué no emitimos healthcheck con
     // distroless está presente.
-    assert!(compose.contains("Healthcheck HTTP NO emitido"));
+    assert!(compose.contains("HTTP healthcheck NOT emitted"));
     assert!(compose.contains("/healthz"));
 }
 

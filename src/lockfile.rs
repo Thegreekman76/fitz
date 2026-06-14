@@ -62,16 +62,16 @@ pub enum LockfileError {
 impl fmt::Display for LockfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LockfileError::Parse(e) => write!(f, "error parseando lockfile: {e}"),
+            LockfileError::Parse(e) => write!(f, "error parsing lockfile: {e}"),
             LockfileError::Serialize(e) => {
-                write!(f, "error serializando lockfile: {e}")
+                write!(f, "error serializing lockfile: {e}")
             }
             LockfileError::UnsupportedVersion { found } => write!(
                 f,
-                "versión `{found}` del lockfile no soportada por este \
-                 binario (entiendo hasta v{CURRENT_LOCKFILE_VERSION}). \
-                 Borralo y dejá que `fitz run`/`build`/`check` lo \
-                 regenere, o actualizá `fitz`."
+                "lockfile version `{found}` is not supported by this \
+                 binary (understands up to v{CURRENT_LOCKFILE_VERSION}). \
+                 Delete it and let `fitz run`/`build`/`check` regenerate \
+                 it, or upgrade `fitz`."
             ),
         }
     }
@@ -246,7 +246,7 @@ mod tests {
         let err = Lockfile::parse(text).unwrap_err();
         match err {
             LockfileError::UnsupportedVersion { found } => assert_eq!(found, 999),
-            other => panic!("se esperaba UnsupportedVersion, fue {other:?}"),
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
     }
 
@@ -313,10 +313,13 @@ source = "git+https://github.com/foo/bar#abc123"
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         let wrote = write_lockfile_if_changed(&path, &l).unwrap();
-        assert!(!wrote, "no debió escribir porque el contenido coincide");
+        assert!(!wrote, "should not have written because contents match");
 
         let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(mtime_before, mtime_after, "no debió tocar el archivo");
+        assert_eq!(
+            mtime_before, mtime_after,
+            "should not have touched the file"
+        );
     }
 
     #[test]
@@ -328,7 +331,7 @@ source = "git+https://github.com/foo/bar#abc123"
 
         let new = Lockfile::from_resolved(&[dep("x", "2.0.0", "../x")]);
         let wrote = write_lockfile_if_changed(&path, &new).unwrap();
-        assert!(wrote, "debió escribir porque el contenido cambió");
+        assert!(wrote, "should have written because contents changed");
 
         let on_disk = Lockfile::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(on_disk, new);

@@ -105,22 +105,22 @@ impl std::fmt::Display for GitDepError {
         match self {
             GitDepError::GitNotFound(e) => write!(
                 f,
-                "no se pudo invocar `git` ({e}). Instalalo y asegurate que esté en el PATH."
+                "could not invoke `git` ({e}). Install it and make sure it is on the PATH."
             ),
             GitDepError::GitCommandFailed { command, stderr } => {
                 let trimmed = stderr.trim();
                 if trimmed.is_empty() {
-                    write!(f, "el comando `{command}` falló sin output")
+                    write!(f, "command `{command}` failed with no output")
                 } else {
-                    write!(f, "el comando `{command}` falló:\n{trimmed}")
+                    write!(f, "command `{command}` failed:\n{trimmed}")
                 }
             }
             GitDepError::NoHomeDir => write!(
                 f,
-                "no se pudo determinar el home directory para ubicar el cache. \
-                 Seteá `FITZ_CACHE_DIR=<path>` para apuntar a un directorio escribible."
+                "could not determine the home directory to locate the cache. \
+                 Set `FITZ_CACHE_DIR=<path>` to point to a writable directory."
             ),
-            GitDepError::Io(e) => write!(f, "error de I/O sobre el cache: {e}"),
+            GitDepError::Io(e) => write!(f, "I/O error on the cache: {e}"),
             GitDepError::InvalidGitDep(msg) => write!(f, "{msg}"),
         }
     }
