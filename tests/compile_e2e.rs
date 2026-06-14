@@ -1526,8 +1526,9 @@ print(REMOTE)
 fn modulo_inexistente_aborta_build() {
     let stderr = build_expect_fail_multi("module-not-found", "import inexistente\nprint(0)\n", &[]);
     assert!(
-        stderr.contains("no se encontró el módulo") || stderr.contains("inexistente"),
-        "esperaba mensaje de módulo no encontrado, fue: {}",
+        (stderr.contains("module") && stderr.contains("not found"))
+            || stderr.contains("inexistente"),
+        "expected module-not-found message, was: {}",
         stderr
     );
 }

@@ -416,8 +416,8 @@ fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzErro
                     ErrorKind::InvalidSyntax,
                     0,
                     0,
-                    "`import python` por sí solo no es un import válido — \
-                     usá `import python.<modulo>` o `from python import <modulo>`."
+                    "`import python` by itself is not a valid import — \
+                     use `import python.<module>` or `from python import <module>`."
                         .to_string(),
                 ));
             }
@@ -428,7 +428,7 @@ fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzErro
                     ErrorKind::InvalidSyntax,
                     0,
                     0,
-                    "`from python import ...`: falta especificar al menos un módulo".to_string(),
+                    "`from python import ...`: at least one module must be specified".to_string(),
                 ));
             }
             _ => {}
@@ -2408,11 +2408,11 @@ fn pattern_to_simple_binding(
         Pattern::Ident(name, _) => Ok((name.clone(), vec![(name.clone(), ty.clone())])),
         Pattern::Wildcard => Ok(("_".into(), Vec::new())),
         Pattern::Tuple(_) => Err(
-            "el codegen del `for` con tuple pattern requiere un Pattern::Tuple manejado por el caller"
+            "codegen of `for` with tuple pattern requires a Pattern::Tuple handled by the caller"
                 .into(),
         ),
         other => Err(format!(
-            "patrón `{:?}` no admitido como variable de `for` en `fitz build`",
+            "pattern `{:?}` not allowed as `for` variable in `fitz build`",
             other
         )),
     }
@@ -3510,12 +3510,12 @@ impl ModuleLoader {
     /// the new index.
     fn load_module(&mut self, segments: &[String]) -> Result<usize, FitzError> {
         if segments.is_empty() {
-            return Err(loader_err("`import` con path vacío".to_string()));
+            return Err(loader_err("`import` with empty path".to_string()));
         }
         let path = self.resolve_path(segments);
         let canonical = std::fs::canonicalize(&path).map_err(|_| {
             loader_err(format!(
-                "no se encontró el módulo `{}` (buscado en `{}`)",
+                "module `{}` not found (searched in `{}`)",
                 segments.join("."),
                 path.display()
             ))
@@ -3537,7 +3537,7 @@ impl ModuleLoader {
                 .collect();
             cycle.push(canonical.display().to_string());
             return Err(loader_err(format!(
-                "ciclo de imports detectado: {}",
+                "import cycle detected: {}",
                 cycle.join(" -> ")
             )));
         }
@@ -3557,7 +3557,7 @@ impl ModuleLoader {
     ) -> Result<usize, FitzError> {
         let source = std::fs::read_to_string(canonical).map_err(|e| {
             loader_err(format!(
-                "error leyendo el módulo `{}`: {}",
+                "error reading module `{}`: {}",
                 canonical.display(),
                 e
             ))
@@ -3593,7 +3593,7 @@ impl ModuleLoader {
             crate::types::check_with_env(&module_program, module_env, module_errors);
         if !type_errors.is_empty() {
             return Err(loader_err(format!(
-                "el módulo `{}` tiene errores de tipo: {}",
+                "module `{}` has type errors: {}",
                 segments.join("."),
                 type_errors[0].message
             )));
@@ -3829,7 +3829,7 @@ impl ModuleLoader {
             Ok(NamedKind::Const)
         } else {
             Err(loader_err(format!(
-                "el módulo `{}` no exporta `{}`",
+                "module `{}` does not export `{}`",
                 m.mod_name, name
             )))
         }
@@ -4361,8 +4361,8 @@ fn generate_module_rs_with_bindings(
             }
             other => {
                 return Err(loader_err(format!(
-                    "el módulo no soporta `{}` a nivel top: hoy permitimos solo `type`, \
-                     `fn`, `let` e `import`.",
+                    "module does not support `{}` at top level: today we only allow `type`, \
+                     `fn`, `let`, and `import`.",
                     stmt_kind(other)
                 )));
             }
@@ -4586,11 +4586,11 @@ fn prefix_module_py_nominal_helpers(input: &str) -> String {
 
 fn stmt_kind(s: &Stmt) -> &'static str {
     match s {
-        Stmt::Assign { .. } => "asignación",
+        Stmt::Assign { .. } => "assignment",
         Stmt::Destructure { .. } => "destructuring",
-        Stmt::Expr(..) => "expresión suelta",
+        Stmt::Expr(..) => "bare expression",
         Stmt::Return(..) => "return",
-        Stmt::ReturnStatus { .. } => "return con status",
+        Stmt::ReturnStatus { .. } => "return with status",
         Stmt::While { .. } => "while",
         Stmt::Loop { .. } => "loop",
         Stmt::For { .. } => "for",
@@ -4601,7 +4601,7 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         Stmt::Import { .. } | Stmt::FromImport { .. } => "import",
         // Phase 9.0.1 (F15): defense against Error nodes — should not
         // reach here because `fitz build` uses `parse()` strict.
-        Stmt::Error(_) => "nodo error",
+        Stmt::Error(_) => "error node",
     }
 }
 
@@ -4677,14 +4677,14 @@ fn collect_module_sigs(
                     let t = match &p.type_ {
                         Some(te) => resolve_type_expr(te, env).map_err(|e| {
                             loader_err(format!(
-                                "fn `{}` del módulo: parámetro `{}`: {}",
+                                "module fn `{}`: parameter `{}`: {}",
                                 name, p.name, e.message
                             ))
                         })?,
                         None => {
                             return Err(loader_err(format!(
-                                "fn `{}` del módulo: parámetro `{}` necesita anotación \
-                                 de tipo (deuda 5b.1).",
+                                "module fn `{}`: parameter `{}` requires a type \
+                                 annotation (debt 5b.1).",
                                 name, p.name
                             )));
                         }
@@ -4694,7 +4694,7 @@ fn collect_module_sigs(
                 let ret = match return_type {
                     Some(te) => resolve_type_expr(te, env).map_err(|e| {
                         loader_err(format!(
-                            "fn `{}` del módulo: return type: {}",
+                            "module fn `{}`: return type: {}",
                             name, e.message
                         ))
                     })?,
@@ -4724,8 +4724,8 @@ fn collect_module_sigs(
                 // Only simple Ident bindings.
                 let AssignTarget::Ident(name, _) = target else {
                     return Err(loader_err(
-                        "el módulo no soporta asignación a campo a nivel top \
-                         (solo `let X = <expr>`)"
+                        "module does not support field assignment at top level \
+                         (only `let X = <expr>`)"
                             .to_string(),
                     ));
                 };
@@ -4737,13 +4737,13 @@ fn collect_module_sigs(
                 let resolved_ty = match type_ {
                     Some(te) => resolve_type_expr(te, env).map_err(|e| {
                         loader_err(format!(
-                            "let `{}` del módulo: anotación: {}",
+                            "module let `{}`: annotation: {}",
                             name, e.message
                         ))
                     })?,
                     None => infer_literal_type(value).ok_or_else(|| {
                         loader_err(format!(
-                            "let `{}` del módulo: la RHS no es literal — anotá el tipo (`let {}: T = <expr>`).",
+                            "module let `{}`: RHS is not a literal — annotate the type (`let {}: T = <expr>`).",
                             name, name
                         ))
                     })?,
@@ -5193,7 +5193,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}`: el argumento por nombre '{}=...' no está soportado",
+                                        "decorator `@{}` on fn `{}`: named argument '{}=...' is not supported",
                                         d.name, name, key,
                                     ),
                                 ));
@@ -5442,7 +5442,7 @@ fn resolve_state_var_types(
                             0,
                             0,
                             format!(
-                                "state HTTP `{}`: anotación no resuelve: {}",
+                                "HTTP state `{}`: annotation does not resolve: {}",
                                 name, e.message
                             ),
                         )
@@ -5731,7 +5731,7 @@ fn parse_cron_kwargs_into_info(
                 Expr::Str(s, _) => info.tz_name = s.clone(),
                 _ => {
                     return Err(err(format!(
-                        "@cron sobre fn '{}': kwarg `tz` debe ser Str literal.",
+                        "@cron on fn '{}': kwarg `tz` must be a Str literal.",
                         fn_name
                     )));
                 }
@@ -5740,7 +5740,7 @@ fn parse_cron_kwargs_into_info(
                 Expr::Bool(b, _) => info.catch_up = *b,
                 _ => {
                     return Err(err(format!(
-                        "@cron sobre fn '{}': kwarg `catch_up` debe ser Bool literal.",
+                        "@cron on fn '{}': kwarg `catch_up` must be a Bool literal.",
                         fn_name
                     )));
                 }
@@ -5749,7 +5749,7 @@ fn parse_cron_kwargs_into_info(
                 Expr::Ident(name, _) => info.store_var = Some(name.clone()),
                 _ => {
                     return Err(err(format!(
-                        "@cron sobre fn '{}': kwarg `store` debe ser un identificador (e.g. `store=db`).",
+                        "@cron on fn '{}': kwarg `store` must be an identifier (e.g. `store=db`).",
                         fn_name
                     )));
                 }
@@ -5759,7 +5759,7 @@ fn parse_cron_kwargs_into_info(
                     Expr::Map(es, _) => es,
                     _ => {
                         return Err(err(format!(
-                            "@cron sobre fn '{}': kwarg `retry` debe ser Map literal.",
+                            "@cron on fn '{}': kwarg `retry` must be a Map literal.",
                             fn_name
                         )));
                     }
@@ -5768,8 +5768,8 @@ fn parse_cron_kwargs_into_info(
             }
             other => {
                 return Err(err(format!(
-                    "@cron sobre fn '{}': kwarg `{}` no reconocido. \
-                     Aceptados: `tz`, `retry`, `catch_up`, `store`.",
+                    "@cron on fn '{}': kwarg `{}` not recognized. \
+                     Accepted: `tz`, `retry`, `catch_up`, `store`.",
                     fn_name, other
                 )));
             }
@@ -6006,7 +6006,7 @@ fn parse_server_decorator(
             0,
             0,
             format!(
-                "@server(...): admite hasta 2 args positionals (port, host), recibió {}",
+                "@server(...): accepts up to 2 positional args (port, host), received {}",
                 args.len()
             ),
         ));
@@ -6021,7 +6021,7 @@ fn parse_server_decorator(
                 ErrorKind::TypeError,
                 0,
                 0,
-                "@server: el primer arg (port) debe ser un Int literal".to_string(),
+                "@server: first arg (port) must be an Int literal".to_string(),
             ));
         };
         if *n < 1 || *n > 65535 {
@@ -6029,7 +6029,7 @@ fn parse_server_decorator(
                 ErrorKind::TypeError,
                 0,
                 0,
-                format!("@server: port fuera de rango [1, 65535]: {}", n),
+                format!("@server: port out of range [1, 65535]: {}", n),
             ));
         }
         cfg.port = *n as u16;
@@ -6041,7 +6041,7 @@ fn parse_server_decorator(
                 ErrorKind::TypeError,
                 0,
                 0,
-                "@server: el segundo arg (host) debe ser un Str literal".to_string(),
+                "@server: second arg (host) must be a Str literal".to_string(),
             ));
         };
         // We do not validate the IP here: rustc cannot do it at
@@ -6061,8 +6061,8 @@ fn parse_server_decorator(
                         ErrorKind::TypeError,
                         0,
                         0,
-                        "@server: port pasado dos veces (positional + kwarg 'port'). \
-                         Usá uno solo de los dos formatos."
+                        "@server: port specified twice (positional + kwarg 'port'). \
+                         Use only one of the two forms."
                             .to_string(),
                     ));
                 }
@@ -6072,7 +6072,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'port' debe ser Int literal, recibió {:?}",
+                            "@server: kwarg 'port' must be an Int literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6082,7 +6082,7 @@ fn parse_server_decorator(
                         ErrorKind::TypeError,
                         0,
                         0,
-                        format!("@server: port fuera de rango [1, 65535]: {}", n),
+                        format!("@server: port out of range [1, 65535]: {}", n),
                     ));
                 }
                 cfg.port = *n as u16;
@@ -6093,8 +6093,8 @@ fn parse_server_decorator(
                         ErrorKind::TypeError,
                         0,
                         0,
-                        "@server: host pasado dos veces (positional + kwarg 'host'). \
-                         Usá uno solo de los dos formatos."
+                        "@server: host specified twice (positional + kwarg 'host'). \
+                         Use only one of the two forms."
                             .to_string(),
                     ));
                 }
@@ -6104,7 +6104,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'host' debe ser Str literal, recibió {:?}",
+                            "@server: kwarg 'host' must be a Str literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6118,7 +6118,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'docs' debe ser Bool literal, recibió {:?}",
+                            "@server: kwarg 'docs' must be a Bool literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6134,7 +6134,7 @@ fn parse_server_decorator(
                         ErrorKind::TypeError,
                         0,
                         0,
-                        "@server: el kwarg 'api_version' no puede ser un string vacío".to_string(),
+                        "@server: kwarg 'api_version' cannot be an empty string".to_string(),
                     ));
                 }
                 _ => {
@@ -6143,7 +6143,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'api_version' debe ser Str literal, recibió {:?}",
+                            "@server: kwarg 'api_version' must be a Str literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6159,7 +6159,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'ws_heartbeat_secs' debe ser Int >= 0, recibió {}",
+                            "@server: kwarg 'ws_heartbeat_secs' must be Int >= 0, received {}",
                             n
                         ),
                     ));
@@ -6170,7 +6170,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'ws_heartbeat_secs' debe ser Int literal, recibió {:?}",
+                            "@server: kwarg 'ws_heartbeat_secs' must be an Int literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6190,7 +6190,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'shutdown_timeout_secs' debe ser Int >= 0, recibió {}",
+                            "@server: kwarg 'shutdown_timeout_secs' must be Int >= 0, received {}",
                             n
                         ),
                     ));
@@ -6201,7 +6201,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'shutdown_timeout_secs' debe ser Int literal, recibió {:?}",
+                            "@server: kwarg 'shutdown_timeout_secs' must be an Int literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6220,7 +6220,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'observability' debe ser Bool literal, recibió {:?}",
+                            "@server: kwarg 'observability' must be a Bool literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6239,7 +6239,7 @@ fn parse_server_decorator(
                         0,
                         0,
                         format!(
-                            "@server: el kwarg 'prometheus' debe ser Bool literal, recibió {:?}",
+                            "@server: kwarg 'prometheus' must be a Bool literal, received {:?}",
                             value_expr
                         ),
                     ));
@@ -6251,7 +6251,7 @@ fn parse_server_decorator(
                     0,
                     0,
                     format!(
-                        "@server: kwarg '{}' no reconocido. Soportados: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
+                        "@server: unrecognized kwarg '{}'. Supported: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
                         other
                     ),
                 ));
@@ -10776,7 +10776,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             let id = self.env.lookup(name).ok_or_else(|| {
                 self.err(format!(
-                    "tipo `{}` no registrado en el TypeEnv (¿checker no corrió?)",
+                    "type `{}` not registered in TypeEnv (did the checker run?)",
                     name
                 ))
             })?;
@@ -10846,17 +10846,17 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             let importer_id = self.env.lookup(&name).ok_or_else(|| {
                 self.err(format!(
-                    "tipo importado `{}` no registrado en TypeEnv del importer (¿checker no corrió?)",
+                    "imported type `{}` not registered in importer's TypeEnv (did the checker run?)",
                     name
                 ))
             })?;
             let (module_sig, module_type_methods) = {
                 let m = self.loaded_modules.get(module_index).ok_or_else(|| {
-                    self.err(format!("módulo no cargado al registrar `{}`", item))
+                    self.err(format!("module not loaded when registering `{}`", item))
                 })?;
                 let sig =
                     m.type_sigs.get(&item).cloned().ok_or_else(|| {
-                        self.err(format!("el módulo no expone el tipo `{}`", item))
+                        self.err(format!("module does not expose type `{}`", item))
                     })?;
                 let methods = m.type_methods.get(&item).cloned();
                 (sig, methods)
@@ -11031,7 +11031,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
                     self.err_at(
                         stmt_span,
-                        format!("let `{}` del módulo: anotación: {}", name, e.message),
+                        format!("module let `{}`: annotation: {}", name, e.message),
                     )
                 })?,
                 None => infer_literal_type(value).unwrap_or(Type::Any),
@@ -11192,7 +11192,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "fn `{}`: parámetro `{}`: {}",
+                        "fn `{}`: parameter `{}`: {}",
                         fn_name, param_name, e.message
                     ),
                 )
@@ -11212,9 +11212,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Err(self.err_at(
                     fn_span,
                     format!(
-                        "fn `{}`: el parámetro `{}` necesita una anotación de tipo (5b.1) — \
-                     el codegen no pudo inferirlo desde call sites. Workaround: anotar \
-                     manualmente (`{}: Str`, `{}: Int`, etc.).",
+                        "fn `{}`: parameter `{}` requires a type annotation (5b.1) — \
+                     codegen could not infer it from call sites. Workaround: annotate \
+                     manually (`{}: Str`, `{}: Int`, etc.).",
                         fn_name, param_name, param_name, param_name,
                     ),
                 ))
@@ -11913,7 +11913,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::Str => "{ let __obj = __FitzPyObject(std::sync::Arc::new(__item.clone().unbind())); __fitz_py_to_list_string(&__obj) }".to_string(),
                     _ => {
                         return Err(self.err(format!(
-                            "field `{}` de tipo `{}`: List<T> con T no primitivo no se soporta todavía adentro de un dict Python (deuda menor)",
+                            "field `{}` of type `{}`: List<T> with non-primitive T is not yet supported inside a Python dict (minor debt)",
                             field_name, type_name
                         )));
                     }
@@ -11921,7 +11921,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             other => {
                 return Err(self.err(format!(
-                    "field `{}` de tipo `{}`: type `{}` no soportado en coerción Python → Fitz",
+                    "field `{}` of type `{}`: type `{}` not supported in Python → Fitz coercion",
                     field_name, type_name, other.display(self.env)
                 )));
             }
@@ -11993,7 +11993,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             ),
             _ => {
                 return Err(self.err(format!(
-                    "field `{}` de tipo `{}` (nullable): inner type compuesto no soportado todavía",
+                    "field `{}` of type `{}` (nullable): composite inner type not yet supported",
                     field_name, type_name
                 )));
             }
@@ -12256,7 +12256,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             for dep_name in &deps {
                 let ty = self.state_var_types.get(dep_name).cloned().ok_or_else(|| {
                     self.err(format!(
-                        "fn `{}` referencia state `{}` pero el tipo no se resolvió",
+                        "fn `{}` references state `{}` but its type did not resolve",
                         name, dep_name
                     ))
                 })?;
@@ -12439,7 +12439,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             // only appears under `parse_with_recovery`. If we
             // arrive here it is a compiler bug.
             Stmt::Error(span) => Err(self.err_at(*span,
-                "nodo `Stmt::Error` en el AST — `fitz build` usa el parser strict, no debería verlo (bug del compilador, Fase 9.0.1)",
+                "`Stmt::Error` node in the AST — `fitz build` uses the strict parser and should never see this (compiler bug, Phase 9.0.1)",
             )),
         }
     }
@@ -12586,8 +12586,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
             }
             _ => Err(self.err(
-                "destructure_pattern_to_rust: pattern no puro pasó al camino puro \
-                 (bug del codegen)"
+                "destructure_pattern_to_rust: non-pure pattern reached the pure path \
+                 (codegen bug)"
                     .to_string(),
             )),
         }
@@ -12620,7 +12620,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             Some(t) => Some(resolve_type_expr(t, self.env).map_err(|e| {
                 self.err_at(
                     value.span(),
-                    format!("anotación de `{}` no resuelve: {}", name, e.message),
+                    format!("annotation of `{}` does not resolve: {}", name, e.message),
                 )
             })?),
             None => None,
@@ -12720,10 +12720,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             ..
         } = stmt
         else {
-            unreachable!("gen_main_hoisted_let solo se llama sobre Stmt::Assign");
+            unreachable!("gen_main_hoisted_let is only called on Stmt::Assign");
         };
         let AssignTarget::Ident(name, _) = target else {
-            unreachable!("collect_f12_hoists ya filtró por Ident");
+            unreachable!("collect_f12_hoists already filtered by Ident");
         };
 
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
@@ -12731,7 +12731,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
                 self.err_at(
                     value.span(),
-                    format!("let `{}` (hoist): anotación: {}", name, e.message),
+                    format!("let `{}` (hoist): annotation: {}", name, e.message),
                 )
             })?,
             None => rhs_ty.clone(),
@@ -12795,12 +12795,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             ..
         } = stmt
         else {
-            unreachable!("gen_module_top_let solo se llama sobre Stmt::Assign");
+            unreachable!("gen_module_top_let is only called on Stmt::Assign");
         };
         let AssignTarget::Ident(name, _) = target else {
             return Err(self.err_at(
                 stmt_span,
-                "asignación a campo a nivel top de módulo: no soportada (solo `let X = <expr>`)",
+                "field assignment at top level of module: not supported (only `let X = <expr>`)",
             ));
         };
 
@@ -12813,7 +12813,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
                 self.err_at(
                     value.span(),
-                    format!("let `{}`: anotación: {}", name, e.message),
+                    format!("let `{}`: annotation: {}", name, e.message),
                 )
             })?,
             None => rhs_ty.clone(),
@@ -12873,7 +12873,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.err_at(
                 value.span(),
                 format!(
-                    "let `{}`: tipo `{}` no soportado a nivel top de módulo",
+                    "let `{}`: type `{}` not supported at top level of module",
                     name,
                     display_type(&declared_ty, self.env)
                 ),
@@ -12984,7 +12984,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             other => Err(self.err_at(
                 object.span(),
                 format!(
-                    "asignación a índice `[...] = v` no soportada sobre `{}` (solo List y Map)",
+                    "index assignment `[...] = v` not supported on `{}` (only List and Map)",
                     type_name(other)
                 ),
             )),
@@ -13002,7 +13002,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 object.span(),
                 format!(
-                    "asignación a campo `.{}` sobre `{}`: solo se soporta sobre instancias",
+                    "field assignment `.{}` on `{}`: only supported on instances",
                     field,
                     type_name(&obj_ty)
                 ),
@@ -13014,7 +13014,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // bug, not a user bug.
         let declared = self.fields_for_id(*id).ok_or_else(|| {
             self.err(format!(
-                "tipo `{}` con campos sin resolver — no se puede generar asignación",
+                "type `{}` with unresolved fields — cannot generate assignment",
                 info_name
             ))
         })?;
@@ -13022,7 +13022,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 object.span(),
                 format!(
-                    "el tipo `{}` no tiene un campo llamado `{}`",
+                    "type `{}` does not have a field named `{}`",
                     info_name, field
                 ),
             ));
@@ -13119,10 +13119,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 e.span(),
                 format!(
-                    "middleware: `return` con un valor no-null no es válido — \
-                 un middleware debe usar `return null` (o ningún return) \
-                 para continuar la cadena, o `return <status> {{ ... }}` \
-                 para cortocircuitar. Recibió `{}`",
+                    "middleware: `return` with a non-null value is invalid — \
+                 a middleware must use `return null` (or no return) \
+                 to continue the chain, or `return <status> {{ ... }}` \
+                 to short-circuit. Received `{}`",
                     type_name(&ty)
                 ),
             ));
@@ -13276,7 +13276,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if !self.response_mode {
             return Err(self.err_at(
                 span,
-                "`return <status> { ... }` solo permitido adentro de handlers HTTP — el checker debió haberlo cazado",
+                "`return <status> { ... }` only allowed inside HTTP handlers — the checker should have caught this",
             ));
         }
         let (status_code, status_ty) = self.gen_expr(status)?;
@@ -13284,7 +13284,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 span,
                 format!(
-                    "el status code de `return` debe ser Int, recibió `{}`",
+                    "`return` status code must be Int, received `{}`",
                     type_name(&status_ty)
                 ),
             ));
@@ -13439,7 +13439,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let elem_ty = (**inner).clone();
                 if matches!(elem_ty, Type::Any) {
                     return Err(self.err_at(iter.span(),
-                        "`for ... in xs` sobre `List<Any>`: el subset compilado exige tipo homogéneo concreto"
+                        "`for ... in xs` over `List<Any>`: the compiled subset requires a concrete homogeneous type"
                             .to_string(),
                     ));
                 }
@@ -13694,13 +13694,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             Ok((code, t.clone()))
                         } else {
                             Err(self.err_at(*span, format!(
-                                "tupla de {} elementos no tiene índice `{}`",
+                                "tuple of {} elements has no index `{}`",
                                 items.len(), index
                             )))
                         }
                     }
                     other => Err(self.err_at(*span, format!(
-                        "acceso `.{}` solo aplica a tuplas, recibí `{}`",
+                        "access `.{}` only applies to tuples, received `{}`",
                         index, display_type(other, self.env)
                     ))),
                 }
@@ -13829,15 +13829,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // citing the canonical pattern.
                 if matches!(name.as_str(), "Date" | "DateTime" | "Uuid") {
                     return Err(self.err(format!(
-                        "`{0}` es un namespace de constructors; usá `{0}.today()`/`{0}.now()`/`{0}.v4()`/`{0}.parse(s)`/etc., \
-                         no `{0}` solo como valor",
+                        "`{0}` is a constructors namespace; use `{0}.today()`/`{0}.now()`/`{0}.v4()`/`{0}.parse(s)`/etc., \
+                         not `{0}` alone as a value",
                         name
                     )));
                 }
                 let ty = self
                     .lookup_var(name)
                     .cloned()
-                    .ok_or_else(|| self.err(format!("variable desconocida en codegen: `{}`", name)))?;
+                    .ok_or_else(|| self.err(format!("unknown variable in codegen: `{}`", name)))?;
                 // For non-Copy types (Str, Nominal, Option<...>), we
                 // generate `.clone()` because expressions consume by
                 // value. Inefficient but correct. For Nominal the
@@ -13944,7 +13944,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             // Phase 9.0.1 (F15): defense — `fitz build` should not see
             // `Expr::Error` (strict parser never produces it).
             Expr::Error(span) => Err(self.err_at(*span,
-                "nodo `Expr::Error` en el AST — `fitz build` usa el parser strict, no debería verlo (bug del compilador, Fase 9.0.1)",
+                "`Expr::Error` node in the AST — `fitz build` uses the strict parser and should never see this (compiler bug, Phase 9.0.1)",
             )),
         }
     }
@@ -38451,8 +38451,8 @@ mod tests {
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let err = gen(src).expect_err("expected error de codegen");
         assert!(
-            err.message.contains("version") && err.message.contains("reconocido"),
-            "expected mensaje sobre kwarg desconocido, fue: {}",
+            err.message.contains("version") && err.message.contains("unrecognized"),
+            "expected message about unknown kwarg, was: {}",
             err.message
         );
     }
@@ -38506,8 +38506,8 @@ mod tests {
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let err = gen(src).expect_err("expected error de codegen");
         assert!(
-            err.message.contains("port") && err.message.contains("dos veces"),
-            "mensaje inesperado: {}",
+            err.message.contains("port") && err.message.contains("twice"),
+            "unexpected message: {}",
             err.message
         );
     }
@@ -38518,8 +38518,8 @@ mod tests {
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let err = gen(src).expect_err("expected error de codegen");
         assert!(
-            err.message.contains("host") && err.message.contains("dos veces"),
-            "mensaje inesperado: {}",
+            err.message.contains("host") && err.message.contains("twice"),
+            "unexpected message: {}",
             err.message
         );
     }
@@ -38751,7 +38751,7 @@ mod tests {
     fn fn_without_param_annotation_is_error() {
         assert_err_contains(
             "fn double(n) -> Int { return n * 2 }",
-            &["parámetro", "anotación"],
+            &["parameter", "annotation"],
         );
     }
 
@@ -40119,8 +40119,8 @@ mod tests {
         let src = "let X = 10\nX = 20\nfn read() -> Int { return X }\nprint(read())";
         let err = gen(src).expect_err("expected error de codegen (X no hoisteable, reasignado)");
         assert!(
-            err.message.contains("desconocida") && err.message.contains("X"),
-            "expected error sobre `X` desconocida (no hoisteada), fue: {}",
+            err.message.contains("unknown") && err.message.contains("X"),
+            "expected error about unknown `X` (not hoisted), was: {}",
             err.message
         );
     }
