@@ -11,6 +11,63 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.16.0] — 2026-06-15 — Hito: compilador 100% inglés (cierre F1-F6 + F5.d)
+
+Cierre formal de la mini-tanda de traducción del código del compilador
+del español al inglés. **47 commits coordinados** en 7 sub-fases
+(F1-F6 + F5.d) que llevan el surface user-facing del binario + tests
+internos + grammar TextMate de español a inglés.
+
+**Sin cambios de comportamiento del lenguaje** — AST, checker, runtime,
+codegen, ORM, package manager y LSP funcionan bit-a-bit idénticos.
+Release cosmética + i18n, pero cross-cutting (47 commits) y user-visible
+(mensajes de error CLI, hints LSP, descripciones de completion, etc.).
+
+### Surface cubierto
+
+| Sub-fase | Scope |
+|---|---|
+| **F1** | Comments en src/**/*.rs (17 batches) |
+| **F2** | Test function names (~2647 renames en 44 archivos) |
+| **F3** | Error messages + runtime emit strings (10 batches) |
+| **F4** | Output user-facing — CLI, LSP, examples, docs internacionales (syntax-spec, architecture) |
+| **F5.a/b/c** | Test assertions internas + barrida cross-archivo + F4 leftover + driver Postgres TLS |
+| **F5.d** | Residual "esperaba"/"esperaban" — 253 strings en `mod tests` de 11 archivos + 1 user-facing en `src/db.rs:535` que F5.c.2 había perdido |
+| **F6** | Comentarios del grammar TextMate (`editors/vscode/syntaxes/fitz.tmLanguage.json`) |
+
+### Resultado
+
+- Surface user-facing del compilador (CLI, LSP, errors): **100% inglés**
+- Test assertions internas (`mod tests`): **100% inglés**
+- Comments Rust + grammar TextMate: **100% inglés**
+- `grep "esperaba|esperaban" src/` → **0 ocurrencias** post-cierre
+
+### NO cubierto (deuda explícita, sigue en español)
+
+- `docs/guide.md`, `docs/curso/`, `docs/taskhub/`, `README.md`, `docs/index.md` — material pedagógico se mantiene en castellano por decisión de proyecto. Traducción a inglés queda como sub-paso futuro si el material gana tracción internacional.
+- Fixtures `.fitz` dentro de tests (ej: "El Chaltén", "división por cero", "id inválido", passwords como "contraseña-secreta-del-usuario") — son fixtures, no surface del compilador.
+
+### Tests al cierre (verificación pre-bump completa)
+
+- `cargo test --lib` → **3052/3052** ✓ (sin feature)
+- `cargo test --lib --features lsp` → **3170/3170** ✓
+- `cargo test --lib --features python` → **3143/3143** ✓
+- `cargo test --test cli_e2e --features lsp` → **98/98** ✓
+- `cargo test --test openapi_e2e --features lsp` → **3/3** ✓
+- `cargo test --test compile_e2e --features lsp` (modulo smoke gigante) → **352 passed, 8 failed** — los 8 son **pre-existentes documentados** en `docs/deudas-post-5b.md` (codegen cross-module + observability, Windows file lock paralelo, runtime HTTP routing 404, codegen drift orm_w17 #7, Postgres apagado para sslmode=require). Cero regresiones de F1-F6+F5.d.
+- `cargo test --test compile_e2e smoke_ejemplos_guia_compilables_compilan` → **1/1** ✓ (~290 ejemplos guía + curso + TaskHub compilan limpios, 251s)
+- `cargo fmt --all --check` → limpio
+- `cargo clippy --all-targets -- -D warnings` → limpio
+- `cargo clippy --all-targets --features lsp -- -D warnings` → limpio
+- `cargo clippy --all-targets --features python -- -D warnings` → limpio
+- `cargo build --release` × 3 features (default + lsp + python) → todos verdes
+- TypeScript de la extensión (`npx tsc --noEmit`) → limpio
+
+### Versión
+
+- `Cargo.toml`: **v0.15.14 → v0.16.0** (minor — cross-cutting cosmético + i18n con visibilidad en surface user-facing CLI/LSP, no breaking de sintaxis del lenguaje ni de tipos)
+- Extensión VSCode: **0.15.0 → 0.16.0** + `.vsix` regenerado (F6 tocó grammar TextMate)
+
 ## [v0.15.14] — 2026-06-09 — Codegen: OnceCell paralelo en `__fitz_cron_init_storage` del binario nativo
 
 **Fix de la falla descubierta IN VIVO en el smoke E2E real del TaskHub

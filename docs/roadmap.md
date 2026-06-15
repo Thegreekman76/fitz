@@ -2,6 +2,29 @@
 
 ---
 
+## Mini-tanda — Traducción ES→EN del código del compilador ✅ CERRADA v0.16.0 (2026-06-15)
+
+**Hito de internacionalización**: tras 47 commits coordinados en 7 sub-fases (F1-F6 + F5.d), el surface user-facing del compilador (CLI, LSP, errors), los test assertions internas y los comentarios del grammar TextMate quedaron 100% en inglés. `grep "esperaba|esperaban" src/` → 0 ocurrencias post-cierre.
+
+**NO cambia el comportamiento del lenguaje** — AST, checker, runtime, codegen, ORM, package manager y LSP funcionan bit-a-bit idénticos. Release cosmética + i18n, pero cross-cutting (47 commits) y visible al usuario en mensajes de error CLI, hints LSP, descripciones de completion.
+
+**Sub-fases ejecutadas**:
+- F1: Comments en `src/**/*.rs` (17 batches)
+- F2: Test function names (~2647 renames en 44 archivos)
+- F3: Error messages + runtime emit strings (10 batches)
+- F4: Output user-facing — CLI, LSP, examples, docs internacionales (syntax-spec, architecture)
+- F5.a/b/c: Test assertions internas + barrida cross-archivo + F4 leftover + driver Postgres TLS
+- F5.d: Residual "esperaba"/"esperaban" — 253 strings en `mod tests` de 11 archivos + 1 user-facing en `src/db.rs:535` que F5.c.2 había perdido
+- F6: Comentarios del grammar TextMate (`editors/vscode/syntaxes/fitz.tmLanguage.json`)
+
+**Verificación pre-bump completa**: 3052 unit (sin feature) / 3170 (lsp) / 3143 (python) + 352 compile_e2e + 1 smoke gigante (290 ejemplos guía/curso/TaskHub) + 98 cli_e2e + 3 openapi + 3 builds release (default + lsp + python) + clippy strict en 3 modos + fmt → todos verdes. 8 failures de compile_e2e son pre-existentes documentados, cero regresiones de F1-F6+F5.d.
+
+**NO cubierto** (deuda explícita): `docs/guide.md`, `docs/curso/`, `docs/taskhub/`, `README.md`, `docs/index.md` — material pedagógico se mantiene en castellano por decisión de proyecto. Traducción a inglés queda como sub-paso futuro si el material gana tracción internacional.
+
+Detalle por sub-paso en [`CHANGELOG.md`](../CHANGELOG.md) → v0.16.0.
+
+---
+
 ## Estado actual del proyecto (v0.9.57 — 2026-05-24)
 
 **Hito**: tras 15 releases consecutivos cerrando deudas (v0.9.43 → v0.9.57), el inventario activo queda **vacío**. El proyecto está en estado **production-ready** para todos los patrones canónicos del lenguaje:

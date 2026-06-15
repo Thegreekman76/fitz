@@ -4,6 +4,29 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 Mini-tanda traducción ES→EN del código — CERRADA v0.16.0 (2026-06-15)
+
+**Hito de internacionalización**: 47 commits coordinados en 7 sub-fases (F1-F6 + F5.d) llevan el surface user-facing del compilador (CLI, LSP, errors), test assertions internas y comentarios del grammar TextMate de español a inglés. `grep "esperaba|esperaban" src/` → 0 ocurrencias post-cierre.
+
+**Por sub-fase**:
+- **F1**: Comments en `src/**/*.rs` (17 batches).
+- **F2**: Test function names (~2647 renames en 44 archivos).
+- **F3**: Error messages + runtime emit strings (10 batches).
+- **F4**: Output user-facing — CLI, LSP, examples, docs internacionales (syntax-spec, architecture).
+- **F5.a/b/c**: Test assertions internas + barrida cross-archivo + F4 leftover + driver Postgres TLS.
+- **F5.d**: Residual "esperaba"/"esperaban" — 253 strings en `mod tests` de 11 archivos + 1 user-facing en `src/db.rs:535` que F5.c.2 había perdido (cierre final).
+- **F6**: Comentarios del grammar TextMate (`editors/vscode/syntaxes/fitz.tmLanguage.json`).
+
+**NO cubierto por la mini-tanda** (deuda explícita pendiente):
+- `docs/guide.md`, `docs/curso/`, `docs/taskhub/`, `README.md`, `docs/index.md` — material pedagógico se mantiene en castellano por decisión de proyecto. Traducción a inglés queda como sub-paso futuro si el material gana tracción internacional.
+- Fixtures `.fitz` adentro de tests (ej: "El Chaltén", "división por cero", "id inválido", passwords como "contraseña-secreta-del-usuario") — son fixtures, no surface del compilador. Quedan intactos por diseño.
+
+**Verificación pre-bump completa** (toda verde): 3052 unit (sin feature) / 3170 (lsp) / 3143 (python) + 352 compile_e2e + 1 smoke gigante (290 ejemplos guía+curso+TaskHub) + 98 cli_e2e + 3 openapi + 3 builds release (default + lsp + python) + clippy strict en 3 modos + fmt limpio. 8 failures de compile_e2e son pre-existentes documentados acá mismo (Windows file lock paralelo + codegen cross-module + observability + routing 404 + codegen drift orm_w17 #7 + Postgres apagado para sslmode=require). Cero regresiones de F1-F6+F5.d.
+
+**Detalle por sub-paso**: `CHANGELOG.md` → v0.16.0.
+
+---
+
 ## 🟢 NO es deuda — trade-off documentado del ORM JSON serializer (analizado 2026-06-09, no requiere fix del lenguaje)
 
 **Contexto**: durante el smoke E2E del TaskHub post-v0.15.14, el
