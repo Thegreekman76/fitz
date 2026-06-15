@@ -114,7 +114,7 @@
       ]
     },
     "numbers": {
-      "comment": "Mini-tanda Núm — separadores `_` y notación científica `e/E`. Mini-tanda Lit — literales hex/binario/octal con prefijos `0x`/`0b`/`0o`. Mini-tanda Cmp — prefijos mayúscula `0X`/`0B`/`0O` también soportados. Los patterns más específicos primero (hex/bin/oct antes que float/int decimal).",
+      "comment": "Mini-phase Num — `_` separators and `e/E` scientific notation. Mini-phase Lit — hex/binary/octal literals with `0x`/`0b`/`0o` prefixes. Mini-phase Cmp — uppercase `0X`/`0B`/`0O` prefixes also supported. Most specific patterns first (hex/bin/oct before float/int decimal).",
       "patterns": [
         {
           "name": "constant.numeric.hex.fitz",
@@ -195,7 +195,7 @@
       "match": "\\b(print|len|sleep|cors|bytes|spawn|assert|assert_eq|assert_ne|assert_throws|popcount|leading_zeros|trailing_zeros|rotate_left|rotate_right|abs|min|max|pow|sqrt|ceil|floor|round|clamp|env|env_or|load_env|ws_broadcast)\\b(?=\\s*\\()"
     },
     "labels": {
-      "comment": "Labels de loops (mini-tanda L): `'outer:` en sitio de declaración y `'outer` en break/continue. El `:` opcional al final NO se consume — lo agarra el resto del parser.",
+      "comment": "Loop labels (mini-phase L): `'outer:` at declaration site and `'outer` at break/continue. The trailing `:` is optional and NOT consumed here — the rest of the parser picks it up.",
       "name": "entity.name.label.fitz",
       "match": "'[a-zA-Z_][a-zA-Z0-9_]*"
     },
@@ -214,7 +214,7 @@
           "match": "\\?"
         },
         {
-          "comment": "Mini-tanda Bits — shifts `<<`/`>>`. ANTES de comparison para que `<=`/`>=` no se confundan con sub-secuencias `<` + `<` etc.",
+          "comment": "Mini-phase Bits — shifts `<<`/`>>`. BEFORE comparison so `<=`/`>=` are not confused with sub-sequences like `<` + `<`.",
           "name": "keyword.operator.bitwise.shift.fitz",
           "match": "<<|>>"
         },
@@ -227,17 +227,17 @@
           "match": "&&|\\|\\||!"
         },
         {
-          "comment": "Or-pattern en match arms (R.2.1): `Ok | Err =>`. También usado como OR bit-a-bit (mini-tanda Bits). Va después del operator lógico (`||`) para que dos pipes consecutivos matcheen como `||`.",
+          "comment": "Or-pattern in match arms (R.2.1): `Ok | Err =>`. Also used as bitwise OR (mini-phase Bits). Goes after the logical operator (`||`) so two consecutive pipes match as `||`.",
           "name": "keyword.operator.alternative.fitz",
           "match": "\\|"
         },
         {
-          "comment": "Mini-tanda Bits — AND bit-a-bit `&`, XOR `^`, NOT unario `~`. `&` no choca con `&&` porque el operator lógico ya fue matcheado arriba.",
+          "comment": "Mini-phase Bits — bitwise AND `&`, XOR `^`, unary NOT `~`. `&` does not clash with `&&` because the logical operator was already matched above.",
           "name": "keyword.operator.bitwise.fitz",
           "match": "&|\\^|~"
         },
         {
-          "comment": "Asignación compuesta (R.2.3 + mini-tanda Cmp). Aritméticos: `+= -= *= /= %=`. Bit-a-bit: `&= |= ^= <<= >>=`. Va antes que `=`/`<<`/`>>`/`&`/`|`/`^` solos para que el regex no se quede con la primera letra. Los shifts compuestos `<<=`/`>>=` van antes que `<<`/`>>` por la misma razón.",
+          "comment": "Compound assignment (R.2.3 + mini-phase Cmp). Arithmetic: `+= -= *= /= %=`. Bitwise: `&= |= ^= <<= >>=`. Goes before lone `=`/`<<`/`>>`/`&`/`|`/`^` so the regex does not stop at the first letter. The compound shifts `<<=`/`>>=` go before `<<`/`>>` for the same reason.",
           "name": "keyword.operator.assignment.compound.fitz",
           "match": "<<=|>>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^="
         },
@@ -254,14 +254,14 @@
     "functions": {
       "patterns": [
         {
-          "comment": "Definición de función: `fn nombre(...)`",
+          "comment": "Function definition: `fn name(...)`",
           "match": "\\bfn\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
           "captures": {
             "1": { "name": "entity.name.function.fitz" }
           }
         },
         {
-          "comment": "Llamada a función: `nombre(...)` (no built-in)",
+          "comment": "Function call: `name(...)` (non-builtin)",
           "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()",
           "captures": {
             "1": { "name": "entity.name.function.call.fitz" }
