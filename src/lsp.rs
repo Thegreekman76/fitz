@@ -221,7 +221,7 @@ pub fn make_hover_with_range(
     // v0.10.32 (Tier D.2) — append CREATE TABLE SQL if applicable.
     if let Some(sql) = try_table_create_sql(ty, env, program) {
         value.push_str(
-            "\n\n---\n\n**`CREATE TABLE` emitted** (vía `fitz db diff/migrate`):\n\n```sql\n",
+            "\n\n---\n\n**`CREATE TABLE` emitted** (via `fitz db diff/migrate`):\n\n```sql\n",
         );
         value.push_str(&sql);
         value.push_str("\n```");
@@ -1126,234 +1126,234 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "get",
             "get(\"${1:/path}\")",
             "@get(path) — HTTP GET handler",
-            "Registra un handler HTTP GET. Path con `{param}` para path params.",
+            "Registers an HTTP GET handler. Path with `{param}` for path params.",
         ),
         (
             "post",
             "post(\"${1:/path}\")",
             "@post(path) — HTTP POST handler",
-            "Registra un handler HTTP POST. Body deserializado al tipo del param leftover.",
+            "Registers an HTTP POST handler. Body deserialized into the leftover param's type.",
         ),
         (
             "put",
             "put(\"${1:/path}\")",
             "@put(path) — HTTP PUT handler",
-            "Registra un handler HTTP PUT. Body deserializado al tipo del param leftover.",
+            "Registers an HTTP PUT handler. Body deserialized into the leftover param's type.",
         ),
         (
             "delete",
             "delete(\"${1:/path}\")",
             "@delete(path) — HTTP DELETE handler",
-            "Registra un handler HTTP DELETE.",
+            "Registers an HTTP DELETE handler.",
         ),
         (
             "server",
             "server(${1:3000})",
             "@server(port, host?, ws_heartbeat_secs?, ...)",
-            "Configura el listener HTTP.\n\n\
-             **Args positionals**: `port` (Int 1-65535), `host` (Str IP literal, default \"127.0.0.1\").\n\n\
-             **Kwargs**: `port=<Int>`, `host=<Str>` (v0.15.13+ — mismos parámetros que los positionals, conflicto si se pasan ambos), \
+            "Configures the HTTP listener.\n\n\
+             **Positional args**: `port` (Int 1-65535), `host` (Str IP literal, default \"127.0.0.1\").\n\n\
+             **Kwargs**: `port=<Int>`, `host=<Str>` (v0.15.13+ — same parameters as the positionals, conflict if both are passed), \
              `docs=<Bool>` (default true), `api_version=<Str>`, \
              `ws_heartbeat_secs=<Int>` (default 30), `shutdown_timeout_secs=<Int>` (default 30), \
-             `observability=<Bool>` (default true), `prometheus=<Bool>` (default false — opt-in del endpoint /metrics).\n\n\
-             **Patrón canónico Docker**: `@server(host=\"0.0.0.0\", port=8080, prometheus=true)`. \
-             El default `127.0.0.1` no acepta conexiones desde la red Docker.",
+             `observability=<Bool>` (default true), `prometheus=<Bool>` (default false — opt-in for the /metrics endpoint).\n\n\
+             **Canonical Docker pattern**: `@server(host=\"0.0.0.0\", port=8080, prometheus=true)`. \
+             The `127.0.0.1` default does not accept connections from the Docker network.",
         ),
         (
             "header",
             "header(\"${1:Header-Name}\")",
-            "@header(name) — param del handler bindeado desde header",
-            "El param del handler recibe el valor del header HTTP. Solo Str o Str?.",
+            "@header(name) — handler param bound from a header",
+            "The handler param receives the value of the HTTP header. Only Str or Str?.",
         ),
         // Middleware / CORS
         (
             "middleware",
             "middleware(${1:fn_name})",
-            "@middleware(fn) — apilable antes del decorator de ruta",
-            "Cadena de middlewares ejecutados en orden. `return null` continúa, `return <status> {...}` short-circuit.",
+            "@middleware(fn) — stackable before the route decorator",
+            "Chain of middlewares executed in order. `return null` continues, `return <status> {...}` short-circuits.",
         ),
         (
             "cors",
             "cors()",
             "@cors() o @cors({allow_origin: \"...\", ...})",
-            "CORS para la ruta. Sin args: defaults permisivos. Con map: override de allow_origin/methods/headers/max_age.",
+            "CORS for the route. No args: permissive defaults. With map: override allow_origin/methods/headers/max_age.",
         ),
         // Auth
         (
             "authenticated",
             "authenticated",
-            "@authenticated — handler protegido por el provider",
-            "Valida bearer token via el @auth_provider singleton. El primer param leftover recibe el User autenticado.",
+            "@authenticated — handler protected by the provider",
+            "Validates bearer token via the @auth_provider singleton. The first leftover param receives the authenticated User.",
         ),
         (
             "admin",
             "admin",
-            "@admin — handler protegido + role == \"admin\"",
-            "Equivalente a @authenticated + check `user.role == \"admin\"`. Devuelve 403 si no admin.",
+            "@admin — protected handler + role == \"admin\"",
+            "Equivalent to @authenticated + check `user.role == \"admin\"`. Returns 403 if not admin.",
         ),
         (
             "requires",
             "requires(\"${1:editor}\")",
-            "@requires(role) — RBAC custom (Fase 9.w.1.iter2)",
-            "Handler protegido por role específico. Apilable: `@requires(\"editor\")` (un role); \
-             `@requires(\"editor\") @requires(\"publisher\")` (OR — matchea cualquiera). \
-             Implica auth (corre el provider). Exige `role: Str` en el User type. \
-             Devuelve 403 si el role del user no matchea.",
+            "@requires(role) — custom RBAC (Phase 9.w.1.iter2)",
+            "Handler protected by a specific role. Stackable: `@requires(\"editor\")` (one role); \
+             `@requires(\"editor\") @requires(\"publisher\")` (OR — matches any). \
+             Implies auth (runs the provider). Requires `role: Str` on the User type. \
+             Returns 403 if the user's role does not match.",
         ),
         (
             "auth_provider",
             "auth_provider",
-            "@auth_provider — singleton resolutor de tokens",
-            "Marca la fn como el provider de auth. Recibe Map<Str,Str> headers, retorna Result<User>.",
+            "@auth_provider — singleton token resolver",
+            "Marks the fn as the auth provider. Receives Map<Str,Str> headers, returns Result<User>.",
         ),
         // WS + Jobs
         (
             "ws",
             "ws(\"${1:/path}\")",
             "@ws(path) — WebSocket endpoint",
-            "Async fn con primer param WsConn<T> typed. T es el message type marshalled de/al cliente.",
+            "Async fn with first param typed WsConn<T>. T is the message type marshalled to/from the client.",
         ),
         (
             "cron",
             "cron(\"${1:0 */5 * * * *}\")",
-            "@cron(expr) — job periódico",
-            "Expression cron (5/6/7 fields Unix). Sync o async. Sin params, return Null/Result/Future. \
-             Kwargs opcionales (iter2): `tz=\"IANA/Name\"` (default UTC), \
+            "@cron(expr) — periodic job",
+            "Cron expression (5/6/7 Unix fields). Sync or async. No params, return Null/Result/Future. \
+             Optional kwargs (iter2): `tz=\"IANA/Name\"` (default UTC), \
              `retry={max: N, backoff: \"exponential\"|\"linear\"|\"constant\", initial_secs: I, max_secs: M}`, \
              `catch_up=true|false` (default false), \
-             `store=db` (persiste runs en fitz_cron_jobs/fitz_cron_runs).",
+             `store=db` (persists runs in fitz_cron_jobs/fitz_cron_runs).",
         ),
         (
             "background",
             "background",
-            "@background — marca fn como spawnable via spawn(fn(...))",
-            "Marker opt-in. Habilita el call `spawn(fn(args))` fire-and-forget tipado a Future<T>. \
-             Kwargs opcionales (iter2): `tz=\"IANA/Name\"`, \
-             `retry={...}` (mismo shape que @cron).",
+            "@background — marks fn as spawnable via spawn(fn(...))",
+            "Opt-in marker. Enables the fire-and-forget `spawn(fn(args))` call typed as Future<T>. \
+             Optional kwargs (iter2): `tz=\"IANA/Name\"`, \
+             `retry={...}` (same shape as @cron).",
         ),
         (
             "test",
             "test",
-            "@test — registra como test unit (fitz test)",
-            "Sin params. Bodies pueden usar assert/assert_eq/assert_ne/assert_throws builtins.",
+            "@test — registers as a unit test (fitz test)",
+            "No params. Bodies may use assert/assert_eq/assert_ne/assert_throws builtins.",
         ),
         // Fase 12.1 (v0.12.0) — Health checks K8s.
         (
             "healthz",
             "healthz",
             "@healthz — liveness probe (auto-mount GET /healthz)",
-            "Singleton. Sin params. Return Bool / Result<Null> / Result<Bool> (sync o async). \
-             Mapea Bool true / Ok / Null → 200; Bool false / Err → 503. Sin @healthz declarado, \
-             el server auto-mounta GET /healthz con respuesta default 200.",
+            "Singleton. No params. Return Bool / Result<Null> / Result<Bool> (sync or async). \
+             Maps Bool true / Ok / Null → 200; Bool false / Err → 503. With no @healthz declared, \
+             the server auto-mounts GET /healthz with a default 200 response.",
         ),
         (
             "readyz",
             "readyz",
             "@readyz — readiness probe (auto-mount GET /readyz)",
-            "Singleton. Sin params. Return Bool / Result<Null> / Result<Bool> (sync o async). \
-             Durante SIGTERM/graceful shutdown, retorna 503 inmediato (K8s deja de rutear) sin tocar \
-             el handler. Sin @readyz declarado, el server auto-mounta GET /readyz con respuesta \
-             default 200.",
+            "Singleton. No params. Return Bool / Result<Null> / Result<Bool> (sync or async). \
+             During SIGTERM/graceful shutdown, returns 503 immediately (K8s stops routing) without invoking \
+             the handler. With no @readyz declared, the server auto-mounts GET /readyz with a default \
+             200 response.",
         ),
         // v0.11.0 (Fase 13) — CLI builder.
         (
             "command",
-            "command(\"${1:name}\", desc=\"${2:descripción}\")",
-            "@command(name, desc=) — declara fn como comando CLI",
-            "El binario producido por `fitz build` parsea argv y dispatcha. Return type debe ser Int (exit code). Params sin default = positional args; con default = flags. Bool con default false → flag bool.",
+            "command(\"${1:name}\", desc=\"${2:description}\")",
+            "@command(name, desc=) — declares fn as a CLI command",
+            "The binary produced by `fitz build` parses argv and dispatches. Return type must be Int (exit code). Params without default = positional args; with default = flags. Bool with default false → bool flag.",
         ),
         // Phase 12.7 — observability decorators over user fns.
         (
             "trace",
             "trace(name=\"${1:span_name}\")",
-            "@trace(name=) — abre un tracing::span por cada call",
-            "Sobre fns user (no HTTP/WS — auto-instrumentation Fase 12.3 cubre). Sin name, usa el nombre de la fn. Cero overhead si no hay subscriber instalado. Combinable con @metric.",
+            "@trace(name=) — opens a tracing::span on each call",
+            "On user fns (not HTTP/WS — auto-instrumentation from Phase 12.3 covers those). Without name, uses the fn name. Zero overhead if no subscriber is installed. Combinable with @metric.",
         ),
         (
             "metric",
             "metric(name=\"${1:metric_name}\")",
-            "@metric(name=) — registra histogram + counter por call",
-            "Sobre fns user (no HTTP/WS). Emite `<name>_duration_seconds` (histogram) y `<name>_calls_total` (counter) al Drop del scope. Sin name, usa el nombre de la fn. Combinable con @trace.",
+            "@metric(name=) — records histogram + counter per call",
+            "On user fns (not HTTP/WS). Emits `<name>_duration_seconds` (histogram) and `<name>_calls_total` (counter) when the scope is dropped. Without name, uses the fn name. Combinable with @trace.",
         ),
         // Phase 12.8 — feature flag decorator over fns.
         (
             "flag",
             "flag(\"${1:flag-name}\")",
-            "@flag(\"name\") — gate la fn por feature flag",
-            "Sobre HTTP/WS handlers o fns regulares. Si la flag está off (default), HTTP/WS retornan 404. Defaults en `fitz.toml [flags]`; override runtime con env var `FITZ_FLAG_<UPPERCASE>`. Combinable con auth + RBAC.",
+            "@flag(\"name\") — gates the fn by feature flag",
+            "On HTTP/WS handlers or regular fns. If the flag is off (default), HTTP/WS return 404. Defaults in `fitz.toml [flags]`; runtime override via env var `FITZ_FLAG_<UPPERCASE>`. Combinable with auth + RBAC.",
         ),
         // ORM
         (
             "table",
-            "table(\"${1:tabla}\")",
-            "@table(\"name\") — type → tabla Postgres",
-            "Habilita los read/write methods del ORM sobre el type. Requiere @primary en algún field.",
+            "table(\"${1:table_name}\")",
+            "@table(\"name\") — type → Postgres table",
+            "Enables ORM read/write methods on the type. Requires @primary on some field.",
         ),
         (
             "primary",
             "primary",
-            "@primary — field es la PK",
-            "Sobre un field. Exactamente uno por type. Composite PKs no soportadas en MVP.",
+            "@primary — field is the PK",
+            "On a field. Exactly one per type. Composite PKs not supported in MVP.",
         ),
         (
             "column",
             "column(\"${1:sql_name}\")",
-            "@column(sql_name) — override del nombre SQL del field",
-            "Por default el ORM usa el nombre Fitz del field. Con @column override-eás el SQL.",
+            "@column(sql_name) — override the SQL name of the field",
+            "By default the ORM uses the Fitz name of the field. With @column you override the SQL name.",
         ),
         (
             "unique",
             "unique",
-            "@unique — UNIQUE constraint (field-level sin args, o type-level con cols posicionales — v0.10.29)",
-            "Sobre un field sin args: marca el field como UNIQUE en el CREATE TABLE. Sobre el `type` (v0.10.29): `@unique(col1, col2, ..., name=\"optional\")` — composite UNIQUE shortcut, alias ergonómico de `@index(unique=true)`. Acepta bare idents o Str con commas.",
+            "@unique — UNIQUE constraint (field-level without args, or type-level with positional cols — v0.10.29)",
+            "On a field without args: marks the field as UNIQUE in CREATE TABLE. On the `type` (v0.10.29): `@unique(col1, col2, ..., name=\"optional\")` — composite UNIQUE shortcut, ergonomic alias of `@index(unique=true)`. Accepts bare idents or Str with commas.",
         ),
         (
             "check_constraint",
             "check_constraint(\"${1:expr}\")",
-            "@check_constraint(\"sql_expr\", name?) — CHECK constraint declarativo (v0.10.29)",
-            "Sobre el `type` con `@table`: emite `CHECK (<expr>)` en CREATE TABLE. La expr se pasa literal al SQL — Postgres valida en INSERT/UPDATE. Apilable. Sin drift check del migrator (deuda menor) — usar `db.exec(\"ALTER TABLE ... DROP/ADD CONSTRAINT\")` para cambios.",
+            "@check_constraint(\"sql_expr\", name?) — declarative CHECK constraint (v0.10.29)",
+            "On the `type` with `@table`: emits `CHECK (<expr>)` in CREATE TABLE. The expr is passed literally to SQL — Postgres validates on INSERT/UPDATE. Stackable. No drift check from the migrator (minor debt) — use `db.exec(\"ALTER TABLE ... DROP/ADD CONSTRAINT\")` for changes.",
         ),
         (
             "index",
             "index",
-            "@index(col, ..., unique?, name?, where_?, using?) — índice declarado al type (v0.10.27+)",
-            "Sobre el `type` con `@table`: declara índices auto-emitidos por `fitz db diff/migrate`. Composite (multi-col), unique (`unique=true`), partial (`where_=<expr>`), nombre override (`name=\"...\"`), method override (`using=\"gin\"|\"gist\"|\"brin\"|\"hash\"|\"spgist\"` — v0.10.28; btree default).",
+            "@index(col, ..., unique?, name?, where_?, using?) — index declared on the type (v0.10.27+)",
+            "On the `type` with `@table`: declares indexes auto-emitted by `fitz db diff/migrate`. Composite (multi-col), unique (`unique=true`), partial (`where_=<expr>`), name override (`name=\"...\"`), method override (`using=\"gin\"|\"gist\"|\"brin\"|\"hash\"|\"spgist\"` — v0.10.28; btree default).",
         ),
         (
             "db_default",
             "db_default",
-            "@db_default — DB asigna el value (skipea INSERT)",
-            "ORM skipea el field del INSERT, Postgres aplica su DEFAULT (típico: timestamps, UUIDs gen_random_uuid()). v0.10.16: opcionalmente acepta arg Str con la expresión SQL — `@db_default(\"NOW()\")` — que `fitz db diff` emite automáticamente en CREATE TABLE / ADD COLUMN.",
+            "@db_default — DB assigns the value (skips INSERT)",
+            "ORM skips the field on INSERT, Postgres applies its DEFAULT (typical: timestamps, UUIDs gen_random_uuid()). v0.10.16: optionally accepts a Str arg with the SQL expression — `@db_default(\"NOW()\")` — which `fitz db diff` emits automatically in CREATE TABLE / ADD COLUMN.",
         ),
         (
             "hidden",
             "hidden",
-            "@hidden — field invisible para el JSON HTTP I/O",
-            "Skipea de __to_fitz_json (no expone al cliente) y __FromFitzJson (rechaza extras). Útil: password_hash, tokens.",
+            "@hidden — field invisible to HTTP JSON I/O",
+            "Skipped by __to_fitz_json (not exposed to the client) and __FromFitzJson (rejects extras). Useful for password_hash, tokens.",
         ),
         (
             "belongs_to",
             "belongs_to(\"${1:Target}\")",
             "@belongs_to(\"Type\", on_delete?, on_update?)",
-            "Sobre un FK field. Soporta kwargs on_delete=\"cascade\"/\"set_null\"/\"restrict\"/\"no_action\".",
+            "On a FK field. Supports kwargs on_delete=\"cascade\"/\"set_null\"/\"restrict\"/\"no_action\".",
         ),
         (
             "has_one",
             "has_one(\"${1:Target}\", via=\"${2:fk}\")",
             "@has_one(\"Type\", via=\"fk_field\", on_delete?)",
-            "Virtual field (no va a la DB). El target hospeda el FK. Para `.preload(...)`.",
+            "Virtual field (does not go to the DB). The target hosts the FK. For `.preload(...)`.",
         ),
         (
             "has_many",
             "has_many(\"${1:Target}\", via=\"${2:fk}\")",
             "@has_many(\"Type\", via=\"fk_field\", on_delete?)",
-            "Virtual List<Target>. El target hospeda el FK. Para `.preload(...)`.",
+            "Virtual List<Target>. The target hosts the FK. For `.preload(...)`.",
         ),
         (
             "renamed_from",
             "renamed_from(\"${1:old_name}\")",
-            "@renamed_from(\"old_name\") — rename seguro (v0.10.17)",
-            "Decorator transient para que `fitz db diff` emita `ALTER TABLE ... RENAME COLUMN/TABLE` en vez de DROP + ADD (preserva datos). Sobre un field: rename de column. Sobre el `type` (junto con `@table`): rename de tabla. Borralo después de aplicar la migration.",
+            "@renamed_from(\"old_name\") — safe rename (v0.10.17)",
+            "Transient decorator so `fitz db diff` emits `ALTER TABLE ... RENAME COLUMN/TABLE` instead of DROP + ADD (preserves data). On a field: column rename. On the `type` (together with `@table`): table rename. Delete it after applying the migration.",
         ),
     ];
 
@@ -1853,14 +1853,14 @@ fn after_dot_completions(
             (
                 "init",
                 format!(
-                    "fn() -> List<{}>  // todos menos el último",
+                    "fn() -> List<{}>  // all but the last",
                     t.display(type_env)
                 ),
             ),
             (
                 "tail",
                 format!(
-                    "fn() -> List<{}>  // todos menos el primero",
+                    "fn() -> List<{}>  // all but the first",
                     t.display(type_env)
                 ),
             ),
@@ -2885,7 +2885,7 @@ fn scope_level_completions(
         kind: Some(CompletionItemKind::FUNCTION),
         detail: Some("flag(name: Str) -> Bool".into()),
         documentation: Some(Documentation::String(
-            "Consulta el registry de feature flags. Defaults del manifest `[flags]` + env var override `FITZ_FLAG_<UPPERCASE>`. Default `false` si no está registrada.".into(),
+            "Queries the feature-flag registry. Defaults from manifest `[flags]` + env var override `FITZ_FLAG_<UPPERCASE>`. Default `false` if not registered.".into(),
         )),
         ..CompletionItem::default()
     });
