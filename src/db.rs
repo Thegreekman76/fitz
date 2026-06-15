@@ -503,9 +503,9 @@ async fn upgrade_to_tls(
         }
         b'N' => {
             return Err(DbError::Tls(format!(
-                "server Postgres no soporta TLS (respondió 'N' al SSLRequest) \
-                 pero el cliente pidió sslmode={}. Verificá que el server tenga \
-                 `ssl=on` en postgresql.conf, o usá sslmode=disable",
+                "Postgres server does not support TLS (replied 'N' to SSLRequest) \
+                 but the client requested sslmode={}. Check that the server has \
+                 `ssl=on` in postgresql.conf, or use sslmode=disable",
                 sslmode_str(config.sslmode)
             )));
         }
@@ -524,8 +524,8 @@ async fn upgrade_to_tls(
                 let _ = tcp_stream.read_exact(&mut payload).await;
             }
             return Err(DbError::Tls(
-                "server Postgres respondió ErrorResponse al SSLRequest \
-                 (típico en versiones <8.0 o configuraciones muy custom)"
+                "Postgres server replied ErrorResponse to SSLRequest \
+                 (typical on versions <8.0 or very custom configurations)"
                     .into(),
             ));
         }
@@ -639,8 +639,8 @@ fn build_root_store(custom_pem: Option<&std::path::Path>) -> DbResult<rustls::Ro
         }
         if count == 0 {
             return Err(DbError::Tls(format!(
-                "sslrootcert `{}` no contiene certificados PEM válidos \
-                 (esperaba uno o más bloques `-----BEGIN CERTIFICATE-----`)",
+                "sslrootcert `{}` does not contain valid PEM certificates \
+                 (expected one or more `-----BEGIN CERTIFICATE-----` blocks)",
                 path.display()
             )));
         }
@@ -2295,12 +2295,15 @@ impl Connection {
                 BackendMessage::AuthenticationSasl { mechanisms } => {
                     if !mechanisms.iter().any(|m| m == "SCRAM-SHA-256") {
                         return Err(DbError::Auth(format!(
-                            "servidor ofreció {mechanisms:?}; \
-                             driver soporta solo SCRAM-SHA-256 en 10.1"
+                            "server offered {mechanisms:?}; \
+                             driver only supports SCRAM-SHA-256 in 10.1"
                         )));
                     }
                     let pwd = config.password.as_deref().ok_or_else(|| {
-                        DbError::Auth("el servidor pide SCRAM y la URL no trae password".into())
+                        DbError::Auth(
+                            "the server requests SCRAM and the URL does not carry a password"
+                                .into(),
+                        )
                     })?;
                     let mut scram = ScramClient::new(&config.user, pwd)?;
                     let cfirst = scram.client_first();
