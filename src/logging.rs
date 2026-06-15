@@ -673,7 +673,7 @@ mod tests {
         assert!(!line.contains("hidden-token"), "leak: {}", line);
         assert!(
             line.contains("<redacted>"),
-            "esperaba redacted en: {}",
+            "expected redacted in: {}",
             line
         );
         assert!(line.contains("first"));
@@ -901,27 +901,27 @@ mod tests {
         // Int → Int
         match value_to_any_value(&Value::Int(42)) {
             Some(AnyValue::Int(n)) => assert_eq!(n, 42),
-            other => panic!("esperaba AnyValue::Int(42), fue {:?}", other),
+            other => panic!("expected AnyValue::Int(42), was {:?}", other),
         }
         // Float → Double
         match value_to_any_value(&Value::Float(2.5)) {
             Some(AnyValue::Double(f)) => assert!((f - 2.5).abs() < 1e-9),
-            other => panic!("esperaba AnyValue::Double(2.5), fue {:?}", other),
+            other => panic!("expected AnyValue::Double(2.5), was {:?}", other),
         }
         // Str → String
         match value_to_any_value(&Value::Str("hola".into())) {
             Some(AnyValue::String(s)) => assert_eq!(s.as_str(), "hola"),
-            other => panic!("esperaba AnyValue::String(\"hola\"), fue {:?}", other),
+            other => panic!("expected AnyValue::String(\"hola\"), was {:?}", other),
         }
         // Bool → Boolean
         match value_to_any_value(&Value::Bool(true)) {
             Some(AnyValue::Boolean(b)) => assert!(b),
-            other => panic!("esperaba AnyValue::Boolean(true), fue {:?}", other),
+            other => panic!("expected AnyValue::Boolean(true), was {:?}", other),
         }
         // Null → String "null"
         match value_to_any_value(&Value::Null) {
             Some(AnyValue::String(s)) => assert_eq!(s.as_str(), "null"),
-            other => panic!("esperaba AnyValue::String(\"null\"), fue {:?}", other),
+            other => panic!("expected AnyValue::String(\"null\"), was {:?}", other),
         }
     }
 
@@ -941,7 +941,7 @@ mod tests {
                     s
                 );
             }
-            other => panic!("esperaba AnyValue::String(\"***\"), fue {:?}", other),
+            other => panic!("expected AnyValue::String(\"***\"), was {:?}", other),
         }
     }
 
@@ -955,7 +955,7 @@ mod tests {
             Some(AnyValue::ListAny(items)) => {
                 assert_eq!(items.len(), 2);
             }
-            other => panic!("esperaba AnyValue::ListAny, fue {:?}", other),
+            other => panic!("expected AnyValue::ListAny, was {:?}", other),
         }
         let map = make_map(vec![
             (Value::Str("k".into()), Value::Int(42)),
@@ -965,7 +965,7 @@ mod tests {
             Some(AnyValue::Map(m)) => {
                 assert_eq!(m.len(), 2);
             }
-            other => panic!("esperaba AnyValue::Map, fue {:?}", other),
+            other => panic!("expected AnyValue::Map, was {:?}", other),
         }
     }
 
@@ -1093,12 +1093,12 @@ mod tests {
             let stripped = strip_ansi(&line);
             assert!(
                 stripped.contains(&format!("trace={}", trace_id_expected)),
-                "esperaba trace=<id> en pretty: {}",
+                "expected trace=<id> in pretty: {}",
                 stripped
             );
             assert!(
                 stripped.contains(&format!("span={}", span_id_expected)),
-                "esperaba span=<id> en pretty: {}",
+                "expected span=<id> in pretty: {}",
                 stripped
             );
         })

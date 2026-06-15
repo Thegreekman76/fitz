@@ -3388,7 +3388,7 @@ mod tests {
         assert_eq!(changes.len(), 1);
         match &changes[0] {
             Change::CreateTable(t) => assert_eq!(t.name, "users"),
-            _ => panic!("se esperaba CreateTable, got: {:?}", changes[0]),
+            _ => panic!("expected CreateTable, got: {:?}", changes[0]),
         }
     }
 
@@ -3402,7 +3402,7 @@ mod tests {
         assert_eq!(changes.len(), 1);
         match &changes[0] {
             Change::DropTable(tr) => assert_eq!(tr.name, "users"),
-            _ => panic!("se esperaba DropTable, got: {:?}", changes[0]),
+            _ => panic!("expected DropTable, got: {:?}", changes[0]),
         }
     }
 
@@ -3744,7 +3744,7 @@ mod tests {
             .count();
         assert_eq!(
             regen_count, 0,
-            "esperaba 0 cambios (whitespace+case canonicalizado), fueron: {:?}",
+            "expected 0 changes (whitespace+case canonicalized), were: {:?}",
             changes_b
         );
         // The other case (extra parens) does trigger — documented.
@@ -3836,7 +3836,7 @@ mod tests {
             .count();
         assert_eq!(
             regen, 0,
-            "esperaba 0 cambios (btree == None), fueron: {:?}",
+            "expected 0 changes (btree == None), were: {:?}",
             changes
         );
     }
@@ -3948,18 +3948,18 @@ mod tests {
     fn changes_to_sql_create_table_emits_ddl() {
         let changes = vec![Change::CreateTable(table_users())];
         let sql = changes_to_sql(&changes);
-        assert!(sql.contains("CREATE TABLE"), "esperaba CREATE TABLE: {sql}");
-        assert!(sql.contains("\"users\""), "esperaba tabla quoted: {sql}");
-        assert!(sql.contains("\"id\""), "esperaba col id quoted: {sql}");
-        assert!(sql.contains("PRIMARY KEY"), "esperaba PK declarada: {sql}");
+        assert!(sql.contains("CREATE TABLE"), "expected CREATE TABLE: {sql}");
+        assert!(sql.contains("\"users\""), "expected quoted table: {sql}");
+        assert!(sql.contains("\"id\""), "expected quoted col id: {sql}");
+        assert!(sql.contains("PRIMARY KEY"), "expected PK declared: {sql}");
     }
 
     #[test]
     fn changes_to_sql_drop_table_emits_ddl() {
         let changes = vec![Change::DropTable(TableRef::public("legacy".to_string()))];
         let sql = changes_to_sql(&changes);
-        assert!(sql.contains("DROP TABLE"), "esperaba DROP TABLE: {sql}");
-        assert!(sql.contains("\"legacy\""), "esperaba nombre quoted: {sql}");
+        assert!(sql.contains("DROP TABLE"), "expected DROP TABLE: {sql}");
+        assert!(sql.contains("\"legacy\""), "expected quoted name: {sql}");
     }
 
     #[test]
@@ -3969,9 +3969,9 @@ mod tests {
             column: col("name", "text", true, false),
         }];
         let sql = changes_to_sql(&changes);
-        assert!(sql.contains("ALTER TABLE"), "esperaba ALTER TABLE: {sql}");
-        assert!(sql.contains("ADD COLUMN"), "esperaba ADD COLUMN: {sql}");
-        assert!(sql.contains("\"name\""), "esperaba col quoted: {sql}");
+        assert!(sql.contains("ALTER TABLE"), "expected ALTER TABLE: {sql}");
+        assert!(sql.contains("ADD COLUMN"), "expected ADD COLUMN: {sql}");
+        assert!(sql.contains("\"name\""), "expected quoted col: {sql}");
     }
 
     #[test]
@@ -3981,9 +3981,9 @@ mod tests {
             column: "old".to_string(),
         }];
         let sql = changes_to_sql(&changes);
-        assert!(sql.contains("ALTER TABLE"), "esperaba ALTER TABLE: {sql}");
-        assert!(sql.contains("DROP COLUMN"), "esperaba DROP COLUMN: {sql}");
-        assert!(sql.contains("\"old\""), "esperaba col quoted: {sql}");
+        assert!(sql.contains("ALTER TABLE"), "expected ALTER TABLE: {sql}");
+        assert!(sql.contains("DROP COLUMN"), "expected DROP COLUMN: {sql}");
+        assert!(sql.contains("\"old\""), "expected quoted col: {sql}");
     }
 
     #[test]
@@ -3994,9 +3994,9 @@ mod tests {
             new_type: "varchar".to_string(),
         }];
         let sql = changes_to_sql(&changes);
-        assert!(sql.contains("ALTER COLUMN"), "esperaba ALTER COLUMN: {sql}");
-        assert!(sql.contains("TYPE"), "esperaba TYPE: {sql}");
-        assert!(sql.contains("varchar"), "esperaba new_type: {sql}");
+        assert!(sql.contains("ALTER COLUMN"), "expected ALTER COLUMN: {sql}");
+        assert!(sql.contains("TYPE"), "expected TYPE: {sql}");
+        assert!(sql.contains("varchar"), "expected new_type: {sql}");
     }
 
     // ============================================================
@@ -4129,7 +4129,7 @@ type Plain {
         let sql = changes_to_sql(&[Change::CreateTable(t)]);
         assert!(
             sql.contains("DEFAULT NOW()"),
-            "esperaba DEFAULT NOW(): {sql}"
+            "expected DEFAULT NOW(): {sql}"
         );
     }
 
@@ -4140,10 +4140,10 @@ type Plain {
             column: col_with_default("created_at", "timestamp with time zone", Some("NOW()")),
         };
         let sql = changes_to_sql(&[change]);
-        assert!(sql.contains("ADD COLUMN"), "esperaba ADD COLUMN: {sql}");
+        assert!(sql.contains("ADD COLUMN"), "expected ADD COLUMN: {sql}");
         assert!(
             sql.contains("DEFAULT NOW()"),
-            "esperaba DEFAULT NOW(): {sql}"
+            "expected DEFAULT NOW(): {sql}"
         );
     }
 
@@ -4385,7 +4385,7 @@ type Plain {
         let created = t.columns.iter().find(|c| c.name == "created_at").unwrap();
         assert!(
             created.default.is_none(),
-            "esperaba default = None (marker-only), got: {:?}",
+            "expected default = None (marker-only), got: {:?}",
             created.default
         );
     }
@@ -4434,7 +4434,7 @@ type Plain {
         let (up, down) = split_up_down(raw);
         assert!(up.contains("CREATE TABLE x"));
         assert!(!up.contains("DROP TABLE"));
-        let down = down.expect("esperaba DOWN");
+        let down = down.expect("expected DOWN");
         assert!(down.contains("DROP TABLE x"));
         assert!(!down.contains("CREATE TABLE"));
     }
@@ -4496,7 +4496,7 @@ type Plain {
                 assert!(up_sql.contains("CREATE TABLE foo"));
                 assert!(down_sql.as_deref().unwrap().contains("DROP TABLE foo"));
             }
-            other => panic!("esperaba MigrationKind::Sql, got {other:?}"),
+            other => panic!("expected MigrationKind::Sql, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -4739,10 +4739,10 @@ type Plain {
         let alter_idx = changes
             .iter()
             .position(|c| matches!(c, Change::AlterColumnNullable { .. }));
-        assert!(rename_idx.is_some(), "esperaba RenameTable: {changes:?}");
+        assert!(rename_idx.is_some(), "expected RenameTable: {changes:?}");
         assert!(
             alter_idx.is_some(),
-            "esperaba AlterColumnNullable: {changes:?}"
+            "expected AlterColumnNullable: {changes:?}"
         );
         assert!(
             rename_idx.unwrap() < alter_idx.unwrap(),
@@ -5303,7 +5303,7 @@ type Plain {
         let sql = change_to_sql(&change);
         assert!(
             sql.contains("REFERENCES \"public\".\"users\" (\"id\")"),
-            "esperaba REFERENCES qualified, fue: {sql}"
+            "expected REFERENCES qualified, was: {sql}"
         );
         assert!(
             sql.contains("ALTER TABLE \"tenants\".\"memberships\""),
@@ -5332,7 +5332,7 @@ type Plain {
         // Without schema qualifier — compat with previous tests.
         assert!(
             sql.contains("REFERENCES \"users\" (\"id\")"),
-            "esperaba REFERENCES sin qualifier: {sql}"
+            "expected REFERENCES without qualifier: {sql}"
         );
         assert!(!sql.contains("\"public\""), "no debe sumar public: {sql}");
     }
@@ -5366,11 +5366,11 @@ type Plain {
         let sql = create_table_sql(&t);
         assert!(
             sql.contains("CONSTRAINT \"chk_users_age_positive\" CHECK (age >= 0 AND age <= 150)"),
-            "esperaba CHECK 1, fue: {sql}"
+            "expected CHECK 1, was: {sql}"
         );
         assert!(
             sql.contains("CONSTRAINT \"chk_users_status_valid\" CHECK (status IN ('a', 'p'))"),
-            "esperaba CHECK 2, fue: {sql}"
+            "expected CHECK 2, was: {sql}"
         );
     }
 

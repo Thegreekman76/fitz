@@ -1227,7 +1227,7 @@ mod tests {
                 assert_eq!(params[0].name, "n");
                 assert_eq!(body.len(), 1);
             }
-            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -1271,7 +1271,7 @@ mod tests {
         );
         match list {
             Expr::List(items, _) => assert_eq!(items.len(), 3),
-            _ => panic!("se esperaba List"),
+            _ => panic!("expected List"),
         }
     }
 
@@ -1291,7 +1291,7 @@ mod tests {
                 assert_eq!(pairs[0].0, Expr::Str("a".into(), Span::ZERO));
                 assert_eq!(pairs[1].1, Expr::Int(2, Span::ZERO));
             }
-            _ => panic!("se esperaba Map"),
+            _ => panic!("expected Map"),
         }
     }
 
@@ -1309,7 +1309,7 @@ mod tests {
                 assert_eq!(*start, Expr::Int(0, Span::ZERO));
                 assert_eq!(*end, Expr::Int(10, Span::ZERO));
             }
-            _ => panic!("se esperaba Range"),
+            _ => panic!("expected Range"),
         }
     }
 
@@ -1326,7 +1326,7 @@ mod tests {
                 assert_eq!(*object, Expr::Ident("xs".into(), Span::ZERO));
                 assert_eq!(*index, Expr::Int(0, Span::ZERO));
             }
-            _ => panic!("se esperaba Index"),
+            _ => panic!("expected Index"),
         }
     }
 
@@ -1355,7 +1355,7 @@ mod tests {
                 assert_eq!(iter, Expr::Ident("xs".into(), Span::ZERO));
                 assert_eq!(body.len(), 1);
             }
-            _ => panic!("se esperaba For"),
+            _ => panic!("expected For"),
         }
     }
 
@@ -1377,7 +1377,7 @@ mod tests {
                 assert_eq!(end, 10);
                 assert!(!inclusive);
             }
-            _ => panic!("se esperaba Range"),
+            _ => panic!("expected Range"),
         }
     }
 
@@ -1403,7 +1403,7 @@ mod tests {
                 assert_eq!(fields[1].0, "name");
                 assert_eq!(fields[1].1, Expr::Str("x".into(), Span::ZERO));
             }
-            _ => panic!("se esperaba StructLit"),
+            _ => panic!("expected StructLit"),
         }
     }
 
@@ -1417,7 +1417,7 @@ mod tests {
         let e = Expr::Ok(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         match e {
             Expr::Ok(inner, _) => assert_eq!(*inner, Expr::Int(42, Span::ZERO)),
-            _ => panic!("se esperaba Ok"),
+            _ => panic!("expected Ok"),
         }
     }
 
@@ -1427,7 +1427,7 @@ mod tests {
         let e = Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO);
         match e {
             Expr::Err(inner, _) => assert_eq!(*inner, Expr::Str("boom".into(), Span::ZERO)),
-            _ => panic!("se esperaba Err"),
+            _ => panic!("expected Err"),
         }
     }
 
@@ -1437,7 +1437,7 @@ mod tests {
         let e = Expr::Try(Box::new(Expr::Ident("x".into(), Span::ZERO)), Span::ZERO);
         match e {
             Expr::Try(inner, _) => assert_eq!(*inner, Expr::Ident("x".into(), Span::ZERO)),
-            _ => panic!("se esperaba Try"),
+            _ => panic!("expected Try"),
         }
     }
 
@@ -1458,7 +1458,7 @@ mod tests {
         if let Expr::Ok(inner, _) = e {
             assert!(matches!(*inner, Expr::Try(_, _)));
         } else {
-            panic!("se esperaba Ok");
+            panic!("expected Ok");
         }
     }
 
@@ -1475,7 +1475,7 @@ mod tests {
                 assert_eq!(op, UnaryOpKind::Neg);
                 assert_eq!(*operand, Expr::Ident("x".into(), Span::ZERO));
             }
-            _ => panic!("se esperaba UnaryOp"),
+            _ => panic!("expected UnaryOp"),
         }
     }
 
@@ -1500,7 +1500,7 @@ mod tests {
                 assert!(matches!(*callee, Expr::Field { .. }));
                 assert_eq!(args.len(), 1);
             }
-            _ => panic!("se esperaba Call"),
+            _ => panic!("expected Call"),
         }
     }
 
@@ -1534,7 +1534,7 @@ mod tests {
                 assert_eq!(body.len(), 1);
                 assert!(matches!(body[0], Stmt::Return(_, _)));
             }
-            _ => panic!("se esperaba FnExpr"),
+            _ => panic!("expected FnExpr"),
         }
     }
 
@@ -1555,7 +1555,7 @@ mod tests {
                 assert_eq!(path, vec!["utils".to_string()]);
                 assert!(alias.is_none());
             }
-            _ => panic!("se esperaba Import"),
+            _ => panic!("expected Import"),
         }
     }
 
@@ -1573,7 +1573,7 @@ mod tests {
                 assert_eq!(path[0], "sub");
                 assert_eq!(path[1], "foo");
             }
-            _ => panic!("se esperaba Import"),
+            _ => panic!("expected Import"),
         }
     }
 
@@ -1593,7 +1593,7 @@ mod tests {
                 assert!(names[0].1.is_none());
                 assert_eq!(names[1].0, "parse");
             }
-            _ => panic!("se esperaba FromImport"),
+            _ => panic!("expected FromImport"),
         }
     }
 
@@ -1631,7 +1631,7 @@ mod tests {
         if let Stmt::FnDef { decorators, .. } = f {
             assert!(decorators.is_empty());
         } else {
-            panic!("se esperaba FnDef");
+            panic!("expected FnDef");
         }
     }
 
@@ -1663,7 +1663,7 @@ mod tests {
             assert_eq!(decorators[0].name, "get");
             assert_eq!(decorators[1].name, "auth");
         } else {
-            panic!("se esperaba FnDef");
+            panic!("expected FnDef");
         }
     }
 
@@ -1679,7 +1679,7 @@ mod tests {
         if let Stmt::Assign { target, .. } = s1 {
             assert_eq!(target, AssignTarget::Ident("x".into(), Span::default()));
         } else {
-            panic!("se esperaba Assign");
+            panic!("expected Assign");
         }
 
         // `user.name = "x"` — Field target.
@@ -1700,7 +1700,7 @@ mod tests {
             assert_eq!(*object, Expr::Ident("user".into(), Span::ZERO));
             assert_eq!(field, "name");
         } else {
-            panic!("se esperaba Assign con target Field");
+            panic!("expected Assign with target Field");
         }
     }
 

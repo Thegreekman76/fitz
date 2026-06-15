@@ -737,7 +737,7 @@ mod tests {
     fn handle_of(v: Value) -> PyObjectHandle {
         match v {
             Value::PyObject(h) => h,
-            other => panic!("se esperaba Value::PyObject, fue: {:?}", other),
+            other => panic!("expected Value::PyObject, was: {:?}", other),
         }
     }
 
@@ -751,7 +751,7 @@ mod tests {
             Value::Result(ResultVariant::Err(msg)) => {
                 panic!("expected Ok(...), got Err({:?})", msg)
             }
-            other => panic!("esperaba Value::Result, fue {:?}", other),
+            other => panic!("expected Value::Result, was {:?}", other),
         }
     }
 
@@ -768,7 +768,7 @@ mod tests {
             Value::Result(ResultVariant::Ok(inner)) => {
                 panic!("expected Err(...), got Ok({:?})", inner)
             }
-            other => panic!("esperaba Value::Result, fue {:?}", other),
+            other => panic!("expected Value::Result, was {:?}", other),
         }
     }
 
@@ -782,7 +782,7 @@ mod tests {
                 // is pinned, but we use an epsilon just in case.
                 assert!((f - std::f64::consts::PI).abs() < 1e-15, "got {}", f);
             }
-            other => panic!("se esperaba Float, fue: {:?}", other),
+            other => panic!("expected Float, was: {:?}", other),
         }
     }
 
@@ -1306,7 +1306,7 @@ mod tests {
         let v = call(&sqrt, &[Value::Float(16.0)]).unwrap();
         assert!(
             matches!(v, Value::Result(ResultVariant::Ok(_))),
-            "esperaba Value::Result(Ok(...)), fue {:?}",
+            "expected Value::Result(Ok(...)), was {:?}",
             v,
         );
     }
@@ -1360,7 +1360,7 @@ mod tests {
         assert_eq!(
             parts.len(),
             2,
-            "esperaba `<ClassName>: <message>`, fue: {}",
+            "expected `<ClassName>: <message>`, was: {}",
             msg
         );
         assert_eq!(parts[0], "ValueError");

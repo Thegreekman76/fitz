@@ -531,8 +531,8 @@ async fn upgrade_to_tls(
         }
         other => {
             return Err(DbError::Protocol(format!(
-                "SSLRequest: byte de respuesta inesperado 0x{other:02x} \
-                 (esperaba 'S'=0x53, 'N'=0x4E, o 'E'=0x45)"
+                "SSLRequest: unexpected response byte 0x{other:02x} \
+                 (expected 'S'=0x53, 'N'=0x4E, or 'E'=0x45)"
             )));
         }
     }

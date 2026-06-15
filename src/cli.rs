@@ -709,7 +709,7 @@ mod tests {
                 assert_eq!(inv.args.len(), 1);
                 matches!(inv.args[0], Value::Str(_));
             }
-            _ => panic!("esperaba Invoke"),
+            _ => panic!("expected Invoke"),
         }
     }
 
@@ -739,7 +739,7 @@ mod tests {
         let result = parse_argv(&["status".to_string()], &reg);
         match result {
             ParseResult::Invoke(inv) => assert_eq!(inv.cmd.name, "status"),
-            _ => panic!("esperaba Invoke"),
+            _ => panic!("expected Invoke"),
         }
     }
 
@@ -754,7 +754,7 @@ mod tests {
                 assert!(msg.contains("unknown"));
                 assert_eq!(code, 2);
             }
-            _ => panic!("esperaba Error"),
+            _ => panic!("expected Error"),
         }
     }
 
@@ -784,7 +784,7 @@ mod tests {
                 assert_eq!(inv.args.len(), 2);
                 assert!(matches!(inv.args[1], Value::Bool(true)));
             }
-            _ => panic!("esperaba Invoke"),
+            _ => panic!("expected Invoke"),
         }
     }
 
@@ -805,7 +805,7 @@ mod tests {
                 assert_eq!(inv.args.len(), 2);
                 assert!(matches!(inv.args[1], Value::Int(5)));
             }
-            _ => panic!("esperaba Invoke"),
+            _ => panic!("expected Invoke"),
         }
     }
 
@@ -822,7 +822,7 @@ mod tests {
             ParseResult::Invoke(inv) => {
                 assert!(matches!(inv.args[1], Value::Int(7)));
             }
-            _ => panic!("esperaba Invoke"),
+            _ => panic!("expected Invoke"),
         }
     }
 

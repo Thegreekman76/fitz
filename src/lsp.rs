@@ -3434,7 +3434,7 @@ mod tests {
         assert!(!errs.is_empty(), "checker should reject Int = Str");
         assert!(
             errs.iter().any(|e| matches!(e.kind, ErrorKind::TypeError)),
-            "esperaba al menos un TypeError: {errs:?}",
+            "expected at least one TypeError: {errs:?}",
         );
     }
 
@@ -3502,7 +3502,7 @@ mod tests {
         let src = "let x = 42";
         let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 8);
-        assert!(matches!(ty, Some(Type::Int)), "esperaba Int, dio {ty:?}");
+        assert!(matches!(ty, Some(Type::Int)), "expected Int, got {ty:?}");
     }
 
     #[test]
@@ -3523,7 +3523,7 @@ mod tests {
         let src = "let nombre = 42\nlet x = nombre + 1";
         let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 1, 11);
-        assert!(matches!(ty, Some(Type::Int)), "esperaba Int, dio {ty:?}");
+        assert!(matches!(ty, Some(Type::Int)), "expected Int, got {ty:?}");
     }
 
     #[test]
@@ -3547,7 +3547,7 @@ mod tests {
         let ty = hover_for_position(&type_info, 0, 0);
         assert!(
             ty.is_none(),
-            "esperaba None antes del primer token, dio {ty:?}"
+            "expected None before the first token, got {ty:?}"
         );
     }
 
@@ -3570,7 +3570,7 @@ mod tests {
                 assert_eq!(*kind, MarkupKind::Markdown);
                 assert_eq!(value, "```fitz\nInt\n```");
             }
-            other => panic!("esperaba Markup, dio {other:?}"),
+            other => panic!("expected Markup, got {other:?}"),
         }
         assert!(hover.range.is_none(), "range debe ser None hasta end_span");
     }
@@ -3583,7 +3583,7 @@ mod tests {
         if let HoverContents::Markup(MarkupContent { value, .. }) = &hover.contents {
             assert_eq!(value, "```fitz\nList<Int>\n```");
         } else {
-            panic!("esperaba Markup");
+            panic!("expected Markup");
         }
     }
 
@@ -3597,7 +3597,7 @@ mod tests {
         if let HoverContents::Markup(MarkupContent { value, .. }) = &hover.contents {
             assert_eq!(value, "```fitz\nInt\n```");
         } else {
-            panic!("esperaba Markup");
+            panic!("expected Markup");
         }
     }
 
@@ -3713,7 +3713,7 @@ mod tests {
                 assert_eq!(recv_line, 1);
                 assert_eq!(recv_col, 1);
             }
-            other => panic!("esperaba AfterDot, dio {other:?}"),
+            other => panic!("expected AfterDot, got {other:?}"),
         }
     }
 
@@ -3751,7 +3751,7 @@ mod tests {
                     "recv_col in 1-based Unicode chars (not UTF-16) post-translation"
                 );
             }
-            other => panic!("esperaba AfterDot, dio {other:?}"),
+            other => panic!("expected AfterDot, got {other:?}"),
         }
     }
 
@@ -3928,7 +3928,7 @@ mod tests {
         // `field`, NOT Stmt::Error.
         assert!(
             program.len() >= 2,
-            "esperaba al menos 2 stmts: el let + el user.<EOF>. Got: {} stmts",
+            "expected at least 2 stmts: the let + the user.<EOF>. Got: {} stmts",
             program.len()
         );
         let last = program.last().expect("last stmt");
@@ -3942,7 +3942,7 @@ mod tests {
                 );
             }
             other => panic!(
-                "esperaba Stmt::Expr(Expr::Field {{ field: \"\" }}), got: {:?}",
+                "expected Stmt::Expr(Expr::Field {{ field: \"\" }}), got: {:?}",
                 other
             ),
         }
@@ -3967,12 +3967,12 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             labels.contains(&"id"),
-            "esperaba field `id` de User en completion, labels: {:?}",
+            "expected field `id` of User in completion, labels: {:?}",
             labels
         );
         assert!(
             labels.contains(&"name"),
-            "esperaba field `name` de User en completion, labels: {:?}",
+            "expected field `name` of User in completion, labels: {:?}",
             labels
         );
     }
@@ -3995,7 +3995,7 @@ mod tests {
                 assert_eq!(recv_line, 1);
                 assert_eq!(recv_col, 1, "chain start is col 1 (the `a`)");
             }
-            other => panic!("esperaba AfterDot con chain, dio {other:?}"),
+            other => panic!("expected AfterDot with chain, got {other:?}"),
         }
     }
 
@@ -4012,7 +4012,7 @@ mod tests {
                     "recv_name should be the chain up to before the last `.`"
                 );
             }
-            other => panic!("esperaba AfterDot, dio {other:?}"),
+            other => panic!("expected AfterDot, got {other:?}"),
         }
     }
 
@@ -4025,7 +4025,7 @@ mod tests {
             CompletionContext::FromImportList { mod_path } => {
                 assert_eq!(mod_path, vec!["foo".to_string()]);
             }
-            other => panic!("esperaba FromImportList, dio {other:?}"),
+            other => panic!("expected FromImportList, got {other:?}"),
         }
     }
 
@@ -4040,7 +4040,7 @@ mod tests {
             CompletionContext::FromImportList { mod_path } => {
                 assert_eq!(mod_path, vec!["foo".to_string()]);
             }
-            other => panic!("esperaba FromImportList, dio {other:?}"),
+            other => panic!("expected FromImportList, got {other:?}"),
         }
     }
 
@@ -4054,7 +4054,7 @@ mod tests {
             CompletionContext::FromImportList { mod_path } => {
                 assert_eq!(mod_path, vec!["sub".to_string(), "utils".to_string()]);
             }
-            other => panic!("esperaba FromImportList, dio {other:?}"),
+            other => panic!("expected FromImportList, got {other:?}"),
         }
     }
 
@@ -4424,7 +4424,7 @@ mod tests {
         let detail = m.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("other_x: Int") && detail.contains("other_y: Int"),
-            "esperaba firma con param names, fue: {detail:?}"
+            "expected signature with param names, was: {detail:?}"
         );
     }
 
@@ -4542,7 +4542,7 @@ mod tests {
         let count = items.iter().find(|i| i.label == "count").unwrap();
         assert!(
             count.detail.as_deref().unwrap_or("").contains("-> Int"),
-            "esperaba firma con `-> Int`, dio: {:?}",
+            "expected signature with `-> Int`, got: {:?}",
             count.detail
         );
     }
@@ -4567,7 +4567,7 @@ mod tests {
                 .as_deref()
                 .unwrap_or("")
                 .contains("fn(Int, Int)"),
-            "esperaba firma con `fn(Int, Int)`, dio: {:?}",
+            "expected signature with `fn(Int, Int)`, got: {:?}",
             item_sort_by.detail
         );
     }
@@ -4874,7 +4874,7 @@ mod tests {
         assert_eq!(
             labels,
             vec!["0", "1", "2"],
-            "esperaba labels 0/1/2, dio {labels:?}"
+            "expected labels 0/1/2, got {labels:?}"
         );
         // Each item is FIELD with detail = element type.
         let it0 = &items[0];
@@ -5072,7 +5072,7 @@ mod tests {
         // Cursor at col 6 (middle of "count" — "let " = 4 chars +
         // "c" + "o").
         let hover = make_hover_with_range(&ty, &env, &empty_program, src, 0, 6);
-        assert!(hover.range.is_some(), "esperaba Range, fue None");
+        assert!(hover.range.is_some(), "expected Range, was None");
         let r = hover.range.unwrap();
         assert_eq!(r.start, Position::new(0, 4)); // start of "count"
         assert_eq!(r.end, Position::new(0, 9)); // end of "count"
@@ -5104,9 +5104,9 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             labels.contains(&"name"),
-            "esperaba param `name`: {labels:?}"
+            "expected param `name`: {labels:?}"
         );
-        assert!(labels.contains(&"age"), "esperaba param `age`: {labels:?}");
+        assert!(labels.contains(&"age"), "expected param `age`: {labels:?}");
     }
 
     #[test]
@@ -5118,7 +5118,7 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             labels.contains(&"mi_var"),
-            "esperaba local `mi_var`: {labels:?}"
+            "expected local `mi_var`: {labels:?}"
         );
     }
 
@@ -5153,7 +5153,7 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             labels.contains(&"item"),
-            "esperaba `item` del for: {labels:?}"
+            "expected `item` from for: {labels:?}"
         );
     }
 
@@ -5203,7 +5203,7 @@ mod tests {
         assert_eq!(
             target_path.canonicalize().unwrap(),
             foo_path.canonicalize().unwrap(),
-            "esperaba target_uri = foo.fitz, dio: {:?}",
+            "expected target_uri = foo.fitz, got: {:?}",
             target_path
         );
         assert_eq!(
@@ -5266,12 +5266,12 @@ mod tests {
         let detail = it.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("name: Str = \"amigo\""),
-            "esperaba `name: Str = \"amigo\"` en detail, fue: {}",
+            "expected `name: Str = \"amigo\"` in detail, was: {}",
             detail
         );
         assert!(
             detail.contains("-> Str"),
-            "esperaba `-> Str` en detail, fue: {}",
+            "expected `-> Str` in detail, was: {}",
             detail
         );
     }
@@ -5388,7 +5388,7 @@ mod tests {
         let detail = all_item.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("User"),
-            "esperaba `User` en detail de all, fue: {}",
+            "expected `User` in detail of all, was: {}",
             detail
         );
     }
@@ -5422,7 +5422,7 @@ mod tests {
         let detail = all_item.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("User"),
-            "esperaba `User` en detail de all, fue: {}",
+            "expected `User` in detail of all, was: {}",
             detail
         );
     }

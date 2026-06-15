@@ -4701,7 +4701,7 @@ mod tests {
         // statements, NOT a `foo()` call that "continues". The
         // lookahead only fires when what follows is `.`.
         let program = parse_program_str("let x = foo\nbar()").unwrap();
-        assert_eq!(program.len(), 2, "se esperaban 2 stmts separados");
+        assert_eq!(program.len(), 2, "expected 2 separated stmts");
     }
 
     #[test]
@@ -8427,7 +8427,7 @@ mod tests {
         // over error-free code, with an empty `Vec<FitzError>`.
         let src = "let x = 1\nlet y = 2\nprint(x + y)";
         let (stmts_rec, errors) = parse_recovering(src);
-        assert!(errors.is_empty(), "no se esperaban errores: {:?}", errors);
+        assert!(errors.is_empty(), "did not expect errors: {:?}", errors);
         let stmts_strict = parse(tokenize(src).unwrap()).unwrap();
         assert_eq!(stmts_rec, stmts_strict);
     }

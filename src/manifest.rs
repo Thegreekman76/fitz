@@ -894,7 +894,7 @@ foo = "yes"
         let err = Manifest::parse(toml_text).unwrap_err();
         assert!(
             matches!(err, ManifestError::Parse(_)),
-            "esperaba ManifestError::Parse, fue {err:?}"
+            "expected ManifestError::Parse, was {err:?}"
         );
     }
 
