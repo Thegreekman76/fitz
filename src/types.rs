@@ -11238,10 +11238,10 @@ mod tests {
         // B.1: the error points to the stmt's `let` (real line/col),
         // not the generic `0:0` used before.
         let errors = errors_of("\n\nlet x: Int = \"texto\"");
-        assert_eq!(errors.len(), 1, "esperaba 1 error, fue {:?}", errors);
+        assert_eq!(errors.len(), 1, "expected 1 error, was {:?}", errors);
         let e = &errors[0];
-        assert_eq!(e.line, 3, "esperaba línea 3, fue {}", e.line);
-        assert_eq!(e.column, 1, "esperaba col 1, fue {}", e.column);
+        assert_eq!(e.line, 3, "expected line 3, was {}", e.line);
+        assert_eq!(e.column, 1, "expected col 1, was {}", e.column);
     }
 
     // ---- Phase 6.2: type checker for async/await ----
@@ -11266,7 +11266,7 @@ mod tests {
             name: "Future".into(),
             args: vec![],
         };
-        let err = resolve_type_expr(&te, &env).expect_err("aridad 0 debe fallar");
+        let err = resolve_type_expr(&te, &env).expect_err("arity 0 must fail");
         assert!(matches!(err.kind, ErrorKind::TypeError));
     }
 
@@ -11277,7 +11277,7 @@ mod tests {
             name: "Future".into(),
             args: vec![TypeExpr::Named("Int".into()), TypeExpr::Named("Str".into())],
         };
-        let err = resolve_type_expr(&te, &env).expect_err("aridad 2 debe fallar");
+        let err = resolve_type_expr(&te, &env).expect_err("arity 2 must fail");
         assert!(matches!(err.kind, ErrorKind::TypeError));
     }
 
@@ -11302,7 +11302,7 @@ mod tests {
         );
         assert!(
             errors.is_empty(),
-            "esperaba sin errores (await top-level es válido), fue: {:?}",
+            "expected no errors (top-level await is valid), was: {:?}",
             errors
         );
     }
@@ -11321,12 +11321,12 @@ mod tests {
         );
         assert!(
             !errors.is_empty(),
-            "esperaba error en .await dentro de fn sync"
+            "expected error on .await inside sync fn"
         );
         let msg = &errors[0].message;
         assert!(
             msg.contains(".await") && msg.contains("async fn"),
-            "esperaba mensaje sobre `.await` y `async fn`, fue: {}",
+            "expected message about `.await` and `async fn`, was: {}",
             msg
         );
     }
@@ -11340,11 +11340,11 @@ mod tests {
                  return x.await\n\
              }",
         );
-        assert!(!errors.is_empty(), "esperaba 1 error");
+        assert!(!errors.is_empty(), "expected 1 error");
         let msg = &errors[0].message;
         assert!(
             msg.contains("Future") && msg.contains("Int"),
-            "esperaba mensaje sobre Future y Int, fue: {}",
+            "expected message about Future and Int, was: {}",
             msg
         );
     }
@@ -11362,7 +11362,7 @@ mod tests {
                  return inner().await\n\
              }",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     #[test]
@@ -11377,7 +11377,7 @@ mod tests {
              }\n\
              let g: Future<Int> = f()",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     #[test]
@@ -11390,7 +11390,7 @@ mod tests {
                  return 42\n\
              }",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     #[test]
@@ -11410,12 +11410,12 @@ mod tests {
         );
         assert!(
             !errors.is_empty(),
-            "esperaba error en el `.await` del closure"
+            "expected error on `.await` of the closure"
         );
         let msg = &errors[0].message;
         assert!(
             msg.contains("async fn"),
-            "esperaba mensaje sobre async fn, fue: {}",
+            "expected message about async fn, was: {}",
             msg
         );
     }
@@ -11440,7 +11440,7 @@ mod tests {
             .any(|e| e.message.contains("Future") && e.message.contains(".await"));
         assert!(
             !any_future_err,
-            "el await sobre Any no debería disparar error de Future, fue: {:?}",
+            "await over Any should not fire Future error, was: {:?}",
             errors
         );
     }
@@ -11453,17 +11453,17 @@ mod tests {
         // destination annotation — if the RHS were not `Future<Null>`,
         // the checker would emit an incompatibility error.
         let errors = errors_of("let r: Future<Null> = sleep(100)");
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     #[test]
     fn sleep_with_non_int_argument_is_error() {
         let errors = errors_of("let r = sleep(\"x\")");
-        assert!(!errors.is_empty(), "esperaba error de tipo");
+        assert!(!errors.is_empty(), "expected type error");
         let msg = &errors[0].message;
         assert!(
             msg.contains("sleep") && msg.contains("Int") && msg.contains("Str"),
-            "esperaba mensaje sobre sleep/Int/Str, fue: {}",
+            "expected message about sleep/Int/Str, was: {}",
             msg
         );
     }
@@ -11471,11 +11471,11 @@ mod tests {
     #[test]
     fn sleep_with_wrong_arity_is_error() {
         let errors = errors_of("let r = sleep(1, 2)");
-        assert!(!errors.is_empty(), "esperaba error de aridad");
+        assert!(!errors.is_empty(), "expected arity error");
         let msg = &errors[0].message;
         assert!(
             msg.contains("sleep") && msg.contains("1") && msg.contains("2"),
-            "esperaba mensaje sobre sleep/1/2, fue: {}",
+            "expected message about sleep/1/2, was: {}",
             msg
         );
     }
@@ -11489,7 +11489,7 @@ mod tests {
                  return sleep(50).await\n\
              }",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     // ---- C-F2: field assignment check ----
@@ -11503,7 +11503,7 @@ mod tests {
         );
         assert!(
             errors.is_empty(),
-            "no debería haber errores, fue {:?}",
+            "should not have errors, was {:?}",
             errors
         );
     }
@@ -11515,11 +11515,11 @@ mod tests {
              let u = U { name: \"x\" }\n\
              u.name = 42",
         );
-        assert_eq!(errors.len(), 1, "esperaba 1 error, fue {:?}", errors);
+        assert_eq!(errors.len(), 1, "expected 1 error, was {:?}", errors);
         let msg = &errors[0].message;
         assert!(
             msg.contains("`U.name`") && msg.contains("Str") && msg.contains("Int"),
-            "esperaba mensaje sobre U.name/Str/Int, fue: {}",
+            "expected message about U.name/Str/Int, was: {}",
             msg
         );
     }
@@ -11537,7 +11537,7 @@ mod tests {
                  return 401 {\"msg\": \"no autorizado\"}\n\
              }",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     #[test]
@@ -11549,11 +11549,11 @@ mod tests {
                  return 401 {\"msg\": \"x\"}\n\
              }",
         );
-        assert!(!errors.is_empty(), "esperaba 1 error");
+        assert!(!errors.is_empty(), "expected 1 error");
         let msg = &errors[0].message;
         assert!(
             msg.contains("HTTP handler") && msg.contains("@get"),
-            "esperaba mensaje sobre handler HTTP, fue: {}",
+            "expected message about HTTP handler, was: {}",
             msg
         );
     }
@@ -11563,9 +11563,9 @@ mod tests {
         // `return 401 { ... }` at top-level (without containing fn)
         // is also not valid — the checker rejects it by the same rule.
         let errors = errors_of("return 401 {\"x\": 1}");
-        assert!(!errors.is_empty(), "esperaba error");
+        assert!(!errors.is_empty(), "expected error");
         let msg = &errors[0].message;
-        assert!(msg.contains("HTTP handler"), "fue: {}", msg);
+        assert!(msg.contains("HTTP handler"), "was: {}", msg);
     }
 
     #[test]
@@ -11579,7 +11579,7 @@ mod tests {
                  return 404 {\"error\": \"no encontrado\"}\n\
              }",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     // ---- Mini-phase MW.1: middleware ----
@@ -11594,7 +11594,7 @@ mod tests {
                  return null\n\
              }",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     #[test]
@@ -11610,7 +11610,7 @@ mod tests {
              @get(\"/admin\")\n\
              fn admin() -> Str => \"ok\"",
         );
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     #[test]
@@ -11623,10 +11623,10 @@ mod tests {
                  return 401 {\"x\": 1}\n\
              }",
         );
-        assert!(!errors.is_empty(), "esperaba error");
+        assert!(!errors.is_empty(), "expected error");
         assert!(
             errors[0].message.contains("middleware") || errors[0].message.contains("handler HTTP"),
-            "esperaba mensaje sobre handler/middleware, fue: {}",
+            "expected message about handler/middleware, was: {}",
             errors[0].message
         );
     }
@@ -11638,11 +11638,11 @@ mod tests {
              let u = U { name: \"x\" }\n\
              u.email = \"y\"",
         );
-        assert!(!errors.is_empty(), "esperaba error de campo inexistente");
+        assert!(!errors.is_empty(), "expected error about nonexistent field");
         let msg = &errors[0].message;
         assert!(
             msg.contains("does not have a field named `email`"),
-            "esperaba mensaje sobre campo inexistente, fue: {}",
+            "expected message about nonexistent field, was: {}",
             msg
         );
     }
@@ -11653,11 +11653,14 @@ mod tests {
             "let x = 42\n\
              x.foo = 1",
         );
-        assert!(!errors.is_empty(), "esperaba error: asignar a campo de Int");
+        assert!(
+            !errors.is_empty(),
+            "expected error: assigning to field of Int"
+        );
         let msg = &errors[0].message;
         assert!(
             msg.contains("solo se permite") || msg.contains("Int"),
-            "esperaba mensaje sobre tipo incompatible, fue: {}",
+            "expected message about incompatible type, was: {}",
             msg
         );
     }
@@ -11686,7 +11689,7 @@ mod tests {
             .collect();
         assert!(
             field_errors.is_empty(),
-            "no debería haber error sobre el campo, fue: {:?}",
+            "should not have error about the field, was: {:?}",
             field_errors
         );
     }
@@ -11701,7 +11704,7 @@ mod tests {
         );
         assert!(
             errors.is_empty(),
-            "Null compatible con Str?, fue: {:?}",
+            "Null compatible with Str?, was: {:?}",
             errors
         );
     }
@@ -11711,12 +11714,12 @@ mod tests {
     #[test]
     fn while_non_bool_error_cites_real_line() {
         let errors = errors_of("\nwhile (42) { let _ = 0 }");
-        assert!(!errors.is_empty(), "esperaba error de tipo");
+        assert!(!errors.is_empty(), "expected type error");
         let e = &errors[0];
-        assert_eq!(e.line, 2, "esperaba línea 2, fue {}", e.line);
+        assert_eq!(e.line, 2, "expected line 2, was {}", e.line);
         assert!(
             e.message.contains("while"),
-            "esperaba mensaje sobre while, fue: {}",
+            "expected message about while, was: {}",
             e.message
         );
     }
@@ -12692,7 +12695,7 @@ mod tests {
         );
         assert!(
             errors.len() >= 3,
-            "esperaba 3+ errores, hubo {}: {:?}",
+            "expected 3+ errors, was {}: {:?}",
             errors.len(),
             errors.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
@@ -14591,12 +14594,9 @@ mod tests {
             .count();
         assert!(
             return_errs >= 1,
-            "esperaba al menos 1 error de return huérfano"
+            "expected at least 1 error of orphan return"
         );
-        assert!(
-            break_errs >= 1,
-            "esperaba al menos 1 error de break huérfano"
-        );
+        assert!(break_errs >= 1, "expected at least 1 error of orphan break");
     }
 
     // ---- R.3: custom methods on type ----
@@ -14691,7 +14691,7 @@ mod tests {
             .count();
         assert!(
             count_reassign >= 1,
-            "esperaba error de reasignación, hubo: {:?}",
+            "expected reassignment error, was: {:?}",
             errors.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
         // The subsequent use `m + 1` types OK (m is still Int).
@@ -14763,7 +14763,7 @@ mod tests {
     #[test]
     fn type_expr_function_with_nonexistent_type_reports_error() {
         let (_, errors) = resolve_str("type Box { f: Fn(NoExiste) -> Int }");
-        assert!(!errors.is_empty(), "esperaba error, hubo: {:?}", errors);
+        assert!(!errors.is_empty(), "expected error, was: {:?}", errors);
         let combined: String = errors.iter().map(|e| e.message.clone()).collect();
         assert!(combined.contains("NoExiste"));
     }
@@ -15042,7 +15042,7 @@ mod tests {
             errors
                 .iter()
                 .any(|e| e.message.contains("private") && e.message.contains("_x")),
-            "esperaba error sobre `_x` privado, fue: {:?}",
+            "expected error about private `_x`, was: {:?}",
             errors,
         );
     }
@@ -15060,7 +15060,7 @@ mod tests {
         );
         assert!(
             errors.is_empty(),
-            "esperaba sin errores adentro de método del mismo tipo, fue: {:?}",
+            "expected no errors inside method of the same type, was: {:?}",
             errors,
         );
     }
@@ -15075,7 +15075,7 @@ mod tests {
         );
         assert!(
             errors.iter().any(|e| e.message.contains("private")),
-            "esperaba error de acceso desde otro tipo, fue: {:?}",
+            "expected error from access from another type, was: {:?}",
             errors,
         );
     }
@@ -15090,7 +15090,7 @@ mod tests {
             errors
                 .iter()
                 .any(|e| e.message.contains("private") && e.message.contains("_balance")),
-            "esperaba error sobre struct lit con `_balance`, fue: {:?}",
+            "expected error about struct lit with `_balance`, was: {:?}",
             errors,
         );
     }
@@ -15107,7 +15107,7 @@ mod tests {
         );
         assert!(
             errors.is_empty(),
-            "esperaba sin errores en constructor estático, fue: {:?}",
+            "expected no errors in static constructor, was: {:?}",
             errors,
         );
     }
@@ -15117,7 +15117,7 @@ mod tests {
         let (_, errors) = check_str("type C { _x: Int = 0 }\nlet c = C {}\nc._x = 5\n");
         assert!(
             errors.iter().any(|e| e.message.contains("private")),
-            "esperaba error de asignación a campo privado, fue: {:?}",
+            "expected error of assignment to private field, was: {:?}",
             errors,
         );
     }
@@ -15137,7 +15137,7 @@ mod tests {
             errors
                 .iter()
                 .any(|e| e.message.contains("private") && e.message.contains("_hidden")),
-            "esperaba error sobre `_hidden` privado, fue: {:?}",
+            "expected error about private `_hidden`, was: {:?}",
             errors,
         );
     }
@@ -15157,7 +15157,7 @@ mod tests {
         );
         assert!(
             errors.is_empty(),
-            "esperaba sin errores adentro del tipo, fue: {:?}",
+            "expected no errors inside the type, was: {:?}",
             errors,
         );
     }
@@ -15172,7 +15172,7 @@ mod tests {
         );
         assert!(
             errors.iter().any(|e| e.message.contains("private")),
-            "esperaba error de acceso desde otro tipo, fue: {:?}",
+            "expected error from access from another type, was: {:?}",
             errors,
         );
     }
@@ -15225,7 +15225,7 @@ mod tests {
         let errors = check_recovering(src);
         assert!(
             errors.is_empty(),
-            "el checker no debe emitir errores sobre Stmt::Error ni sobre stmts válidos vecinos: {:?}",
+            "the checker must not emit errors about Stmt::Error nor about neighboring valid stmts: {:?}",
             errors
         );
     }
@@ -15241,7 +15241,7 @@ mod tests {
         assert_eq!(
             errors.len(),
             1,
-            "esperaba 1 error de tipo del stmt válido: {:?}",
+            "expected 1 type error from the valid stmt: {:?}",
             errors
         );
         // The error is from the valid stmt on line 2, not from the Error node.
@@ -15263,7 +15263,7 @@ mod tests {
         // none that directly mentions the Error node.)
         assert!(
             errors.iter().any(|e| e.line == 4),
-            "esperaba al menos un error de tipo en la línea 4 (return mal tipado): {:?}",
+            "expected at least one type error on line 4 (mistyped return): {:?}",
             errors
         );
     }
@@ -15281,7 +15281,7 @@ mod tests {
         // from valid code".
         assert!(
             errors.iter().any(|e| e.line == 2),
-            "esperaba error de tipo en la línea 2: {:?}",
+            "expected type error on line 2: {:?}",
             errors
         );
     }
@@ -15350,27 +15350,27 @@ mod tests {
             });
         assert!(
             by_line[&1].iter().any(|t| matches!(t, Type::Int)),
-            "línea 1 debe tener Int: {:?}",
+            "line 1 must have Int: {:?}",
             by_line.get(&1)
         );
         assert!(
             by_line[&2].iter().any(|t| matches!(t, Type::Float)),
-            "línea 2 debe tener Float: {:?}",
+            "line 2 must have Float: {:?}",
             by_line.get(&2)
         );
         assert!(
             by_line[&3].iter().any(|t| matches!(t, Type::Str)),
-            "línea 3 debe tener Str: {:?}",
+            "line 3 must have Str: {:?}",
             by_line.get(&3)
         );
         assert!(
             by_line[&4].iter().any(|t| matches!(t, Type::Bool)),
-            "línea 4 debe tener Bool: {:?}",
+            "line 4 must have Bool: {:?}",
             by_line.get(&4)
         );
         assert!(
             by_line[&5].iter().any(|t| matches!(t, Type::Null)),
-            "línea 5 debe tener Null: {:?}",
+            "line 5 must have Null: {:?}",
             by_line.get(&5)
         );
     }
@@ -15390,7 +15390,7 @@ mod tests {
             .count();
         assert!(
             int_count_line2 >= 3,
-            "línea 2 debe persistir ≥3 nodos Int (ident `x`, literal `5`, BinOp): {:?}",
+            "line 2 must persist ≥3 Int nodes (ident `x`, literal `5`, BinOp): {:?}",
             info.inner
         );
     }
@@ -15414,7 +15414,7 @@ let s = greet(u)
             .any(|(k, t)| k.0 == 4 && matches!(t, Type::Str));
         assert!(
             any_str_call,
-            "línea 4 debe tener Str (resultado del call greet(u)): {:?}",
+            "line 4 must have Str (result of the greet(u) call): {:?}",
             info.inner
         );
         // The struct lit `User { ... }` is on line 3 — must type
@@ -15425,7 +15425,7 @@ let s = greet(u)
             .any(|(k, t)| k.0 == 3 && matches!(t, Type::Nominal(_)));
         assert!(
             any_nominal_struct,
-            "línea 3 debe tener Nominal(User): {:?}",
+            "line 3 must have Nominal(User): {:?}",
             info.inner
         );
     }
@@ -15580,7 +15580,7 @@ print(total)
         let has_def_in_line_1 = defs.iter().any(|(_, def_span)| def_span.line == 1);
         assert!(
             has_def_in_line_1,
-            "def_span del binding `x` debe apuntar a línea 1: {:?}",
+            "def_span of binding `x` must point to line 1: {:?}",
             defs.iter().collect::<Vec<_>>()
         );
     }
@@ -15611,7 +15611,7 @@ print(total)
         let has_def_in_line_1 = defs.iter().any(|(_, def_span)| def_span.line == 1);
         assert!(
             has_def_in_line_1,
-            "def_span del FnDef `dobla` debe estar en línea 1: {:?}",
+            "def_span of FnDef `dobla` must be on line 1: {:?}",
             defs.iter().collect::<Vec<_>>()
         );
     }
@@ -15627,8 +15627,8 @@ print(total)
         assert!(!defs.is_empty(), "uso del param debe registrarse");
         let entry = defs.iter().next().unwrap();
         let (use_span, def_span) = entry;
-        assert_eq!(use_span.0, 1, "use en línea 1");
-        assert_eq!(def_span.line, 1, "def_span del param es la fn (línea 1)");
+        assert_eq!(use_span.0, 1, "use on line 1");
+        assert_eq!(def_span.line, 1, "def_span of param is the fn (line 1)");
     }
 
     #[test]
@@ -15665,7 +15665,7 @@ print(total)
         // (the expr is Int, the iter is List<Int>).
         let src = "let r: List<Int> = [x * 2 for x in [1, 2, 3]]\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15674,7 +15674,7 @@ print(total)
         // If the expr uses `var * 2`, the result is List<Int>.
         let src = "let r: List<Int> = [n * 2 for n in 0..10]\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15685,8 +15685,8 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("filtro") || e.message.contains("Bool")),
-            "esperaba error sobre el filtro: {:?}",
+                .any(|e| e.message.contains("filter") || e.message.contains("Bool")),
+            "expected error about the filter: {:?}",
             errors
         );
     }
@@ -15700,7 +15700,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("iterable") || e.message.contains("List o Range")),
-            "esperaba error sobre el iter: {:?}",
+            "expected error about the iter: {:?}",
             errors
         );
     }
@@ -15715,7 +15715,7 @@ print(total)
         assert!(
             errors.iter().any(|e| e.message.contains("variable")
                 && (e.message.contains("x") || e.message.contains("not defined"))),
-            "esperaba error sobre `x` no definida: {:?}",
+            "expected error about undefined `x`: {:?}",
             errors
         );
     }
@@ -15726,7 +15726,7 @@ print(total)
     fn checker_fm_spec_f_with_float_compiles_clean() {
         let src = "let x: Float = 3.14\nlet s = \"{x:.2f}\"\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15734,7 +15734,7 @@ print(total)
         // Transparent Int → Float promotion.
         let src = "let n: Int = 42\nlet s = \"{n:.2f}\"\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15745,7 +15745,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("`f`") && e.message.contains("Float o Int")),
-            "esperaba error de compatibilidad: {:?}",
+            "expected compatibility error: {:?}",
             errors
         );
     }
@@ -15758,7 +15758,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("`d`") && e.message.contains("Int")),
-            "esperaba error de compatibilidad: {:?}",
+            "expected compatibility error: {:?}",
             errors
         );
     }
@@ -15768,7 +15768,7 @@ print(total)
         // The `s` kind accepts any type (via Display).
         let src = "let n: Int = 42\nlet r = \"{n:s}\"\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     // ---- Mini-batch Md — for with Pattern in `var` ----
@@ -15779,7 +15779,7 @@ print(total)
         // If I use them correctly, no errors.
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nfor (k, v) in m {\n    let len_k: Int = k.len()\n    let v2: Int = v + 1\n}\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15788,7 +15788,7 @@ print(total)
         // would be used inside the body (doesn't exist).
         let src = "let xs: List<Int> = [1, 2, 3]\nfor _ in xs {\n    print(\"hola\")\n}\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15798,7 +15798,7 @@ print(total)
         let errors = check_recovering(src);
         assert!(
             errors.iter().any(|e| e.message.contains("tuple")),
-            "esperaba error sobre tuple pattern: {:?}",
+            "expected error about tuple pattern: {:?}",
             errors
         );
     }
@@ -15812,7 +15812,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("admitido") || e.message.contains("Ident")),
-            "esperaba error sobre pattern no admitido: {:?}",
+            "expected error about unsupported pattern: {:?}",
             errors
         );
     }
@@ -15824,7 +15824,7 @@ print(total)
         // `xs.enumerate()` with xs: List<Int> must type `List<(Int, Int)>`.
         let src = "let xs: List<Int> = [1, 2, 3]\nlet ys: List<(Int, Int)> = xs.enumerate()\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15834,7 +15834,7 @@ print(total)
         let src =
             "let xs: List<Int> = [1, 2]\nlet ys: List<Str> = [\"a\", \"b\"]\nlet pairs: List<(Int, Str)> = xs.zip(ys)\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15843,7 +15843,7 @@ print(total)
         let src =
             "let xs: List<Int> = [1, 2]\nlet ys: List<Int> = [3, 4]\nlet zs: List<Int> = xs.chain(ys)\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15856,7 +15856,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("chain") && e.message.contains("List<Int>")),
-            "esperaba error sobre chain con tipos incompatibles: {:?}",
+            "expected error about chain with incompatible types: {:?}",
             errors
         );
     }
@@ -15869,7 +15869,7 @@ print(total)
     fn checker_re_plus_result_t_e_explicit_annotation() {
         let src = "type ApiError { status: Int, msg: Str }\nfn fetch() -> Result<Int, ApiError> {\n    return Err(ApiError { status: 503, msg: \"down\" })\n}\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15877,7 +15877,7 @@ print(total)
         // The `e` binding from `Err(e)` now types with the E of the Result.
         let src = "type ApiError { status: Int, msg: Str }\nfn fetch() -> Result<Int, ApiError> {\n    return Err(ApiError { status: 503, msg: \"x\" })\n}\nlet code: Int = match fetch() {\n    Ok(v) => v,\n    Err(e) => e.status\n}\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15885,7 +15885,7 @@ print(total)
         // `Result<T>` without E must keep working (default Str).
         let src = "fn div(a: Int, b: Int) -> Result<Int> {\n    if b == 0 { return Err(\"zero\") }\n    return Ok(a / b)\n}\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15897,7 +15897,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("Result") && e.message.contains("1 or 2")),
-            "esperaba error sobre aridad: {:?}",
+            "expected error about arity: {:?}",
             errors
         );
     }
@@ -15924,7 +15924,7 @@ print(total)
     fn checker_bits_on_int_is_ok() {
         let src = "let a: Int = 5 & 3\nlet b: Int = 5 | 3\nlet c: Int = 5 ^ 3\nlet d: Int = 1 << 4\nlet e: Int = ~0\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     #[test]
@@ -15935,7 +15935,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("bitwise") && e.message.contains("Float")),
-            "esperaba error sobre bit-a-bit con Float: {:?}",
+            "expected error about bitwise with Float: {:?}",
             errors
         );
     }
@@ -15948,7 +15948,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("bitwise") && e.message.contains("Bool")),
-            "esperaba error sobre `&` con Bool: {:?}",
+            "expected error about `&` with Bool: {:?}",
             errors
         );
     }
@@ -15961,7 +15961,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("`~`") && e.message.contains("Int")),
-            "esperaba error sobre `~` con Float: {:?}",
+            "expected error about `~` with Float: {:?}",
             errors
         );
     }
@@ -15971,7 +15971,7 @@ print(total)
         // The canonical case that motivates the mini-batch: `for (i, x) in xs.enumerate()`.
         let src = "let xs: List<Str> = [\"a\", \"b\"]\nfor (i, x) in xs.enumerate() {\n    let idx: Int = i\n    let val: Str = x\n}\n";
         let errors = check_recovering(src);
-        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, got {:?}", errors);
     }
 
     // ---- Mini-batch Math + Mb9 + Int/Float methods ----
@@ -16126,7 +16126,7 @@ print(total)
     /// Helper: checks that the program passes without errors.
     fn assert_auth_ok(src: &str) {
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
     /// Helper: checks that the program produces at least one error whose
@@ -16136,7 +16136,7 @@ print(total)
         let matched = errors.iter().any(|e| e.message.contains(expected_substr));
         assert!(
             matched,
-            "esperaba error con substring '{}', errores fueron: {:?}",
+            "expected error with substring '{}', errors were: {:?}",
             expected_substr, errors
         );
     }
@@ -16576,7 +16576,7 @@ print(total)
             name: "WsConn".into(),
             args: vec![],
         };
-        let err = resolve_type_expr(&te, &env).expect_err("aridad 0");
+        let err = resolve_type_expr(&te, &env).expect_err("arity 0");
         assert!(matches!(err.kind, ErrorKind::TypeError));
     }
 
@@ -16629,7 +16629,7 @@ print(total)
                 TypeExpr::Named("Bool".into()),
             ],
         };
-        let err = resolve_type_expr(&te, &env).expect_err("aridad 3 debería fallar");
+        let err = resolve_type_expr(&te, &env).expect_err("arity 3 should fail");
         assert!(matches!(err.kind, ErrorKind::TypeError));
     }
 
@@ -16808,7 +16808,7 @@ print(total)
         let src = "@cron(\"0 0 * * *\")\n\
                    async fn cleanup() -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores, fueron {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors, were {:?}", errors);
     }
 
     #[test]
@@ -16819,7 +16819,7 @@ print(total)
         let src = "@cron(\"*/5 * * * *\")\n\
                    fn tick() -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores, fueron {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors, were {:?}", errors);
     }
 
     #[test]
@@ -16830,7 +16830,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("@cron") && e.message.contains("1 positional argument")),
-            "esperaba msg sobre args: {:?}",
+            "expected msg about args: {:?}",
             errors
         );
     }
@@ -16841,7 +16841,7 @@ print(total)
         let errors = errors_of(src);
         assert!(
             errors.iter().any(|e| e.message.contains("Str literal")),
-            "esperaba msg sobre Str literal: {:?}",
+            "expected msg about Str literal: {:?}",
             errors
         );
     }
@@ -16854,7 +16854,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("does not accept params")),
-            "esperaba msg sobre params: {:?}",
+            "expected msg about params: {:?}",
             errors
         );
     }
@@ -16867,7 +16867,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("is not combinable") && e.message.contains("get")),
-            "esperaba msg sobre combinación con @get: {:?}",
+            "expected msg about combination with @get: {:?}",
             errors
         );
     }
@@ -16880,7 +16880,7 @@ print(total)
             errors.iter().any(
                 |e| e.message.contains("is not combinable") && e.message.contains("background")
             ),
-            "esperaba msg sobre combinación con @background: {:?}",
+            "expected msg about combination with @background: {:?}",
             errors
         );
     }
@@ -16893,7 +16893,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("@cron") && e.message.contains("Null")),
-            "esperaba msg sobre return Null/Result: {:?}",
+            "expected msg about return Null/Result: {:?}",
             errors
         );
     }
@@ -16904,14 +16904,14 @@ print(total)
         // without aborting the scheduler.
         let src = "@cron(\"0 0 * * *\")\nfn h() -> Result<Null> { return Ok(null) }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
     fn background_simple_passes_checker() {
         let src = "@background\nfn send_email(to: Str) -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -16922,7 +16922,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("@background") && e.message.contains("does not accept")),
-            "esperaba msg sobre args: {:?}",
+            "expected msg about args: {:?}",
             errors
         );
     }
@@ -16935,7 +16935,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("is not combinable")),
-            "esperaba msg sobre combinación: {:?}",
+            "expected msg about combination: {:?}",
             errors
         );
     }
@@ -16952,7 +16952,7 @@ print(total)
         let src = "@cron(\"0 0 * * *\", tz=\"America/Argentina/Buenos_Aires\")\n\
                    fn h() -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -16963,7 +16963,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("`tz`") && e.message.contains("Str literal")),
-            "esperaba msg sobre tz Str literal: {:?}",
+            "expected msg about tz Str literal: {:?}",
             errors
         );
     }
@@ -16973,7 +16973,7 @@ print(total)
         let src = "@cron(\"0 0 * * *\", retry={max: 3, backoff: \"exponential\", initial_secs: 1, max_secs: 60})\n\
                    fn h() -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -16982,7 +16982,7 @@ print(total)
         // runtime checks them, not the checker).
         let src = "@cron(\"0 0 * * *\", retry={max: 5})\nfn h() -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -16993,7 +16993,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("`retry`") && e.message.contains("Map literal")),
-            "esperaba msg sobre retry Map literal: {:?}",
+            "expected msg about retry Map literal: {:?}",
             errors
         );
     }
@@ -17006,7 +17006,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("`foo`") && e.message.contains("retry")),
-            "esperaba msg sobre key foo desconocida: {:?}",
+            "expected msg about unknown key foo: {:?}",
             errors
         );
     }
@@ -17019,7 +17019,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("retry.max") && e.message.contains(">= 0")),
-            "esperaba msg sobre max >= 0: {:?}",
+            "expected msg about max >= 0: {:?}",
             errors
         );
     }
@@ -17033,7 +17033,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("retry.backoff") && e.message.contains("exponential")),
-            "esperaba msg sobre backoff whitelist: {:?}",
+            "expected msg about backoff whitelist: {:?}",
             errors
         );
     }
@@ -17046,7 +17046,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("initial_secs") && e.message.contains(">= 1")),
-            "esperaba msg sobre initial_secs >= 1: {:?}",
+            "expected msg about initial_secs >= 1: {:?}",
             errors
         );
     }
@@ -17055,7 +17055,7 @@ print(total)
     fn cron_with_catch_up_passes_checker() {
         let src = "@cron(\"0 0 * * *\", catch_up=true)\nfn h() -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -17066,7 +17066,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("catch_up") && e.message.contains("Bool literal")),
-            "esperaba msg sobre catch_up Bool: {:?}",
+            "expected msg about catch_up Bool: {:?}",
             errors
         );
     }
@@ -17083,7 +17083,7 @@ print(total)
         // which does NOT touch the decorator.
         assert!(
             !errors.iter().any(|e| e.message.contains("store")),
-            "no debería haber error sobre store: {:?}",
+            "should not have error about store: {:?}",
             errors
         );
     }
@@ -17096,7 +17096,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("store") && e.message.contains("null")),
-            "esperaba msg sobre store no null: {:?}",
+            "expected msg about non-null store: {:?}",
             errors
         );
     }
@@ -17109,7 +17109,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("`foo`") && e.message.contains("unrecognized")),
-            "esperaba msg sobre kwarg desconocido: {:?}",
+            "expected msg about unknown kwarg: {:?}",
             errors
         );
     }
@@ -17131,7 +17131,7 @@ print(total)
             !errors
                 .iter()
                 .any(|e| e.message.contains("@cron") || e.message.contains("kwarg")),
-            "happy path: no debería haber errores del @cron: {:?}",
+            "happy path: should not have errors from @cron: {:?}",
             errors
         );
     }
@@ -17141,7 +17141,7 @@ print(total)
         let src = "@background(tz=\"America/Argentina/Buenos_Aires\")\n\
                    fn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -17149,7 +17149,7 @@ print(total)
         let src = "@background(retry={max: 3, backoff: \"exponential\"})\n\
                    fn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -17162,7 +17162,7 @@ print(total)
             errors.iter().any(|e| e.message.contains("@background")
                 && e.message.contains("`store`")
                 && e.message.contains("unrecognized")),
-            "esperaba msg sobre store no aceptado en @background: {:?}",
+            "expected msg about store not accepted in @background: {:?}",
             errors
         );
     }
@@ -17176,7 +17176,7 @@ print(total)
             errors.iter().any(|e| e.message.contains("@background")
                 && e.message.contains("`catch_up`")
                 && e.message.contains("unrecognized")),
-            "esperaba msg sobre catch_up no aceptado en @background: {:?}",
+            "expected msg about catch_up not accepted in @background: {:?}",
             errors
         );
     }
@@ -17190,7 +17190,7 @@ print(total)
         assert!(
             errors.iter().any(|e| e.message.contains("@background")
                 && e.message.contains("does not accept positional args")),
-            "esperaba msg sobre positionals: {:?}",
+            "expected msg about positionals: {:?}",
             errors
         );
     }
@@ -17208,7 +17208,7 @@ print(total)
         let errors = errors_of(src);
         // The Int return type is valid because `spawn(job())` →
         // `Future<Int>`, and `.await` unpacks to `Int`.
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
@@ -17222,7 +17222,7 @@ print(total)
             errors
                 .iter()
                 .any(|e| e.message.contains("spawn") && e.message.contains("1 argument")),
-            "esperaba msg sobre args de spawn: {:?}",
+            "expected msg about spawn args: {:?}",
             errors
         );
     }
@@ -17239,7 +17239,7 @@ print(total)
         let errors = errors_of(src);
         assert!(
             errors.iter().any(|e| e.message.contains("literal call")),
-            "esperaba msg sobre call literal: {:?}",
+            "expected msg about literal call: {:?}",
             errors
         );
     }
@@ -17254,7 +17254,7 @@ print(total)
         let errors = errors_of(src);
         assert!(
             errors.iter().any(|e| e.message.contains("@background")),
-            "esperaba msg sobre @background: {:?}",
+            "expected msg about @background: {:?}",
             errors
         );
     }
@@ -17267,7 +17267,7 @@ print(total)
         let src = "fn spawn(x: Int) -> Int { return x }\n\
                    fn main() -> Int { return spawn(42) }";
         let errors = errors_of(src);
-        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     // ===== Phase 10.3.a — ORM decorator checker =====
@@ -17276,9 +17276,9 @@ print(total)
     fn checker_table_decorator_registers_metadata() {
         let src = "@table(\"users\") type User { id: Int, name: Str }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
-        let id = env.lookup("User").expect("User debería estar registrado");
-        let meta = env.table_metadata(id).expect("debería haber TableMetadata");
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
+        let id = env.lookup("User").expect("User should be registered");
+        let meta = env.table_metadata(id).expect("should have TableMetadata");
         assert_eq!(meta.sql_name, "users");
         assert_eq!(meta.primary_fields, Vec::<String>::new());
         assert!(meta.columns.is_empty());
@@ -17288,7 +17288,7 @@ print(total)
     fn checker_table_without_args_uses_lowercase_default() {
         let src = "@table type Post { id: Int }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("Post").unwrap();
         let meta = env.table_metadata(id).unwrap();
         assert_eq!(meta.sql_name, "post");
@@ -17298,7 +17298,7 @@ print(total)
     fn checker_primary_decorator_registers_primary_field() {
         let src = "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("User").unwrap();
         let meta = env.table_metadata(id).unwrap();
         assert_eq!(meta.single_pk(), Some("id"));
@@ -17308,7 +17308,7 @@ print(total)
     fn checker_column_decorator_registers_overrides() {
         let src = "@table(\"users\") type User {\n  @column(name=\"user_id\", sql_type=\"bigserial\")\n  id: Int\n}";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("User").unwrap();
         let meta = env.table_metadata(id).unwrap();
         let col = meta.columns.get("id").expect("columna `id` con metadata");
@@ -17320,7 +17320,7 @@ print(total)
     fn checker_unique_and_index_get_registered() {
         let src = "@table type T {\n  @unique @index\n  email: Str\n}";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("T").unwrap();
         let meta = env.table_metadata(id).unwrap();
         let col = meta.columns.get("email").unwrap();
@@ -17332,7 +17332,7 @@ print(total)
     fn checker_type_without_table_has_no_metadata() {
         let src = "type Plain { x: Int }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("Plain").unwrap();
         assert!(env.table_metadata(id).is_none());
     }
@@ -17344,7 +17344,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("missing `@table")),
-            "esperaba error sobre @table faltante: {:?}",
+            "expected error about missing @table: {:?}",
             errs
         );
     }
@@ -17372,7 +17372,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("twice")),
-            "esperaba error sobre @primary duplicado en mismo field: {:?}",
+            "expected error about duplicate @primary on same field: {:?}",
             errs
         );
     }
@@ -17383,7 +17383,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("@bogus")),
-            "esperaba error sobre @bogus: {:?}",
+            "expected error about @bogus: {:?}",
             errs
         );
     }
@@ -17394,7 +17394,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("@bogus")),
-            "esperaba error sobre @bogus: {:?}",
+            "expected error about @bogus: {:?}",
             errs
         );
     }
@@ -17405,7 +17405,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("@table")),
-            "esperaba error sobre arg no string: {:?}",
+            "expected error about non-string arg: {:?}",
             errs
         );
     }
@@ -17417,7 +17417,7 @@ print(total)
         assert!(
             errs.iter()
                 .any(|e| e.message.contains("more than one `@table` decorator")),
-            "esperaba error sobre @table duplicado: {:?}",
+            "expected error about duplicate @table: {:?}",
             errs
         );
     }
@@ -17433,10 +17433,10 @@ print(total)
                      author_id: Int\n\
                    }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("Post").unwrap();
         let meta = env.table_metadata(id).unwrap();
-        let rel = meta.relations.get("author_id").expect("relación bindeada");
+        let rel = meta.relations.get("author_id").expect("relation bound");
         assert_eq!(rel.kind, RelationKind::BelongsTo);
         assert_eq!(rel.target_type, "User");
         assert_eq!(rel.fk_field, "author_id");
@@ -17452,7 +17452,7 @@ print(total)
                      author_id: Int\n\
                    }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("Post").unwrap();
         let meta = env.table_metadata(id).unwrap();
         let rel = meta.relations.get("author_id").unwrap();
@@ -17469,7 +17469,7 @@ print(total)
                      posts: List<Post>\n\
                    }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("User").unwrap();
         let meta = env.table_metadata(id).unwrap();
         assert!(meta.is_virtual_field("posts"));
@@ -17490,7 +17490,7 @@ print(total)
                      posts: List<Post>\n\
                    }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("User").unwrap();
         let meta = env.table_metadata(id).unwrap();
         let rel = meta.relations.get("posts").unwrap();
@@ -17506,7 +17506,7 @@ print(total)
                      profile: Profile?\n\
                    }";
         let (env, errs) = resolve_str(src);
-        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
         let id = env.lookup("User").unwrap();
         let meta = env.table_metadata(id).unwrap();
         assert!(meta.is_virtual_field("profile"));
@@ -17523,7 +17523,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("@belongs_to")),
-            "esperaba error de aridad: {:?}",
+            "expected arity error: {:?}",
             errs
         );
     }
@@ -17539,7 +17539,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("on_delete")),
-            "esperaba error sobre on_delete: {:?}",
+            "expected error about on_delete: {:?}",
             errs
         );
     }
@@ -17556,7 +17556,7 @@ print(total)
         assert!(
             errs.iter()
                 .any(|e| e.message.contains("more than one relation decorator")),
-            "esperaba error sobre duplicado: {:?}",
+            "expected error about duplicate: {:?}",
             errs
         );
     }
@@ -17599,7 +17599,7 @@ print(total)
         assert!(
             errs.iter().any(|e| e.message.contains("User")
                 && (e.message.contains("Int") || e.message.contains("incompatible"))),
-            "esperaba error de tipo (User no es Int): {:?}",
+            "expected type error (User is not Int): {:?}",
             errs
         );
     }
@@ -17621,7 +17621,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.is_empty(),
-            "esperaba 0 errores con anotación correcta: {:?}",
+            "expected 0 errors with correct annotation: {:?}",
             errs
         );
     }
@@ -17644,7 +17644,7 @@ print(total)
         assert!(
             errs.iter().any(|e| e.message.contains("List")
                 && (e.message.contains("Post") || e.message.contains("incompatible"))),
-            "esperaba error de tipo (List<Post> no es Post): {:?}",
+            "expected type error (List<Post> is not Post): {:?}",
             errs
         );
     }
@@ -17666,7 +17666,7 @@ print(total)
         assert!(
             errs.iter().any(|e| e.message.contains("Profile")
                 && (e.message.contains("Int") || e.message.contains("incompatible"))),
-            "esperaba error de tipo (Profile no es Int): {:?}",
+            "expected type error (Profile is not Int): {:?}",
             errs
         );
     }
@@ -17686,7 +17686,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.is_empty(),
-            "esperaba 0 errores (static ORM sigue tipando): {:?}",
+            "expected 0 errors (static ORM still types): {:?}",
             errs
         );
     }
@@ -17706,7 +17706,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.is_empty(),
-            "esperaba 0 errores; get_int debe tipar como Result<Int>: {:?}",
+            "expected 0 errors; get_int must type as Result<Int>: {:?}",
             errs
         );
     }
@@ -17722,7 +17722,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.is_empty(),
-            "esperaba 0 errores; get_str debe tipar como Result<Str>: {:?}",
+            "expected 0 errors; get_str must type as Result<Str>: {:?}",
             errs
         );
     }
@@ -17742,7 +17742,7 @@ print(total)
             errs.iter().any(|e| e.message.contains("Int")
                 || e.message.contains("Str")
                 || e.message.contains("incompatible")),
-            "esperaba error de tipo (Int vs Str): {:?}",
+            "expected type error (Int vs Str): {:?}",
             errs
         );
     }
@@ -17759,7 +17759,7 @@ print(total)
         assert!(
             errs.iter()
                 .any(|e| e.message.contains("DbRow") && e.message.contains("get_potato")),
-            "esperaba error citando DbRow.get_potato: {:?}",
+            "expected error citing DbRow.get_potato: {:?}",
             errs
         );
     }
@@ -17785,7 +17785,7 @@ print(total)
             let errs = errors_of(&src);
             assert!(
                 errs.is_empty(),
-                "method `{method}` debería ser aceptado, errors: {:?}",
+                "method `{method}` should be accepted, errors: {:?}",
                 errs
             );
             // Validate that the using is populated (None for default btree,
@@ -17822,7 +17822,7 @@ print(total)
             errs.iter().any(|e| e.message.contains("bloom")
                 && e.message.contains("btree")
                 && e.message.contains("gin")),
-            "error debería citar el method invalido + lista de soportados: {:?}",
+            "error should cite the invalid method + list of supported: {:?}",
             errs
         );
     }
@@ -17837,7 +17837,7 @@ print(total)
         assert!(
             errs.iter()
                 .any(|e| e.message.contains("`@index(using=...)`")),
-            "error debería citar el contrato de `using=`: {:?}",
+            "error should cite the contract of `using=`: {:?}",
             errs
         );
     }
@@ -17854,7 +17854,7 @@ print(total)
                      tenant_id: Int\n\
                    }\n";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors: {:?}", errs);
         let tokens = tokenize(src).expect("lex");
         let program = parse(tokens).expect("parse");
         let (env, _, _, _) = check_program(&program);
@@ -17881,7 +17881,7 @@ print(total)
                      tenant_id: Int\n\
                    }\n";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors: {:?}", errs);
         let tokens = tokenize(src).expect("lex");
         let program = parse(tokens).expect("parse");
         let (env, _, _, _) = check_program(&program);
@@ -17903,7 +17903,7 @@ print(total)
                      email: Str\n\
                    }\n";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors: {:?}", errs);
         let tokens = tokenize(src).expect("lex");
         let program = parse(tokens).expect("parse");
         let (env, _, _, _) = check_program(&program);
@@ -17924,7 +17924,7 @@ print(total)
         assert!(
             errs.iter().any(|e| e.message.contains("`@unique")
                 && e.message.contains("at least 1 positional column")),
-            "esperaba error de aridad: {:?}",
+            "expected arity error: {:?}",
             errs
         );
     }
@@ -17939,7 +17939,7 @@ print(total)
             errs.iter().any(|e| e.message.contains("@unique")
                 && e.message.contains("where_")
                 && e.message.contains("@index")),
-            "esperaba error citando `@index` como alternativa: {:?}",
+            "expected error citing `@index` as alternative: {:?}",
             errs
         );
     }
@@ -17956,7 +17956,7 @@ print(total)
                      slug: Str\n\
                    }\n";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors: {:?}", errs);
         let tokens = tokenize(src).expect("lex");
         let program = parse(tokens).expect("parse");
         let (env, _, _, _) = check_program(&program);
@@ -17977,7 +17977,7 @@ print(total)
                      age: Int\n\
                    }\n";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors: {:?}", errs);
         let tokens = tokenize(src).expect("lex");
         let program = parse(tokens).expect("parse");
         let (env, _, _, _) = check_program(&program);
@@ -17997,7 +17997,7 @@ print(total)
                      status: Str\n\
                    }\n";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors: {:?}", errs);
         let tokens = tokenize(src).expect("lex");
         let program = parse(tokens).expect("parse");
         let (env, _, _, _) = check_program(&program);
@@ -18020,7 +18020,7 @@ print(total)
                      email: Str\n\
                    }\n";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors: {:?}", errs);
         let tokens = tokenize(src).expect("lex");
         let program = parse(tokens).expect("parse");
         let (env, _, _, _) = check_program(&program);
@@ -18038,7 +18038,7 @@ print(total)
         assert!(
             errs.iter().any(|e| e.message.contains("@check_constraint")
                 && e.message.contains("1 positional arg")),
-            "esperaba error de aridad: {:?}",
+            "expected arity error: {:?}",
             errs
         );
     }
@@ -18051,7 +18051,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("empty string")),
-            "esperaba error de string vacío: {:?}",
+            "expected empty string error: {:?}",
             errs
         );
     }
@@ -18066,7 +18066,7 @@ print(total)
             errs.iter()
                 .any(|e| e.message.contains("@check_constraint")
                     && e.message.contains("Str literal")),
-            "esperaba error de tipo: {:?}",
+            "expected type error: {:?}",
             errs
         );
     }
@@ -18087,7 +18087,7 @@ print(total)
             .collect();
         assert!(
             related.is_empty(),
-            "esperaba sin errores de @healthz/@readyz, fue: {:?}",
+            "expected no errors from @healthz/@readyz, was: {:?}",
             related
         );
     }
@@ -18099,7 +18099,7 @@ print(total)
         let matched = errs.iter().any(|e| e.message.contains(expected_substr));
         assert!(
             matched,
-            "esperaba error con substring '{}', errores fueron: {:?}",
+            "expected error with substring '{}', errors were: {:?}",
             expected_substr, errs
         );
     }
@@ -18269,7 +18269,7 @@ print(total)
         let _ = errs; // enough that the shape is declarable
         let src2 = "async fn pp() -> Result<Null> {\n  let p: Secret<Str> = secret(\"K\")?\n  return Ok(null)\n}";
         let errs2 = errors_of(src2);
-        assert!(errs2.is_empty(), "esperaba sin errores, fue: {:?}", errs2);
+        assert!(errs2.is_empty(), "expected no errors, was: {:?}", errs2);
     }
 
     #[test]
@@ -18282,7 +18282,7 @@ print(total)
                    return Ok(exposed.len())\n\
                    }";
         let errs = errors_of(src);
-        assert!(errs.is_empty(), "esperaba sin errores, fue: {:?}", errs);
+        assert!(errs.is_empty(), "expected no errors, was: {:?}", errs);
     }
 
     #[test]
@@ -18300,7 +18300,7 @@ print(total)
             .any(|e| e.message.contains("Secret") && e.message.contains(".expose()"));
         assert!(
             matched,
-            "esperaba mensaje con sugerencia de `.expose()`, fue: {:?}",
+            "expected message with suggestion of `.expose()`, was: {:?}",
             errs
         );
     }
@@ -18318,7 +18318,7 @@ print(total)
         });
         assert!(
             matched,
-            "esperaba error citando 'no admite argumentos', fue: {:?}",
+            "expected error citing 'does not accept arguments', was: {:?}",
             errs
         );
     }
@@ -18331,7 +18331,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.is_empty(),
-            "esperaba sin errores con anotación destino, fue: {:?}",
+            "expected no errors with target annotation, was: {:?}",
             errs
         );
     }
@@ -18344,7 +18344,7 @@ print(total)
         let matched = errs
             .iter()
             .any(|e| e.message.contains("Str") || e.message.contains("Int"));
-        assert!(matched, "esperaba error de tipo en arg, fue: {:?}", errs);
+        assert!(matched, "expected type error on arg, was: {:?}", errs);
     }
 
     // ---- Phase 12.8 — @flag decorator checker ----
@@ -18465,9 +18465,9 @@ print(total)
         let ty = types_at_position("let datos: Int? = null\n", 1, 5);
         match ty {
             Some(Type::Nullable(inner)) => {
-                assert_eq!(*inner, Type::Int, "esperaba Nullable(Int)");
+                assert_eq!(*inner, Type::Int, "expected Nullable(Int)");
             }
-            other => panic!("esperaba Nullable(Int), recibió {:?}", other),
+            other => panic!("expected Nullable(Int), received {:?}", other),
         }
     }
 
@@ -18530,10 +18530,10 @@ print(total)
             Some(Type::List(inner)) => assert_eq!(
                 *inner,
                 Type::Int,
-                "esperaba List<Int>, recibió List<{:?}>",
+                "expected List<Int>, received List<{:?}>",
                 inner
             ),
-            other => panic!("esperaba List<Int>, recibió {:?}", other),
+            other => panic!("expected List<Int>, received {:?}", other),
         }
     }
 
@@ -18545,7 +18545,7 @@ print(total)
         let ty = type_of_last_let("let r = [1, 2, 3].filter(fn(x) => x > 0)\n");
         match ty {
             Some(Type::List(inner)) => assert_eq!(*inner, Type::Int),
-            other => panic!("esperaba List<Int>, recibió {:?}", other),
+            other => panic!("expected List<Int>, received {:?}", other),
         }
     }
 
@@ -18557,7 +18557,7 @@ print(total)
         let ty = type_of_last_let("let r = [\"a\", \"b\"].map(fn(s) => s.upper())\n");
         match ty {
             Some(Type::List(inner)) => assert_eq!(*inner, Type::Str),
-            other => panic!("esperaba List<Str>, recibió {:?}", other),
+            other => panic!("expected List<Str>, received {:?}", other),
         }
     }
 
@@ -18573,10 +18573,10 @@ print(total)
             Some(Type::List(inner)) => assert_eq!(
                 *inner,
                 Type::Float,
-                "esperaba List<Float> (anotación explícita gana), recibió List<{:?}>",
+                "expected List<Float> (explicit annotation wins), received List<{:?}>",
                 inner
             ),
-            other => panic!("esperaba List<Float>, recibió {:?}", other),
+            other => panic!("expected List<Float>, received {:?}", other),
         }
     }
 
@@ -18586,7 +18586,7 @@ print(total)
         let ty = type_of_last_let("let r = [1, 2, 3].find(fn(x) => x == 2)\n");
         match ty {
             Some(Type::Result { ok, .. }) => assert_eq!(*ok, Type::Int),
-            other => panic!("esperaba Result<Int>, recibió {:?}", other),
+            other => panic!("expected Result<Int>, received {:?}", other),
         }
     }
 
@@ -18603,7 +18603,7 @@ print(total)
         // No errors should appear — n: Int * 2: Int → Int, compatible with Fn(Int) -> Int.
         assert!(
             errs.is_empty(),
-            "esperaba sin errores, recibió: {:?}",
+            "expected no errors, received: {:?}",
             errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
         );
         let _ = env;
@@ -18623,7 +18623,7 @@ let r = apply(fn(n) => n * 2, 5)
         let (env, _ti, _di, errs) = check_program(&program);
         assert!(
             errs.is_empty(),
-            "esperaba sin errores con inferencia bidireccional, recibió: {:?}",
+            "expected no errors with bidirectional inference, received: {:?}",
             errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
         );
         let _ = env;
@@ -18641,7 +18641,7 @@ let r = apply(fn(n) => n * 2, 5)
         let (_env, _ti, _di, errs) = check_program(&program);
         assert!(
             !errs.is_empty(),
-            "esperaba error por anotación incompatible, recibió 0"
+            "expected error from incompatible annotation, received 0"
         );
     }
 
@@ -18659,7 +18659,7 @@ let r = apply(fn(n) => n * 2, 5)
     fn s1_hover_on_unannotated_param_shows_any() {
         // `fn f(x) => x + 1` — without annotation, x: Any.
         let ty = types_at_position("fn f(x) => x + 1\n", 1, 6);
-        assert_eq!(ty, Some(Type::Any), "param sin anotación tipa como Any");
+        assert_eq!(ty, Some(Type::Any), "param without annotation types as Any");
     }
 
     #[test]
@@ -18720,12 +18720,12 @@ let r = c.double(5)
                 Type::List(inner) => assert_eq!(
                     **inner,
                     Type::Int,
-                    "esperaba List<List<Int>>, recibió List<List<{:?}>>",
+                    "expected List<List<Int>>, received List<List<{:?}>>",
                     inner
                 ),
-                other => panic!("esperaba List<List<Int>>, recibió List<{:?}>", other),
+                other => panic!("expected List<List<Int>>, received List<{:?}>", other),
             },
-            other => panic!("esperaba List<List<Int>>, recibió {:?}", other),
+            other => panic!("expected List<List<Int>>, received {:?}", other),
         }
     }
 }
