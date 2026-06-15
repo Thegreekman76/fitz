@@ -18544,7 +18544,7 @@ mod tests {
             env,
         )
         .await
-        .expect_err("segundo await debería fallar");
+        .expect_err("second await should fail");
         match err {
             EvalSignal::Error(fitz_err) => {
                 assert!(fitz_err.message.contains("consumed"));
@@ -20811,7 +20811,10 @@ print(_)\n";
         };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
-        let v = env.lock().get("User").expect("User no quedó en el env");
+        let v = env
+            .lock()
+            .get("User")
+            .expect("User did not stay in the env");
         match v {
             Value::Type { name, fields, .. } => {
                 assert_eq!(name, "User");
@@ -21540,7 +21543,7 @@ print(factorial(5))
         let err = res.unwrap_err();
         assert!(
             err.message.contains("instance method"),
-            "esperaba mensaje sobre método de instancia, fue: {}",
+            "expected message about instance method, was: {}",
             err.message,
         );
     }
@@ -22053,7 +22056,7 @@ let first_y = zs[0].1
         let err = res.unwrap_err();
         assert!(
             err.message.contains("operator `?` failed") && err.message.contains("boom"),
-            "esperaba mensaje específico de `?`: {}",
+            "expected specific message from `?`: {}",
             err.message,
         );
     }
@@ -22444,7 +22447,7 @@ let r = match n {
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(
             err.message.contains("name"),
-            "el error debería mencionar el campo faltante `name`: {}",
+            "the error should mention the missing field `name`: {}",
             err.message
         );
     }
@@ -22459,7 +22462,7 @@ let r = match n {
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(
             err.message.contains("color"),
-            "el error debería mencionar el campo extra `color`: {}",
+            "the error should mention the extra field `color`: {}",
             err.message
         );
     }
@@ -22507,7 +22510,7 @@ let r = match n {
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(
             err.message.contains("nope"),
-            "el error debería mencionar el campo `nope`: {}",
+            "the error should mention the field `nope`: {}",
             err.message
         );
     }
@@ -23299,7 +23302,7 @@ let r = match n {
             assert_eq!(g.len(), 1);
             assert_eq!(g[0], Value::Str("abc".into()));
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23367,7 +23370,7 @@ let r = match n {
                 ]
             );
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23383,7 +23386,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert!(items.lock().is_empty());
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23412,7 +23415,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![1, 1, 2, 3, 4, 5, 6, 9]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23439,7 +23442,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![4, 3, 1]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23464,7 +23467,7 @@ let r = match n {
                 }
             }
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23477,10 +23480,10 @@ let r = match n {
             assert_eq!(
                 items.lock().len(),
                 3,
-                "esperaba 3 pares (trunca al más corto)"
+                "expected 3 pairs (truncates to the shortest)"
             );
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23503,7 +23506,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![0, 1, 2, 100, 200]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23535,7 +23538,7 @@ let r = match n {
             let a_value = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
             assert_eq!(a_value.map(|(_, v)| v.clone()), Some(Value::Int(110)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -23554,7 +23557,7 @@ let r = match n {
             let a_value = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
             assert_eq!(a_value.map(|(_, v)| v.clone()), Some(Value::Int(10)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -23581,7 +23584,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![11, 22, 33]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23610,7 +23613,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![1, 10, 2, 20, 3, 30]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23673,7 +23676,7 @@ let r = match n {
             let b_value = g.iter().find(|(k, _)| k == &Value::Str("b".into()));
             assert_eq!(b_value.map(|(_, v)| v.clone()), Some(Value::Int(20)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -23702,7 +23705,7 @@ let r = match n {
                 .collect();
             assert_eq!(keys, vec!["a", "b", "c"]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23738,7 +23741,7 @@ let r = match n {
         if let Value::Result(ResultVariant::Ok(inner)) = a {
             assert_eq!(*inner, Value::Int(12));
         } else {
-            panic!("esperaba Ok");
+            panic!("expected Ok");
         }
     }
 
@@ -23759,7 +23762,7 @@ let r = match n {
             // chars: c(0) a(1) f(2) é(3) ' '(4) l(5) → char index = 5
             assert_eq!(*inner, Value::Int(5));
         } else {
-            panic!("esperaba Ok");
+            panic!("expected Ok");
         }
     }
 
@@ -23775,7 +23778,7 @@ let r = match n {
         if let Value::Map(pairs) = passing {
             assert_eq!(pairs.lock().len(), 2);
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -23795,7 +23798,7 @@ let r = match n {
             let a_value = pairs.iter().find(|(k, _)| k == &Value::Str("a".into()));
             assert_eq!(a_value.map(|(_, v)| v.clone()), Some(Value::Int(2)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -23950,7 +23953,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![1, 1, 2, 3, 4, 5, 6, 9]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23968,7 +23971,7 @@ let r = match n {
             assert_eq!(g[0], Value::Str("alfa".into()));
             assert_eq!(g[2], Value::Str("zeta".into()));
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -23997,7 +24000,7 @@ let r = match n {
             assert_eq!(g[0], Value::Int(5));
             assert_eq!(g[4], Value::Int(1));
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -24084,7 +24087,7 @@ let r = match n {
             assert_eq!(g[3], Value::Int(99));
             assert_eq!(g[0], Value::Int(1));
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -24178,7 +24181,7 @@ let r = match n {
             let g = items.lock();
             assert_eq!(g[1], Value::Int(2), "xs original no debe haber cambiado");
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -24504,12 +24507,12 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("inexistente"),
-            "el mensaje debe nombrar el módulo: {}",
+            "the message must name the module: {}",
             err.message
         );
         assert!(
             err.message.contains("not found"),
-            "el mensaje debe decir 'no se encontró': {}",
+            "the message must say 'not found': {}",
             err.message
         );
     }
@@ -24599,7 +24602,7 @@ let r = match n {
         let u2 = env.lock().get("u2").unwrap();
         assert_eq!(
             u1, u2,
-            "el segundo import debe devolver el mismo módulo cacheado"
+            "the second import must return the same cached module"
         );
     }
 
@@ -24727,7 +24730,7 @@ let r = match n {
         let busted = "let x = +\n"; // syntax error
         let main = "import busted\n";
         let (_env, res) = eval_with_modules(&[("busted.fitz", busted)], main).await;
-        assert!(res.is_err(), "se esperaba error de parseo del módulo");
+        assert!(res.is_err(), "expected module parse error");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24797,7 +24800,7 @@ let r = match n {
     async fn from_python_import_math_binds_pyobject() {
         let (env, res) = parse_eval_into_env("from python import math\n").await;
         res.unwrap();
-        let v = env.lock().get("math").expect("math debería estar bindeado");
+        let v = env.lock().get("math").expect("math should be bound");
         assert!(
             matches!(v, Value::PyObject(_)),
             "se esperaba PyObject, fue: {:?}",
@@ -24834,7 +24837,7 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("ModuleNotFoundError"),
-            "mensaje debería citar ModuleNotFoundError, fue: {}",
+            "message should cite ModuleNotFoundError, was: {}",
             err.message,
         );
     }
@@ -24863,7 +24866,7 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("from python import"),
-            "el error debería sugerir la forma canónica, fue: {}",
+            "the error should suggest the canonical form, was: {}",
             err.message,
         );
     }
@@ -24877,7 +24880,7 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("--features python"),
-            "mensaje debería citar el flag de build, fue: {}",
+            "message should cite the build flag, was: {}",
             err.message,
         );
     }
@@ -24937,7 +24940,7 @@ let r = match n {
         match v {
             Value::Result(crate::value::ResultVariant::Ok(inner)) => *inner,
             Value::Result(crate::value::ResultVariant::Err(msg)) => {
-                panic!("esperaba Ok(...), llegó Err({:?})", msg)
+                panic!("expected Ok(...), got Err({:?})", msg)
             }
             other => panic!("esperaba Value::Result, fue {:?}", other),
         }
@@ -25026,10 +25029,10 @@ let r = match n {
             Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
                 Value::Str(s) => assert!(
                     s.contains("ValueError"),
-                    "mensaje del Err debería citar ValueError, fue: {}",
+                    "Err message should cite ValueError, was: {}",
                     s,
                 ),
-                other => panic!("Err debería envolver Str, fue {:?}", other),
+                other => panic!("Err should wrap Str, was {:?}", other),
             },
             other => panic!("esperaba Err(...), fue {:?}", other),
         }
@@ -25053,13 +25056,13 @@ let r = match n {
         let msg = match r {
             Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
                 Value::Str(s) => s,
-                other => panic!("Err debería envolver Str, fue {:?}", other),
+                other => panic!("Err should wrap Str, was {:?}", other),
             },
             other => panic!("esperaba Err(...), fue {:?}", other),
         };
         assert!(
             msg.contains("TypeError"),
-            "mensaje debería ser TypeError de Python, fue: {}",
+            "message should be Python TypeError, was: {}",
             msg,
         );
     }
@@ -25367,7 +25370,7 @@ let r = match n {
         let msg = match s {
             Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
                 Value::Str(s) => s,
-                other => panic!("Err debería envolver Str, fue {:?}", other),
+                other => panic!("Err should wrap Str, was {:?}", other),
             },
             other => panic!("esperaba Err(...), fue {:?}", other),
         };
@@ -25423,7 +25426,7 @@ let r = match n {
             Value::Str(s) => {
                 assert!(
                     s.contains("JSONDecodeError"),
-                    "mensaje del Err debería citar JSONDecodeError, fue: {}",
+                    "Err message should cite JSONDecodeError, was: {}",
                     s,
                 );
             }
@@ -25454,10 +25457,10 @@ let r = match n {
             Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
                 Value::Str(s) => assert!(
                     s.contains("ValueError"),
-                    "propagación con `?` debería preservar el mensaje, fue: {}",
+                    "propagation with `?` should preserve the message, was: {}",
                     s,
                 ),
-                other => panic!("Err debería envolver Str, fue {:?}", other),
+                other => panic!("Err should wrap Str, was {:?}", other),
             },
             other => panic!("esperaba Err(...) propagado por `?`, fue {:?}", other),
         }
@@ -25480,7 +25483,7 @@ let r = match n {
         // `p` is direct Float, NOT Result<Float>.
         assert!(
             matches!(p, Value::Float(_)),
-            "field access NO debería envolver en Result, fue {:?}",
+            "field access should NOT wrap in Result, was {:?}",
             p,
         );
     }
@@ -25770,7 +25773,7 @@ let r = match n {
         let users = env.lock().get("users").unwrap();
         match users {
             Value::List(items_ref) => assert!(items_ref.lock().is_empty()),
-            other => panic!("esperaba List vacía, fue {:?}", other),
+            other => panic!("expected empty List, was {:?}", other),
         }
     }
 
@@ -26349,7 +26352,7 @@ let r = match n {
         assert_eq!(bp.declared_type_name.as_deref(), Some("UserInput"));
         assert!(
             matches!(&bp.declared_type, Some(Value::Type { name, .. }) if name == "UserInput"),
-            "declared_type debería ser Value::Type 'UserInput'",
+            "declared_type should be Value::Type 'UserInput'",
         );
     }
 
@@ -26754,7 +26757,7 @@ let r = match n {
         );
         assert!(
             !err.message.contains("derivado del header"),
-            "no debería mencionar la convención cuando hay alias explícito: {}",
+            "should not mention the convention when there is an explicit alias: {}",
             err.message,
         );
     }
@@ -27646,7 +27649,7 @@ let r = match n {
         let src = "@test fn suma() { assert_eq(2 + 2, 4) }";
         let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(src).await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
         })
         .await;
         assert_eq!(registry.len(), 1);
@@ -27659,7 +27662,7 @@ let r = match n {
         let src = "@test async fn carga() { let x = sleep(0).await }";
         let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(src).await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
         })
         .await;
         assert_eq!(registry.len(), 1);
@@ -27676,7 +27679,7 @@ let r = match n {
         ";
         let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(src).await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
         })
         .await;
         assert_eq!(registry.len(), 3);
@@ -27790,7 +27793,7 @@ let r = match n {
     async fn assert_eq_int_and_float_coerces() {
         // `Value::PartialEq` coerciona Int↔Float. assert_eq lo refleja.
         let (_, res) = parse_eval_into_env("assert_eq(2, 2.0)").await;
-        res.expect("assert_eq(2, 2.0) OK por coerción Int↔Float");
+        res.expect("assert_eq(2, 2.0) OK via Int↔Float coercion");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27834,7 +27837,7 @@ let r = match n {
         // it and returns Null.
         let (_, res) =
             parse_eval_into_env("assert_throws(fn() => assert(false, \"intencional\"))").await;
-        res.expect("assert_throws debería pasar (callback tira)");
+        res.expect("assert_throws should pass (callback throws)");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27898,7 +27901,7 @@ let r = match n {
         let val = env.lock().get("r").expect("var `r` no definida");
         match val {
             Value::List(items) => items.lock().clone(),
-            other => panic!("se esperaba List, recibió {:?}", other),
+            other => panic!("expected List, received {:?}", other),
         }
     }
 
@@ -28137,7 +28140,7 @@ let r = match n {
                 vec!["a".to_string(), "b".to_string(), "c".to_string()]
             );
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28164,7 +28167,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![1, 2, 3]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28180,7 +28183,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert_eq!(items.lock().len(), 0);
         } else {
-            panic!("esperaba List vacía");
+            panic!("expected empty List");
         }
     }
 
@@ -28350,7 +28353,7 @@ let r = match n {
                 vec!["a".to_string(), "b".to_string(), "c".to_string()]
             );
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28363,7 +28366,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert_eq!(items.lock().len(), 4);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28385,10 +28388,10 @@ let r = match n {
                 assert_eq!(parts[0], Value::Str("a".into()));
                 assert_eq!(parts[1], Value::Int(1));
             } else {
-                panic!("esperaba Tuple");
+                panic!("expected Tuple");
             }
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28407,7 +28410,7 @@ let r = match n {
             let a = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
             assert_eq!(a.map(|(_, v)| v.clone()), Some(Value::Int(1)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -28428,7 +28431,7 @@ let r = match n {
             let a = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
             assert_eq!(a.map(|(_, v)| v.clone()), Some(Value::Int(999)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -28480,7 +28483,7 @@ let r = match n {
                 .collect();
             assert_eq!(nums, vec![1, 2, 3, 4]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28496,7 +28499,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert_eq!(items.lock().len(), 3);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28542,7 +28545,7 @@ let r = match n {
                 assert_eq!(nums, vec![1, 3, 5]);
             }
         } else {
-            panic!("esperaba Tuple");
+            panic!("expected Tuple");
         }
     }
 
@@ -28562,7 +28565,7 @@ let r = match n {
             assert_eq!(g[0].0, Value::Str("a".into()));
             assert_eq!(g[0].1, Value::Int(1));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -28582,7 +28585,7 @@ let r = match n {
             assert_eq!(g[0].0, Value::Int(1));
             assert_eq!(g[0].1, Value::Str("b".into()));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -28596,7 +28599,7 @@ let r = match n {
             assert_eq!(items[0], Value::Str("hola".into()));
             assert_eq!(items[1], Value::Str(" mundo".into()));
         } else {
-            panic!("esperaba Tuple");
+            panic!("expected Tuple");
         }
     }
 
@@ -28672,7 +28675,7 @@ let r = match n {
             // (1,10), (1,20), (2,10), (2,20), (3,10), (3,20)
             assert_eq!(nums, vec![11, 21, 12, 22, 13, 23]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28701,7 +28704,7 @@ let r = match n {
             // x odd: 1, 3 → (1,10), (1,20), (3,10), (3,20)
             assert_eq!(nums, vec![10, 20, 30, 60]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -28719,7 +28722,7 @@ let r = match n {
             assert_eq!(g[1], (Value::Int(2), Value::Int(4)));
             assert_eq!(g[3], (Value::Int(4), Value::Int(16)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -28734,7 +28737,7 @@ let r = match n {
             let g = pairs.lock();
             assert_eq!(g.len(), 4); // 6, 7, 8, 9
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -28754,7 +28757,7 @@ let r = match n {
             // is overwritten.
             assert_eq!(g.len(), 3);
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -29130,7 +29133,7 @@ let r = match n {
             // Each acc step: 0+1=1, 1+2=3, 3+3=6, 6+4=10.
             assert_eq!(nums, vec![1, 3, 6, 10]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -29146,7 +29149,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert!(items.lock().is_empty());
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -29162,7 +29165,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert_eq!(items.lock().len(), 3);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -29178,7 +29181,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert!(items.lock().is_empty());
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -29217,7 +29220,7 @@ let r = match n {
                 .map(|(_, v)| v.clone());
             assert_eq!(y_val, Some(Value::Int(12)));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -29335,7 +29338,7 @@ let r = match n {
             // And "par" second (n=2).
             assert_eq!(g[1].0, Value::Str("par".into()));
         } else {
-            panic!("esperaba Map");
+            panic!("expected Map");
         }
     }
 
@@ -29364,7 +29367,7 @@ let r = match n {
             // truncates to min(4, 2) = 2 elements.
             assert_eq!(nums, vec![11, 22]);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -29383,7 +29386,7 @@ let r = match n {
                 let name = g.iter().find(|(k, _)| k == "name").map(|(_, v)| v.clone());
                 assert_eq!(name, Some(Value::Str("Cam".into())));
             } else {
-                panic!("esperaba Instance");
+                panic!("expected Instance");
             }
         } else {
             panic!("esperaba Ok(P)");
@@ -29402,7 +29405,7 @@ let r = match n {
         if let Value::Result(ResultVariant::Err(_)) = v {
             // OK.
         } else {
-            panic!("esperaba Err");
+            panic!("expected Err");
         }
     }
 
@@ -29432,7 +29435,7 @@ let r = match n {
                 vec!["uno".to_string(), "dos".to_string(), "tres".to_string()]
             );
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -29448,7 +29451,7 @@ let r = match n {
         if let Value::List(items) = v {
             assert_eq!(items.lock().len(), 2);
         } else {
-            panic!("esperaba List");
+            panic!("expected List");
         }
     }
 
@@ -30013,7 +30016,7 @@ let r = match n {
         let env = Environment::new();
         register_builtins(&env);
         // `jwt` and `hash` are in the global env as Value::Module.
-        let jwt = env.lock().get("jwt").expect("jwt debería estar bindeado");
+        let jwt = env.lock().get("jwt").expect("jwt should be bound");
         match jwt {
             Value::Module { name, env: jwt_env } => {
                 assert_eq!(name, "jwt");
@@ -30021,9 +30024,9 @@ let r = match n {
                 assert!(jwt_env.lock().get("encode").is_some());
                 assert!(jwt_env.lock().get("decode").is_some());
             }
-            other => panic!("jwt debería ser Value::Module, fue {:?}", other),
+            other => panic!("jwt should be Value::Module, was {:?}", other),
         }
-        let hash = env.lock().get("hash").expect("hash debería estar bindeado");
+        let hash = env.lock().get("hash").expect("hash should be bound");
         match hash {
             Value::Module {
                 name,
@@ -30033,7 +30036,7 @@ let r = match n {
                 assert!(hash_env.lock().get("password").is_some());
                 assert!(hash_env.lock().get("verify").is_some());
             }
-            other => panic!("hash debería ser Value::Module, fue {:?}", other),
+            other => panic!("hash should be Value::Module, was {:?}", other),
         }
     }
 
@@ -30095,11 +30098,11 @@ let r = match n {
                     assert!(
                         msg.to_lowercase().contains("signature")
                             || msg.to_lowercase().contains("invalid"),
-                        "esperaba mención de signature/invalid, fue: {}",
+                        "expected mention of signature/invalid, was: {}",
                         msg
                     );
                 }
-                other => panic!("Err inner debería ser Str, fue {:?}", other),
+                other => panic!("Err inner should be Str, was {:?}", other),
             },
             other => panic!("decode con secret malo debe ser Err, fue {:?}", other),
         }
@@ -30210,7 +30213,7 @@ let r = match n {
         let plain = Value::Str("misma-pass".into());
         let h1 = builtin_hash_password(std::slice::from_ref(&plain)).unwrap();
         let h2 = builtin_hash_password(std::slice::from_ref(&plain)).unwrap();
-        assert_ne!(h1, h2, "hashes deberían diferir por el salt random");
+        assert_ne!(h1, h2, "hashes should differ due to the random salt");
         let v1 = builtin_hash_verify(&[plain.clone(), h1]).unwrap();
         let v2 = builtin_hash_verify(&[plain, h2]).unwrap();
         assert_eq!(v1, Value::Bool(true));
@@ -30307,7 +30310,7 @@ let r = match n {
         // are accessible as builtins.
         let env = Environment::new();
         register_builtins(&env);
-        let auth = env.lock().get("auth").expect("auth debería estar bindeado");
+        let auth = env.lock().get("auth").expect("auth should be bound");
         match auth {
             Value::Module { name, env } => {
                 assert_eq!(name, "auth");
@@ -30322,7 +30325,7 @@ let r = match n {
                     Some(Value::Builtin { .. })
                 ));
             }
-            other => panic!("esperaba Value::Module, recibió {:?}", other),
+            other => panic!("expected Value::Module, received {:?}", other),
         }
     }
 
@@ -30344,12 +30347,12 @@ let r = match n {
         // token is Str with 3 JWT parts.
         match env.get("token").expect("token bindeado") {
             Value::Str(s) => assert_eq!(s.split('.').count(), 3),
-            other => panic!("token debería ser Str, fue {:?}", other),
+            other => panic!("token should be Str, was {:?}", other),
         }
         // pw is PHC Argon2id string.
         match env.get("pw").expect("pw bindeado") {
             Value::Str(s) => assert!(s.starts_with("$argon2id$")),
-            other => panic!("pw debería ser Str, fue {:?}", other),
+            other => panic!("pw should be Str, was {:?}", other),
         }
         assert_eq!(env.get("ok"), Some(Value::Bool(true)));
         assert_eq!(env.get("bad"), Some(Value::Bool(false)));
@@ -30531,7 +30534,7 @@ let r = match n {
             let (env, res) =
                 parse_eval_into_env("@cron(\"*/5 * * * *\")\nfn tick() -> Null { return null }")
                     .await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
             env
         })
         .await;
@@ -30554,7 +30557,7 @@ let r = match n {
                 "@cron(\"*/1 * * * * *\")\nasync fn tick() -> Null { return null }",
             )
             .await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
             env
         })
         .await;
@@ -30596,7 +30599,7 @@ let r = match n {
                  fn h() -> Null { return null }",
             )
             .await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
             env
         })
         .await;
@@ -30631,7 +30634,7 @@ let r = match n {
                  fn h() -> Null { return null }",
             )
             .await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
             env
         })
         .await;
@@ -30652,7 +30655,7 @@ let r = match n {
                  fn h() -> Null { return null }",
             )
             .await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
             env
         })
         .await;
@@ -30672,7 +30675,7 @@ let r = match n {
                  fn h() -> Null { return null }",
             )
             .await;
-            res.expect("evaluación OK");
+            res.expect("evaluation OK");
             env
         })
         .await;
@@ -30729,7 +30732,7 @@ let r = match n {
         // no-op. The fn remains defined in the env normally.
         let (env, res) =
             parse_eval_into_env("@background\nfn send(addr: Str) -> Null { return null }").await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         assert!(matches!(
             env.lock().get("send"),
             Some(Value::Function { .. })
@@ -30748,7 +30751,7 @@ let r = match n {
              let f = spawn(job())",
         )
         .await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         let f = env.lock().get("f").expect("f bindeado");
         assert!(
             matches!(f, Value::Future(_)),
@@ -30771,7 +30774,7 @@ let r = match n {
              let result = caller()",
         )
         .await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         // `caller()` returns a Future because it is async. To check
         // the inner value, we await it in the test.
         let caller_fut = env.lock().get("result").expect("result bindeado");
@@ -30792,7 +30795,7 @@ let r = match n {
              let result = spawn(41)",
         )
         .await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         assert_eq!(env.lock().get("result"), Some(Value::Int(42)));
     }
 
@@ -30812,17 +30815,17 @@ let r = match n {
         // returns `Value::Builtin` for `connect`.
         let env = Environment::new();
         register_builtins(&env);
-        let db_value = env.lock().get("db").expect("módulo db registrado");
+        let db_value = env.lock().get("db").expect("db module registered");
         match db_value {
             Value::Module { name, env: db_env } => {
                 assert_eq!(name, "db");
                 let connect_value = db_env.lock().get("connect");
                 match connect_value {
                     Some(Value::Builtin { name: bname, .. }) => assert_eq!(bname, "connect"),
-                    other => panic!("`db.connect` debería ser Builtin, fue {:?}", other),
+                    other => panic!("`db.connect` should be Builtin, was {:?}", other),
                 }
             }
-            other => panic!("`db` debería ser Module, fue {:?}", other),
+            other => panic!("`db` should be Module, was {:?}", other),
         }
     }
 
@@ -30833,7 +30836,7 @@ let r = match n {
         // .await — here we test the immediate shape.
         let (env, res) =
             parse_eval_into_env("let f = db.connect(\"postgres://nadie@127.0.0.1:1/x\")").await;
-        res.expect("evaluación sin .await debe ser OK");
+        res.expect("evaluation without .await must be OK");
         let f = env.lock().get("f").expect("f bindeado");
         match f {
             Value::Future(_) => {}
@@ -30858,7 +30861,7 @@ let r = match n {
         // URL parse message. Without real Postgres, we do not need a
         // TCP connection — the URL parse fails first.
         let (env, res) = parse_eval_into_env("let r = db.connect(\"mysql://x@h/d\").await").await;
-        res.expect("evaluación + await OK");
+        res.expect("evaluation + await OK");
         let r = env.lock().get("r").expect("r bindeado");
         match r {
             Value::Result(crate::value::ResultVariant::Err(boxed)) => {
@@ -30886,7 +30889,7 @@ let r = match n {
         let (env, res) =
             parse_eval_into_env("let r = db.connect(\"postgres://x@h/d?sslmode=require\").await")
                 .await;
-        res.expect("evaluación + await OK");
+        res.expect("evaluation + await OK");
         let r = env.lock().get("r").expect("r bindeado");
         match r {
             Value::Result(crate::value::ResultVariant::Err(boxed)) => {
@@ -30960,7 +30963,7 @@ let r = match n {
             "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}",
         )
         .await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         let v = env.lock().get("User").expect("User bindeado");
         match v {
             Value::Type {
@@ -30979,7 +30982,7 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn orm_type_without_table_has_no_metadata() {
         let (env, res) = parse_eval_into_env("type Plain { x: Int }").await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         let v = env.lock().get("Plain").unwrap();
         match v {
             Value::Type { table_metadata, .. } => assert!(table_metadata.is_none()),
@@ -31002,7 +31005,7 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("Plain") && err.message.contains("all"),
-            "mensaje esperado sobre método no encontrado: {}",
+            "expected message about method not found: {}",
             err.message
         );
     }
@@ -31291,7 +31294,7 @@ let r = match n {
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
         assert!(
             sql.contains("LIKE") && sql.contains("IN") && sql.contains("AND"),
-            "esperaba composición: {sql}"
+            "expected composition: {sql}"
         );
         // Args: pattern + 2 ints = 3 args.
         assert_eq!(args.len(), 3);
@@ -31591,7 +31594,7 @@ let r = match n {
                     ]
                 );
             }
-            _ => panic!("esperaba Array"),
+            _ => panic!("expected Array"),
         }
     }
 
@@ -31673,7 +31676,7 @@ let r = match n {
              let qb = User.where(fn(u) => u.age > 18)",
         )
         .await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         let qb = env.lock().get("qb").unwrap();
         assert!(matches!(qb, Value::QueryBuilder(_)));
     }
@@ -31823,7 +31826,7 @@ let r = match n {
         let sql = build_select_sql(&s, None);
         assert!(
             !sql.contains("\"posts\""),
-            "el field virtual `posts` no debería estar en el SQL: {sql}"
+            "the virtual field `posts` should not be in the SQL: {sql}"
         );
         assert!(sql.contains("\"id\""));
         assert!(sql.contains("\"name\""));
@@ -31856,7 +31859,7 @@ let r = match n {
              let qb = User.where(fn(u) => u.age > 0).order_by(fn(u) => u.age)",
         )
         .await;
-        res.expect("evaluación OK");
+        res.expect("evaluation OK");
         let qb = env.lock().get("qb").unwrap();
         assert!(matches!(qb, Value::QueryBuilder(_)));
     }
@@ -31901,7 +31904,7 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("bogus_method") && err.message.contains("count"),
-            "esperaba mensaje con método y lista de soportados: {}",
+            "expected message with method and list of supported: {}",
             err.message
         );
     }
