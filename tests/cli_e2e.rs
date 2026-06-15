@@ -28,7 +28,7 @@ fn run_fitz(args: &[&str], cwd: &Path) -> (String, String, i32) {
 }
 
 #[test]
-fn new_crea_estructura_completa_default_cli() {
+fn new_creates_complete_default_cli_structure() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["new", "mi-app", "--no-git"], tmp.path());
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -58,7 +58,7 @@ fn new_crea_estructura_completa_default_cli() {
 }
 
 #[test]
-fn new_con_http_usa_template_http() {
+fn new_with_http_uses_http_template() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["new", "mi-http", "--http", "--no-git"], tmp.path());
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -71,7 +71,7 @@ fn new_con_http_usa_template_http() {
 }
 
 #[test]
-fn new_sin_no_git_inicializa_repo() {
+fn new_without_no_git_initializes_repo() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, _stderr, code) = run_fitz(&["new", "mi-git"], tmp.path());
     assert_eq!(code, 0);
@@ -85,7 +85,7 @@ fn new_sin_no_git_inicializa_repo() {
 }
 
 #[test]
-fn new_con_no_git_no_inicializa_repo() {
+fn new_with_no_git_does_not_initialize_repo() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, _stderr, code) = run_fitz(&["new", "mi-nogit", "--no-git"], tmp.path());
     assert_eq!(code, 0);
@@ -93,7 +93,7 @@ fn new_con_no_git_no_inicializa_repo() {
 }
 
 #[test]
-fn new_aborta_si_carpeta_ya_existe() {
+fn new_aborts_if_folder_already_exists() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("existente")).unwrap();
     let (_stdout, stderr, code) = run_fitz(&["new", "existente", "--no-git"], tmp.path());
@@ -102,7 +102,7 @@ fn new_aborta_si_carpeta_ya_existe() {
 }
 
 #[test]
-fn new_aborta_con_nombre_invalido() {
+fn new_aborts_with_invalid_name() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["new", "Foo", "--no-git"], tmp.path());
     assert_eq!(code, 1);
@@ -114,7 +114,7 @@ fn new_aborta_con_nombre_invalido() {
 }
 
 #[test]
-fn init_usa_nombre_del_directorio_actual() {
+fn init_uses_current_directory_name() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("mi-init");
     std::fs::create_dir_all(&project).unwrap();
@@ -126,7 +126,7 @@ fn init_usa_nombre_del_directorio_actual() {
 }
 
 #[test]
-fn init_con_name_override_ignora_directorio() {
+fn init_with_name_override_ignores_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("Dir-Invalido");
     std::fs::create_dir_all(&project).unwrap();
@@ -139,7 +139,7 @@ fn init_con_name_override_ignora_directorio() {
 }
 
 #[test]
-fn init_aborta_si_manifest_ya_existe() {
+fn init_aborts_if_manifest_already_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("mi-app");
     std::fs::create_dir_all(&project).unwrap();
@@ -150,7 +150,7 @@ fn init_aborta_si_manifest_ya_existe() {
 }
 
 #[test]
-fn init_aborta_si_directorio_tiene_nombre_invalido_sin_override() {
+fn init_aborts_if_directory_has_invalid_name_without_override() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("Dir-Con-Mayusculas");
     std::fs::create_dir_all(&project).unwrap();
@@ -164,7 +164,7 @@ fn init_aborta_si_directorio_tiene_nombre_invalido_sin_override() {
 }
 
 #[test]
-fn programa_generado_por_new_corre_con_fitz_run() {
+fn program_generated_by_new_runs_with_fitz_run() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, _stderr, code) = run_fitz(&["new", "demo-app", "--no-git"], tmp.path());
     assert_eq!(code, 0);
@@ -199,7 +199,7 @@ fn create_project(tmp_root: &Path, name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn run_sin_args_dentro_de_proyecto_ejecuta_bin_main() {
+fn run_without_args_inside_project_executes_bin_main() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "run-test");
     let (stdout, stderr, code) = run_fitz(&["run"], &project);
@@ -211,7 +211,7 @@ fn run_sin_args_dentro_de_proyecto_ejecuta_bin_main() {
 }
 
 #[test]
-fn check_sin_args_dentro_de_proyecto_chequea_bin_main() {
+fn check_without_args_inside_project_checks_bin_main() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "check-test");
     let (stdout, _stderr, code) = run_fitz(&["check"], &project);
@@ -234,7 +234,7 @@ fn run_camina_hacia_arriba_buscando_manifest() {
 }
 
 #[test]
-fn run_con_archivo_explicito_ignora_manifest_y_corre_en_single_file_mode() {
+fn run_with_explicit_file_ignores_manifest_and_runs_in_single_file_mode() {
     // El archivo explícito es de un proyecto ajeno: el cwd está adentro
     // de `walk-test` pero pasamos un .fitz que vive en otro lado.
     let tmp = tempfile::tempdir().unwrap();
@@ -260,7 +260,7 @@ fn run_con_archivo_explicito_ignora_manifest_y_corre_en_single_file_mode() {
 }
 
 #[test]
-fn run_sin_manifest_y_sin_archivo_aborta_con_mensaje_claro() {
+fn run_without_manifest_and_file_aborts_with_clear_message() {
     let tmp = tempfile::tempdir().unwrap();
     // No creamos proyecto: el tempdir está vacío.
     let (_stdout, stderr, code) = run_fitz(&["run"], tmp.path());
@@ -270,7 +270,7 @@ fn run_sin_manifest_y_sin_archivo_aborta_con_mensaje_claro() {
 }
 
 #[test]
-fn check_sin_manifest_y_sin_archivo_aborta() {
+fn check_without_manifest_and_file_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["check"], tmp.path());
     assert_eq!(code, 1);
@@ -278,7 +278,7 @@ fn check_sin_manifest_y_sin_archivo_aborta() {
 }
 
 #[test]
-fn manifest_sin_seccion_bin_aborta_con_mensaje_claro() {
+fn manifest_without_bin_section_aborts_with_clear_message() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
         tmp.path().join("fitz.toml"),
@@ -294,7 +294,7 @@ fn manifest_sin_seccion_bin_aborta_con_mensaje_claro() {
 }
 
 #[test]
-fn manifest_corrupto_aborta_con_mensaje_claro() {
+fn corrupt_manifest_aborts_with_clear_message() {
     let tmp = tempfile::tempdir().unwrap();
     // TOML malformado: cierra una tabla sin abrir.
     std::fs::write(tmp.path().join("fitz.toml"), "this is = = not toml\n").unwrap();
@@ -335,7 +335,7 @@ fn add_path_dep(project_dir: &Path, app_name: &str, dep_name: &str, rel_path: &s
 }
 
 #[test]
-fn check_con_path_dep_emite_lockfile() {
+fn check_with_path_dep_emits_lockfile() {
     let tmp = tempfile::tempdir().unwrap();
     let lib_dir = tmp.path().join("utils-lib");
     let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
@@ -360,7 +360,7 @@ fn check_con_path_dep_emite_lockfile() {
 }
 
 #[test]
-fn check_es_idempotente_sin_re_escribir_lockfile() {
+fn check_is_idempotent_without_rewriting_lockfile() {
     let tmp = tempfile::tempdir().unwrap();
     let lib_dir = tmp.path().join("utils-lib");
     let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
@@ -383,7 +383,7 @@ fn check_es_idempotente_sin_re_escribir_lockfile() {
 }
 
 #[test]
-fn lockfile_se_regenera_cuando_dep_cambia_version() {
+fn lockfile_regenerates_when_dep_changes_version() {
     let tmp = tempfile::tempdir().unwrap();
     let lib_dir = tmp.path().join("utils-lib");
     let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
@@ -409,7 +409,7 @@ fn lockfile_se_regenera_cuando_dep_cambia_version() {
 }
 
 #[test]
-fn proyecto_sin_deps_no_emite_lockfile() {
+fn project_without_deps_does_not_emit_lockfile() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "no-deps");
     let (_stdout, _stderr, code) = run_fitz(&["check"], &project);
@@ -421,7 +421,7 @@ fn proyecto_sin_deps_no_emite_lockfile() {
 }
 
 #[test]
-fn version_corta_aborta_citando_9y5() {
+fn short_version_aborts_citing_9y5() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "ver-app");
     std::fs::write(
@@ -435,7 +435,7 @@ fn version_corta_aborta_citando_9y5() {
 }
 
 #[test]
-fn git_dep_sin_tag_ni_rev_aborta_pidiendo_uno() {
+fn git_dep_without_tag_or_rev_aborts_requesting_one() {
     // Pre-9.y.3.c este test verificaba que git deps eran rechazadas
     // wholesale citando 9.y.3.c. Post-cierre: git deps SÍ se aceptan,
     // pero requieren `tag` o `rev` explícito por reproducibilidad
@@ -458,7 +458,7 @@ fn git_dep_sin_tag_ni_rev_aborta_pidiendo_uno() {
 }
 
 #[test]
-fn path_dep_inexistente_aborta() {
+fn nonexistent_path_dep_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "missing-app");
     add_path_dep(&project, "missing-app", "ghost", "../no-existe");
@@ -468,7 +468,7 @@ fn path_dep_inexistente_aborta() {
 }
 
 #[test]
-fn path_dep_sin_lib_aborta_con_sugerencia() {
+fn path_dep_without_lib_aborts_with_suggestion() {
     let tmp = tempfile::tempdir().unwrap();
     // Dep es un proyecto solo-bin (no library).
     let _ = run_fitz(&["new", "solo-bin", "--no-git"], tmp.path());
@@ -512,7 +512,7 @@ fn setup_dep_project(
 }
 
 #[test]
-fn run_resuelve_from_dep_import_via_dep_registry() {
+fn run_resolves_from_dep_import_via_dep_registry() {
     let tmp = tempfile::tempdir().unwrap();
     let app_dir = setup_dep_project(
         tmp.path(),
@@ -530,7 +530,7 @@ fn run_resuelve_from_dep_import_via_dep_registry() {
 }
 
 #[test]
-fn run_dep_no_referenciada_no_falla_si_no_se_importa() {
+fn unreferenced_run_dep_does_not_fail_if_not_imported() {
     // Setup proyecto con dep en manifest pero main.fitz no la importa.
     // El lockfile se emite igual, el programa corre sin tocar la dep.
     let tmp = tempfile::tempdir().unwrap();
@@ -552,7 +552,7 @@ fn run_dep_no_referenciada_no_falla_si_no_se_importa() {
 }
 
 #[test]
-fn run_local_fitz_no_es_shadoweado_por_archivo_inexistente() {
+fn run_local_fitz_not_shadowed_by_nonexistent_file() {
     // Confirma que el fallback path-relativo sigue funcionando cuando
     // el segment NO matchea ninguna dep. Importer importa un módulo
     // local `utils.fitz` que vive en `<app>/src/`. Sin deps en el
@@ -578,7 +578,7 @@ fn run_local_fitz_no_es_shadoweado_por_archivo_inexistente() {
 }
 
 #[test]
-fn run_dep_shadowea_archivo_local_con_mismo_nombre() {
+fn run_dep_shadows_local_file_with_same_name() {
     // Decisión documentada: si hay `[dependencies] foo = { path = ... }`
     // Y un `src/foo.fitz` local, la dep gana. Verificamos el behavior.
     let tmp = tempfile::tempdir().unwrap();
@@ -704,7 +704,7 @@ fn run_fitz_with_cache(args: &[&str], cwd: &Path, cache_dir: &Path) -> (String, 
 }
 
 #[test]
-fn git_dep_clona_al_cache_y_emite_lockfile_con_commit() {
+fn git_dep_clones_to_cache_and_emits_lockfile_with_commit() {
     let tmp = tempfile::tempdir().unwrap();
     let (app_dir, cache_dir, commit) = setup_git_dep_project(
         tmp.path(),
@@ -741,7 +741,7 @@ fn git_dep_clona_al_cache_y_emite_lockfile_con_commit() {
 }
 
 #[test]
-fn git_dep_reusa_cache_sin_re_clonar() {
+fn git_dep_reuses_cache_without_re_cloning() {
     let tmp = tempfile::tempdir().unwrap();
     let (app_dir, cache_dir, _commit) = setup_git_dep_project(
         tmp.path(),
@@ -785,7 +785,7 @@ fn git_dep_reusa_cache_sin_re_clonar() {
 }
 
 #[test]
-fn git_dep_lockfile_idempotente_si_commit_no_cambia() {
+fn git_dep_lockfile_idempotent_if_commit_does_not_change() {
     let tmp = tempfile::tempdir().unwrap();
     let (app_dir, cache_dir, _commit) = setup_git_dep_project(
         tmp.path(),
@@ -811,7 +811,7 @@ fn git_dep_lockfile_idempotente_si_commit_no_cambia() {
 }
 
 #[test]
-fn git_dep_tag_inexistente_aborta_con_mensaje_de_git() {
+fn git_dep_nonexistent_tag_aborts_with_git_message() {
     let tmp = tempfile::tempdir().unwrap();
     // Crear repo con tag v0.1.0 pero pedir tag v9.9.9 que no existe.
     let lib_dir = tmp.path().join("realib");
@@ -850,7 +850,7 @@ fn git_dep_tag_inexistente_aborta_con_mensaje_de_git() {
 /// dep_registry y compila ambos módulos en un Cargo project unificado.
 /// Test pesado (~3-5s) porque invoca rustc real para 2 archivos `.fitz`.
 #[test]
-fn build_resuelve_from_dep_import_via_dep_registry() {
+fn build_resolves_from_dep_import_via_dep_registry() {
     let tmp = tempfile::tempdir().unwrap();
     let app_dir = setup_dep_project(
         tmp.path(),
@@ -881,7 +881,7 @@ fn build_resuelve_from_dep_import_via_dep_registry() {
 // ---- Fase 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ----
 
 #[test]
-fn add_path_dep_modifica_manifest_y_emite_lockfile() {
+fn add_path_dep_modifies_manifest_and_emits_lockfile() {
     let tmp = tempfile::tempdir().unwrap();
     let lib_dir = tmp.path().join("utils-lib");
     let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
@@ -908,7 +908,7 @@ fn add_path_dep_modifica_manifest_y_emite_lockfile() {
 }
 
 #[test]
-fn add_sin_flags_aborta_pidiendo_path_o_git() {
+fn add_without_flags_aborts_requesting_path_or_git() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "myapp");
     let (_stdout, stderr, code) = run_fitz(&["add", "foo"], &project);
@@ -924,7 +924,7 @@ fn add_sin_flags_aborta_pidiendo_path_o_git() {
 }
 
 #[test]
-fn add_git_sin_tag_ni_rev_aborta_pidiendo_uno() {
+fn add_git_without_tag_or_rev_aborts_requesting_one() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "myapp");
     let (_stdout, stderr, code) = run_fitz(&["add", "foo", "--git", "https://x.com/r"], &project);
@@ -937,7 +937,7 @@ fn add_git_sin_tag_ni_rev_aborta_pidiendo_uno() {
 }
 
 #[test]
-fn add_path_y_git_juntos_aborta_clap_conflict() {
+fn add_path_and_git_together_aborts_with_clap_conflict() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "myapp");
     let (_stdout, stderr, code) = run_fitz(
@@ -949,7 +949,7 @@ fn add_path_y_git_juntos_aborta_clap_conflict() {
 }
 
 #[test]
-fn add_fuera_de_proyecto_aborta_con_mensaje_claro() {
+fn add_outside_project_aborts_with_clear_message() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["add", "foo", "--path", "../x"], tmp.path());
     assert_eq!(code, 1);
@@ -958,7 +958,7 @@ fn add_fuera_de_proyecto_aborta_con_mensaje_claro() {
 }
 
 #[test]
-fn add_sobreescribe_dep_existente() {
+fn add_overwrites_existing_dep() {
     let tmp = tempfile::tempdir().unwrap();
     let _ = run_fitz(&["new", "lib-uno", "--no-git"], tmp.path());
     convert_to_lib(&tmp.path().join("lib-uno"), "lib-uno", "0.1.0");
@@ -986,7 +986,7 @@ fn add_sobreescribe_dep_existente() {
 }
 
 #[test]
-fn remove_dep_existente_quita_y_actualiza_lockfile() {
+fn remove_existing_dep_removes_and_updates_lockfile() {
     let tmp = tempfile::tempdir().unwrap();
     let _ = run_fitz(&["new", "u", "--no-git"], tmp.path());
     convert_to_lib(&tmp.path().join("u"), "u", "0.1.0");
@@ -1011,7 +1011,7 @@ fn remove_dep_existente_quita_y_actualiza_lockfile() {
 }
 
 #[test]
-fn remove_dep_inexistente_aborta() {
+fn remove_nonexistent_dep_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "myapp");
     let (_stdout, stderr, code) = run_fitz(&["remove", "no-existe"], &project);
@@ -1020,7 +1020,7 @@ fn remove_dep_inexistente_aborta() {
 }
 
 #[test]
-fn update_sin_git_deps_reporta_no_op() {
+fn update_without_git_deps_reports_no_op() {
     let tmp = tempfile::tempdir().unwrap();
     let _ = run_fitz(&["new", "u", "--no-git"], tmp.path());
     convert_to_lib(&tmp.path().join("u"), "u", "0.1.0");
@@ -1034,7 +1034,7 @@ fn update_sin_git_deps_reporta_no_op() {
 }
 
 #[test]
-fn update_invalida_cache_de_git_dep_y_re_clona() {
+fn update_invalidates_git_dep_cache_and_re_clones() {
     let tmp = tempfile::tempdir().unwrap();
     // Setup repo git con tag.
     let lib_dir = tmp.path().join("u");
@@ -1088,7 +1088,7 @@ fn update_invalida_cache_de_git_dep_y_re_clona() {
 }
 
 #[test]
-fn update_dep_inexistente_aborta() {
+fn update_nonexistent_dep_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     let _ = run_fitz(&["new", "u", "--no-git"], tmp.path());
     convert_to_lib(&tmp.path().join("u"), "u", "0.1.0");
@@ -1138,7 +1138,7 @@ fn fmt_archivo_explicito_canonicaliza_indent_y_blocks() {
 }
 
 #[test]
-fn fmt_check_idempotente_devuelve_0() {
+fn fmt_check_idempotent_returns_0() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("ok.fitz");
     // Texto ya en forma canónica (blank line obligatoria entre
@@ -1164,7 +1164,7 @@ fn fmt_check_idempotente_devuelve_0() {
 }
 
 #[test]
-fn fmt_check_no_canonico_devuelve_1_sin_modificar() {
+fn fmt_check_non_canonical_returns_1_without_modifying() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("dirty.fitz");
     let dirty = "fn double(n: Int) -> Int { return n * 2 }\n";
@@ -1183,7 +1183,7 @@ fn fmt_check_no_canonico_devuelve_1_sin_modificar() {
 }
 
 #[test]
-fn fmt_no_emite_warning_post_9z1b() {
+fn fmt_does_not_emit_warning_post_9z1b() {
     // Fase 9.z.1.b cerró la deuda de comments — el warning loud
     // del modo write fue removido. Este test bloquea regresiones.
     let tmp = tempfile::tempdir().unwrap();
@@ -1209,7 +1209,7 @@ fn fmt_no_emite_warning_post_9z1b() {
 }
 
 #[test]
-fn fmt_preserva_comments_y_blank_lines() {
+fn fmt_preserves_comments_and_blank_lines() {
     // Fase 9.z.1.b: el round-trip debe ser exacto incluyendo
     // comments y blank lines.
     let tmp = tempfile::tempdir().unwrap();
@@ -1289,7 +1289,7 @@ fn fmt_trailing_comment_seguido_de_bloque_no_inserta_blank_spurio() {
 }
 
 #[test]
-fn fmt_archivo_con_error_de_sintaxis_aborta_sin_escribir() {
+fn fmt_file_with_syntax_error_aborts_without_writing() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("broken.fitz");
     let broken = "let x = (\n"; // paréntesis sin cerrar
@@ -1307,7 +1307,7 @@ fn fmt_archivo_con_error_de_sintaxis_aborta_sin_escribir() {
 }
 
 #[test]
-fn fmt_sin_args_dentro_de_proyecto_descubre_archivos_de_src() {
+fn fmt_without_args_inside_project_discovers_src_files() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "fmt-proj");
 
@@ -1330,7 +1330,7 @@ fn fmt_sin_args_dentro_de_proyecto_descubre_archivos_de_src() {
 /// paquete (NO el stem del fuente). Test pesado (~3s) porque invoca
 /// rustc real adentro de cargo build.
 #[test]
-fn build_sin_args_emite_a_target_release_con_pkg_name() {
+fn build_without_args_emits_to_target_release_with_pkg_name() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "build-target-test");
     let (_stdout, stderr, code) = run_fitz(&["build"], &project);
@@ -1373,7 +1373,7 @@ fn write_file(root: &Path, rel: &str, content: &str) {
 }
 
 #[test]
-fn test_single_file_corre_tests_y_reporta_ok() {
+fn test_single_file_runs_tests_and_reports_ok() {
     let tmp = tempfile::tempdir().unwrap();
     let src = "\
         @test fn suma_funciona() {\n\
@@ -1396,7 +1396,7 @@ fn test_single_file_corre_tests_y_reporta_ok() {
 }
 
 #[test]
-fn test_falla_devuelve_exit_1_con_detalle_left_right() {
+fn test_failure_returns_exit_1_with_left_right_detail() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(
         tmp.path(),
@@ -1414,7 +1414,7 @@ fn test_falla_devuelve_exit_1_con_detalle_left_right() {
 }
 
 #[test]
-fn test_filter_substring_matchea_solo_lo_que_contiene() {
+fn test_filter_substring_matches_only_what_it_contains() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(
         tmp.path(),
@@ -1433,7 +1433,7 @@ fn test_filter_substring_matchea_solo_lo_que_contiene() {
 }
 
 #[test]
-fn test_filter_sin_matches_devuelve_0_tests_pero_exit_0() {
+fn test_filter_without_matches_returns_0_tests_but_exit_0() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(
         tmp.path(),
@@ -1450,7 +1450,7 @@ fn test_filter_sin_matches_devuelve_0_tests_pero_exit_0() {
 }
 
 #[test]
-fn test_async_fn_funciona() {
+fn test_async_fn_works() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(
         tmp.path(),
@@ -1497,7 +1497,7 @@ fn test_manifest_mode_descubre_tests_integration() {
 }
 
 #[test]
-fn test_manifest_mode_solo_lib_sin_tests_carga_lib_inline() {
+fn test_manifest_mode_lib_only_without_tests_loads_lib_inline() {
     // Proyecto solo-lib con `@test` inline, sin `tests/*.fitz`. El
     // runner debe cargar el lib directamente para descubrir esos tests.
     let tmp = tempfile::tempdir().unwrap();
@@ -1558,7 +1558,7 @@ fn test_manifest_no_duplica_tests_de_lib_importada_por_tests_integration() {
 }
 
 #[test]
-fn test_sin_manifest_y_sin_file_aborta_con_mensaje_claro() {
+fn test_without_manifest_and_file_aborts_with_clear_message() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["test"], tmp.path());
     assert_eq!(code, 1);
@@ -1569,7 +1569,7 @@ fn test_sin_manifest_y_sin_file_aborta_con_mensaje_claro() {
 }
 
 #[test]
-fn test_assert_throws_pasa_cuando_callback_tira() {
+fn test_assert_throws_passes_when_callback_throws() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(
         tmp.path(),
@@ -1582,7 +1582,7 @@ fn test_assert_throws_pasa_cuando_callback_tira() {
 }
 
 #[test]
-fn test_archivo_con_error_de_tipos_aborta_antes_de_correr() {
+fn test_file_with_type_errors_aborts_before_running() {
     // Strict checker: si el código no compila, no hay tests que correr.
     let tmp = tempfile::tempdir().unwrap();
     write_file(
@@ -1632,7 +1632,7 @@ fn lint_deny_promueve_a_error_y_exit_1() {
 }
 
 #[test]
-fn lint_suppression_con_allow_silencia() {
+fn lint_suppression_with_allow_silences() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(
         tmp.path(),
@@ -1645,7 +1645,7 @@ fn lint_suppression_con_allow_silencia() {
 }
 
 #[test]
-fn lint_archivo_inexistente_devuelve_exit_1() {
+fn lint_nonexistent_file_returns_exit_1() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["lint", "no_existe.fitz"], tmp.path());
     assert_eq!(code, 1);
@@ -1662,7 +1662,7 @@ fn lint_string_concat_detecta_literales() {
 }
 
 #[test]
-fn lint_codigo_limpio_no_emite_findings() {
+fn lint_clean_code_does_not_emit_findings() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(
         tmp.path(),
@@ -1694,7 +1694,7 @@ fn lint_useless_match_un_solo_arm_catchall() {
 // =================================================================
 
 #[test]
-fn cap_16b_ejemplo_greeter_corre_y_genera_lockfile() {
+fn cap_16b_greeter_example_runs_and_generates_lockfile() {
     // Reproducimos `examples/guide/16b-pkg-manager/` en tempdir
     // para que el test no toque el repo. Lockfile generado vive en
     // el tempdir y se descarta al cerrar.
@@ -1818,7 +1818,7 @@ fn cap_16b_fitz_build_compila_greeter_a_binario_nativo() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn py_stubs_class_basica_emite_type_fitz() {
+fn py_stubs_basic_class_emits_fitz_type() {
     let tmpdir = tempfile::tempdir().unwrap();
     let stub_path = tmpdir.path().join("user.pyi");
     std::fs::write(
@@ -1884,7 +1884,7 @@ fn py_stubs_out_a_archivo() {
 }
 
 #[test]
-fn py_stubs_archivo_inexistente_es_error() {
+fn py_stubs_nonexistent_file_is_error() {
     let tmpdir = tempfile::tempdir().unwrap();
     let bogus = tmpdir.path().join("nope.pyi");
     let (_stdout, stderr, code) = run_fitz(&["py-stubs", bogus.to_str().unwrap()], tmpdir.path());
@@ -1937,7 +1937,7 @@ fn make_docker_project(tmp: &Path, pkg_name: &str, main_fitz: &str) -> std::path
 }
 
 #[test]
-fn docker_init_cli_puro_escribe_tres_archivos_sin_expose_ni_db() {
+fn docker_init_pure_cli_writes_three_files_without_expose_or_db() {
     let tmp = tempfile::tempdir().unwrap();
     let project = make_docker_project(tmp.path(), "demo-cli", "print(\"hola\")\n");
 
@@ -1974,7 +1974,7 @@ fn docker_init_cli_puro_escribe_tres_archivos_sin_expose_ni_db() {
 }
 
 #[test]
-fn docker_init_http_con_server_emite_expose_y_ports() {
+fn docker_init_http_with_server_emits_expose_and_ports() {
     let tmp = tempfile::tempdir().unwrap();
     let main_fitz = "@get(\"/\")\nfn root() => \"ok\"\n\n@server(8080)\nfn main() => 0\n";
     let project = make_docker_project(tmp.path(), "myhttp", main_fitz);
@@ -1991,7 +1991,7 @@ fn docker_init_http_con_server_emite_expose_y_ports() {
 }
 
 #[test]
-fn docker_init_con_db_emite_postgres_y_database_url() {
+fn docker_init_with_db_emits_postgres_and_database_url() {
     let tmp = tempfile::tempdir().unwrap();
     let main_fitz = "\
 @get(\"/users\")
@@ -2018,7 +2018,7 @@ fn main() => 0
 }
 
 #[test]
-fn docker_init_skipea_archivos_existentes_y_sugiere_force() {
+fn docker_init_skips_existing_files_and_suggests_force() {
     let tmp = tempfile::tempdir().unwrap();
     let project = make_docker_project(tmp.path(), "demo-skip", "print(\"hola\")\n");
     std::fs::write(project.join("Dockerfile"), "viejo").unwrap();
@@ -2034,7 +2034,7 @@ fn docker_init_skipea_archivos_existentes_y_sugiere_force() {
 }
 
 #[test]
-fn docker_init_force_sobrescribe_archivos_existentes() {
+fn docker_init_force_overwrites_existing_files() {
     let tmp = tempfile::tempdir().unwrap();
     let project = make_docker_project(tmp.path(), "demo-force", "print(\"hola\")\n");
     std::fs::write(project.join("Dockerfile"), "viejo").unwrap();
@@ -2047,7 +2047,7 @@ fn docker_init_force_sobrescribe_archivos_existentes() {
 }
 
 #[test]
-fn docker_init_sin_manifest_aborta_con_mensaje_claro() {
+fn docker_init_without_manifest_aborts_with_clear_message() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["docker", "init"], tmp.path());
     assert_ne!(code, 0);
@@ -2081,7 +2081,7 @@ fn docker_init_uses_python_reporta_runtime_fallback() {
 }
 
 #[test]
-fn docker_init_uses_cron_emite_restart_unless_stopped() {
+fn docker_init_uses_cron_emits_restart_unless_stopped() {
     let tmp = tempfile::tempdir().unwrap();
     let main_fitz = "@cron(\"0 * * * *\")\nfn limpiar() => 0\n";
     let project = make_docker_project(tmp.path(), "scheduler", main_fitz);
@@ -2095,7 +2095,7 @@ fn docker_init_uses_cron_emite_restart_unless_stopped() {
 }
 
 #[test]
-fn docker_init_python_y_server_emite_healthcheck_http_en_compose() {
+fn docker_init_python_and_server_emits_http_healthcheck_in_compose() {
     let tmp = tempfile::tempdir().unwrap();
     let main_fitz = "\
 from python import os
@@ -2118,7 +2118,7 @@ fn main() => 0
 }
 
 #[test]
-fn docker_init_distroless_y_server_no_emite_healthcheck_pero_comentario_claro() {
+fn docker_init_distroless_and_server_does_not_emit_healthcheck_but_clear_comment() {
     let tmp = tempfile::tempdir().unwrap();
     let main_fitz = "@get(\"/\")\nfn root() => \"ok\"\n\n@server(3000)\nfn main() => 0\n";
     let project = make_docker_project(tmp.path(), "api", main_fitz);
@@ -2134,7 +2134,7 @@ fn docker_init_distroless_y_server_no_emite_healthcheck_pero_comentario_claro() 
 }
 
 #[test]
-fn docker_build_sin_dockerfile_aborta_con_sugerencia() {
+fn docker_build_without_dockerfile_aborts_with_suggestion() {
     let tmp = tempfile::tempdir().unwrap();
     let project = make_docker_project(tmp.path(), "no-dockerfile", "print(\"hola\")\n");
     // NO corremos `docker init` primero — no debería haber Dockerfile.
@@ -2148,7 +2148,7 @@ fn docker_build_sin_dockerfile_aborta_con_sugerencia() {
 }
 
 #[test]
-fn docker_build_sin_manifest_aborta() {
+fn docker_build_without_manifest_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["docker", "build"], tmp.path());
     assert_ne!(code, 0);
@@ -2163,7 +2163,7 @@ fn docker_build_sin_manifest_aborta() {
 // =================================================================
 
 #[test]
-fn deploy_docker_sin_dockerfile_aborta_con_sugerencia() {
+fn deploy_docker_without_dockerfile_aborts_with_suggestion() {
     let tmp = tempfile::tempdir().unwrap();
     let project = make_docker_project(tmp.path(), "no-dockerfile", "print(\"hola\")\n");
 
@@ -2179,7 +2179,7 @@ fn deploy_docker_sin_dockerfile_aborta_con_sugerencia() {
 }
 
 #[test]
-fn deploy_compose_sin_compose_file_aborta_con_sugerencia() {
+fn deploy_compose_without_compose_file_aborts_with_suggestion() {
     let tmp = tempfile::tempdir().unwrap();
     let project = make_docker_project(tmp.path(), "no-compose", "print(\"hola\")\n");
 
@@ -2194,7 +2194,7 @@ fn deploy_compose_sin_compose_file_aborta_con_sugerencia() {
 }
 
 #[test]
-fn deploy_docker_sin_manifest_aborta() {
+fn deploy_docker_without_manifest_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["deploy", "docker"], tmp.path());
     assert_ne!(code, 0);
@@ -2205,7 +2205,7 @@ fn deploy_docker_sin_manifest_aborta() {
 }
 
 #[test]
-fn deploy_compose_sin_manifest_aborta() {
+fn deploy_compose_without_manifest_aborts() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["deploy", "compose"], tmp.path());
     assert_ne!(code, 0);
