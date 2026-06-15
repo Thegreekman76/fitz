@@ -4265,7 +4265,7 @@ type Plain {
     }
 
     #[test]
-    fn diff_default_idempotente_case_insensitive() {
+    fn diff_default_idempotent_case_insensitive() {
         // PG returns `now()` lowercase; the user passed `NOW()`.
         // The diff must be empty (idempotent).
         let current = Schema {
@@ -4308,7 +4308,7 @@ type Plain {
     }
 
     #[test]
-    fn diff_default_idempotente_strip_pg_cast() {
+    fn diff_default_idempotent_strip_pg_cast() {
         // PG returns `'public'::text` for Str literals; the user
         // passed `'public'`. The diff must be empty.
         let current = Schema {
@@ -4448,7 +4448,7 @@ type Plain {
     }
 
     #[test]
-    fn split_up_down_seccion_down_vacia_es_none() {
+    fn split_up_down_empty_down_section_is_none() {
         let raw = "-- UP\nA;\n-- DOWN\n   \n  \n";
         let (up, down) = split_up_down(raw);
         assert!(up.contains("A;"));
@@ -4991,7 +4991,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_text_schema_vacio_mensaje_claro() {
+    fn format_inspection_text_empty_schema_clear_message() {
         let s = Schema::default();
         let text = format_inspection_text(&s, None, None);
         assert!(text.starts_with("Schema: public\n"));
@@ -5002,7 +5002,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_text_filter_table_inexistente_mensaje_claro() {
+    fn format_inspection_text_filter_nonexistent_table_clear_message() {
         let s = inspect_schema_fixture();
         let text = format_inspection_text(&s, None, Some("nonexistent"));
         assert!(

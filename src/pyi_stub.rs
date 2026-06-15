@@ -1070,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn mapper_nominal_se_registra_en_env() {
+    fn mapper_nominal_registers_in_env() {
         let mut env = TypeEnv::new();
         let t = StubType::Named("User".into());
         let fitz_ty = stub_type_to_fitz_type(&t, &mut env);

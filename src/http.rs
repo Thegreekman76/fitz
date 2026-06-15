@@ -7886,7 +7886,7 @@ mod tests {
     }
 
     #[test]
-    fn mw_wrap_classifier_param_sin_anotacion_es_post() {
+    fn mw_wrap_classifier_param_without_annotation_is_post() {
         // No annotation → default Post (preserves historical
         // semantics).
         use crate::ast::Param;
