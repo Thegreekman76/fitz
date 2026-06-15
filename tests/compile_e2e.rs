@@ -221,7 +221,7 @@ fn assert_lines(stdout: &str, expected: &[&str]) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn criterio_de_exito_hello_world_compilado() {
+fn hello_world_success_criterion_compiled() {
     let src = "\
 let name = \"Fitz\"
 let x = 10 + 5
@@ -236,7 +236,7 @@ print(double(x))
 }
 
 #[test]
-fn if_else_funciona_en_binario() {
+fn if_else_works_in_binary() {
     let src = "\
 let x = 5
 if (x > 0) { print(\"pos\") } else { print(\"neg\") }
@@ -247,7 +247,7 @@ if (x > 0) { print(\"pos\") } else { print(\"neg\") }
 }
 
 #[test]
-fn while_y_reasignacion_funcionan_en_binario() {
+fn while_and_reassignment_work_in_binary() {
     let src = "\
 let n = 0
 while (n < 3) {
@@ -261,7 +261,7 @@ while (n < 3) {
 }
 
 #[test]
-fn for_in_range_funciona_en_binario() {
+fn for_in_range_works_in_binary() {
     let src = "\
 for i in 0..4 {
     print(i)
@@ -273,7 +273,7 @@ for i in 0..4 {
 }
 
 #[test]
-fn coercion_int_a_float_funciona_en_binario() {
+fn coercion_int_to_float_works_in_binary() {
     let src = "\
 let pi: Float = 3
 let r: Float = pi * 2.0
@@ -287,7 +287,7 @@ print(r)
 }
 
 #[test]
-fn recursion_funciona_en_binario() {
+fn recursion_works_in_binary() {
     let src = "\
 fn fact(n: Int) -> Int {
     if (n <= 1) { return 1 }
@@ -305,7 +305,7 @@ print(fact(5))
 // ---------------------------------------------------------------------------
 
 #[test]
-fn instancia_basica_round_trip_compilado() {
+fn basic_instance_round_trip_compiled() {
     let src = "\
 type User { id: Int, name: Str }
 let u = User { id: 1, name: \"Fitz\" }
@@ -331,7 +331,7 @@ print(c.debug)
 }
 
 #[test]
-fn nullable_omitido_imprime_null_en_binario() {
+fn omitted_nullable_prints_null_in_binary() {
     let src = "\
 type User { id: Int, email: Str? }
 let u = User { id: 1 }
@@ -343,7 +343,7 @@ print(u.email)
 }
 
 #[test]
-fn field_mutation_visible_via_alias_compilado() {
+fn field_mutation_visible_via_alias_compiled() {
     // Semántica de referencia compartida: mutar a través de un
     // alias se ve en la variable original. Mismo modelo que el
     // intérprete (Rc<RefCell<>>).
@@ -361,7 +361,7 @@ print(b.name)
 }
 
 #[test]
-fn fn_que_muta_param_refleja_afuera_compilado() {
+fn fn_that_mutates_param_reflects_outside_compiled() {
     let src = "\
 type User { name: Str }
 fn rename(u: User, n: Str) {
@@ -377,7 +377,7 @@ print(u.name)
 }
 
 #[test]
-fn print_instance_formato_canonico_compilado() {
+fn print_instance_canonical_format_compiled() {
     // El Display de `UserData` debe reproducir el formato del
     // intérprete: `User { id: 1, name: "Fitz", email: null }`.
     let src = "\
@@ -391,7 +391,7 @@ print(u)
 }
 
 #[test]
-fn igualdad_estructural_entre_instancias_compilado() {
+fn structural_equality_between_instances_compiled() {
     // Dos instancias con los mismos campos comparan true; con
     // un campo distinto, false. Recursa adentro de campos
     // nominales anidados gracias al derive(PartialEq) de Rust
@@ -415,7 +415,7 @@ print(a1 != c)
 }
 
 #[test]
-fn tipos_anidados_round_trip_compilado() {
+fn nested_types_round_trip_compiled() {
     let src = "\
 type User { name: Str }
 type Order { id: Int, user: User? }
@@ -440,7 +440,7 @@ print(o.user)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn if_como_expresion_con_else_compilado() {
+fn if_as_expression_with_else_compiled() {
     let src = "\
 let active = true
 let status = if (active) { \"on\" } else { \"off\" }
@@ -452,7 +452,7 @@ print(status)
 }
 
 #[test]
-fn if_else_if_chain_como_expresion_compilado() {
+fn if_else_if_chain_as_expression_compiled() {
     let src = "\
 let n = -3
 let sign = if (n > 0) { \"positivo\" } else if (n < 0) { \"negativo\" } else { \"cero\" }
@@ -464,7 +464,7 @@ print(sign)
 }
 
 #[test]
-fn if_expresion_bloque_multilinea_compilado() {
+fn if_expression_multiline_block_compiled() {
     let src = "\
 let total = if (true) {
     let a = 10
@@ -481,7 +481,7 @@ print(total)
 }
 
 #[test]
-fn if_expresion_unifica_int_y_float_compilado() {
+fn if_expression_unifies_int_and_float_compiled() {
     let src = "\
 let n = 5
 let r = if (n > 0) { 1 } else { 2.5 }
@@ -499,7 +499,7 @@ print(r)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn str_len_chars_unicode_compilado() {
+fn str_len_chars_unicode_compiled() {
     let src = "\
 let s = \"Chaltén\"
 print(s.len())
@@ -511,7 +511,7 @@ print(s.len())
 }
 
 #[test]
-fn str_upper_lower_round_trip_compilado() {
+fn str_upper_lower_round_trip_compiled() {
     let src = "\
 let s = \"Hola Mundo\"
 print(s.upper())
@@ -528,7 +528,7 @@ print(s.upper().lower())
 // ---------------------------------------------------------------------------
 
 #[test]
-fn build_aborta_con_errores_de_tipo_strict() {
+fn build_aborts_with_strict_type_errors() {
     let stderr = build_expect_fail(
         "strict-type-error",
         "let x: Int = \"no soy int\"\nprint(x)\n",
@@ -545,7 +545,7 @@ fn build_aborta_con_errores_de_tipo_strict() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn lista_basica_push_len_iteracion_compilado() {
+fn basic_list_push_len_iteration_compiled() {
     let src = "\
 let xs: List<Int> = [1, 2, 3]
 print(xs)
@@ -566,7 +566,7 @@ for v in xs {
 }
 
 #[test]
-fn lista_indexing_y_pop_compilado() {
+fn list_indexing_and_pop_compiled() {
     let src = "\
 let xs: List<Int> = [10, 20, 30]
 print(xs[0])
@@ -581,7 +581,7 @@ print(xs)
 }
 
 #[test]
-fn mapa_basico_has_keys_values_len_compilado() {
+fn basic_map_has_keys_values_len_compiled() {
     let src = "\
 let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}
 print(m)
@@ -609,7 +609,7 @@ print(m.values())
 }
 
 #[test]
-fn lista_de_instancias_con_map_filter_y_alias_compilado() {
+fn list_of_instances_with_map_filter_and_alias_compiled() {
     // Reproduce un fragmento del cap 13 (sin `find`, que llega en 5b.4).
     // Cubre: lista de Nominal, push, map con FnExpr→Str, filter con
     // FnExpr→Bool y método encadenado `.lower()`, mutación via alias
@@ -644,7 +644,7 @@ print(usuarios)
 }
 
 #[test]
-fn chain_de_metodos_funciona_compilado() {
+fn method_chain_works_compiled() {
     // `.map(...).map(...)` y `.filter(...).map(...)` — los métodos de
     // List devuelven Rc<RefCell<Vec<_>>>, así que se pueden encadenar
     // como cualquier expresión. Ojo: cada método toma el receptor por
@@ -660,7 +660,7 @@ print(resultado)
 }
 
 #[test]
-fn lista_de_floats_con_int_promueve_a_float_compilado() {
+fn list_of_floats_with_int_promotes_to_float_compiled() {
     // El lub de items hace que `[1, 2.5, 3]` sea `List<Float>` y los
     // Int se inserten como `(N as f64)`.
     let src = "\
@@ -674,7 +674,7 @@ print(xs)
 }
 
 #[test]
-fn lista_heterogenea_aborta_build() {
+fn heterogeneous_list_aborts_build() {
     // F13 cerrado (heterogéneos `Int/Float/Str/Bool/Null/Bytes/
     // Nominal` cubiertos con `__FitzValue` tagged runtime) — la
     // lista `[1, "dos"]` SÍ compila ahora y produce output
@@ -688,7 +688,7 @@ fn lista_heterogenea_aborta_build() {
 }
 
 #[test]
-fn async_fn_con_sleep_compilable_y_correcta() {
+fn async_fn_with_sleep_compilable_and_correct() {
     // Fase 6.6: async fn Fitz con `sleep(...).await` adentro compila
     // a binario nativo y corre con tokio runtime current_thread.
     // El programa NO usa `.await` top-level (el checker lo prohíbe);
@@ -719,7 +719,7 @@ fn async_fn_con_sleep_compilable_y_correcta() {
 // ejecución del binario.
 
 #[test]
-fn build_aborta_si_codegen_no_soporta_feature() {
+fn build_aborts_if_codegen_does_not_support_feature() {
     // 5b.6 abrió @get/@post/etc., F11 abrió state HTTP compartido.
     // La feature que apuntamos acá pasa a ser **decorator HTTP custom
     // sobre `fn main`** — el codegen lo rechaza con mensaje claro
@@ -758,7 +758,7 @@ fn h() -> Str => \"ok\"
 }
 
 #[test]
-fn http_mw3_middleware_short_circuita_con_401() {
+fn http_mw3_middleware_short_circuits_with_401() {
     // Middleware corta con 401 — handler NO se invoca.
     let src = "\
 fn auth(req: Request) {
@@ -780,7 +780,7 @@ fn h() -> Str => \"NO DEBERIA APARECER\"
 }
 
 #[test]
-fn http_mw3_cors_preflight_options_devuelve_204_con_headers() {
+fn http_mw3_cors_preflight_options_returns_204_with_headers() {
     let src = "\
 @server(43372)
 fn main() => 0
@@ -811,7 +811,7 @@ fn list_items() -> Str => \"[]\"
 }
 
 #[test]
-fn r_bug_options_preflight_duplicado_en_fitz_build_paridad_con_fitz_run() {
+fn r_bug_options_preflight_duplicate_in_fitz_build_parity_with_fitz_run() {
     // Regresión del bug "Overlapping method route. Handler for `OPTIONS
     // /tasks` already exists" (2026-05-22). Cuando varios handlers
     // comparten path con CORS, `fitz build` paniqueaba en boot del
@@ -898,7 +898,7 @@ fn h() -> Str => \"ok\"
 }
 
 #[test]
-fn http_q3_cors_set_omite_origin_si_request_no_matchea() {
+fn http_q3_cors_set_omits_origin_if_request_does_not_match() {
     let src = "\
 @server(43381)
 fn main() => 0
@@ -1165,7 +1165,7 @@ fn build_spawn_request_raw(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn result_ok_err_match_completo_compilado() {
+fn result_ok_err_complete_match_compiled() {
     // Cap 14 entero adaptado: `divide` retorna Result; consumimos los
     // dos resultados con `match` Ok/Err. La salida debe matchear
     // bit-a-bit lo que produce el intérprete.
@@ -1193,7 +1193,7 @@ match divide(10, 0) {
 }
 
 #[test]
-fn try_operator_propaga_err_compilado() {
+fn try_operator_propagates_err_compiled() {
     // `?` adentro de fn `Result<T>` propaga el Err. Replicamos el
     // segundo bloque del cap 14: find_user / describe_user.
     let src = "\
@@ -1227,7 +1227,7 @@ match describe_user(42) {
 }
 
 #[test]
-fn list_find_devuelve_result_y_se_consume_con_match_compilado() {
+fn list_find_returns_result_and_consumes_with_match_compiled() {
     // Cap 13 con find: `.find` devuelve Ok(item) o Err. Match Ok/Err.
     let src = "\
 type User { id: Int, name: Str }
@@ -1252,7 +1252,7 @@ match nadie {
 }
 
 #[test]
-fn map_get_devuelve_result_con_mensaje_compilado() {
+fn map_get_returns_result_with_message_compiled() {
     // `m.get(k)` con clave faltante: Err con mensaje "key not found: <k>"
     // — formato idéntico al intérprete. Importante: la clave se formatea
     // con Display (Value), no inline — Str va SIN comillas en el mensaje.
@@ -1273,7 +1273,7 @@ match m.get(\"z\") {
 }
 
 #[test]
-fn print_de_result_compilado_matchea_interprete() {
+fn print_of_result_compiled_matches_interpreter() {
     // `print(Ok(v))` y `print(Err(e))` deben producir `Ok(42)` y
     // `Err("texto")` (Err con comillas dobles) bit-a-bit.
     let src = "\
@@ -1376,7 +1376,7 @@ fn build_expect_fail_multi(
 }
 
 #[test]
-fn from_import_type_y_fn_compilado() {
+fn from_import_type_and_fn_compiled() {
     // Reproduce el patrón de `examples/guide/16-modulos.fitz`:
     // - `import utils` expone `utils.greet(...)` como namespace.
     // - `from utils import User` trae el tipo al scope para
@@ -1402,7 +1402,7 @@ type User { id: Int, name: Str }
 }
 
 #[test]
-fn from_import_const_str_compilado() {
+fn from_import_const_str_compiled() {
     // `from utils import PREFIX` trae una constante de Str al scope.
     let main = "\
 from utils import PREFIX
@@ -1415,7 +1415,7 @@ print(PREFIX)
 }
 
 #[test]
-fn import_namespace_con_fn_solo_compilado() {
+fn import_namespace_with_fn_only_compiled() {
     // `import utils` y luego `utils.greet(...)` sin importar nada
     // específico. El namespace queda disponible vía path Rust.
     let main = "\
@@ -1430,7 +1430,7 @@ print(utils.greet(\"Patagonia\"))
 }
 
 #[test]
-fn from_import_type_con_default_referencia_const_del_modulo() {
+fn from_import_type_with_default_references_module_const() {
     // PreF8.3: el `type User` del módulo tiene un default
     // `id: Int = MAX` donde `MAX` es una const del propio módulo.
     // El importer NO importa `MAX`, solo `User`. Pre-PreF8.3 el
@@ -1456,7 +1456,7 @@ type User { id: Int = MAX, name: Str = HELLO }
 }
 
 #[test]
-fn import_namespace_con_alias_compila() {
+fn import_namespace_with_alias_compiles() {
     // PreF8.4: `import utils as u` y luego `u.greet(...)`. El alias
     // queda como binding local; el módulo se carga normalmente.
     let main = "\
@@ -1471,7 +1471,7 @@ print(u.greet(\"Fitz\"))
 }
 
 #[test]
-fn from_import_con_alias_simple_compila() {
+fn from_import_with_simple_alias_compiles() {
     // PreF8.4: `from utils import greet as g` y `g(...)`.
     let main = "\
 from utils import greet as g
@@ -1503,7 +1503,7 @@ print(p)
 }
 
 #[test]
-fn from_import_alias_de_const_no_choca_con_let_local() {
+fn from_import_const_alias_does_not_collide_with_local_let() {
     // PreF8.4 — caso para el que el alias es útil: el importer
     // tiene una `let PREFIX = "local"` y necesita la `PREFIX` del
     // módulo bajo otro nombre. Sin alias chocarían en el codegen
@@ -1523,7 +1523,7 @@ print(REMOTE)
 }
 
 #[test]
-fn modulo_inexistente_aborta_build() {
+fn nonexistent_module_aborts_build() {
     let stderr = build_expect_fail_multi("module-not-found", "import inexistente\nprint(0)\n", &[]);
     assert!(
         (stderr.contains("module") && stderr.contains("not found"))
@@ -1534,7 +1534,7 @@ fn modulo_inexistente_aborta_build() {
 }
 
 #[test]
-fn modulo_con_import_propio_compila_via_import_transitivo() {
+fn module_with_own_import_compiles_via_transitive_import() {
     // F15: imports transitivos ahora compilan. Un módulo cargado puede
     // tener su propio `import` que el codegen sigue recursivamente.
     let main = "\
@@ -1583,7 +1583,7 @@ fn greet(name: Str) -> Str => \"{PREFIX}{name}\"
 }
 
 #[test]
-fn f15_ciclo_de_imports_transitivos_aborta_con_error_claro() {
+fn f15_transitive_import_cycle_aborts_with_clear_error() {
     // F15: ciclo de imports detectado por el loader del codegen
     // (paralelo al evaluator). a → b → a debe abortar el build.
     let main = "\
@@ -1608,7 +1608,7 @@ fn y() -> Int => 2
 }
 
 #[test]
-fn f15_import_transitivo_con_type_compartido() {
+fn f15_transitive_import_with_shared_type() {
     // F15: un type definido en C, usado por B, expuesto via fn de A.
     // El codegen del módulo A necesita conocer la sig de `User` para
     // que `from c import User` resuelva al `pub fn` que retorna.
@@ -1634,7 +1634,7 @@ fn make_user(id: Int) -> User => User { id: id }
 // ---------------------------------------------------------------------------
 
 #[test]
-fn f14_modulo_let_const_eval_compila_y_devuelve_valor_inlineado() {
+fn f14_module_let_const_eval_compiles_and_returns_inlined_value() {
     // Const-eval: `let X = 60 * 60` y `let Y = X / 36`.
     // El segundo no es const-eval estricto (referencia un Ident), pero
     // F14 lo emite como accessor fn — el call site `utils.Y` se
@@ -1654,7 +1654,7 @@ let MAX: Int = SECONDS / 36
 }
 
 #[test]
-fn f14_modulo_let_runtime_str_concat_compila() {
+fn f14_module_let_runtime_str_concat_compiles() {
     // Str concat no es const-eval (Rust no acepta `String + String`
     // en const). F14 lo emite como `pub fn GREETING() -> String`,
     // el call site `utils.GREETING` se traduce a `utils::GREETING()`.
@@ -1669,7 +1669,7 @@ print(utils.GREETING)
 }
 
 #[test]
-fn f14_modulo_let_runtime_struct_lit_via_fn_call() {
+fn f14_module_let_runtime_struct_lit_via_fn_call() {
     // RHS = fn call que retorna instancia. F14 emite accessor fn que
     // re-evalúa la RHS en cada referencia.
     let main = "\
@@ -1814,7 +1814,7 @@ fn http_get_simple_responde_200_y_body() {
 }
 
 #[test]
-fn http_get_con_path_param_int() {
+fn http_get_with_path_param_int() {
     let src = "@server(43211)\nfn main() => 0\n\
                @get(\"/double/{n}\") fn double(n: Int) -> Int => n * 2\n";
     let (status, body) =
@@ -1824,7 +1824,7 @@ fn http_get_con_path_param_int() {
 }
 
 #[test]
-fn http_async_handler_con_sleep_responde_200() {
+fn http_async_handler_with_sleep_responds_200() {
     // Fase 6.6: handler `async fn` con `sleep(...).await` adentro.
     // El wrapper de axum await-ea el future del handler antes de
     // serializar el resultado. End-to-end con tokio current_thread.
@@ -2061,7 +2061,7 @@ fn uc_http_post_urlencoded_parsea_a_map_str_str() {
 }
 
 #[test]
-fn uc_http_post_urlencoded_con_url_encoding() {
+fn uc_http_post_urlencoded_with_url_encoding() {
     // URL-decoding: `+` → espacio, `%20` → espacio.
     let src = "@server(43241)\nfn main() => 0\n\
                @post(\"/echo\") fn echo(body: Map<Str, Str>) -> Map<Str, Str> => body\n";
@@ -2083,7 +2083,7 @@ fn uc_http_post_urlencoded_con_url_encoding() {
 }
 
 #[test]
-fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
+fn ha_http_content_type_text_plain_is_415_with_clear_msg() {
     // Mini-tanda HA: el msg del 415 cubre los formatos no soportados.
     // Mini-tanda MP-Build — multipart ya es soportado por el codegen
     // también (paridad bit-a-bit con `fitz run`). Probamos con
@@ -2124,7 +2124,7 @@ fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
+fn dz_division_int_by_zero_compiles_and_panics_with_aligned_msg() {
     // Pre-DZ: `print(10 / 0)` rechaza rustc con `unconditional_panic`.
     // Post-DZ: compila y panica en runtime con el mismo msg que el
     // intérprete ("division by zero").
@@ -2166,7 +2166,7 @@ fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
 }
 
 #[test]
-fn dz_division_float_por_cero_compila_y_panica_con_msg_alineado() {
+fn dz_division_float_by_zero_compiles_and_panics_with_aligned_msg() {
     // T2 (v0.10.13) — unique stem.
     let stem = "dz_float";
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
@@ -2196,7 +2196,7 @@ fn dz_division_float_por_cero_compila_y_panica_con_msg_alineado() {
 }
 
 #[test]
-fn ct_comparar_int_vs_str_compila_y_devuelve_false() {
+fn ct_compare_int_vs_str_compiles_and_returns_false() {
     // `1 == "1"` y `1 != "1"` ahora compilan a literal false/true.
     let src = "print(1 == \"1\")\nprint(1 != \"1\")\nprint(true == 0)\n";
     let (stdout, exit) = build_and_run("ct-incompat", src);
@@ -2205,7 +2205,7 @@ fn ct_comparar_int_vs_str_compila_y_devuelve_false() {
 }
 
 #[test]
-fn ct_paridad_bit_a_bit_run_vs_build_comparaciones_incompatibles() {
+fn ct_bit_for_bit_parity_run_vs_build_incompatible_comparisons() {
     // Paridad bit-a-bit `fitz run` ↔ `fitz build` para `==`/`!=`
     // entre tipos primitivos incompatibles.
     // T2 (v0.10.13) — unique stem.
@@ -2309,7 +2309,7 @@ fn mp_build_multipart_file_field_compila_y_parsea() {
 }
 
 #[test]
-fn mp_build_multipart_sin_boundary_es_400() {
+fn mp_build_multipart_without_boundary_is_400() {
     let src = "@server(43372)\nfn main() => 0\n\
                @post(\"/form\") fn form(body: Map<Str, Str>) -> Str => \"ok\"\n";
     let (status, body) = build_spawn_request_with_ct(
@@ -2330,7 +2330,7 @@ fn mp_build_multipart_sin_boundary_es_400() {
 }
 
 #[test]
-fn f13_spike_lista_heterogenea_compila_y_paridad_bit_a_bit() {
+fn f13_spike_heterogeneous_list_compiles_and_bit_for_bit_parity() {
     // F13 SPIKE — última residual del bloque post-Fase-8.
     // Listas heterogéneas (`[1, "dos", true]`) ya compilan a binario
     // nativo y producen output bit-a-bit idéntico a `fitz run`.
@@ -2392,7 +2392,7 @@ print(len(ys))
 }
 
 #[test]
-fn f13_a_bytes_y_nominal_en_lista_heterogenea_paridad_run_vs_build() {
+fn f13_a_bytes_and_nominal_in_heterogeneous_list_parity_run_vs_build() {
     // F13.A + F13.B — Bytes y Nominales adentro de listas
     // heterogéneas. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
     // T2 (v0.10.13) — unique stem.
@@ -2446,7 +2446,7 @@ print(xs)
 }
 
 #[test]
-fn f13_a_map_heterogeneo_paridad_run_vs_build() {
+fn f13_a_heterogeneous_map_parity_run_vs_build() {
     // F13.A — Map heterogéneo (values mixtos) paridad bit-a-bit.
     // T2 (v0.10.13) — unique stem.
     let stem = "f13_a_map";
@@ -2490,7 +2490,7 @@ fn f13_a_map_heterogeneo_paridad_run_vs_build() {
 }
 
 #[test]
-fn f13_lista_con_tipo_complejo_aborta_con_msg_claro() {
+fn f13_list_with_complex_type_aborts_with_clear_msg() {
     // F13.E follow-up cerrado (post-9.w.2) — el caso `[1, [2, 3]]`
     // (List anidada como item de heterogéneo) ahora SÍ compila con
     // `fitz build` y produce output bit-a-bit con `fitz run`. La
@@ -2510,7 +2510,7 @@ fn f13_lista_con_tipo_complejo_aborta_con_msg_claro() {
 }
 
 #[test]
-fn mw_wrap_codegen_rechaza_con_msg_que_cita_fitz_run() {
+fn mw_wrap_codegen_rejects_with_msg_citing_fitz_run() {
     // Mini-tanda Mw-Wrap — el codegen rechaza wrap-style mws con
     // un mensaje claro citando `fitz run` como workaround.
     // El intérprete sí los soporta (deuda residual del codegen).
@@ -2552,7 +2552,7 @@ fn wrapped() -> Str => \"handler\"
 }
 
 #[test]
-fn bytes_paridad_bit_a_bit_run_vs_build() {
+fn bytes_bit_for_bit_parity_run_vs_build() {
     // Mini-tanda Bytes — el output de `fitz run` y `fitz build`
     // deben coincidir bit-a-bit para todos los casos canónicos:
     // literal con escapes, len, is_empty, to_str Ok/Err.
@@ -2624,7 +2624,7 @@ print(len(s))
 }
 
 #[test]
-fn oapi_return_ident_a_const_top_level_compila_y_emite_schema() {
+fn oapi_return_ident_to_top_level_const_compiles_and_emits_schema() {
     // `return NOT_FOUND { ... }` con NOT_FOUND const top-level
     // ahora parsea, compila a binario, y entra al schema OpenAPI.
     // T2 (v0.10.13) — unique stem.
@@ -2676,7 +2676,7 @@ fn h(id: Int) -> Int {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn fn_anonima_asignada_a_var_se_invoca() {
+fn anonymous_fn_assigned_to_var_is_invoked() {
     let src = "\
 let f: Fn(Int) -> Int = fn(n: Int) => n * 2
 print(f(21))
@@ -2687,7 +2687,7 @@ print(f(21))
 }
 
 #[test]
-fn fn_nombrada_como_valor_se_invoca() {
+fn named_fn_as_value_is_invoked() {
     let src = "\
 fn square(n: Int) -> Int => n * n
 let g: Fn(Int) -> Int = square
@@ -2699,7 +2699,7 @@ print(g(7))
 }
 
 #[test]
-fn apply_con_fn_y_fnexpr_inline() {
+fn apply_with_fn_and_inline_fnexpr() {
     let src = "\
 fn square(n: Int) -> Int => n * n
 fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)
@@ -2712,7 +2712,7 @@ print(apply(fn(n: Int) => n * 10, 7))
 }
 
 #[test]
-fn closure_con_captura_int_funciona() {
+fn closure_with_int_capture_works() {
     // make_adder(x) retorna una closure que captura x por valor.
     let src = "\
 fn make_adder(x: Int) -> Fn(Int) -> Int {
@@ -2728,7 +2728,7 @@ print(add5(10))
 }
 
 #[test]
-fn closure_que_captura_str_clona_afuera() {
+fn closure_that_captures_str_clones_outside() {
     // El codegen debe clonar `saludo` antes del closure para que la
     // var siga disponible en el caller después de pasarla a la
     // closure (move la consumiría sin el clone).
@@ -2744,7 +2744,7 @@ print(saludo)
 }
 
 #[test]
-fn fnexpr_sin_anotacion_de_param_aborta_build() {
+fn fnexpr_without_param_annotation_aborts_build() {
     // Param sin anotar → error claro (deuda 5b.1).
     let stderr = build_expect_fail(
         "f12-fnexpr-sin-anot",
@@ -3095,7 +3095,7 @@ fn http_state_post_persiste_entre_requests() {
 }
 
 #[test]
-fn http_state_put_mutacion_de_campos() {
+fn http_state_put_field_mutation() {
     // F11: PUT muta campos de un user existente. El siguiente GET
     // debe ver la mutación. Mismo binary, locks consecutivos sobre el
     // thread_local.
@@ -3182,7 +3182,7 @@ fn http_state_var_no_referenciada_no_se_promueve() {
 }
 
 #[test]
-fn match_sobre_int_con_rango_compilado() {
+fn match_on_int_with_range_compiled() {
     // Pattern `0..10` con guard, más wildcard catch-all.
     let src = "\
 let n = 5
@@ -3298,7 +3298,7 @@ fn http_query_param_obligatorio_faltante_es_400() {
 }
 
 #[test]
-fn http_query_param_nullable_falta_devuelve_null() {
+fn http_query_param_nullable_missing_returns_null() {
     // `name: Str?` → si falta en la query, el handler ve `Null`. El
     // print/interpolación lo serializa como `null`.
     let src = "@server(43502)\nfn main() => 0\n\
@@ -3403,7 +3403,7 @@ fn fase_8_7_1_build_python_import_math_extrae_pi() {
 
 #[cfg(feature = "python")]
 #[test]
-fn fase_8_7_1_build_python_import_sin_anotacion_es_opaco() {
+fn fase_8_7_1_build_python_import_without_annotation_is_opaque() {
     // Sin anotación destino, `let m = math.pi` queda como
     // `__FitzPyObject` opaco. `print(m)` delega al Display del newtype
     // que invoca `__str__` Python — paridad bit-a-bit con `fitz run`.
@@ -3417,7 +3417,7 @@ fn fase_8_7_1_build_python_import_sin_anotacion_es_opaco() {
 
 #[cfg(feature = "python")]
 #[test]
-fn fase_8_7_2_build_call_math_sqrt_devuelve_result_ok() {
+fn fase_8_7_2_build_call_math_sqrt_returns_result_ok() {
     // Criterio canónico 8.7.2: `math.sqrt(16.0)` desde `fitz build`
     // produce un binario que matchea bit-a-bit con `fitz run`.
     //
@@ -3505,7 +3505,7 @@ fn fase_8_7_2_build_marshalla_instance_fitz_a_dict_python() {
 
 #[cfg(feature = "python")]
 #[test]
-fn fase_8_7_2_build_call_python_propagacion_con_try() {
+fn fase_8_7_2_build_call_python_propagation_with_try() {
     // Operador `?` Fitz adentro de fn que retorna `Result<Float>`
     // propaga el Err Python. La fn `root_safe` extrae el Float via
     // anotación destino sobre el Ok.
@@ -3551,7 +3551,7 @@ fn fase_8_7_3_build_await_corutina_asyncio_sleep() {
 
 #[cfg(feature = "python")]
 #[test]
-fn fase_8_7_3_build_pipeline_con_multiples_awaits() {
+fn fase_8_7_3_build_pipeline_with_multiple_awaits() {
     // Múltiples awaits encadenados sobre corutinas distintas — cada
     // uno ejecuta su propia `run_until_complete`. Paridad con el
     // ejemplo canónico 8.6.
@@ -3590,7 +3590,7 @@ fn fase_8_7_3_build_pipeline_con_multiples_awaits() {
 
 #[cfg(feature = "python")]
 #[test]
-fn fase_8_7_1_transitiva_build_from_python_en_modulo_compila_y_corre() {
+fn fase_8_7_1_transitive_build_from_python_in_module_compiles_and_runs() {
     let main_src = "from pymath import area\n\
                     let a: Float = area(2.0)\n\
                     print(\"area = {a}\")\n";
@@ -3624,7 +3624,7 @@ fn fase_8_7_1_transitiva_build_from_python_en_modulo_compila_y_corre() {
 
 #[cfg(feature = "python")]
 #[test]
-fn fase_8_7_1_transitiva_bis_modulo_coerce_pyany_a_tipo_importado() {
+fn fase_8_7_1_transitive_bis_module_coerces_pyany_to_imported_type() {
     // El módulo `parser` define `type User` y `from python import
     // json`. Hace `let u: User = json.loads(raw)?` adentro de una fn.
     // Main importa `parse_user` del módulo y la invoca.
@@ -3678,7 +3678,7 @@ fn mini_tanda_c_comprehension_sobre_lista_compila_y_doblea() {
 }
 
 #[test]
-fn mini_tanda_c_comprehension_sobre_range_con_filter() {
+fn mini_tanda_c_comprehension_over_range_with_filter() {
     // `[n for n in 0..10 if n % 2 == 0]` filtra pares. La anotación
     // `List<Int>` ayuda al codegen a tipar concreto el iter Int.
     let src = "let r: List<Int> = [n for n in 0..10 if n % 2 == 0]\nprint(r)\n";
@@ -3690,7 +3690,7 @@ fn mini_tanda_c_comprehension_sobre_range_con_filter() {
 // ---- Mini-tanda Fm — format specifiers ----
 
 #[test]
-fn mini_tanda_fm_float_con_precision_decimal() {
+fn mini_tanda_fm_float_with_decimal_precision() {
     // `{ratio:.2f}` debe producir el mismo output bit-a-bit que
     // `fitz run` (es decir "0.50" para 0.5).
     let src = "let ratio: Float = 0.5\nprint(\"{ratio:.2f}\")\n";
@@ -3700,7 +3700,7 @@ fn mini_tanda_fm_float_con_precision_decimal() {
 }
 
 #[test]
-fn mini_tanda_fm_int_con_width_y_zero_pad() {
+fn mini_tanda_fm_int_with_width_and_zero_pad() {
     // `{n:05d}` produce "00042".
     let src = "let n: Int = 42\nprint(\"{n:05d}\")\n";
     let (stdout, exit) = build_and_run("mini_tanda_fm_int_zero_pad", src);
@@ -3709,7 +3709,7 @@ fn mini_tanda_fm_int_con_width_y_zero_pad() {
 }
 
 #[test]
-fn mini_tanda_fm_hex_con_alternate() {
+fn mini_tanda_fm_hex_with_alternate() {
     // `{n:#x}` produce "0xff".
     let src = "let n: Int = 255\nprint(\"{n:#x}\")\n";
     let (stdout, exit) = build_and_run("mini_tanda_fm_hex_alt", src);
@@ -3718,7 +3718,7 @@ fn mini_tanda_fm_hex_con_alternate() {
 }
 
 #[test]
-fn mini_tanda_fm_alignment_right_con_fill_default() {
+fn mini_tanda_fm_alignment_right_with_default_fill() {
     // `{x:>5}` padding con espacios a la derecha (right alignment).
     let src = "let x: Int = 42\nprint(\"[{x:>5}]\")\n";
     let (stdout, exit) = build_and_run("mini_tanda_fm_align_right", src);
@@ -3758,7 +3758,7 @@ fn mini_tanda_md_for_wildcard_pattern_compila() {
 // ---- Mini-tanda It — enumerate / zip / chain ----
 
 #[test]
-fn mini_tanda_it_enumerate_con_for_destructuring() {
+fn mini_tanda_it_enumerate_with_for_destructuring() {
     // `for (i, x) in xs.enumerate() { ... }` — caso canónico que
     // motiva la mini-tanda. Encaja con Md (tuple destructuring).
     let src = "let xs: List<Str> = [\"a\", \"b\", \"c\"]\n\
@@ -3812,7 +3812,7 @@ fn mini_tanda_err_plus_err_int_compila_y_corre() {
 // ---- Mini-tanda Rt — tuple patterns con sub-pattern Str/Range/Or ----
 
 #[test]
-fn mini_tanda_rt_tuple_con_str_literal_subpattern() {
+fn mini_tanda_rt_tuple_with_str_literal_subpattern() {
     // `("ada", n)` en codegen: Str literal como sub-pattern de Tuple.
     let src = "fn name(p: (Str, Int)) -> Str {\n\
                  return match p {\n\
@@ -3828,7 +3828,7 @@ fn mini_tanda_rt_tuple_con_str_literal_subpattern() {
 }
 
 #[test]
-fn mini_tanda_rt_tuple_con_or_pattern_subpattern() {
+fn mini_tanda_rt_tuple_with_or_pattern_subpattern() {
     // `(name, 1 | 2)` en codegen: Or-pattern como sub-pattern.
     let src = "fn clasif(p: (Str, Int)) -> Str {\n\
                  return match p {\n\
@@ -3845,7 +3845,7 @@ fn mini_tanda_rt_tuple_con_or_pattern_subpattern() {
 }
 
 #[test]
-fn mini_tanda_rt_tuple_con_range_subpattern() {
+fn mini_tanda_rt_tuple_with_range_subpattern() {
     // `(name, 0..10)` en codegen: Range como sub-pattern.
     let src = "fn band(p: (Str, Int)) -> Str {\n\
                  return match p {\n\
@@ -3938,7 +3938,7 @@ fn mini_tanda_re_plus_err_int_bindea_int_no_str() {
 }
 
 #[test]
-fn mini_tanda_re_plus_legacy_result_t_sin_e_sigue_funcionando() {
+fn mini_tanda_re_plus_legacy_result_t_without_e_keeps_working() {
     // Regresión: `Result<T>` sin E sigue funcionando (default Str).
     let src = "fn div(a: Int, b: Int) -> Result<Int> {\n\
                  if b == 0 { return Err(\"zero\") }\n\
@@ -3954,7 +3954,7 @@ fn mini_tanda_re_plus_legacy_result_t_sin_e_sigue_funcionando() {
 }
 
 #[test]
-fn mini_tanda_err_plus_err_instance_compila_y_preserva_display() {
+fn mini_tanda_err_plus_err_instance_compiles_and_preserves_display() {
     // `Err(Instance)` deref del Arc<Mutex<TData>> antes del format!
     // — paridad bit-a-bit con el Display del intérprete. Post-Re+ se
     // requiere declarar el E explícito.
@@ -4047,7 +4047,7 @@ fn ex2_list_flat_map_compila() {
 }
 
 #[test]
-fn ex2_list_first_y_last_devuelven_result() {
+fn ex2_list_first_and_last_return_result() {
     let src = "let xs: List<Int> = [42, 7, 100]\n\
                match xs.first() {\n\
                  Ok(v) => print(\"first: {v}\"),\n\
@@ -4261,7 +4261,7 @@ fn f8_identifiers_unicode_compilan_y_corren() {
 }
 
 #[test]
-fn f8_fn_y_params_con_identifiers_unicode() {
+fn f8_fn_and_params_with_unicode_identifiers() {
     // `fn` con nombre Unicode + params con nombre Unicode.
     let src = "fn niño(edad: Int) -> Str => \"niño de {edad}\"\n\
                print(niño(5))\n";
@@ -4284,7 +4284,7 @@ fn xor_tabla_de_verdad_bit_a_bit() {
 }
 
 #[test]
-fn xor_chain_misma_precedencia_que_or() {
+fn xor_chain_same_precedence_as_or() {
     // `true xor true xor true` left-assoc → ((T xor T) xor T) = (F xor T) = T.
     let src = "print(true xor true xor true)\n\
                print(true xor false xor true)\n";
@@ -4294,7 +4294,7 @@ fn xor_chain_misma_precedencia_que_or() {
 }
 
 #[test]
-fn xor_combina_con_and_y_or() {
+fn xor_combines_with_and_and_or() {
     // `a and b xor c` → `(a and b) xor c`. And precedencia mayor.
     let src = "let a: Bool = true\n\
                let b: Bool = false\n\
@@ -4333,7 +4333,7 @@ fn mln_from_import_parens_multi_linea_compila_y_corre() {
 }
 
 #[test]
-fn mln_from_import_parens_con_aliases_mixtos_compila() {
+fn mln_from_import_parens_with_mixed_aliases_compiles() {
     // Aliases dentro de los paréntesis funcionan igual que en
     // single-line; el binding local se hace bajo el alias.
     let main = "from utils import (\n\
@@ -4365,7 +4365,7 @@ fn mln_from_import_parens_con_aliases_mixtos_compila() {
 // ---- Mini-tanda El — Err(List<T>) / Err(Map<K,V>) en codegen ----
 
 #[test]
-fn el_err_list_compila_y_preserva_value() {
+fn el_err_list_compiles_and_preserves_value() {
     // Err(List<Int>): el binding `Err(xs)` tipa con List<Int>, así
     // métodos como `.len()` funcionan sobre el value.
     let src = "fn fail() -> Result<Int, List<Int>> {\n\
@@ -4381,7 +4381,7 @@ fn el_err_list_compila_y_preserva_value() {
 }
 
 #[test]
-fn el_err_list_print_directo_matches_interprete() {
+fn el_err_list_direct_print_matches_interpreter() {
     // Print directo del Err con List preserva el formato canónico
     // (matchea el evaluator).
     let src = "fn fail() -> Result<Int, List<Int>> {\n\
@@ -4397,7 +4397,7 @@ fn el_err_list_print_directo_matches_interprete() {
 }
 
 #[test]
-fn el_err_map_compila_y_preserva_value() {
+fn el_err_map_compiles_and_preserves_value() {
     // Err(Map<Str, Int>): el binding `Err(m)` tipa con Map<Str, Int>,
     // así `.len()` y `.has(k)` funcionan sobre el value.
     let src = "fn fail() -> Result<Int, Map<Str, Int>> {\n\
@@ -4413,7 +4413,7 @@ fn el_err_map_compila_y_preserva_value() {
 }
 
 #[test]
-fn el_err_propagation_con_list_via_try_operator() {
+fn el_err_propagation_with_list_via_try_operator() {
     // `?` propaga el Err(List<T>) intacto.
     let src = "fn inner() -> Result<Int, List<Int>> {\n\
                  return Err([1, 2])\n\
@@ -4444,7 +4444,7 @@ fn ir_range_enumerate_compila_y_corre() {
 }
 
 #[test]
-fn ir_range_zip_con_list_str_trunca() {
+fn ir_range_zip_with_list_str_truncates() {
     let src = "let nombres: List<Str> = [\"ada\", \"bea\"]\n\
                for (i, n) in (1..100).zip(nombres) {\n\
                  print(\"{i}-{n}\")\n\
@@ -4455,7 +4455,7 @@ fn ir_range_zip_con_list_str_trunca() {
 }
 
 #[test]
-fn ir_range_chain_con_list_int_concatena() {
+fn ir_range_chain_with_list_int_concatenates() {
     let src = "let extra: List<Int> = [100, 200]\n\
                let combo: List<Int> = (0..3).chain(extra)\n\
                print(combo)\n";
@@ -4583,7 +4583,7 @@ fn lt_let_ok_binding_extrae_resultado() {
 }
 
 #[test]
-fn lt_let_panic_si_no_matchea() {
+fn lt_let_panic_if_does_not_match() {
     // `let (1, x) = (2, 42)`: el 2 NO matchea el 1 → panic en runtime.
     // El binario debe terminar con exit code != 0.
     // T4 (post-W12-W16) — además del exit code, validamos que el panic
@@ -4605,7 +4605,7 @@ fn lt_let_panic_si_no_matchea() {
 // ---- Mini-tanda F9 — escapes extendidos en strings ----
 
 #[test]
-fn f9_escapes_extendidos_paridad_bit_a_bit() {
+fn f9_extended_escapes_bit_for_bit_parity() {
     // `\u{...}` Unicode (BMP + suplementario), `\x..` ASCII hex, `\0`,
     // `\b`. El lexer produce un Token::Str con los chars resueltos,
     // así que el codegen no necesita lógica extra — `rust_str_literal`
@@ -4663,7 +4663,7 @@ fn mb2_list_min_max_sum_float_compila() {
 }
 
 #[test]
-fn mb2_list_min_vacia_devuelve_err_paridad() {
+fn mb2_list_min_empty_returns_err_parity() {
     let src = "let xs: List<Int> = []\n\
                match xs.min() {\n\
                  Ok(v) => print(\"min: {v}\"),\n\
@@ -4804,7 +4804,7 @@ fn mb3_list_to_map_compila() {
 // ---- Mini-tanda Cd — codegen polish: higher-order + F12 ----
 
 #[test]
-fn cd_ho_map_con_fn_nombrada_compila() {
+fn cd_ho_map_with_named_fn_compiles() {
     let src = "fn double(n: Int) -> Int { return n * 2 }\n\
                let xs: List<Int> = [1, 2, 3]\n\
                let ys: List<Int> = xs.map(double)\n\
@@ -4815,7 +4815,7 @@ fn cd_ho_map_con_fn_nombrada_compila() {
 }
 
 #[test]
-fn cd_ho_filter_con_fn_nombrada_compila() {
+fn cd_ho_filter_with_named_fn_compiles() {
     let src = "fn is_even(n: Int) -> Bool { return n % 2 == 0 }\n\
                let xs: List<Int> = [1, 2, 3, 4, 5]\n\
                let ys: List<Int> = xs.filter(is_even)\n\
@@ -4826,7 +4826,7 @@ fn cd_ho_filter_con_fn_nombrada_compila() {
 }
 
 #[test]
-fn cd_ho_reduce_binary_con_fn_nombrada_compila() {
+fn cd_ho_reduce_binary_with_named_fn_compiles() {
     let src = "fn sumar(acc: Int, x: Int) -> Int { return acc + x }\n\
                let xs: List<Int> = [1, 2, 3, 4, 5]\n\
                let total: Int = xs.reduce(0, sumar)\n\
@@ -4871,7 +4871,7 @@ fn cd_f12_let_float_compila() {
 }
 
 #[test]
-fn cd_f12_const_eval_con_binop_compila() {
+fn cd_f12_const_eval_with_binop_compiles() {
     let src = "let LIMIT = 10 * 2 + 5\n\
                fn check(n: Int) -> Bool { return n < LIMIT }\n\
                print(check(20))\n\
@@ -4937,7 +4937,7 @@ fn cmp_multi_for_clauses_compila() {
 }
 
 #[test]
-fn cmp_multi_for_con_filter_compila() {
+fn cmp_multi_for_with_filter_compiles() {
     let src = "let xs: List<Int> = [1, 2, 3]\n\
                let ys: List<Int> = [10, 20]\n\
                let r: List<Int> = [x * y for x in xs for y in ys if x % 2 == 1]\n\
@@ -4960,7 +4960,7 @@ fn cmp_map_comp_basico_compila() {
 }
 
 #[test]
-fn cmp_map_comp_con_filter_compila() {
+fn cmp_map_comp_with_filter_compiles() {
     let src = "let big: Map<Int, Int> = {n: n * 10 for n in 0..10 if n > 5}\n\
                print(big[6])\n\
                print(big[9])\n";
@@ -5007,7 +5007,7 @@ fn mb5_list_max_by_compila() {
 }
 
 #[test]
-fn mb5_list_min_by_lista_vacia_devuelve_err_compila() {
+fn mb5_list_min_by_empty_list_returns_err_compiles() {
     let src = "let xs: List<Int> = []\n\
                match xs.min_by(fn(n: Int) => n) {\n\
                  Ok(v) => print(\"min: {v}\"),\n\
@@ -5271,7 +5271,7 @@ fn mb6_list_windows_compila() {
 }
 
 #[test]
-fn mb6_map_merge_with_callback_resuelve_conflicts_compila() {
+fn mb6_map_merge_with_callback_resolves_conflicts_compiles() {
     let src = "let a: Map<Str, Int> = {\"x\": 1, \"y\": 2}\n\
                let b: Map<Str, Int> = {\"y\": 10, \"z\": 3}\n\
                let r: Map<Str, Int> = a.merge_with(b, fn(va: Int, vb: Int) => va + vb)\n\
@@ -5286,7 +5286,7 @@ fn mb6_map_merge_with_callback_resuelve_conflicts_compila() {
 // ---- Mini-tanda HTTP-Cors — echo Origin sin filtro --------
 
 #[test]
-fn http_cors_echo_origin_hace_echo_sin_filtro() {
+fn http_cors_echo_origin_echoes_without_filter() {
     // allow_origin: "echo" (Str literal) → echo del Origin recibido
     // sin filtro. Cualquier Origin que llegue se eco-emite en la
     // response. Si no llega Origin header, no se emite el header.
@@ -5317,7 +5317,7 @@ fn h() -> Str => \"ok\"
 }
 
 #[test]
-fn http_cors_echo_sin_origin_no_emite_header() {
+fn http_cors_echo_without_origin_does_not_emit_header() {
     let src = "\
 @server(43393)
 fn main() => 0
@@ -5341,7 +5341,7 @@ fn h() -> Str => \"ok\"
 // ---- Mini-tanda HTTP-Err — status codes específicos por Err ----
 
 #[test]
-fn http_err_instance_con_status_field_devuelve_ese_status() {
+fn http_err_instance_with_status_field_returns_that_status() {
     // Convención: Err con Instance con field `status: Int` → ese
     // status code se usa en la response. Body = Instance serializada.
     let src = "\
@@ -5367,7 +5367,7 @@ fn get_user(id: Int) -> Result<Str, ApiErr> {
 }
 
 #[test]
-fn http_err_instance_con_status_field_400_y_ok_path() {
+fn http_err_instance_with_status_field_400_and_ok_path() {
     let src = "\
 type ApiErr {
     status: Int = 500
@@ -5570,7 +5570,7 @@ fn fp2_varargs_basico_compila() {
 }
 
 #[test]
-fn fp2_varargs_con_required_compila() {
+fn fp2_varargs_with_required_compiles() {
     let src = "fn join(prefix: Str, ...xs: Str) -> Int {\n\
                    return xs.len()\n\
                }\n\
@@ -5642,7 +5642,7 @@ fn sp2_return_en_match_arm_compila() {
 // ---- Mini-tanda 5b.1 — param type inference desde call sites ----
 
 #[test]
-fn fp_5b1_param_sin_anotar_se_infiere_desde_call_site() {
+fn fp_5b1_param_without_annotation_inferred_from_call_site() {
     let src = "fn greet(name) {\n\
                    return \"Hola, {name}\"\n\
                }\n\
@@ -5671,7 +5671,7 @@ fn p2_param_y_return_ambos_inferidos_via_re_check() {
 }
 
 #[test]
-fn fp_5b1_param_int_se_infiere_con_return_anotado() {
+fn fp_5b1_param_int_inferred_with_annotated_return() {
     // Cuando el return type está anotado pero el param no,
     // 5b.1 infiere el param sin colidir con Hpx.2.
     let src = "fn double(n) -> Int {\n\
@@ -5686,7 +5686,7 @@ fn fp_5b1_param_int_se_infiere_con_return_anotado() {
 // ---- Mini-tanda Hpx.2 — return type inference en handlers ------
 
 #[test]
-fn hpx2_fn_sin_anotacion_de_return_infiere_del_body_compila() {
+fn hpx2_fn_without_return_annotation_infers_from_body_compiles() {
     let src = "fn greet(name: Str) {\n\
                    return \"Hola, {name}\"\n\
                }\n\
@@ -5697,7 +5697,7 @@ fn hpx2_fn_sin_anotacion_de_return_infiere_del_body_compila() {
 }
 
 #[test]
-fn hpx2_fn_sin_anotacion_infiere_int_compila() {
+fn hpx2_fn_without_annotation_infers_int_compiles() {
     let src = "fn double(n: Int) {\n\
                    return n * 2\n\
                }\n\
@@ -5708,7 +5708,7 @@ fn hpx2_fn_sin_anotacion_infiere_int_compila() {
 }
 
 #[test]
-fn hpx2_fn_con_if_else_infiere_lub() {
+fn hpx2_fn_with_if_else_infers_lub() {
     let src = "fn maybe(b: Bool) {\n\
                    if b {\n\
                        return 42\n\
@@ -5723,7 +5723,7 @@ fn hpx2_fn_con_if_else_infiere_lub() {
 }
 
 #[test]
-fn sp2_match_arm_con_block_compila() {
+fn sp2_match_arm_with_block_compiles() {
     let src = "fn f(n: Int) -> Int {\n\
                    return match n {\n\
                        0 => {\n\
@@ -5859,7 +5859,7 @@ fn build_spawn_auth_requests(
 }
 
 #[test]
-fn auth_codegen_flujo_completo_end_to_end() {
+fn auth_codegen_complete_flow_end_to_end() {
     // Programa de referencia: provider que matchea Authorization contra
     // dos tokens hardcoded (admin, user); ruta pública sin auth, una con
     // `@authenticated` y otra con `@admin`. El programa entero compila a
@@ -6643,7 +6643,7 @@ fn webhook(body: Map<Str, Any>) -> Str {\n\
 }
 
 #[test]
-fn float_arithmetic_overflow_devuelve_error_r6() {
+fn float_arithmetic_overflow_returns_error_r6() {
     // R6 (v0.10.14) — overflow aritmético Float produce `inf`/`NaN`.
     // Antes: el codegen emitía la op cruda (Rust no panica en
     // overflow Float), el `inf` se propagaba hasta serialización JSON
@@ -6685,7 +6685,7 @@ print(y)\n\
 }
 
 #[test]
-fn handler_panic_devuelve_500_no_rompe_conexion_r6() {
+fn handler_panic_returns_500_does_not_break_connection_r6() {
     // R6 (v0.10.13) — un panic adentro de un handler HTTP (típicamente
     // `x / 0`, `xs[N]` out-of-bounds, etc.) debe convertirse en una
     // respuesta 500 con `{"error": <msg>}`. Antes del fix el panic del
@@ -7301,7 +7301,7 @@ fn main() => 0\n\
 }
 
 #[test]
-fn hidden_decorator_skipea_field_en_json_io_v0_10_11() {
+fn hidden_decorator_skips_field_in_json_io_v0_10_11() {
     // v0.10.11 — `@hidden` field decorator:
     //   - El field NO aparece en `__to_fitz_json` (response al
     //     cliente — útil para `password_hash`, tokens internos).
@@ -7624,7 +7624,7 @@ fn create(input: PostInput) -> Post {\n\
 }
 
 #[test]
-fn auth_codegen_handler_con_body_y_user_w14() {
+fn auth_codegen_handler_with_body_and_user_w14() {
     // W14 (v0.10.10) — handler protegido por auth que recibe ADEMÁS
     // un body JSON. Antes del fix el dispatcher rechazaba con
     // "En MVP, un handler protegido por auth admite solo el param
@@ -8109,7 +8109,7 @@ fn ws_codegen_binary_echo_compila_y_responde() {
 /// handshake, y el handler corre con el `user` inyectado.
 #[allow(clippy::await_holding_lock)]
 #[test]
-fn ws_codegen_auth_via_subprotocol_acepta_token() {
+fn ws_codegen_auth_via_subprotocol_accepts_token() {
     let src = "@server(43990)\n\
                fn main() => 0\n\
                type User { id: Int, name: Str, role: Str }\n\
@@ -8243,7 +8243,7 @@ fn ws_codegen_auth_via_subprotocol_acepta_token() {
 /// test falla por exit code (timeout). El stdout valida que ambas
 /// líneas se imprimen.
 #[test]
-fn r_bug_deadlock_str_interp_re_lock_mismo_arc_no_cuelga() {
+fn r_bug_deadlock_str_interp_re_lock_same_arc_does_not_hang() {
     let src = "type Sale { product: Str, amount: Float }\n\
                let xs: List<Sale> = [\n\
                    Sale { product: \"a\", amount: 1.0 },\n\
@@ -8379,7 +8379,7 @@ fn fase_8_7_bis_build_pyany_a_list_de_instances() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn env_builtin_lee_var_existente_y_propaga_con_try() {
+fn env_builtin_reads_existing_var_and_propagates_with_try() {
     let src = "\
         fn read() -> Result<Str> {\n\
             let s = env(\"FITZ_E2E_GREETING\")?\n\
@@ -8396,7 +8396,7 @@ fn env_builtin_lee_var_existente_y_propaga_con_try() {
 }
 
 #[test]
-fn env_builtin_var_missing_propaga_err() {
+fn env_builtin_var_missing_propagates_err() {
     // No seteamos la var → env() devuelve Err, el `?` propaga, el
     // match top-level imprime el msg de error.
     let src = "\
@@ -8418,7 +8418,7 @@ fn env_builtin_var_missing_propaga_err() {
 }
 
 #[test]
-fn env_or_builtin_devuelve_default_si_missing() {
+fn env_or_builtin_returns_default_if_missing() {
     let src = "\
         let port = env_or(\"FITZ_E2E_NO_SET_PORT\", \"3000\")\n\
         print(\"port={port}\")\n";
@@ -8428,7 +8428,7 @@ fn env_or_builtin_devuelve_default_si_missing() {
 }
 
 #[test]
-fn env_or_builtin_var_existente_ignora_default() {
+fn env_or_builtin_existing_var_ignores_default() {
     let src = "\
         let port = env_or(\"FITZ_E2E_PORT_REAL\", \"3000\")\n\
         print(\"port={port}\")\n";
@@ -8439,7 +8439,7 @@ fn env_or_builtin_var_existente_ignora_default() {
 }
 
 #[test]
-fn load_env_builtin_carga_archivo_y_lee_vars() {
+fn load_env_builtin_loads_file_and_reads_vars() {
     // Escribimos un .env en un tempdir SEPARADO al del build (el build
     // hace `remove_dir_all` adentro de `fitz-e2e-<test_name>`, no queremos
     // que pise el env file). La fitz src lee `FITZ_E2E_LOAD_PATH` (env
@@ -8534,7 +8534,7 @@ fn get_item(id: Int) -> Result<Item> {
 }
 
 #[test]
-fn r_bug_result_status_handler_path_404_funciona() {
+fn r_bug_result_status_handler_path_404_works() {
     let src = "\
 @server(43778)
 fn main() => 0
@@ -8652,7 +8652,7 @@ fn loader_absoluto_data_sibling_import_compila_en_fitz_build() {
 // + `.await` + match sobre Result.
 
 #[test]
-fn db_connect_url_invalida_compila_y_corre() {
+fn db_connect_invalid_url_compiles_and_runs() {
     // Programa Fitz que llama a db.connect con URL no-postgres.
     // El parse del URL falla y devuelve Result::Err(msg). El
     // `return match` explícito evita el bug del codegen que no
@@ -8677,7 +8677,7 @@ fn db_connect_url_invalida_compila_y_corre() {
 }
 
 #[test]
-fn db_connect_sslmode_require_compila_y_falla_con_mensaje() {
+fn db_connect_sslmode_require_compiles_and_fails_with_message() {
     // sslmode=require todavía no llega (deuda TLS). El driver
     // devuelve Err con mensaje claro citando el sub-paso futuro.
     let (stdout, code) = build_and_run(
@@ -8700,7 +8700,7 @@ fn db_connect_sslmode_require_compila_y_falla_con_mensaje() {
 }
 
 #[test]
-fn db_query_exec_close_compilan_emite_helpers() {
+fn db_query_exec_close_compile_emit_helpers() {
     // Programa que NO conecta realmente. El connect falla con
     // URL inválida, así que el cuerpo de `run` propaga el Err
     // antes de ejecutar query/exec/close. Lo importante es que
@@ -9011,7 +9011,7 @@ fn ws_jobs_cross_module_compila_w10() {
 }
 
 #[test]
-fn db_upd_con_map_var_compila_a_binario_w7() {
+fn db_upd_with_map_var_compiles_to_binary_w7() {
     // W7 (v0.10.6) — `.update(db, changes)` con `changes` como var
     // `Map<Str, Any>` (no Map literal) compila a binario nativo.
     // Programa connect inválido — el cuerpo nunca ejecuta el update.
@@ -9047,7 +9047,7 @@ fn db_upd_con_map_var_compila_a_binario_w7() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn orm_insert_compila_emite_insert_returning_sin_postgres() {
+fn orm_insert_compiles_emits_insert_returning_without_postgres() {
     // Programa con `User.insert(db, user)` debe COMPILAR a binario
     // standalone. El connect a una URL inválida falla en runtime, así
     // que el insert nunca se ejecuta — verificamos que el rustc del
@@ -9079,7 +9079,7 @@ fn orm_insert_compila_emite_insert_returning_sin_postgres() {
 }
 
 #[test]
-fn orm_insert_con_nullable_y_column_override_compila() {
+fn orm_insert_with_nullable_and_column_override_compiles() {
     // Marshalling de `Str?` + override `@column(name=...)` deben
     // compilar limpio. Mismo patrón: el connect falla, el insert no
     // se ejecuta, lo que verificamos es el output Rust.
@@ -9109,7 +9109,7 @@ fn orm_insert_con_nullable_y_column_override_compila() {
 }
 
 #[test]
-fn orm_update_y_delete_sin_where_aborta_build_con_guard_de_seguridad() {
+fn orm_update_and_delete_without_where_aborts_build_with_safety_guard() {
     // 10.b.5 — `User.update(...)` / `User.delete(...)` sin `.where(...)`
     // previo se rechazan en codegen con mensaje paralelo al guard del
     // evaluator (afectarían toda la tabla).
@@ -9156,7 +9156,7 @@ fn orm_update_y_delete_sin_where_aborta_build_con_guard_de_seguridad() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn orm_where_chain_con_order_y_limit_compila_a_binario() {
+fn orm_where_chain_with_order_and_limit_compiles_to_binary() {
     // `User.where(...).order_by(...).limit(N).all(db)` debe compilar a
     // binario standalone. El connect a una URL inválida falla en runtime
     // así que el chain nunca se ejecuta; verificamos que el rustc del
@@ -9186,7 +9186,7 @@ fn orm_where_chain_con_order_y_limit_compila_a_binario() {
 }
 
 #[test]
-fn orm_qb_upd_con_where_compila_a_binario() {
+fn orm_qb_upd_with_where_compiles_to_binary() {
     // `User.where(...).update(db, {...})` compila a binario y emite el
     // SET correctamente. Run-time falla por URL inválida. Nombre del
     // test evita la cadena `update` para no disparar el handler UAC
@@ -9216,7 +9216,7 @@ fn orm_qb_upd_con_where_compila_a_binario() {
 }
 
 #[test]
-fn orm_delete_con_where_compila_a_binario() {
+fn orm_delete_with_where_compiles_to_binary() {
     // `User.where(...).delete(db)` compila a binario. Run-time falla
     // por URL inválida.
     let (stdout, code) = build_and_run(
@@ -9243,7 +9243,7 @@ fn orm_delete_con_where_compila_a_binario() {
 }
 
 #[test]
-fn orm_chain_first_con_multiples_wheres_compila_a_binario() {
+fn orm_chain_first_with_multiple_wheres_compiles_to_binary() {
     // Caso pesado: dos wheres + order_by + first(db). Cubre el
     // renumerado de placeholders en runtime + LIMIT 1 override en
     // .first.
@@ -9311,7 +9311,7 @@ fn orm_sum_directo_sobre_type_compila_a_binario() {
 }
 
 #[test]
-fn orm_avg_chain_con_where_compila_a_binario() {
+fn orm_avg_chain_with_where_compiles_to_binary() {
     // `.where(...).avg(closure, db)` valida que (a) el chain QB
     // preserva el where antes del aggregate, (b) avg emite el cast
     // `::float8` que el helper espera, (c) el tipo Future<Result<Float>>
@@ -9741,7 +9741,7 @@ fn orm_min_y_max_combinados_compilan_a_binario() {
 // nullables, y display recursivo de instancias con campos colección.
 
 #[test]
-fn t5_triple_nivel_field_access_y_mutation_compilado() {
+fn t5_triple_level_field_access_and_mutation_compiled() {
     // 3 niveles de anidación + mutación profunda visible vía alias del
     // nivel superior. Valida que Rc<RefCell<>> recursea como el
     // intérprete adentro de la jerarquía.
@@ -9762,7 +9762,7 @@ print(u == alias)
 }
 
 #[test]
-fn t5_igualdad_difiere_tras_mutacion_de_un_solo_field_compilado() {
+fn t5_equality_differs_after_single_field_mutation_compiled() {
     // Dos instancias estructuralmente iguales se vuelven distintas tras
     // mutar UN campo de UNA. PartialEq recursivo se sensibiliza a
     // cambios profundos.
@@ -9783,7 +9783,7 @@ print(b.addr.city)
 }
 
 #[test]
-fn t5_field_chain_sobre_nullable_anidado_compilado() {
+fn t5_field_chain_over_nested_nullable_compiled() {
     // Caso típico: `match` con pattern `null => ...` y ident binding
     // que refina al inner. Cap 14 de la guía documenta este patrón
     // como canónico para Nullable. El binding `u` post-`null =>`
@@ -9815,7 +9815,7 @@ print(city_of(no_user))
 }
 
 #[test]
-fn t5_display_recursivo_con_field_lista_y_mapa_compilado() {
+fn t5_recursive_display_with_list_and_map_field_compiled() {
     // Instancia con campos `List<Int>` y `Map<Str, Int>` debe imprimir
     // el formato canónico recursivo del intérprete (sin perder ningún
     // bracket o coma).
@@ -9838,7 +9838,7 @@ print(s)
 // List<List<Int>>, Map<Str, List<Int>>, List<Custom?>, Map<Str, Custom>.
 
 #[test]
-fn t6_list_de_listas_int_compilado() {
+fn t6_list_of_lists_int_compiled() {
     // Matriz: list de lists. Indexing doble + iteración anidada.
     // Fitz no tiene `let mut` — reasignación pura es OK.
     let src = "\
@@ -9862,7 +9862,7 @@ print(total)
 }
 
 #[test]
-fn t6_map_str_a_list_int_compilado() {
+fn t6_map_str_to_list_int_compiled() {
     // Map de Str → List<Int>. Lookup + iter sobre el inner. Match
     // arms multi-stmt con trailing `print(...)` colapsan en
     // expression position — el codegen lo rechaza. Workaround
@@ -9897,7 +9897,7 @@ match buckets.get(\"a\") {
 }
 
 #[test]
-fn t6_list_de_custom_nullable_compilado() {
+fn t6_list_of_custom_nullable_compiled() {
     // List<User?> con mezcla de Some + null. Display + iter + chequeo
     // de cada elemento via match (Fitz no tiene `let mut` — reasignación
     // pura del binding existente).
@@ -9923,7 +9923,7 @@ print(users[1])
 }
 
 #[test]
-fn t6_map_str_a_custom_compilado() {
+fn t6_map_str_to_custom_compiled() {
     // Map<Str, User> — value es nominal. get() devuelve Result<User>.
     // El error del get tiene formato `"key not found: <k>"`
     // (sin comillas alrededor del key, sin "en mapa") según
@@ -9947,7 +9947,7 @@ match dir.get(\"missing\") {
 }
 
 #[test]
-fn map_str_any_indexing_assign_compilado() {
+fn map_str_any_indexing_assign_compiled() {
     // R.1.3 (v0.10.7) — `Map<Str, Any>` con indexing assignment
     // dinámico (`m["k"] = v`) ahora envuelve key/value como
     // `__FitzValue` cuando el storage es heterogéneo.
@@ -10120,7 +10120,7 @@ fn main() => 0\n\
 }
 
 #[test]
-fn openapi_cross_module_incluye_handlers_de_modulos() {
+fn openapi_cross_module_includes_module_handlers() {
     // 10.8.5 (v0.10.8) — fix #3: el schema OpenAPI 3.1 emitido por
     // `fitz build` ahora incluye los handlers HTTP de módulos
     // importados (`loader.modules[i].http_fn_stmts` capturados por
@@ -10294,7 +10294,7 @@ fn main() => 0\n\
 }
 
 #[test]
-fn orm_db_default_skipea_field_del_insert() {
+fn orm_db_default_skips_field_from_insert() {
     // 10.8.2 (v0.10.7+) — fix #5: decorator `@db_default` marca al
     // field como "manejado por la DB". El ORM lo skipea del
     // INSERT, dejando que Postgres aplique el `DEFAULT` declarado
@@ -10373,7 +10373,7 @@ fn main() => 0\n\
 }
 
 #[test]
-fn http_wrapper_desempaca_result_tail_sin_ok_explicito() {
+fn http_wrapper_unwraps_result_tail_without_explicit_ok() {
     // 10.8.1 (v0.10.7+) — fix #6: handler HTTP que termina con
     // `return <expr>` cuyo tipo es `Result<T>` (sin `Ok()` literal)
     // ahora se desempaca con match runtime, devolviendo `T` puro en
@@ -10448,7 +10448,7 @@ fn main() => 0\n\
 }
 
 #[test]
-fn orm_array_has_acepta_var_externa() {
+fn orm_array_has_accepts_external_var() {
     // v0.10.7 — gap cerrado: `.has(var)` sobre `text[]`/`int8[]`/etc.
     // ahora acepta variables externas al closure, no solo literales.
     // Antes el codegen rechazaba con "el value debe ser literal del
@@ -10679,7 +10679,7 @@ fn parity_run_vs_build(test_name: &str, src: &str) -> String {
 }
 
 #[test]
-fn tier_b1_paridad_date_add_methods() {
+fn tier_b1_date_add_methods_parity() {
     // B.1 Date arithmetic: add_days/months/years con n positivo y negativo.
     // Envuelto en `fn run() -> Result<Null>` porque codegen rechaza `?`
     // top-level (el intérprete lo soporta, pero queremos paridad).
@@ -10709,7 +10709,7 @@ match run() {
 }
 
 #[test]
-fn tier_b1_paridad_datetime_add_methods() {
+fn tier_b1_datetime_add_methods_parity() {
     // B.1 DateTime arithmetic: sub-second + calendar units.
     let src = "\
 fn run() -> Result<Null> {
@@ -10740,7 +10740,7 @@ match run() {
 }
 
 #[test]
-fn tier_b2_paridad_subtract_methods() {
+fn tier_b2_subtract_methods_parity() {
     // B.2 subtract symmetric (alias de add con negate).
     let src = "\
 fn run() -> Result<Null> {
@@ -10772,7 +10772,7 @@ match run() {
 }
 
 #[test]
-fn tier_b3_paridad_diff_methods() {
+fn tier_b3_diff_methods_parity() {
     // B.3 diff entre fechas (signed Int).
     let src = "\
 fn run() -> Result<Null> {
@@ -10806,7 +10806,7 @@ match run() {
 }
 
 #[test]
-fn tier_b4_paridad_comparison_operators() {
+fn tier_b4_comparison_operators_parity() {
     // B.4 <, >, <=, >= entre Date/DateTime (chrono::Ord nativos).
     let src = "\
 fn run() -> Result<Null> {
@@ -10866,7 +10866,7 @@ match run() {
 }
 
 #[test]
-fn tier_b6_paridad_shortcuts() {
+fn tier_b6_shortcuts_parity() {
     // B.6 Date.tomorrow/yesterday y DateTime.epoch.
     // Verificamos el shape (no fechas exactas — Local::now() varía):
     // tomorrow - today = 1 día; today - yesterday = 1; epoch == 1970-01-01.
@@ -10889,7 +10889,7 @@ print(e.timestamp())
 }
 
 #[test]
-fn tier_b7_paridad_in_tz_iana() {
+fn tier_b7_in_tz_iana_parity() {
     // B.7 timezone display: `to_local()` (TZ del sistema) + `in_tz`
     // (IANA name → Result<Str>). El instante UTC interno (timestamp)
     // NO cambia — solo el display.
@@ -10965,7 +10965,7 @@ print(bomb.to_str())
 }
 
 #[test]
-fn tier_b_checker_rechaza_arg_no_int() {
+fn tier_b_checker_rejects_non_int_arg() {
     // El checker estático rechaza `d.add_days(\"hola\")` con error claro.
     // Anotación `: Date` explícita: los constructores estáticos
     // (`Date.today()`) retornan Any (Module call) — sin anotación, el
@@ -11165,7 +11165,7 @@ fn greet(name: Str) -> Int {
 }
 
 #[test]
-fn fase_13_cli_flag_int_invalido_exit_2() {
+fn fase_13_cli_invalid_int_flag_exit_2() {
     let src = "\
 @command(\"greet\")
 fn greet(name: Str, count: Int = 1) -> Int {
@@ -11225,7 +11225,7 @@ fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
 }
 
 #[test]
-fn fase_13_short_flag_desconocida_es_error() {
+fn fase_13_unknown_short_flag_is_error() {
     let src = "\
 @command(\"greet\")
 fn greet(name: Str, loud: Bool = false) -> Int {
@@ -11242,7 +11242,7 @@ fn greet(name: Str, loud: Bool = false) -> Int {
 }
 
 #[test]
-fn fase_13_bool_default_true_se_niega_con_no_flag() {
+fn fase_13_bool_default_true_negated_by_no_flag() {
     let src = "\
 @command(\"go\")
 fn go(verbose: Bool = true) -> Int {
@@ -11295,7 +11295,7 @@ fn run(mode: Str, files: List<Str> = []) -> Int {
 }
 
 #[test]
-fn fase_13_list_str_variadic_vacio_aceptado() {
+fn fase_13_list_str_variadic_empty_accepted() {
     let src = "\
 @command(\"run\")
 fn run(files: List<Str> = []) -> Int {
@@ -11309,7 +11309,7 @@ fn run(files: List<Str> = []) -> Int {
 }
 
 #[test]
-fn fase_13_paridad_run_vs_build_polish() {
+fn fase_13_parity_run_vs_build_polish() {
     let stem = "fase13_paridad_polish";
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
@@ -11367,7 +11367,7 @@ fn process(mode: Str, verbose: Bool = true, count: Int = 1, files: List<Str> = [
 }
 
 #[test]
-fn fase_13_short_flag_collision_es_error_compile() {
+fn fase_13_short_flag_collision_is_compile_error() {
     let src = "\
 @command(\"go\")
 fn go(loud: Bool = false, level: Int = 1) -> Int {
@@ -11383,7 +11383,7 @@ fn go(loud: Bool = false, level: Int = 1) -> Int {
 }
 
 #[test]
-fn fase_13_cli_paridad_run_vs_build() {
+fn fase_13_cli_parity_run_vs_build() {
     // Paridad bit-a-bit: el output del intérprete debe coincidir con
     // el del binario compilado para el mismo argv.
     let stem = "fase13_paridad";
@@ -11509,7 +11509,7 @@ fn build_and_run_with_env_and_stderr(
 }
 
 #[test]
-fn m12_3_a_3_log_info_emite_json_con_shape_flat_a_stderr() {
+fn m12_3_a_3_log_info_emits_json_with_flat_shape_to_stderr() {
     // Programa con `log.info(msg, kwargs)` debe emitir JSON flat a
     // stderr: timestamp + level + msg + kwargs al mismo nivel.
     let src = "\
@@ -11562,7 +11562,7 @@ print(\"done\")
 }
 
 #[test]
-fn m12_3_a_3_log_default_level_info_filtra_debug() {
+fn m12_3_a_3_log_default_level_info_filters_debug() {
     // Sin RUST_LOG seteada, default level = info. log.debug() NO debe
     // aparecer en el output stderr.
     let src = "\
@@ -11613,7 +11613,7 @@ log.info(\"tambien visible\")
 }
 
 #[test]
-fn m12_3_a_3_log_warn_con_secret_redacta_el_inner() {
+fn m12_3_a_3_log_warn_with_secret_redacts_inner() {
     // Programa que pone un Secret en kwargs — el value real (de la
     // env var SMOKE_TOK) NO debe aparecer en el output.
     let src = "\
@@ -11644,7 +11644,7 @@ let _ = rotate()
 }
 
 #[test]
-fn auth_blacklist_codegen_compila_los_3_builtins_y_emite_helpers() {
+fn auth_blacklist_codegen_compiles_3_builtins_and_emits_helpers() {
     // 9.w.1.iter2.b — programa que usa `auth.blacklist`,
     // `auth.is_blacklisted` y `auth.cleanup_expired` debe compilar
     // sin errores y emitir los 3 helpers `__fitz_auth_*` en el
@@ -11720,7 +11720,7 @@ print(\"my-flag: {v}\")
 }
 
 #[test]
-fn fase_12_8_flags_list_codegen_devuelve_env_var_detectada() {
+fn fase_12_8_flags_list_codegen_returns_detected_env_var() {
     // Sin manifest mode, los defaults compile-time están vacíos.
     // Pero `flags.list()` enumera env vars `FITZ_FLAG_*`. Para evitar
     // pollución de otros tests / env del shell, este test valida solo
