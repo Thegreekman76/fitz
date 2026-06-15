@@ -7410,7 +7410,7 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_import(dotted: &str) -> __FitzPyObject {\n    \
              Python::attach(|py| match py.import(dotted) {\n        \
              Ok(module) => __FitzPyObject(Arc::new(module.into_any().unbind())),\n        \
-             Err(err) => panic!(\"error importando módulo Python `{}`: {}\", dotted, __fitz_py_err_to_string(py, err)),\n    \
+             Err(err) => panic!(\"error importing Python module `{}`: {}\", dotted, __fitz_py_err_to_string(py, err)),\n    \
              })\n\
              }\n\n\
              pub(crate) fn __fitz_py_get_attr_obj(obj: &__FitzPyObject, name: &str) -> __FitzPyObject {\n    \
@@ -7418,7 +7418,7 @@ impl<'a> CodegenCtx<'a> {
              let bound = obj.0.bind(py);\n        \
              match bound.getattr(name) {\n            \
              Ok(attr) => __FitzPyObject(Arc::new(attr.unbind())),\n            \
-             Err(err) => panic!(\"error accediendo a `.{}` sobre objeto Python: {}\", name, __fitz_py_err_to_string(py, err)),\n        \
+             Err(err) => panic!(\"error accessing `.{}` on Python object: {}\", name, __fitz_py_err_to_string(py, err)),\n        \
              }\n    \
              })\n\
              }\n\n\
@@ -7429,9 +7429,9 @@ impl<'a> CodegenCtx<'a> {
              return if bound.extract::<bool>().unwrap_or(false) { 1 } else { 0 };\n        \
              }\n        \
              if !bound.is_instance_of::<PyInt>() {\n            \
-             panic!(\"se esperaba un int Python para coercer a Int, llegó otro tipo\");\n        \
+             panic!(\"expected a Python int to coerce to Int, got another type\");\n        \
              }\n        \
-             bound.extract::<i64>().unwrap_or_else(|_| panic!(\"el int Python excede el rango de Int (i64) en Fitz\"))\n    \
+             bound.extract::<i64>().unwrap_or_else(|_| panic!(\"Python int exceeds the range of Int (i64) in Fitz\"))\n    \
              })\n\
              }\n\n\
              pub(crate) fn __fitz_py_extract_f64(obj: &__FitzPyObject) -> f64 {\n    \
@@ -7443,14 +7443,14 @@ impl<'a> CodegenCtx<'a> {
              if bound.is_instance_of::<PyInt>() {\n            \
              return bound.extract::<i64>().map(|n| n as f64).unwrap_or(0.0);\n        \
              }\n        \
-             panic!(\"se esperaba un float Python para coercer a Float, llegó otro tipo\")\n    \
+             panic!(\"expected a Python float to coerce to Float, got another type\")\n    \
              })\n\
              }\n\n\
              pub(crate) fn __fitz_py_extract_string(obj: &__FitzPyObject) -> String {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              if !bound.is_instance_of::<PyString>() {\n            \
-             panic!(\"se esperaba un str Python para coercer a Str, llegó otro tipo\");\n        \
+             panic!(\"expected a Python str to coerce to Str, got another type\");\n        \
              }\n        \
              bound.extract::<String>().unwrap_or_default()\n    \
              })\n\
@@ -7459,7 +7459,7 @@ impl<'a> CodegenCtx<'a> {
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              if !bound.is_instance_of::<PyBool>() {\n            \
-             panic!(\"se esperaba un bool Python para coercer a Bool, llegó otro tipo\");\n        \
+             panic!(\"expected a Python bool to coerce to Bool, got another type\");\n        \
              }\n        \
              bound.extract::<bool>().unwrap_or(false)\n    \
              })\n\
@@ -7708,11 +7708,11 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_to_list_i64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<i64>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Int>\"));\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"expected a Python list to coerce to List<Int>\"));\n        \
              let mut out: Vec<i64> = Vec::with_capacity(list.len());\n        \
              for item in list.iter() {\n            \
-             if !item.is_instance_of::<PyInt>() { panic!(\"elemento de list Python no es int — esperado para List<Int>\"); }\n            \
-             out.push(item.extract::<i64>().unwrap_or_else(|_| panic!(\"int Python fuera de rango i64 al coercer List<Int>\")));\n        \
+             if !item.is_instance_of::<PyInt>() { panic!(\"Python list element is not int — expected for List<Int>\"); }\n            \
+             out.push(item.extract::<i64>().unwrap_or_else(|_| panic!(\"Python int out of i64 range when coercing List<Int>\")));\n        \
              }\n        \
              Arc::new(Mutex::new(out))\n    \
              })\n\
@@ -7720,7 +7720,7 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_to_list_f64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<f64>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Float>\"));\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"expected a Python list to coerce to List<Float>\"));\n        \
              let mut out: Vec<f64> = Vec::with_capacity(list.len());\n        \
              for item in list.iter() {\n            \
              let f = if item.is_instance_of::<PyFloat>() {\n                \
@@ -7728,7 +7728,7 @@ impl<'a> CodegenCtx<'a> {
              } else if item.is_instance_of::<PyInt>() {\n                \
              item.extract::<i64>().map(|n| n as f64).unwrap_or(0.0)\n            \
              } else {\n                \
-             panic!(\"elemento de list Python no es número — esperado para List<Float>\")\n            \
+             panic!(\"Python list element is not a number — expected for List<Float>\")\n            \
              };\n            \
              out.push(f);\n        \
              }\n        \
@@ -7738,10 +7738,10 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_to_list_string(obj: &__FitzPyObject) -> Arc<Mutex<Vec<String>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Str>\"));\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"expected a Python list to coerce to List<Str>\"));\n        \
              let mut out: Vec<String> = Vec::with_capacity(list.len());\n        \
              for item in list.iter() {\n            \
-             if !item.is_instance_of::<PyString>() { panic!(\"elemento de list Python no es str — esperado para List<Str>\"); }\n            \
+             if !item.is_instance_of::<PyString>() { panic!(\"Python list element is not str — expected for List<Str>\"); }\n            \
              out.push(item.extract::<String>().unwrap_or_default());\n        \
              }\n        \
              Arc::new(Mutex::new(out))\n    \
@@ -7750,10 +7750,10 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_to_list_bool(obj: &__FitzPyObject) -> Arc<Mutex<Vec<bool>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Bool>\"));\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"expected a Python list to coerce to List<Bool>\"));\n        \
              let mut out: Vec<bool> = Vec::with_capacity(list.len());\n        \
              for item in list.iter() {\n            \
-             if !item.is_instance_of::<PyBool>() { panic!(\"elemento de list Python no es bool — esperado para List<Bool>\"); }\n            \
+             if !item.is_instance_of::<PyBool>() { panic!(\"Python list element is not bool — expected for List<Bool>\"); }\n            \
              out.push(item.extract::<bool>().unwrap_or(false));\n        \
              }\n        \
              Arc::new(Mutex::new(out))\n    \
@@ -7774,11 +7774,11 @@ impl<'a> CodegenCtx<'a> {
             "pub(crate) fn __fitz_py_to_map_string_string(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, String)>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Str>\"));\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"expected a Python dict to coerce to Map<Str, Str>\"));\n        \
              let mut out: Vec<(String, String)> = Vec::with_capacity(dict.len());\n        \
              for (k, v) in dict.iter() {\n            \
-             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
-             if !v.is_instance_of::<PyString>() { panic!(\"valor de dict Python no es str — esperado para Map<_, Str>\"); }\n            \
+             if !k.is_instance_of::<PyString>() { panic!(\"Python dict key is not str — expected for Map<Str, _>\"); }\n            \
+             if !v.is_instance_of::<PyString>() { panic!(\"Python dict value is not str — expected for Map<_, Str>\"); }\n            \
              out.push((k.extract::<String>().unwrap_or_default(), v.extract::<String>().unwrap_or_default()));\n        \
              }\n        \
              Arc::new(Mutex::new(out))\n    \
@@ -7787,12 +7787,12 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_to_map_string_i64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, i64)>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Int>\"));\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"expected a Python dict to coerce to Map<Str, Int>\"));\n        \
              let mut out: Vec<(String, i64)> = Vec::with_capacity(dict.len());\n        \
              for (k, v) in dict.iter() {\n            \
-             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
-             if !v.is_instance_of::<PyInt>() { panic!(\"valor de dict Python no es int — esperado para Map<_, Int>\"); }\n            \
-             out.push((k.extract::<String>().unwrap_or_default(), v.extract::<i64>().unwrap_or_else(|_| panic!(\"int Python fuera de rango i64 al coercer Map<Str, Int>\"))));\n        \
+             if !k.is_instance_of::<PyString>() { panic!(\"Python dict key is not str — expected for Map<Str, _>\"); }\n            \
+             if !v.is_instance_of::<PyInt>() { panic!(\"Python dict value is not int — expected for Map<_, Int>\"); }\n            \
+             out.push((k.extract::<String>().unwrap_or_default(), v.extract::<i64>().unwrap_or_else(|_| panic!(\"Python int out of i64 range when coercing Map<Str, Int>\"))));\n        \
              }\n        \
              Arc::new(Mutex::new(out))\n    \
              })\n\
@@ -7800,16 +7800,16 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_to_map_string_f64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, f64)>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Float>\"));\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"expected a Python dict to coerce to Map<Str, Float>\"));\n        \
              let mut out: Vec<(String, f64)> = Vec::with_capacity(dict.len());\n        \
              for (k, v) in dict.iter() {\n            \
-             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
+             if !k.is_instance_of::<PyString>() { panic!(\"Python dict key is not str — expected for Map<Str, _>\"); }\n            \
              let f = if v.is_instance_of::<PyFloat>() {\n                \
              v.extract::<f64>().unwrap_or(0.0)\n            \
              } else if v.is_instance_of::<PyInt>() {\n                \
              v.extract::<i64>().map(|n| n as f64).unwrap_or(0.0)\n            \
              } else {\n                \
-             panic!(\"valor de dict Python no es número — esperado para Map<_, Float>\")\n            \
+             panic!(\"Python dict value is not a number — expected for Map<_, Float>\")\n            \
              };\n            \
              out.push((k.extract::<String>().unwrap_or_default(), f));\n        \
              }\n        \
@@ -7819,11 +7819,11 @@ impl<'a> CodegenCtx<'a> {
              pub(crate) fn __fitz_py_to_map_string_bool(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, bool)>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
-             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Bool>\"));\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"expected a Python dict to coerce to Map<Str, Bool>\"));\n        \
              let mut out: Vec<(String, bool)> = Vec::with_capacity(dict.len());\n        \
              for (k, v) in dict.iter() {\n            \
-             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
-             if !v.is_instance_of::<PyBool>() { panic!(\"valor de dict Python no es bool — esperado para Map<_, Bool>\"); }\n            \
+             if !k.is_instance_of::<PyString>() { panic!(\"Python dict key is not str — expected for Map<Str, _>\"); }\n            \
+             if !v.is_instance_of::<PyBool>() { panic!(\"Python dict value is not bool — expected for Map<_, Bool>\"); }\n            \
              out.push((k.extract::<String>().unwrap_or_default(), v.extract::<bool>().unwrap_or(false)));\n        \
              }\n        \
              Arc::new(Mutex::new(out))\n    \
@@ -8200,9 +8200,9 @@ impl<'a> CodegenCtx<'a> {
                      use std::str::FromStr;\n        \
                      let __normalized = __fitz_normalize_cron({expr});\n        \
                      let __schedule = cron::Schedule::from_str(&__normalized)\n            \
-                         .unwrap_or_else(|e| panic!(\"@cron sobre fn '{{}}': expresión inválida `{{}}`: {{}}\", {name}, {expr}, e));\n        \
+                         .unwrap_or_else(|e| panic!(\"@cron on fn '{{}}': invalid expression `{{}}`: {{}}\", {name}, {expr}, e));\n        \
                      let __tz = {tz_lit}.parse::<chrono_tz::Tz>()\n            \
-                         .unwrap_or_else(|_| panic!(\"@cron sobre fn '{{}}': IANA timezone `{{}}` no reconocido.\", {name}, {tz_lit}));\n        \
+                         .unwrap_or_else(|_| panic!(\"@cron on fn '{{}}': IANA timezone `{{}}` not recognized.\", {name}, {tz_lit}));\n        \
                      let __opts = __FitzCronOptions {{ tz: __tz, retry: {retry}, catch_up: {catch_up}{store} }};\n        \
                      let __job_name = {name}.to_string();\n        \
                      tokio::spawn(__fitz_run_cron_job(__job_name, __schedule, __opts, move || async {{ {invoke} }}));\n    \
@@ -8447,7 +8447,7 @@ impl __FitzRetryConfig {
         if !self.uses_logging {
             return;
         }
-        self.emit("\n// --- 12.3.a.3: runtime de structured logging (módulo `log`) ---\n");
+        self.emit("\n// --- 12.3.a.3: structured logging runtime (`log` module) ---\n");
         self.emit(LOGGING_PRELUDE);
         // Phase 12.3.iter2.b — the `__fitz_emit_log_to_otel`
         // helper has two versions: no-op stub (when OTEL_PRELUDE
@@ -8725,7 +8725,7 @@ pub(crate) fn __fitz_pg_to_i64(v: &__FitzPgValue, col: &str) -> Result<i64, Stri
         __FitzPgValue::Text(s) => s.parse::<i64>().map_err(|_| {
             format!(\"columna `{}`: texto `{}` no parsea a Int\", col, s)
         }),
-        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        __FitzPgValue::Null => Err(format!(\"column `{}` is NULL but the field is not nullable\", col)),
         other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Int\", col, other)),
     }
 }
@@ -8737,7 +8737,7 @@ pub(crate) fn __fitz_pg_to_f64(v: &__FitzPgValue, col: &str) -> Result<f64, Stri
         __FitzPgValue::Text(s) => s.parse::<f64>().map_err(|_| {
             format!(\"columna `{}`: texto `{}` no parsea a Float\", col, s)
         }),
-        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        __FitzPgValue::Null => Err(format!(\"column `{}` is NULL but the field is not nullable\", col)),
         other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Float\", col, other)),
     }
 }
@@ -8745,7 +8745,7 @@ pub(crate) fn __fitz_pg_to_f64(v: &__FitzPgValue, col: &str) -> Result<f64, Stri
 pub(crate) fn __fitz_pg_to_string(v: &__FitzPgValue, col: &str) -> Result<String, String> {
     match v {
         __FitzPgValue::Text(s) => Ok(s.clone()),
-        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        __FitzPgValue::Null => Err(format!(\"column `{}` is NULL but the field is not nullable\", col)),
         other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Str\", col, other)),
     }
 }
@@ -8753,7 +8753,7 @@ pub(crate) fn __fitz_pg_to_string(v: &__FitzPgValue, col: &str) -> Result<String
 pub(crate) fn __fitz_pg_to_bool(v: &__FitzPgValue, col: &str) -> Result<bool, String> {
     match v {
         __FitzPgValue::Bool(b) => Ok(*b),
-        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        __FitzPgValue::Null => Err(format!(\"column `{}` is NULL but the field is not nullable\", col)),
         other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Bool\", col, other)),
     }
 }
@@ -8761,7 +8761,7 @@ pub(crate) fn __fitz_pg_to_bool(v: &__FitzPgValue, col: &str) -> Result<bool, St
 pub(crate) fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
     match v {
         __FitzPgValue::Bytes(b) => Ok(b.clone()),
-        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        __FitzPgValue::Null => Err(format!(\"column `{}` is NULL but the field is not nullable\", col)),
         other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Bytes\", col, other)),
     }
 }
@@ -8926,9 +8926,9 @@ impl<TData> __FitzQueryBuilder<TData> {
                 match guard.first() {
                     Some(r) => match r.get_at(0) {
                         Some(v) => __fitz_pg_to_i64(v, \"count\"),
-                        None => Err(\"COUNT(*) sin columna\".to_string()),
+                        None => Err(\"COUNT(*) without column\".to_string()),
                     },
-                    None => Err(\"COUNT(*) sin row\".to_string()),
+                    None => Err(\"COUNT(*) without row\".to_string()),
                 }
             }
             Err(e) => Err(e),
@@ -9058,9 +9058,9 @@ impl<TData> __FitzQueryBuilder<TData> {
                 match guard.first() {
                     Some(r) => match r.get_at(0) {
                         Some(v) => __fitz_pg_to_f64(v, \"__agg\"),
-                        None => Err(format!(\"`{}`: sin columna en la row\", agg_name)),
+                        None => Err(format!(\"`{}`: no column in row\", agg_name)),
                     },
-                    None => Err(format!(\"`{}`: sin row en el resultset\", agg_name)),
+                    None => Err(format!(\"`{}`: no row in resultset\", agg_name)),
                 }
             }
             Err(e) => Err(e),
@@ -9211,7 +9211,7 @@ fn __fitz_fv_to_json(v: &__FitzValue) -> serde_json::Value {
 /// Parsea un text de columna JSONB a `__FitzValue::Map(...)`.
 pub(crate) fn __fitz_jsonb_to_fitz_value(s: &str) -> Result<__FitzValue, String> {
     let json: serde_json::Value = serde_json::from_str(s)
-        .map_err(|e| format!(\"JSONB inválido: {}\", e))?;
+        .map_err(|e| format!(\"invalid JSONB: {}\", e))?;
     Ok(__fitz_json_to_fv(&json))
 }
 
@@ -9696,7 +9696,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                  serde_json::Value::Number(n) => {\n                \
                                      if let Some(i) = n.as_i64() { Ok(__FitzValue::Int(i)) }\n                \
                                      else if let Some(f) = n.as_f64() { Ok(__FitzValue::Float(f)) }\n                \
-                                     else { Err(format!(\"número JSON fuera de rango: {}\", n)) }\n            \
+                                     else { Err(format!(\"JSON number out of range: {}\", n)) }\n            \
                                  }\n            \
                                  serde_json::Value::String(s) => Ok(__FitzValue::Str(s.clone())),\n            \
                                  serde_json::Value::Array(arr) => {\n                \
@@ -9760,7 +9760,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                      }\n                \
                                      Ok(pairs)\n            \
                                  }\n            \
-                                 other => Err(format!(\"expected un JSON object para Map<Str, Any>, recibió: {}\", other)),\n        \
+                                 other => Err(format!(\"expected a JSON object for Map<Str, Any>, got: {}\", other)),\n        \
                              }\n    \
                          }\n\
                      }\n\n\
@@ -9889,10 +9889,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              for (line_no, raw_line) in contents.lines().enumerate() {\n        \
              let line = raw_line.trim();\n        \
              if line.is_empty() || line.starts_with('#') { continue; }\n        \
-             let eq_idx = line.find('=').ok_or_else(|| format!(\"{}:{}: línea sin `=` — formato esperado `KEY=VALUE`\", path, line_no + 1))?;\n        \
+             let eq_idx = line.find('=').ok_or_else(|| format!(\"{}:{}: line without `=` — expected format `KEY=VALUE`\", path, line_no + 1))?;\n        \
              let key = line[..eq_idx].trim();\n        \
              let mut value = line[eq_idx + 1..].trim().to_string();\n        \
-             if key.is_empty() { return Err(format!(\"{}:{}: key vacía antes del `=`\", path, line_no + 1)); }\n        \
+             if key.is_empty() { return Err(format!(\"{}:{}: empty key before `=`\", path, line_no + 1)); }\n        \
              if value.len() >= 2 && value.starts_with('\"') && value.ends_with('\"') {\n            \
              value = value[1..value.len() - 1].to_string();\n        \
              }\n        \
@@ -9955,7 +9955,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              let trimmed = contents.trim_end_matches(['\\n', '\\r']).to_string();\n        \
              return Ok(__FitzSecret::new(trimmed));\n    \
              }\n    \
-             Err(format!(\"secret '{}' no encontrado (chequeado: env var, /run/secrets/{})\", key, key))\n\
+             Err(format!(\"secret '{}' not found (checked: env var, /run/secrets/{})\", key, key))\n\
              }\n\n",
         );
     }
@@ -10041,7 +10041,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if has_cron {
             self.emit("    let _ = tokio::signal::ctrl_c().await;\n");
             self.emit(
-                "    eprintln!(\"\\n\\u{1F550} Fitz scheduler recibió Ctrl+C, terminando.\");\n",
+                "    eprintln!(\"\\n\\u{1F550} Fitz scheduler received Ctrl+C, terminating.\");\n",
             );
         }
         self.pop_scope();
@@ -10566,13 +10566,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }
                     "Int" => {
                         self.emit(&format!(
-                            "                    match v.parse::<i64>() {{ Ok(n) => {} = n, Err(_) => {{ eprintln!(\"error: --{} espera Int, recibió `{{}}`\", v); return 2i64; }} }};\n",
+                            "                    match v.parse::<i64>() {{ Ok(n) => {} = n, Err(_) => {{ eprintln!(\"error: --{} expects Int, got `{{}}`\", v); return 2i64; }} }};\n",
                             slot, p.name
                         ));
                     }
                     "Float" => {
                         self.emit(&format!(
-                            "                    match v.parse::<f64>() {{ Ok(n) => {} = n, Err(_) => {{ eprintln!(\"error: --{} espera Float, recibió `{{}}`\", v); return 2i64; }} }};\n",
+                            "                    match v.parse::<f64>() {{ Ok(n) => {} = n, Err(_) => {{ eprintln!(\"error: --{} expects Float, got `{{}}`\", v); return 2i64; }} }};\n",
                             slot, p.name
                         ));
                     }
@@ -10585,7 +10585,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.emit("                }\n");
         }
         self.emit("                other => {\n");
-        self.emit("                    eprintln!(\"error: flag desconocida --{}\", other);\n");
+        self.emit("                    eprintln!(\"error: unknown flag --{}\", other);\n");
         self.emit(&format!(
             "                    eprintln!(\"\");\n                    eprintln!(\"{{}}\", __fitz_cli_{i}_help(bin_name, true));\n",
             i = ident
@@ -10599,11 +10599,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let total_positional = positionals.len();
         if total_positional == 0 {
             self.emit(
-                "            eprintln!(\"error: argumento posicional inesperado: `{}`\", tok);\n",
+                "            eprintln!(\"error: unexpected positional argument: `{}`\", tok);\n",
             );
             self.emit("            return 2i64;\n");
         } else {
-            self.emit("            // Resolver positional según el primer slot libre.\n");
+            self.emit("            // Resolve positional by first free slot.\n");
             for p in &positionals {
                 // v0.11.1 — variadic is handled in the final `else`.
                 if Some(&p.name) == variadic_param_name.as_ref() {
@@ -10620,11 +10620,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 match ty.as_str() {
                     "Str" => self.emit(&format!("                {} = Some(tok.clone());\n", slot)),
                     "Int" => self.emit(&format!(
-                        "                match tok.parse::<i64>() {{ Ok(n) => {} = Some(n), Err(_) => {{ eprintln!(\"error: <{}> espera Int, recibió `{{}}`\", tok); return 2i64; }} }};\n",
+                        "                match tok.parse::<i64>() {{ Ok(n) => {} = Some(n), Err(_) => {{ eprintln!(\"error: <{}> expects Int, got `{{}}`\", tok); return 2i64; }} }};\n",
                         slot, p.name
                     )),
                     "Float" => self.emit(&format!(
-                        "                match tok.parse::<f64>() {{ Ok(n) => {} = Some(n), Err(_) => {{ eprintln!(\"error: <{}> espera Float, recibió `{{}}`\", tok); return 2i64; }} }};\n",
+                        "                match tok.parse::<f64>() {{ Ok(n) => {} = Some(n), Err(_) => {{ eprintln!(\"error: <{}> expects Float, got `{{}}`\", tok); return 2i64; }} }};\n",
                         slot, p.name
                     )),
                     "Bool" => self.emit(&format!(
@@ -10662,7 +10662,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
             } else {
                 self.emit("            } else {\n");
-                self.emit("                eprintln!(\"error: argumento posicional inesperado: `{}`\", tok);\n");
+                self.emit("                eprintln!(\"error: unexpected positional argument: `{}`\", tok);\n");
                 self.emit("                return 2i64;\n");
                 self.emit("            }\n");
             }
@@ -10688,7 +10688,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             if p.default.is_none() {
                 self.emit(&format!(
-                    "    let __cli_arg_{i} = match __cli_pos_{i} {{ Some(v) => v, None => {{ eprintln!(\"error: falta argumento <{n}>\"); return 2i64; }} }};\n",
+                    "    let __cli_arg_{i} = match __cli_pos_{i} {{ Some(v) => v, None => {{ eprintln!(\"error: missing argument <{n}>\"); return 2i64; }} }};\n",
                     i = ident,
                     n = p.name
                 ));
@@ -11449,7 +11449,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             let coerce_block = orm_field_coerce_block(&f.type_, &col_lit, f.name.as_str())?;
             writeln!(
                 &mut self.output,
-                "        let {field}: {ty} = {{\n            let __v = __row.get({col_lit}).ok_or_else(|| format!(\"columna `{{}}` (field `{field}`) no está en el resultset\", {col_lit}))?;\n            {coerce}\n        }};",
+                "        let {field}: {ty} = {{\n            let __v = __row.get({col_lit}).ok_or_else(|| format!(\"column `{{}}` (field `{field}`) is not in the resultset\", {col_lit}))?;\n            {coerce}\n        }};",
                 field = f.name,
                 ty = rust_type_for(&f.type_, self.env)?,
                 col_lit = col_lit,
@@ -11753,7 +11753,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("        let bound = obj.0.bind(py);\n");
         writeln!(
             &mut self.output,
-            "        let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a `{}` (recibí otro tipo)\"));",
+            "        let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"expected a Python dict to coerce to `{}` (got another type)\"));",
             name
         )
         .unwrap();
@@ -11843,23 +11843,23 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // Extract arm depends on the field's type.
         let extract = match &f.type_ {
             Type::Int => format!(
-                "__item.extract::<i64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: int Python fuera de rango i64\"))",
+                "__item.extract::<i64>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}`: Python int out of i64 range\"))",
                 f = field_name, t = type_name
             ),
             Type::Float => format!(
                 "if __item.is_instance_of::<PyInt>() {{ \
                  __item.extract::<i64>().map(|n| n as f64).unwrap_or(0.0) \
                  }} else {{ \
-                 __item.extract::<f64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: no es float Python\")) \
+                 __item.extract::<f64>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}`: not a Python float\")) \
                  }}",
                 f = field_name, t = type_name
             ),
             Type::Str => format!(
-                "__item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: no es str Python\"))",
+                "__item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}`: not a Python str\"))",
                 f = field_name, t = type_name
             ),
             Type::Bool => format!(
-                "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: no es bool Python\"))",
+                "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}`: not a Python bool\"))",
                 f = field_name, t = type_name
             ),
             // Date/DateTime/Uuid: the Python side sends them as
@@ -11867,18 +11867,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             // ISO 8601 str / canonical UUID). We parse to the
             // native Rust type.
             Type::Date => format!(
-                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Date): no es str Python\")); \
-                 chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Date): str `{{}}` no parsea como YYYY-MM-DD\", __s)) }}",
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (Date): not a Python str\")); \
+                 chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (Date): str `{{}}` does not parse as YYYY-MM-DD\", __s)) }}",
                 f = field_name, t = type_name
             ),
             Type::DateTime => format!(
-                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (DateTime): no es str Python\")); \
-                 chrono::DateTime::parse_from_rfc3339(&__s).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (DateTime): str `{{}}` no parsea como RFC 3339\", __s)) }}",
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (DateTime): not a Python str\")); \
+                 chrono::DateTime::parse_from_rfc3339(&__s).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (DateTime): str `{{}}` does not parse as RFC 3339\", __s)) }}",
                 f = field_name, t = type_name
             ),
             Type::Uuid => format!(
-                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Uuid): no es str Python\")); \
-                 uuid::Uuid::parse_str(&__s).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Uuid): str `{{}}` no parsea como UUID canonical\", __s)) }}",
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (Uuid): not a Python str\")); \
+                 uuid::Uuid::parse_str(&__s).unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (Uuid): str `{{}}` does not parse as canonical UUID\", __s)) }}",
                 f = field_name, t = type_name
             ),
             Type::Nullable(inner) => {
@@ -11937,7 +11937,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             "None".to_string()
         } else {
             format!(
-                "panic!(\"no se puede coercer a `{t}`: el dict no tiene el campo `{f}` (requerido por el tipo, no es nullable ni tiene default)\")",
+                "panic!(\"cannot coerce to `{t}`: the dict has no field `{f}` (required by the type, not nullable and no default)\")",
                 t = type_name, f = field_name
             )
         };
@@ -11954,41 +11954,41 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     ) -> Result<String, FitzError> {
         let arm = match inner {
             Type::Int => format!(
-                "__item.extract::<i64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Int): int Python fuera de rango\"))",
+                "__item.extract::<i64>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Int): Python int out of range\"))",
                 f = field_name, t = type_name
             ),
             Type::Float => format!(
                 "if __item.is_instance_of::<PyInt>() {{ \
                  __item.extract::<i64>().map(|n| n as f64).unwrap_or(0.0) \
                  }} else {{ \
-                 __item.extract::<f64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Float): no es float\")) \
+                 __item.extract::<f64>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Float): not a float\")) \
                  }}",
                 f = field_name, t = type_name
             ),
             Type::Str => format!(
-                "__item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Str): no es str\"))",
+                "__item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Str): not a str\"))",
                 f = field_name, t = type_name
             ),
             Type::Bool => format!(
-                "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Bool): no es bool\"))",
+                "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Bool): not a bool\"))",
                 f = field_name, t = type_name
             ),
             // Date/DateTime/Uuid in nullable — same pattern as
             // the non-nullable case (canonical str from Python,
             // parses to Rust).
             Type::Date => format!(
-                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Date): no es str\")); \
-                 chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Date): str `{{}}` no parsea como YYYY-MM-DD\", __s)) }}",
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Date): not a str\")); \
+                 chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Date): str `{{}}` does not parse as YYYY-MM-DD\", __s)) }}",
                 f = field_name, t = type_name
             ),
             Type::DateTime => format!(
-                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable DateTime): no es str\")); \
-                 chrono::DateTime::parse_from_rfc3339(&__s).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable DateTime): str `{{}}` no parsea como RFC 3339\", __s)) }}",
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable DateTime): not a str\")); \
+                 chrono::DateTime::parse_from_rfc3339(&__s).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable DateTime): str `{{}}` does not parse as RFC 3339\", __s)) }}",
                 f = field_name, t = type_name
             ),
             Type::Uuid => format!(
-                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Uuid): no es str\")); \
-                 uuid::Uuid::parse_str(&__s).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Uuid): str `{{}}` no parsea como UUID canonical\", __s)) }}",
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Uuid): not a str\")); \
+                 uuid::Uuid::parse_str(&__s).unwrap_or_else(|_| panic!(\"field `{f}` of `{t}` (nullable Uuid): str `{{}}` does not parse as canonical UUID\", __s)) }}",
                 f = field_name, t = type_name
             ),
             _ => {
@@ -12020,7 +12020,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("        let bound = obj.0.bind(py);\n");
         writeln!(
             &mut self.output,
-            "        let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<{}>\"));",
+            "        let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"expected a Python list to coerce to List<{}>\"));",
             name
         )
         .unwrap();
@@ -12519,7 +12519,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // extracting values.
                 writeln!(
                     &mut self.output,
-                    "match __destr_scrut {{ {}{} => {{}}, _ => panic!(\"destructuring no matcheó el valor\") }};",
+                    "match __destr_scrut {{ {}{} => {{}}, _ => panic!(\"destructuring did not match the value\") }};",
                     rust_pat, guard_clause
                 )
                 .unwrap();
@@ -12528,7 +12528,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let n = &names[0];
                 writeln!(
                     &mut self.output,
-                    "let mut {} = match __destr_scrut {{ {}{} => {}, _ => panic!(\"destructuring no matcheó el valor\") }};",
+                    "let mut {} = match __destr_scrut {{ {}{} => {}, _ => panic!(\"destructuring did not match the value\") }};",
                     n, rust_pat, guard_clause, n
                 )
                 .unwrap();
@@ -12537,7 +12537,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let joined = names.join(", ");
                 writeln!(
                     &mut self.output,
-                    "let ({}) = match __destr_scrut {{ {}{} => ({}), _ => panic!(\"destructuring no matcheó el valor\") }};",
+                    "let ({}) = match __destr_scrut {{ {}{} => ({}), _ => panic!(\"destructuring did not match the value\") }};",
                     joined, rust_pat, guard_clause, joined
                 )
                 .unwrap();
@@ -12930,7 +12930,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                      let __len = __g.len() as i64; \
                      let __eff = if __idx < 0 {{ __len + __idx }} else {{ __idx }}; \
                      if __eff < 0 || __eff >= __len {{ \
-                     panic!(\"índice {{}} fuera de rango (lista de tamaño {{}})\", __idx, __len); \
+                     panic!(\"index {{}} out of range (list of size {{}})\", __idx, __len); \
                      }} \
                      __g[__eff as usize] = __val; \
                      }}",
@@ -14134,7 +14134,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Ok((float_arith_with_finite_check(&l, sym, &r, &t), t))
             }
             // DZ mini-batch — explicit divisor-0 check to emit the
-            // same `"división por cero"` message as the interpreter
+            // same `"division by zero"` message as the interpreter
             // (`eval_div` in evaluator.rs). Without this wrap:
             // (a) `10 / 0` literal would make rustc reject with
             // `unconditional_panic` in const-eval, and (b) dynamic
@@ -14164,7 +14164,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Ok((
                     format!(
                         "{{ let __a: {ty} = {l}; let __b: {ty} = {r}; \
-                         if __b == {z} {{ panic!(\"división por cero\"); }} \
+                         if __b == {z} {{ panic!(\"division by zero\"); }} \
                          let __r = __a / __b;{check} __r }}",
                         ty = ty_rs, z = zero_lit, l = l, r = r,
                         check = finite_check
@@ -14186,12 +14186,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
                 // The `{}.rem_euclid({})` panics if `b == 0`. We
                 // wrap in an explicit check to emit the same error
-                // as the interpreter ("división por cero") instead
+                // as the interpreter ("division by zero") instead
                 // of a raw Rust panic.
                 Ok((
                     format!(
                         "{{ let __a: i64 = {}; let __b: i64 = {}; \
-                         if __b == 0 {{ panic!(\"división por cero\"); }} \
+                         if __b == 0 {{ panic!(\"division by zero\"); }} \
                          __a.rem_euclid(__b) }}",
                         lc, rc
                     ),
@@ -14222,7 +14222,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
                 let (l, r, _t) = numeric_coerce(&lc, &lt, &rc, &rt)
                     .ok_or_else(|| self.err_at(span, format!(
-                        "comparación entre `{}` y `{}` no aplicable",
+                        "comparison between `{}` and `{}` not applicable",
                         type_name(&lt), type_name(&rt)
                     )))?;
                 Ok((format!("({} {} {})", l, sym, r), Type::Bool))
@@ -14335,14 +14335,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             BinOpKind::BitXor => Ok((format!("({} ^ {})", lc, rc), Type::Int)),
             BinOpKind::Shl => Ok((
                 format!(
-                    "({{ let __rhs: i64 = {}; if !(0..64).contains(&__rhs) {{ panic!(\"shift fuera de rango: {{}}\", __rhs); }} (({}).wrapping_shl(__rhs as u32)) }})",
+                    "({{ let __rhs: i64 = {}; if !(0..64).contains(&__rhs) {{ panic!(\"shift out of range: {{}}\", __rhs); }} (({}).wrapping_shl(__rhs as u32)) }})",
                     rc, lc
                 ),
                 Type::Int,
             )),
             BinOpKind::Shr => Ok((
                 format!(
-                    "({{ let __rhs: i64 = {}; if !(0..64).contains(&__rhs) {{ panic!(\"shift fuera de rango: {{}}\", __rhs); }} (({}).wrapping_shr(__rhs as u32)) }})",
+                    "({{ let __rhs: i64 = {}; if !(0..64).contains(&__rhs) {{ panic!(\"shift out of range: {{}}\", __rhs); }} (({}).wrapping_shr(__rhs as u32)) }})",
                     rc, lc
                 ),
                 Type::Int,
@@ -16033,7 +16033,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Err(self.err_at(
                         body.span(),
                         format!(
-                            "no podés comparar el row entero (`{}`); accedé a un field específico",
+                            "cannot compare the entire row (`{}`); access a specific field",
                             name
                         ),
                     ))
@@ -16659,7 +16659,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     .map_err(|e| {
                         self.err_at(
                             callee_span,
-                            format!(".contains_json: serialización JSON: {e}"),
+                            format!(".contains_json: JSON serialization: {e}"),
                         )
                     })?;
                 bindings.push(format!(
@@ -16816,7 +16816,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (s_code, s_ty) = self.gen_expr(&args[0])?;
                 let s_c = coerce(&s_code, &s_ty, &Type::Str, self.env);
                 let code = format!(
-                    "({{ let __s = {}; chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").map_err(|e| format!(\"Date.parse: `{{}}` no es ISO 8601 (YYYY-MM-DD): {{}}\", __s, e)) }})",
+                    "({{ let __s = {}; chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").map_err(|e| format!(\"Date.parse: `{{}}` is not ISO 8601 (YYYY-MM-DD): {{}}\", __s, e)) }})",
                     s_c
                 );
                 Ok((
@@ -16840,7 +16840,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let code = format!(
                     "({{ let __y = {} as i32; let __m = {} as u32; let __d = {} as u32; \
                      chrono::NaiveDate::from_ymd_opt(__y, __m, __d).ok_or_else(|| \
-                     format!(\"Date.from_ymd: ({{}}, {{}}, {{}}) no es una fecha válida\", __y, __m, __d)) }})",
+                     format!(\"Date.from_ymd: ({{}}, {{}}, {{}}) is not a valid date\", __y, __m, __d)) }})",
                     coerced[0], coerced[1], coerced[2]
                 );
                 Ok((
@@ -16866,7 +16866,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (s_code, s_ty) = self.gen_expr(&args[0])?;
                 let s_c = coerce(&s_code, &s_ty, &Type::Str, self.env);
                 let code = format!(
-                    "({{ let __s = {}; chrono::DateTime::parse_from_rfc3339(&__s).map(|dt| dt.with_timezone(&chrono::Utc)).map_err(|e| format!(\"DateTime.parse: `{{}}` no es RFC 3339 (ej: 2026-05-30T14:30:00Z): {{}}\", __s, e)) }})",
+                    "({{ let __s = {}; chrono::DateTime::parse_from_rfc3339(&__s).map(|dt| dt.with_timezone(&chrono::Utc)).map_err(|e| format!(\"DateTime.parse: `{{}}` is not RFC 3339 (e.g.: 2026-05-30T14:30:00Z): {{}}\", __s, e)) }})",
                     s_c
                 );
                 Ok((
@@ -16885,7 +16885,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
                 let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let code = format!(
-                    "({{ let __secs = {}; chrono::DateTime::<chrono::Utc>::from_timestamp(__secs, 0).ok_or_else(|| format!(\"DateTime.from_timestamp: {{}} fuera de rango\", __secs)) }})",
+                    "({{ let __secs = {}; chrono::DateTime::<chrono::Utc>::from_timestamp(__secs, 0).ok_or_else(|| format!(\"DateTime.from_timestamp: {{}} out of range\", __secs)) }})",
                     n_c
                 );
                 Ok((
@@ -16918,7 +16918,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (s_code, s_ty) = self.gen_expr(&args[0])?;
                 let s_c = coerce(&s_code, &s_ty, &Type::Str, self.env);
                 let code = format!(
-                    "({{ let __s = {}; uuid::Uuid::parse_str(&__s).map_err(|e| format!(\"Uuid.parse: `{{}}` no es UUID canonical: {{}}\", __s, e)) }})",
+                    "({{ let __s = {}; uuid::Uuid::parse_str(&__s).map_err(|e| format!(\"Uuid.parse: `{{}}` is not canonical UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): {{}}\", __s, e)) }})",
                     s_c
                 );
                 Ok((
@@ -16955,7 +16955,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(arity_err(0, args.len()));
                 }
                 Ok((
-                    "chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect(\"epoch siempre válida\")"
+                    "chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect(\"epoch always valid\")"
                         .to_string(),
                     Type::DateTime,
                 ))
@@ -17145,7 +17145,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`DbConn.close` no acepta argumentos, recibió {}",
+                            "`DbConn.close` does not accept arguments, got {}",
                             args.len()
                         ),
                     ));
@@ -17166,7 +17166,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`DbConn.is_closed` no acepta argumentos, recibió {}",
+                            "`DbConn.is_closed` does not accept arguments, got {}",
                             args.len()
                         ),
                     ));
@@ -17604,7 +17604,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.err_at(
                 call_span,
                 format!(
-                    "navigation: el type `{}` no está registrado",
+                    "navigation: type `{}` is not registered",
                     rel.target_type
                 ),
             )
@@ -17902,9 +17902,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              match __rows_guard.first() {{\n                \
              Some(__r) => match __r.get_at(0) {{\n                    \
              Some(__v) => __fitz_pg_to_i64(__v, \"count\"),\n                    \
-             None => Err(\"COUNT(*) sin columna\".to_string()),\n                \
+             None => Err(\"COUNT(*) without column\".to_string()),\n                \
              }},\n                \
-             None => Err(\"COUNT(*) sin row\".to_string()),\n            \
+             None => Err(\"COUNT(*) without row\".to_string()),\n            \
              }}\n        \
              }}\n        \
              Err(__e) => Err(__e),\n    \
@@ -18166,7 +18166,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              Ok(__d) => Ok(Arc::new(Mutex::new(__d))),\n                    \
              Err(__e) => Err(__e),\n                \
              }},\n                \
-             None => Err(\"INSERT ... RETURNING no devolvió rows (inesperado)\".to_string()),\n            \
+             None => Err(\"INSERT ... RETURNING returned no rows (unexpected)\".to_string()),\n            \
              }}\n        \
              }}\n        \
              Err(__e) => Err(__e),\n    \
@@ -18343,7 +18343,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              let __db = {db};\n    \
              let __batch_size_i64: i64 = {batch_size};\n    \
              if __batch_size_i64 <= 0 {{\n        \
-             return Err(format!(\"{type_n}.bulk_insert: batch_size debe ser > 0, recibió {{}}\", __batch_size_i64));\n    \
+             return Err(format!(\"{type_n}.bulk_insert: batch_size must be > 0, got {{}}\", __batch_size_i64));\n    \
              }}\n    \
              let __batch_size: usize = __batch_size_i64 as usize;\n    \
              if __rows_vec.is_empty() {{\n        \
@@ -18578,7 +18578,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.preload(\"{}\")` MVP: solo @has_many o BelongsToCompanion (recibido: {:?}). Para BelongsTo eager, declará un sibling `field: Target?` adyacente al FK (e.g. `user: User?` junto a `@belongs_to(\"User\") user_id: Int`).",
+                    "`{}.preload(\"{}\")` MVP: only @has_many or BelongsToCompanion (received: {:?}). For eager BelongsTo, declare a sibling `field: Target?` adjacent to the FK (e.g. `user: User?` next to `@belongs_to(\"User\") user_id: Int`).",
                     type_name, name, rel.kind
                 ),
             ));
@@ -19794,7 +19794,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if pairs.is_empty() {
             return Err(self.err_at(
                 call_span,
-                "`.update(db, changes)`: el Map de changes está vacío",
+                "`.update(db, changes)`: the changes Map is empty",
             ));
         }
         let mut set_clauses = String::new();
@@ -19888,7 +19888,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // with the db preludium helper.
                 let fv_code = fitz_lit_to_fitz_value_code(value_expr)?;
                 format!(
-                    "__FitzPgValue::Text(__fitz_fitz_value_to_jsonb(&{}).expect(\"JSONB serialize falló en .update\"))",
+                    "__FitzPgValue::Text(__fitz_fitz_value_to_jsonb(&{}).expect(\"JSONB serialize failed in .update\"))",
                     fv_code
                 )
             } else {
@@ -19986,13 +19986,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                              for __it in items.iter() {{ \
                                  __vs.push(match __it {{ \
                                      {item_arm} \
-                                     _ => return Err(format!(\"`.update`: field `{f}` (array): item con tipo inesperado\")), \
+                                     _ => return Err(format!(\"`.update`: field `{f}` (array): item with unexpected type\")), \
                                  }}); \
                              }} \
                              __FitzPgValue::Array {{ elem_oid: {oid}, values: __vs }} \
                          }} \
                          __FitzValue::Null => __FitzPgValue::Null, \
-                         _ => return Err(format!(\"`.update`: field `{f}` espera List, recibió otro tipo\")), \
+                         _ => return Err(format!(\"`.update`: field `{f}` expects List, got another type\")), \
                      }}",
                     item_arm = item_arm,
                     oid = elem_oid,
@@ -20001,19 +20001,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             } else {
                 match &f.type_ {
                     Type::Int => format!(
-                        "match __v {{ __FitzValue::Int(n) => __FitzPgValue::Int(*n), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Int, recibió otro tipo\")), }}",
+                        "match __v {{ __FitzValue::Int(n) => __FitzPgValue::Int(*n), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Int, got another type\")), }}",
                         f = f.name,
                     ),
                     Type::Float => format!(
-                        "match __v {{ __FitzValue::Float(x) => __FitzPgValue::Float(*x), __FitzValue::Int(n) => __FitzPgValue::Float(*n as f64), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Float, recibió otro tipo\")), }}",
+                        "match __v {{ __FitzValue::Float(x) => __FitzPgValue::Float(*x), __FitzValue::Int(n) => __FitzPgValue::Float(*n as f64), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Float, got another type\")), }}",
                         f = f.name,
                     ),
                     Type::Str => format!(
-                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Str, recibió otro tipo\")), }}",
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Str, got another type\")), }}",
                         f = f.name,
                     ),
                     Type::Bool => format!(
-                        "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Bool, recibió otro tipo\")), }}",
+                        "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Bool, got another type\")), }}",
                         f = f.name,
                     ),
                     // Date/DateTime/Uuid in `.update(db, Map var)`: the
@@ -20024,48 +20024,48 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     // DateTime<Utc>/uuid::Uuid` which also serializes them
                     // as Text).
                     Type::Date => format!(
-                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Date como Str ISO 8601, recibió otro tipo\")), }}",
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Date as Str ISO 8601, got another type\")), }}",
                         f = f.name,
                     ),
                     Type::DateTime => format!(
-                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera DateTime como Str RFC 3339, recibió otro tipo\")), }}",
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects DateTime as Str RFC 3339, got another type\")), }}",
                         f = f.name,
                     ),
                     Type::Uuid => format!(
-                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Uuid como Str canonical, recibió otro tipo\")), }}",
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Uuid as canonical Str, got another type\")), }}",
                         f = f.name,
                     ),
                     Type::Nullable(inner) => {
                         // Same dispatch as the inner type, but accepts Null.
                         match inner.as_ref() {
                             Type::Int => format!(
-                                "match __v {{ __FitzValue::Int(n) => __FitzPgValue::Int(*n), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Int?, recibió otro tipo\")), }}",
+                                "match __v {{ __FitzValue::Int(n) => __FitzPgValue::Int(*n), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Int?, got another type\")), }}",
                                 f = f.name,
                             ),
                             Type::Float => format!(
-                                "match __v {{ __FitzValue::Float(x) => __FitzPgValue::Float(*x), __FitzValue::Int(n) => __FitzPgValue::Float(*n as f64), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Float?, recibió otro tipo\")), }}",
+                                "match __v {{ __FitzValue::Float(x) => __FitzPgValue::Float(*x), __FitzValue::Int(n) => __FitzPgValue::Float(*n as f64), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Float?, got another type\")), }}",
                                 f = f.name,
                             ),
                             Type::Str => format!(
-                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Str?, recibió otro tipo\")), }}",
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Str?, got another type\")), }}",
                                 f = f.name,
                             ),
                             Type::Bool => format!(
-                                "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Bool?, recibió otro tipo\")), }}",
+                                "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Bool?, got another type\")), }}",
                                 f = f.name,
                             ),
                             // Date?/DateTime?/Uuid? — same pattern as the
                             // non-nullable: canonical Str or Null.
                             Type::Date => format!(
-                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Date? como Str ISO 8601, recibió otro tipo\")), }}",
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Date? as Str ISO 8601, got another type\")), }}",
                                 f = f.name,
                             ),
                             Type::DateTime => format!(
-                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera DateTime? como Str RFC 3339, recibió otro tipo\")), }}",
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects DateTime? as Str RFC 3339, got another type\")), }}",
                                 f = f.name,
                             ),
                             Type::Uuid => format!(
-                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Uuid? como Str canonical, recibió otro tipo\")), }}",
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` expects Uuid? as canonical Str, got another type\")), }}",
                                 f = f.name,
                             ),
                             _ => return Err(self.err(format!(
@@ -20103,7 +20103,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                  __g.clone()\n        \
                  }};\n        \
                  if __pairs.is_empty() {{\n            \
-                 return Err(\"`.update(db, changes)`: el Map de changes está vacío\".to_string());\n        \
+                 return Err(\"`.update(db, changes)`: the changes Map is empty\".to_string());\n        \
                  }}\n        \
                  let mut __set_clauses = String::new();\n        \
                  let mut __set_args: Vec<__FitzPgValue> = Vec::with_capacity(__pairs.len());\n        \
@@ -20160,7 +20160,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         if !args.is_empty() {
                             return Err(self.err_at(
                                 call_span,
-                                format!("`WsConn.recv()` no acepta args, recibió {}", args.len()),
+                                format!("`WsConn.recv()` does not accept args, got {}", args.len()),
                             ));
                         }
                         return Ok((
@@ -20199,7 +20199,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         if !args.is_empty() {
                             return Err(self.err_at(
                                 call_span,
-                                format!("`WsConn.close()` no acepta args, recibió {}", args.len()),
+                                format!("`WsConn.close()` does not accept args, got {}", args.len()),
                             ));
                         }
                         return Ok((format!("({{ ({}).close(); () }})", obj_code), Type::Null));
@@ -20252,7 +20252,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         "(match ({}).get(({}).as_str()) {{ \
                             Some(__fitz_db_runtime::PgValue::{variant}(__v)) => Ok({extract_value}), \
                             Some(__fitz_db_runtime::PgValue::Null) => Err(format!(\"col `{{}}` es NULL\", ({}))), \
-                            Some(__other) => Err(format!(\"col `{{}}` es {{:?}}, esperaba {expect_label}\", ({}), __other)), \
+                            Some(__other) => Err(format!(\"col `{{}}` is {{:?}}, expected {expect_label}\", ({}), __other)), \
                             None => Err(format!(\"col `{{}}` no existe en el row\", ({}))) \
                         }})",
                         obj_code, name_code, name_code, name_code, name_code,
@@ -20272,7 +20272,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     if !args.is_empty() {
                         return Err(self.err_at(
                             call_span,
-                            format!("`DbRow.len()` no acepta args, recibió {}", args.len()),
+                            format!("`DbRow.len()` does not accept args, got {}", args.len()),
                         ));
                     }
                     return Ok((format!("(({}).len() as i64)", obj_code), Type::Int));
@@ -20341,7 +20341,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }
                     return Ok((
                         format!(
-                            "({}).and_hms_opt(0, 0, 0).expect(\"00:00:00 siempre válida\").and_utc()",
+                            "({}).and_hms_opt(0, 0, 0).expect(\"00:00:00 always valid\").and_utc()",
                             obj_code
                         ),
                         Type::DateTime,
@@ -20375,7 +20375,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         format!(
                             "({{ let __n: i64 = {sign}({n}); \
                              ({obj}).checked_add_signed(chrono::Duration::days(__n)) \
-                             .unwrap_or_else(|| panic!(\"Date.{m}({{}}) overflow rango NaiveDate\", __n)) }})",
+                             .unwrap_or_else(|| panic!(\"Date.{m}({{}}) overflow NaiveDate range\", __n)) }})",
                             sign = sign,
                             n = n_expr,
                             obj = obj_code,
@@ -20408,7 +20408,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 let __u: u32 = u32::try_from(__m.unsigned_abs()).unwrap_or_else(|_| panic!(\"Date.{m}({{}}) overflow u32 meses\", __raw)); \
                                 ({obj}).checked_sub_months(chrono::Months::new(__u)) \
                              }}; \
-                             __res.unwrap_or_else(|| panic!(\"Date.{m}({{}}) overflow rango NaiveDate\", __raw)) }})",
+                             __res.unwrap_or_else(|| panic!(\"Date.{m}({{}}) overflow NaiveDate range\", __raw)) }})",
                             sign = sign,
                             n = n_expr,
                             scale = scale,
@@ -20544,7 +20544,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                              let __secs: i64 = __raw.checked_mul({factor}i64) \
                                  .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow i64 segundos\", __raw)); \
                              ({obj}).checked_add_signed(chrono::Duration::seconds(__secs)) \
-                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow rango DateTime\", __raw)) }})",
+                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow DateTime range\", __raw)) }})",
                             sign = sign,
                             n = n_expr,
                             factor = factor,
@@ -20565,7 +20565,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         format!(
                             "({{ let __n: i64 = {sign}({n}); \
                              ({obj}).checked_add_signed(chrono::Duration::days(__n)) \
-                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow rango DateTime\", __n)) }})",
+                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow DateTime range\", __n)) }})",
                             sign = sign,
                             n = n_expr,
                             obj = obj_code,
@@ -20598,7 +20598,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 let __u: u32 = u32::try_from(__m.unsigned_abs()).unwrap_or_else(|_| panic!(\"DateTime.{m}({{}}) overflow u32 meses\", __raw)); \
                                 ({obj}).checked_sub_months(chrono::Months::new(__u)) \
                              }}; \
-                             __res.unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow rango DateTime\", __raw)) }})",
+                             __res.unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow DateTime range\", __raw)) }})",
                             sign = sign,
                             n = n_expr,
                             scale = scale,
@@ -20666,7 +20666,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         "({{ let __dt = {obj}; let __tz_name: String = {tz}; \
                          match __tz_name.parse::<chrono_tz::Tz>() {{ \
                              Ok(__tz) => Ok(__dt.with_timezone(&__tz).format(\"%Y-%m-%dT%H:%M:%S%:z\").to_string()), \
-                             Err(_) => Err(format!(\"DateTime.in_tz: `{{}}` no es un nombre IANA válido (ej: `America/Argentina/Buenos_Aires`, `Europe/Paris`, `UTC`)\", __tz_name)) \
+                             Err(_) => Err(format!(\"DateTime.in_tz: `{{}}` is not a valid IANA name (e.g.: `America/Argentina/Buenos_Aires`, `Europe/Paris`, `UTC`)\", __tz_name)) \
                          }} }})",
                         obj = obj_code,
                         tz = tz_c,
@@ -20836,7 +20836,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let code = format!(
                     "{{ let __step: i64 = {n_c}; \
-                       if __step <= 0 {{ panic!(\"`Range.step_by()` requiere n > 0, recibió {{}}\", __step); }} \
+                       if __step <= 0 {{ panic!(\"`Range.step_by()` requires n > 0, got {{}}\", __step); }} \
                        Arc::new(Mutex::new(({start_c}..{end_final}).step_by(__step as usize).collect::<Vec<i64>>())) }}"
                 );
                 return Ok((code, Type::List(Box::new(Type::Int))));
@@ -20939,7 +20939,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let code = format!(
                     "(match &({}) {{ \
                         __FitzValue::Int(__n) => Ok::<i64, String>(*__n), \
-                        __other => Err::<i64, String>(format!(\"as_int: el valor es {{}}, no Int\", __fv_type_name(__other))), \
+                        __other => Err::<i64, String>(format!(\"as_int: value is {{}}, not Int\", __fv_type_name(__other))), \
                     }})",
                     obj_code
                 );
@@ -20951,7 +20951,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "(match &({}) {{ \
                         __FitzValue::Float(__x) => Ok::<f64, String>(*__x), \
                         __FitzValue::Int(__n) => Ok::<f64, String>(*__n as f64), \
-                        __other => Err::<f64, String>(format!(\"as_float: el valor es {{}}, no Float\", __fv_type_name(__other))), \
+                        __other => Err::<f64, String>(format!(\"as_float: value is {{}}, not Float\", __fv_type_name(__other))), \
                     }})",
                     obj_code
                 );
@@ -20962,7 +20962,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let code = format!(
                     "(match &({}) {{ \
                         __FitzValue::Str(__s) => Ok::<String, String>(__s.clone()), \
-                        __other => Err::<String, String>(format!(\"as_str: el valor es {{}}, no Str\", __fv_type_name(__other))), \
+                        __other => Err::<String, String>(format!(\"as_str: value is {{}}, not Str\", __fv_type_name(__other))), \
                     }})",
                     obj_code
                 );
@@ -20973,7 +20973,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let code = format!(
                     "(match &({}) {{ \
                         __FitzValue::Bool(__b) => Ok::<bool, String>(*__b), \
-                        __other => Err::<bool, String>(format!(\"as_bool: el valor es {{}}, no Bool\", __fv_type_name(__other))), \
+                        __other => Err::<bool, String>(format!(\"as_bool: value is {{}}, not Bool\", __fv_type_name(__other))), \
                     }})",
                     obj_code
                 );
@@ -20984,7 +20984,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let code = format!(
                     "(match &({}) {{ \
                         __FitzValue::Bytes(__bs) => Ok::<Vec<u8>, String>(__bs.clone()), \
-                        __other => Err::<Vec<u8>, String>(format!(\"as_bytes: el valor es {{}}, no Bytes\", __fv_type_name(__other))), \
+                        __other => Err::<Vec<u8>, String>(format!(\"as_bytes: value is {{}}, not Bytes\", __fv_type_name(__other))), \
                     }})",
                     obj_code
                 );
@@ -21014,7 +21014,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let code = format!(
                     "{{ let __r: Result<String, String> = match String::from_utf8({}) {{ \
                         Ok(__s) => Ok(__s), \
-                        Err(__e) => Err(format!(\"Bytes.to_str(): contenido no es UTF-8 válido en offset {{}}\", __e.utf8_error().valid_up_to())) \
+                        Err(__e) => Err(format!(\"Bytes.to_str(): content is not valid UTF-8 at offset {{}}\", __e.utf8_error().valid_up_to())) \
                     }}; __r }}",
                     obj_code,
                 );
@@ -21092,7 +21092,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let code = format!(
                     "{{ let __s: String = {obj_code}; \
                        let __idx: i64 = {i_c}; \
-                       if __idx < 0 {{ panic!(\"`Str.split_at()` no acepta índice negativo: recibió {{}}\", __idx); }} \
+                       if __idx < 0 {{ panic!(\"`Str.split_at()` does not accept negative index: got {{}}\", __idx); }} \
                        let __len: i64 = __s.chars().count() as i64; \
                        let __clamped: usize = __idx.min(__len) as usize; \
                        let __left: String = __s.chars().take(__clamped).collect(); \
@@ -21145,7 +21145,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
                 let coerced = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let code = format!(
-                    "({{ let __n: i64 = {}; if __n < 0 {{ panic!(\"`.repeat()` no acepta n negativo: recibió {{}}\", __n); }} ({}).repeat(__n as usize) }})",
+                    "({{ let __n: i64 = {}; if __n < 0 {{ panic!(\"`.repeat()` does not accept negative n: got {{}}\", __n); }} ({}).repeat(__n as usize) }})",
                     coerced, obj_code
                 );
                 Ok((code, Type::Str))
@@ -21162,7 +21162,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "{{ let __s: String = {}; let __needle: String = {}; \
                      match __s.find(__needle.as_str()) {{ \
                          Some(__b) => Ok(__s[..__b].chars().count() as i64), \
-                         None => Err(String::from(\"no encontrado\")) \
+                         None => Err(String::from(\"not found\")) \
                      }} }}",
                     obj_code, coerced,
                 );
@@ -21176,7 +21176,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "{{ let __s: String = {}; let __needle: String = {}; \
                      match __s.rfind(__needle.as_str()) {{ \
                          Some(__b) => Ok(__s[..__b].chars().count() as i64), \
-                         None => Err(String::from(\"no encontrado\")) \
+                         None => Err(String::from(\"not found\")) \
                      }} }}",
                     obj_code, coerced,
                 );
@@ -21203,7 +21203,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                        let __width: i64 = {w_c}; \
                        let __ch: String = {ch_c}; \
                        if __ch.chars().count() != 1 {{ \
-                           panic!(\"`.{method}(width, ch)`: el char de relleno debe ser exactamente 1 caracter, recibió `\\\"{{}}\\\"` ({{}} chars)\", __ch, __ch.chars().count()); \
+                           panic!(\"`.{method}(width, ch)`: the fill char must be exactly 1 character, received `\\\"{{}}\\\"` ({{}} chars)\", __ch, __ch.chars().count()); \
                        }} \
                        let __len: i64 = __s.chars().count() as i64; \
                        if __len >= __width {{ __s }} else {{ \
@@ -21301,7 +21301,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                        let __width: i64 = {w_c}; \
                        let __ch: String = {ch_c}; \
                        if __ch.chars().count() != 1 {{ \
-                           panic!(\"`Str.center(width, ch)`: el char de relleno debe ser 1 caracter, recibió `\\\"{{}}\\\"`\", __ch); \
+                           panic!(\"`Str.center(width, ch)`: the fill char must be 1 character, received `\\\"{{}}\\\"`\", __ch); \
                        }} \
                        let __len: i64 = __s.chars().count() as i64; \
                        if __len >= __width {{ __s }} else {{ \
@@ -21329,7 +21329,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "{{ let __s: String = {obj_code}; \
                        let __n: i64 = {n_c}; \
                        let __sep: String = {sep_c}; \
-                       if __n < 0 {{ panic!(\"`.repeat_with()` no acepta n negativo: recibió {{}}\", __n); }} \
+                       if __n < 0 {{ panic!(\"`.repeat_with()` does not accept negative n: received {{}}\", __n); }} \
                        let __parts: Vec<&str> = std::iter::repeat(__s.as_str()).take(__n as usize).collect(); \
                        __parts.join(__sep.as_str()) }}"
                 );
@@ -21522,7 +21522,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         let __items: Vec<_> = ({obj_code}).lock().unwrap().clone(); \
                         let __cb = {cb_code}; \
                         let mut __result: Result<i64, String> = \
-                            Err(String::from(\"no encontrado\")); \
+                            Err(String::from(\"not found\")); \
                         for (__i, __it) in __items.into_iter().enumerate() {{ \
                             if __cb(__it) {{ __result = Ok(__i as i64); break; }} \
                         }} \
@@ -21569,7 +21569,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "{{ let __list = {obj_code}; let __g = __list.lock().unwrap(); \
                        match __g.first().cloned() {{ \
                            Some(__v) => Ok::<{t_rs}, String>(__v), \
-                           None => Err(String::from(\"lista vacía\")) \
+                           None => Err(String::from(\"empty list\")) \
                        }} }}"
                 );
                 Ok((code, Type::Result { ok: Box::new((**t).clone()), err: Box::new(Type::Str) }))
@@ -21581,7 +21581,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "{{ let __list = {obj_code}; let __g = __list.lock().unwrap(); \
                        match __g.last().cloned() {{ \
                            Some(__v) => Ok::<{t_rs}, String>(__v), \
-                           None => Err(String::from(\"lista vacía\")) \
+                           None => Err(String::from(\"empty list\")) \
                        }} }}"
                 );
                 Ok((code, Type::Result { ok: Box::new((**t).clone()), err: Box::new(Type::Str) }))
@@ -21602,7 +21602,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             "{{ let __list = {obj_code}; let __g = __list.lock().unwrap(); \
                                match __g.iter().{cmp_fn}().copied() {{ \
                                    Some(__v) => Ok::<{t_rs}, String>(__v), \
-                                   None => Err(String::from(\"lista vacía\")) \
+                                   None => Err(String::from(\"empty list\")) \
                                }} }}"
                         )
                     }
@@ -21626,7 +21626,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                }} \
                                match __best {{ \
                                    Some(__v) => Ok::<{t_rs}, String>(__v), \
-                                   None => Err(String::from(\"lista vacía\")) \
+                                   None => Err(String::from(\"empty list\")) \
                                }} }}"
                         )
                     }
@@ -21842,7 +21842,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 };
                 if matches!(v_ty, Type::Any) {
                     return Err(self.err_at(call_span,
-                        "`.zip_with()`: el ret type del callback es `Any` (anotalo o usá tipos concretos)".to_string(),
+                        "`.zip_with()`: the callback's ret type is `Any` (annotate it or use concrete types)".to_string(),
                     ));
                 }
                 let cb_code = self.gen_binary_callback_inline_with_ret(
@@ -21886,7 +21886,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                        }} \
                        match __best {{ \
                            Some((_, __v)) => Ok::<{t_rs}, String>(__v), \
-                           None => Err(String::from(\"lista vacía\")) \
+                           None => Err(String::from(\"empty list\")) \
                        }} }}"
                 );
                 Ok((
@@ -21932,7 +21932,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __n: i64 = {n_c}; \
-                       if __n <= 0 {{ panic!(\"`.windows()` requiere n > 0, recibió {{}}\", __n); }} \
+                       if __n <= 0 {{ panic!(\"`.windows()` requires n > 0, received {{}}\", __n); }} \
                        let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
                        let __w = __n as usize; \
                        let mut __out: Vec<Arc<Mutex<Vec<{t_rs}>>>> = Vec::new(); \
@@ -22014,7 +22014,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __idx: i64 = {idx_c}; \
-                       if __idx < 0 {{ panic!(\"`.insert_at()` no acepta idx negativo: recibió {{}}\", __idx); }} \
+                       if __idx < 0 {{ panic!(\"`.insert_at()` does not accept negative idx: received {{}}\", __idx); }} \
                        let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
                        let __clamped = (__idx as usize).min(__snap.len()); \
                        let mut __out: Vec<{t_rs}> = Vec::with_capacity(__snap.len() + 1); \
@@ -22036,7 +22036,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "{{ let __idx: i64 = {idx_c}; \
                        let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
                        if __idx < 0 || (__idx as usize) >= __snap.len() {{ \
-                           panic!(\"`.remove_at()`: idx {{}} fuera de rango (len = {{}})\", __idx, __snap.len()); \
+                           panic!(\"`.remove_at()`: idx {{}} out of range (len = {{}})\", __idx, __snap.len()); \
                        }} \
                        let __remove = __idx as usize; \
                        let __out: Vec<{t_rs}> = __snap.into_iter().enumerate() \
@@ -22429,7 +22429,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                            8 => format!(\"{{:o}}\", __n), \
                            10 => __n.to_string(), \
                            16 => format!(\"{{:x}}\", __n), \
-                           _ => panic!(\"`Int.to_str_base()` solo soporta bases 2, 8, 10 o 16; recibió {{}}\", __base), \
+                           _ => panic!(\"`Int.to_str_base()` only supports bases 2, 8, 10 or 16; received {{}}\", __base), \
                        }} }}"
                 );
                 Ok((code, Type::Str))
@@ -22880,7 +22880,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("pop", args, 0)?;
         let code = format!(
-            "({}).lock().unwrap().pop().expect(\"`.pop()` sobre lista vacía\")",
+            "({}).lock().unwrap().pop().expect(\"`.pop()` on empty list\")",
             obj_code
         );
         Ok((code, elem_ty.clone()))
@@ -22957,7 +22957,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let __items: Vec<_> = ({}).lock().unwrap().clone(); \
                 let __cb = {}; \
                 let mut __result: Result<{}, String> = \
-                    Err(String::from(\"no encontrado\")); \
+                    Err(String::from(\"not found\")); \
                 for __it in __items.into_iter() {{ \
                     if __cb(__it.clone()) {{ __result = Ok(__it); break; }} \
                 }} \
@@ -23029,7 +23029,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     // --- Map methods -----------------------------------------------------
 
     /// `m.get(k)` → linear search by equality. Returns `Ok(v)` if
-    /// the key exists, `Err("clave no encontrada: <k>")` if not. Message
+    /// the key exists, `Err("key not found: <k>")` if not. Message
     /// identical to the interpreter's. Returned type: `Result<V, String>`.
     fn gen_map_get(
         &mut self,
@@ -23043,7 +23043,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let coerced_key = coerce(&arg_code, &arg_ty, key_ty, self.env);
         // For the error message, we format the key with the same
         // style as the interpreter (`Display` of Value, **without** quotes
-        // for Str: `clave no encontrada: z`, not `clave no encontrada:
+        // for Str: `key not found: z`, not `key not found:
         // "z"`). That's what `show_expr` (mode "print top-level") gives,
         // not `show_expr_inline` (mode "inside list/map", which DOES insert
         // quotes).
@@ -23088,7 +23088,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let __map = {}; \
                 let __k = {}; \
                 let __pairs = __map.lock().unwrap(); \
-                let mut __result: Result<{}, String> = Err(format!(\"clave no encontrada: {{}}\", {})); \
+                let mut __result: Result<{}, String> = Err(format!(\"key not found: {{}}\", {})); \
                 let __key_lhs = {}; \
                 for (__k2, __v) in __pairs.iter() {{ \
                     if __k2 == &__key_lhs {{ __result = Ok(__v.clone()); break; }} \
@@ -23323,7 +23323,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         arg_span,
                         format!(
-                            "el callback de `.{}` toma 2 parámetros, la fn `{}` declara {}",
+                            "the `.{}` callback takes 2 parameters, fn `{}` declares {}",
                             method,
                             name,
                             sig_params.len(),
@@ -23372,8 +23372,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     arg_span,
                     format!(
-                    "`.{}(...)` exige un callback inline `fn(a, b) => ...` o `fn(a, b) {{ ... }}` \
-                     o el nombre de una fn top-level (`fn(...) -> ...`).",
+                    "`.{}(...)` requires an inline callback `fn(a, b) => ...` or `fn(a, b) {{ ... }}` \
+                     or the name of a top-level fn (`fn(...) -> ...`).",
                     method
                 ),
                 ));
@@ -23383,7 +23383,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 arg_span,
                 format!(
-                    "el callback de `.{}` toma 2 parámetros, recibió {}",
+                    "the `.{}` callback takes 2 parameters, got {}",
                     method,
                     params.len()
                 ),
@@ -35583,7 +35583,7 @@ mod tests {
         assert!(ast_test::fn_return_type(main).is_none());
         assert!(
             main.block.stmts.is_empty(),
-            "expected main body vacío, got: {}",
+            "expected empty main body, got: {}",
             ast_test::fn_body_text(main)
         );
     }
@@ -36466,7 +36466,7 @@ mod tests {
         // F13 SPIKE — heterogeneous `[1, "dos"]` is no longer an error;
         // emits `Vec<__FitzValue>` with each item wrapped in its
         // variant (`__FitzValue::Int(1)`, `__FitzValue::Str("dos")`).
-        // Before the SPIKE codegen aborted with "homogénea requerida".
+        // Before the SPIKE codegen aborted with "homogeneous required".
         let code = gen("let xs = [1, \"dos\"]").unwrap();
         assert!(
             code.contains("Vec<__FitzValue>"),
@@ -36744,10 +36744,10 @@ mod tests {
             "expected pipeline lock + pop + expect, was: {}",
             init
         );
-        // The expect message must mention `pop` and `lista vacía`
+        // The expect message must mention `pop` and `empty list`
         // (matches the interpreter's).
         assert!(
-            init.contains("pop") && init.contains("vac"),
+            init.contains("pop") && init.contains("empty list"),
             "expected expect message about empty list, was: {}",
             init
         );
@@ -37004,7 +37004,7 @@ mod tests {
     #[test]
     fn list_find_emits_result_with_loop() {
         // 5b.4: find returns `Result<T, String>` with Ok(item) at the first
-        // match and `Err("no encontrado")` if nothing matches. The binding
+        // match and `Err("not found")` if nothing matches. The binding
         // `x` must be typed `Result<i64, String>`.
         let file = ast_test::parse(
             &gen("let xs: List<Int> = [1, 2]\nlet x = xs.find(fn(n) => n > 0)").unwrap(),
@@ -37023,8 +37023,8 @@ mod tests {
         let init = ast_test::local_init_expr(l).unwrap();
         let init_text = ast_test::ts(init);
         assert!(
-            init_text.contains("Err (String :: from (\"no encontrado\"))"),
-            "expected initializer with `Err(\"no encontrado\")`, was: {}",
+            init_text.contains("Err (String :: from (\"not found\"))"),
+            "expected initializer with `Err(\"not found\")`, was: {}",
             init_text
         );
         assert!(
@@ -37037,7 +37037,7 @@ mod tests {
     #[test]
     fn map_get_emits_result_with_linear_search() {
         // 5b.4: get returns `Result<V, String>`. The Err message matches
-        // bit-a-bit the interpreter's: `clave no encontrada: <k>` with `<k>`
+        // bit-a-bit the interpreter's: `key not found: <k>` with `<k>`
         // formatted inline (Str with quotes).
         let file = ast_test::parse(
             &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet v = m.get(\"a\")").unwrap(),
@@ -37050,14 +37050,14 @@ mod tests {
             "expected `v: Result<i64, String>`"
         );
         let init = ast_test::local_init_expr(l).unwrap();
-        // The Err message carries the template `clave no encontrada: {}`
+        // The Err message carries the template `key not found: {}`
         // (bit-a-bit contract with the interpreter) — I look for it inside
         // a format! macro call.
         let fmt = ast_test::find_macro_args(init, "format")
             .expect("expected a format! with the Err message");
         assert!(
-            fmt.contains("clave no encontrada: {}"),
-            "expected template `clave no encontrada: {{}}` in format!, was: {}",
+            fmt.contains("key not found: {}"),
+            "expected template `key not found: {{}}` in format!, was: {}",
             fmt
         );
         let init_text = ast_test::ts(init);
@@ -38176,14 +38176,14 @@ mod tests {
     #[test]
     fn dz_div_int_emits_zero_check() {
         // `a / b` for Int emits a block with explicit 0 check
-        // that panics with "división por cero" — parallel to `eval_div`
+        // that panics with "division by zero" — parallel to `eval_div`
         // in the interpreter and before rustc rejects literal `10/0`
         // with `unconditional_panic`.
         let src = "let x = 10 / 2\nprint(x)";
         let code = gen(src).unwrap();
         assert!(
-            code.contains("__b == 0") && code.contains("división por cero"),
-            "expected check `__b == 0` + panic with `división por cero`, got:\n{}",
+            code.contains("__b == 0") && code.contains("division by zero"),
+            "expected check `__b == 0` + panic with `division by zero`, got:\n{}",
             code
         );
     }
@@ -38195,7 +38195,7 @@ mod tests {
         let src = "let x = 10.0 / 2.0\nprint(x)";
         let code = gen(src).unwrap();
         assert!(
-            code.contains("__b == 0.0") && code.contains("división por cero"),
+            code.contains("__b == 0.0") && code.contains("division by zero"),
             "expected check `__b == 0.0` + panic, got:\n{}",
             code
         );
@@ -38209,8 +38209,8 @@ mod tests {
         let src = "print(10 / 0)";
         let code = gen(src).unwrap();
         assert!(
-            code.contains("división por cero"),
-            "expected panic msg `división por cero` in the output, got:\n{}",
+            code.contains("division by zero"),
+            "expected panic msg `division by zero` in the output, got:\n{}",
             code
         );
     }
@@ -39184,7 +39184,7 @@ mod tests {
             code
         );
         assert!(
-            code.contains("panic!(\"destructuring no matcheó"),
+            code.contains("panic!(\"destructuring did not match the value"),
             "expected catch-all panic, got:\n{}",
             code
         );
@@ -41405,7 +41405,7 @@ mod tests {
         );
         // No-rows fallback with insert-specific message.
         assert!(
-            rust.contains("INSERT ... RETURNING no devolvió rows"),
+            rust.contains("INSERT ... RETURNING returned no rows"),
             "expected clear fallback when RETURNING returns empty",
         );
     }
@@ -42348,7 +42348,7 @@ mod tests {
     fn codegen_orm_concrete_map_no_jsonb_aborts_with_clear_message() {
         // Map<Str, Int> is NOT supported (not free JSONB — the homogeneous
         // concrete value does not use __FitzValue). Clear error citing
-        // "usá Map<Str, Any>". Needs an ORM call so codegen
+        // "use Map<Str, Any>". Needs an ORM call so codegen
         // tries to emit the coerce_block of the Map field.
         // Phase 10.b.12.b: `Map<Str, Int>` is now supported (typed JSONB
         // concrete path). Changed the pathological case to
@@ -43106,7 +43106,7 @@ mod tests {
         let (_env, _types, _defs, errors) = crate::types::check_program(&program);
         assert!(
             errors.iter().any(|e| e.message.contains("Aggregated")
-                && (e.message.contains(".all") || e.message.contains("no es válido"))),
+                && (e.message.contains(".all") || e.message.contains("is not valid"))),
             "expected checker error rejecting .all on Aggregated, was: {:?}",
             errors
         );

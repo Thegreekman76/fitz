@@ -1248,12 +1248,12 @@ match nadie {
 ";
     let (stdout, exit) = build_and_run("list-find-match", src);
     assert_eq!(exit, 0);
-    assert_lines(&stdout, &["hola, Fitz!", "falta: no encontrado"]);
+    assert_lines(&stdout, &["hola, Fitz!", "falta: not found"]);
 }
 
 #[test]
 fn map_get_devuelve_result_con_mensaje_compilado() {
-    // `m.get(k)` con clave faltante: Err con mensaje "clave no encontrada: <k>"
+    // `m.get(k)` con clave faltante: Err con mensaje "key not found: <k>"
     // — formato idéntico al intérprete. Importante: la clave se formatea
     // con Display (Value), no inline — Str va SIN comillas en el mensaje.
     let src = "\
@@ -1269,7 +1269,7 @@ match m.get(\"z\") {
 ";
     let (stdout, exit) = build_and_run("map-get-match", src);
     assert_eq!(exit, 0);
-    assert_lines(&stdout, &["a vale 1", "err: clave no encontrada: z"]);
+    assert_lines(&stdout, &["a vale 1", "err: key not found: z"]);
 }
 
 #[test]
@@ -2127,7 +2127,7 @@ fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
 fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
     // Pre-DZ: `print(10 / 0)` rechaza rustc con `unconditional_panic`.
     // Post-DZ: compila y panica en runtime con el mismo msg que el
-    // intérprete ("división por cero").
+    // intérprete ("division by zero").
     // T2 (v0.10.13) — unique stem.
     let stem = "dz_int";
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
@@ -2159,8 +2159,8 @@ fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
     );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("división por cero"),
-        "esperaba msg `división por cero`, stderr: {}",
+        stderr.contains("division by zero"),
+        "esperaba msg `division by zero`, stderr: {}",
         stderr
     );
 }
@@ -2189,8 +2189,8 @@ fn dz_division_float_por_cero_compila_y_panica_con_msg_alineado() {
     assert!(!run.status.success(), "esperaba panic");
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("división por cero"),
-        "esperaba msg `división por cero`, stderr: {}",
+        stderr.contains("division by zero"),
+        "esperaba msg `division by zero`, stderr: {}",
         stderr
     );
 }
@@ -4673,7 +4673,7 @@ fn mb2_list_min_vacia_devuelve_err_paridad() {
                print(\"sum: {total}\")\n";
     let (stdout, exit) = build_and_run("mb2_list_min_vacia_err", src);
     assert_eq!(exit, 0);
-    assert_eq!(stdout.trim(), "err: lista vacía\nsum: 0");
+    assert_eq!(stdout.trim(), "err: empty list\nsum: 0");
 }
 
 #[test]
@@ -5015,7 +5015,7 @@ fn mb5_list_min_by_lista_vacia_devuelve_err_compila() {
                }\n";
     let (stdout, exit) = build_and_run("mb5_list_min_by_vacia", src);
     assert_eq!(exit, 0);
-    assert_eq!(stdout.trim(), "err: lista vacía");
+    assert_eq!(stdout.trim(), "err: empty list");
 }
 
 #[test]
@@ -6799,7 +6799,7 @@ fn ok() -> Str => \"alive\"\n\
         (status, &body)
     );
     assert!(
-        body.contains("división por cero"),
+        body.contains("division by zero"),
         "/div body debe contener el msg del panic: {:?}",
         body
     );
@@ -6814,7 +6814,7 @@ fn ok() -> Str => \"alive\"\n\
         (status, &body)
     );
     assert!(
-        body.contains("división por cero"),
+        body.contains("division by zero"),
         "/div-async body: {:?}",
         body
     );
@@ -9925,7 +9925,7 @@ print(users[1])
 #[test]
 fn t6_map_str_a_custom_compilado() {
     // Map<Str, User> — value es nominal. get() devuelve Result<User>.
-    // El error del get tiene formato `"clave no encontrada: <k>"`
+    // El error del get tiene formato `"key not found: <k>"`
     // (sin comillas alrededor del key, sin "en mapa") según
     // src/codegen.rs:17259.
     let src = "\
@@ -9943,7 +9943,7 @@ match dir.get(\"missing\") {
 ";
     let (stdout, exit) = build_and_run("t6-map-str-a-custom", src);
     assert_eq!(exit, 0);
-    assert_lines(&stdout, &["2", "Ana", "clave no encontrada: missing"]);
+    assert_lines(&stdout, &["2", "Ana", "key not found: missing"]);
 }
 
 #[test]
