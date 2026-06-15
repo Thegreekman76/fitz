@@ -1,6 +1,6 @@
-// hello.fitz — El primer programa en Fitz
+// hello.fitz — the first program in Fitz
 
-print("Hola desde Fitz 🏔️")
+print("Hello from Fitz 🏔️")
 
 name = "Patagonia"
-print("Hola, {name}!")
+print("Hello, {name}!")

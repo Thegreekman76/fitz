@@ -1,4 +1,4 @@
-// types.fitz — Tipos y funciones en Fitz
+// types.fitz — types and functions in Fitz
 
 type User {
     id: Int
@@ -22,9 +22,9 @@ fn create_user(input: UserInput, id: Int) -> User {
 
 fn greet_user(user: User) -> Str {
     if user.active {
-        return "Hola, {user.name}!"
+        return "Hello, {user.name}!"
     } else {
-        return "Usuario {user.name} inactivo"
+        return "User {user.name} is inactive"
     }
 }
 
