@@ -67,7 +67,7 @@ impl CliRegistry {
         let mut cmds = self.commands.lock();
         if cmds.iter().any(|c| c.name == cmd.name) {
             return Err(format!(
-                "@command(\"{}\"): nombre del comando duplicado. Cada `@command` debe tener un nombre único.",
+                "@command(\"{}\"): duplicate command name. Each `@command` must have a unique name.",
                 cmd.name
             ));
         }
@@ -149,8 +149,8 @@ pub fn compute_short_flags(
         }
         if let Some(existing) = out.get(&first) {
             return Err(format!(
-                "@command short flag conflict: `--{}` y `--{}` comparten primera letra `-{}`. \
-                 Renombrá uno de los dos o desactivá short flags para uno (deuda futura: kwarg \
+                "@command short flag conflict: `--{}` and `--{}` share first letter `-{}`. \
+                 Rename one of them or disable short flags for one (future debt: kwarg \
                  `@flag(short=null)`).",
                 existing, p.name, first
             ));
@@ -457,11 +457,11 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
             let mut chars_iter = short_part.chars();
             let first = chars_iter
                 .next()
-                .expect("short_part no vacío validado arriba");
+                .expect("short_part not empty, validated above");
             if chars_iter.next().is_some() {
                 return ParseResult::Error(
                     format!(
-                        "flag corta combinada o con `=` no soportada en MVP: `{}`. Usá la forma larga `--<name>`.",
+                        "combined short flag or with `=` not supported in MVP: `{}`. Use the long form `--<name>`.",
                         tok
                     ),
                     2,
@@ -513,7 +513,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
         let missing_param = &positional_params[positional_values.len()];
         return ParseResult::Error(
             format!(
-                "falta el argumento posicional `<{}>` (esperaba {} positional args, recibió {})",
+                "missing positional argument `<{}>` (expected {} positional args, received {})",
                 missing_param.name,
                 required_positional_count,
                 positional_values.len()
@@ -524,7 +524,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
     if !has_variadic && positional_values.len() > positional_params.len() {
         return ParseResult::Error(
             format!(
-                "demasiados argumentos posicionales: esperaba {}, recibió {} (extras: {:?})",
+                "too many positional arguments: expected {}, received {} (extras: {:?})",
                 positional_params.len(),
                 positional_values.len(),
                 &positional_values[positional_params.len()..]
@@ -577,7 +577,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
     if let Some((unknown, _)) = flag_values.iter().next() {
         return ParseResult::Error(
             format!(
-                "flag desconocida `--{}`. Run `--help` para ver flags válidas.",
+                "unknown flag `--{}`. Run `--help` to see valid flags.",
                 unknown
             ),
             2,
@@ -609,7 +609,7 @@ fn coerce_arg_value(p: &Param, raw: Option<&str>) -> Result<Value, String> {
                 Ok(Value::Bool(true))
             } else {
                 Err(format!(
-                    "flag `--{}` requiere un valor (tipo `{}`)",
+                    "flag `--{}` requires a value (type `{}`)",
                     p.name, head
                 ))
             }
@@ -619,21 +619,21 @@ fn coerce_arg_value(p: &Param, raw: Option<&str>) -> Result<Value, String> {
             "Int" => s
                 .parse::<i64>()
                 .map(Value::Int)
-                .map_err(|_| format!("`--{}` espera Int, recibió `{}`", p.name, s)),
+                .map_err(|_| format!("`--{}` expects Int, received `{}`", p.name, s)),
             "Float" => s
                 .parse::<f64>()
                 .map(Value::Float)
-                .map_err(|_| format!("`--{}` espera Float, recibió `{}`", p.name, s)),
+                .map_err(|_| format!("`--{}` expects Float, received `{}`", p.name, s)),
             "Bool" => match s {
                 "true" | "1" | "yes" => Ok(Value::Bool(true)),
                 "false" | "0" | "no" => Ok(Value::Bool(false)),
                 _ => Err(format!(
-                    "`--{}` espera Bool (true/false/1/0/yes/no), recibió `{}`",
+                    "`--{}` expects Bool (true/false/1/0/yes/no), received `{}`",
                     p.name, s
                 )),
             },
             other => Err(format!(
-                "tipo `{}` no marshallable desde CLI (deuda menor — bajá a Str y parseá en el body)",
+                "type `{}` not marshallable from the CLI (minor debt — drop down to Str and parse in the body)",
                 other
             )),
         },
@@ -686,7 +686,7 @@ mod tests {
         reg.register(mkcmd("greet", vec![])).unwrap();
         let dup = reg.register(mkcmd("greet", vec![]));
         assert!(dup.is_err());
-        assert!(dup.unwrap_err().contains("duplicado"));
+        assert!(dup.unwrap_err().contains("duplicate"));
     }
 
     #[test]
@@ -765,8 +765,8 @@ mod tests {
             .unwrap();
         let result = parse_argv(&[], &reg);
         match result {
-            ParseResult::Error(msg, _) => assert!(msg.contains("falta")),
-            _ => panic!("esperaba Error"),
+            ParseResult::Error(msg, _) => assert!(msg.contains("missing")),
+            _ => panic!("expected Error"),
         }
     }
 
@@ -838,8 +838,8 @@ mod tests {
         // El parser primero asocia `--bogus` con valor "x", después
         // al final ve la flag desconocida.
         match result {
-            ParseResult::Error(msg, _) => assert!(msg.contains("desconocida")),
-            _ => panic!("esperaba Error"),
+            ParseResult::Error(msg, _) => assert!(msg.contains("unknown")),
+            _ => panic!("expected Error"),
         }
     }
 

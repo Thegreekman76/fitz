@@ -17,11 +17,11 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
 
-/// Fitz — El lenguaje de programación nacido en la Patagonia 🏔️
+/// Fitz — the programming language born in Patagonia 🏔️
 #[derive(Parser)]
 #[command(name = "fitz")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "El lenguaje de programación Fitz")]
+#[command(about = "The Fitz programming language")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -817,7 +817,7 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        eprintln!("✗ could not read the current directory: {e}");
         std::process::exit(1);
     });
 
@@ -825,9 +825,9 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
         Some(p) => p,
         None => {
             eprintln!(
-                "✗ no se encontró `{}` en `{}` ni en directorios padre.\n   \
-                 Pasá un archivo explícito (`fitz <cmd> archivo.fitz`) o creá un \
-                 proyecto con `fitz new <nombre>` / `fitz init`.",
+                "✗ could not find `{}` in `{}` or in parent directories.\n   \
+                 Pass an explicit file (`fitz <cmd> file.fitz`) or create a \
+                 project with `fitz new <name>` / `fitz init`.",
                 manifest::MANIFEST_FILE,
                 cwd.display()
             );
@@ -836,7 +836,7 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
     };
 
     let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        eprintln!("✗ could not read `{}`: {e}", manifest_path.display());
         std::process::exit(1);
     });
 
@@ -854,8 +854,8 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
         Some(b) => b,
         None => {
             eprintln!(
-                "✗ `{}` no tiene sección `[bin]` con un `main`. El MVP del package \
-                 manager (Fase 9.y) requiere uno. Agregá:\n\n[bin]\nmain = \"src/main.fitz\"\n",
+                "✗ `{}` has no `[bin]` section with a `main`. The package \
+                 manager MVP (Phase 9.y) requires one. Add:\n\n[bin]\nmain = \"src/main.fitz\"\n",
                 manifest_path.display()
             );
             std::process::exit(1);
@@ -991,9 +991,9 @@ fn py_types_file(source: &std::path::Path, out: Option<&std::path::Path>) {
 #[cfg(not(feature = "python"))]
 fn py_types_file(_source: &std::path::Path, _out: Option<&std::path::Path>) {
     eprintln!(
-        "✗ `fitz py-types` requiere recompilar `fitz` con interop Python habilitada. \
-         Este binario se compiló sin la feature `python`. \
-         Recompilá con `cargo install --features python` (o \
+        "✗ `fitz py-types` requires recompiling `fitz` with Python interop enabled. \
+         This binary was compiled without the `python` feature. \
+         Rebuild with `cargo install --features python` (or \
          `cargo build --features python`)."
     );
     std::process::exit(1);
@@ -1364,7 +1364,7 @@ fn openapi_file(path: &PathBuf) {
     let (_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
-            "✗ {} — {} error(es) de tipo:",
+            "✗ {} — {} type error(s):",
             path.display(),
             type_errors.len()
         );
@@ -1424,9 +1424,9 @@ fn check_file(path: &PathBuf) {
     // 8-pyi.B: loads adjacent .pyi stubs before the check.
     let (_env, _types, _defs, errors) = check_program_with_pyi_stubs(&program, path);
     if errors.is_empty() {
-        println!("✓ {} — sin errores de tipo", path.display());
+        println!("✓ {} — no type errors", path.display());
     } else {
-        eprintln!("✗ {} — {} error(es) de tipo:", path.display(), errors.len());
+        eprintln!("✗ {} — {} type error(s):", path.display(), errors.len());
         for e in &errors {
             eprintln!("  {}", e);
         }
@@ -1487,14 +1487,14 @@ fn build_file(
     let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
-            "✗ {} — {} error(es) de tipo:",
+            "✗ {} — {} type error(s):",
             path.display(),
             type_errors.len()
         );
         for e in &type_errors {
             eprintln!("  {}", e);
         }
-        eprintln!("   Usá `fitz check` para revisar antes de buildear.");
+        eprintln!("   Use `fitz check` to review before building.");
         std::process::exit(1);
     }
 
@@ -1600,19 +1600,19 @@ fn build_file(
     let output = match output {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("Error invocando cargo: {}", e);
-            eprintln!("   ¿Tenés cargo en el PATH? (`rustup` lo provee.)");
+            eprintln!("Error invoking cargo: {}", e);
+            eprintln!("   Is cargo on your PATH? (`rustup` provides it.)");
             std::process::exit(1);
         }
     };
 
     if !output.status.success() {
-        eprintln!("✗ cargo build falló al compilar el código generado:");
+        eprintln!("✗ cargo build failed to compile the generated code:");
         eprintln!(
-            "   (revisá {} para ver qué se intentó compilar.)",
+            "   (check {} to see what was attempted.)",
             src_dir.display()
         );
-        eprintln!("--- stderr de cargo ---");
+        eprintln!("--- cargo stderr ---");
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
         std::process::exit(1);
     }
@@ -1807,10 +1807,12 @@ fn build_file_with_bundle(
     };
 
     if !program_uses_from_python_import(&program) {
-        eprintln!("✗ `--bundle-python` solo aplica a programas que usan `from python import ...`.");
         eprintln!(
-            "  Si tu programa no usa interop Python, usá `fitz build` sin el flag — el binario \
-             resultante ya es standalone (no requiere ningún runtime externo)."
+            "✗ `--bundle-python` only applies to programs that use `from python import ...`."
+        );
+        eprintln!(
+            "  If your program does not use Python interop, run `fitz build` without the flag — the resulting \
+             binary is already standalone (it requires no external runtime)."
         );
         std::process::exit(1);
     }
@@ -1820,14 +1822,14 @@ fn build_file_with_bundle(
     let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
-            "✗ {} — {} error(es) de tipo:",
+            "✗ {} — {} type error(s):",
             path.display(),
             type_errors.len()
         );
         for e in &type_errors {
             eprintln!("  {}", e);
         }
-        eprintln!("   Usá `fitz check` para revisar antes de buildear.");
+        eprintln!("   Use `fitz check` to review before building.");
         std::process::exit(1);
     }
 
@@ -1909,12 +1911,12 @@ fn build_file_with_bundle(
     let output = match output {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("Error invocando cargo (real binary): {}", e);
+            eprintln!("Error invoking cargo (real binary): {}", e);
             std::process::exit(1);
         }
     };
     if !output.status.success() {
-        eprintln!("✗ cargo build del real binary falló:");
+        eprintln!("✗ cargo build of the real binary failed:");
         eprintln!("--- stderr ---");
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
         std::process::exit(1);
@@ -1933,7 +1935,7 @@ fn build_file_with_bundle(
         Ok(p) => p,
         Err(e) => {
             eprintln!(
-                "✗ no se encontró el real binary tras cargo build ({}): {}",
+                "✗ real binary not found after cargo build ({}): {}",
                 real_bin_path.display(),
                 e
             );
@@ -1957,14 +1959,14 @@ fn build_file_with_bundle(
     let tarball_abs = match tarball_path.canonicalize() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("✗ canonicalize del tarball PBS falló: {}", e);
+            eprintln!("✗ canonicalize of the PBS tarball failed: {}", e);
             std::process::exit(1);
         }
     };
     let tarball_bytes = match fs::read(&tarball_abs) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("✗ leer tarball PBS para hash: {}", e);
+            eprintln!("✗ read PBS tarball for hashing: {}", e);
             std::process::exit(1);
         }
     };
@@ -2032,20 +2034,20 @@ fn build_file_with_bundle(
 
         if cache_hit {
             println!(
-                "→ pip cache hit ({} paquete(s), hash {}…) — reusando tarball",
+                "→ pip cache hit ({} package(s), hash {}…) — reusing tarball",
                 pip_total_count,
                 &pip_inputs_hash[..8]
             );
             match pip_tarball_path.canonicalize() {
                 Ok(p) => Some(p),
                 Err(e) => {
-                    eprintln!("✗ canonicalize del pip tarball cacheado falló: {}", e);
+                    eprintln!("✗ canonicalize of the cached pip tarball failed: {}", e);
                     std::process::exit(1);
                 }
             }
         } else {
             println!(
-                "→ extrayendo PBS al cache local para correr pip ({} paquete(s))…",
+                "→ extracting PBS to local cache to run pip ({} package(s))…",
                 pip_total_count
             );
             let pbs_extract_dir = PathBuf::from("target")
@@ -2053,7 +2055,7 @@ fn build_file_with_bundle(
                 .join(format!("{}_pbs_extract", project.bin_name));
             if !pbs_extract_dir.join("python").exists() {
                 if let Err(e) = fs::create_dir_all(&pbs_extract_dir) {
-                    eprintln!("Error creando {}: {}", pbs_extract_dir.display(), e);
+                    eprintln!("Error creating {}: {}", pbs_extract_dir.display(), e);
                     std::process::exit(1);
                 }
                 // Extract the PBS tarball using `tar -xzf` (same
@@ -2070,15 +2072,15 @@ fn build_file_with_bundle(
                     Ok(s) if s.success() => {}
                     Ok(s) => {
                         eprintln!(
-                            "✗ tar -xzf del PBS tarball falló (exit code: {:?})",
+                            "✗ tar -xzf of the PBS tarball failed (exit code: {:?})",
                             s.code()
                         );
                         std::process::exit(1);
                     }
                     Err(e) => {
-                        eprintln!("✗ no se pudo invocar `tar` para extraer PBS: {}", e);
+                        eprintln!("✗ could not invoke `tar` to extract PBS: {}", e);
                         eprintln!(
-                            "  Necesitás `tar` en el PATH (bsdtar en Win11/macOS, GNU tar en Linux)."
+                            "  You need `tar` on your PATH (bsdtar on Win11/macOS, GNU tar on Linux)."
                         );
                         std::process::exit(1);
                     }
@@ -2092,7 +2094,7 @@ fn build_file_with_bundle(
             };
             if !python_exe.exists() {
                 eprintln!(
-                    "✗ no se encontró python en el PBS extract: {}",
+                    "✗ python not found in the PBS extract: {}",
                     python_exe.display()
                 );
                 std::process::exit(1);
@@ -2141,12 +2143,12 @@ fn build_file_with_bundle(
             let pip_out = match pip_out {
                 Ok(o) => o,
                 Err(e) => {
-                    eprintln!("✗ no se pudo invocar pip: {}", e);
+                    eprintln!("✗ could not invoke pip: {}", e);
                     std::process::exit(1);
                 }
             };
             if !pip_out.status.success() {
-                eprintln!("✗ pip install falló:");
+                eprintln!("✗ pip install failed:");
                 eprintln!("--- stderr ---");
                 eprintln!("{}", String::from_utf8_lossy(&pip_out.stderr));
                 std::process::exit(1);
@@ -2155,7 +2157,7 @@ fn build_file_with_bundle(
             // Create the secondary tarball from pip_install_dir.
             // We use `tar -czf` with `-C <dir>` so the inner
             // paths are relative (without the cwd prefix).
-            println!("→ empacando pip_packages.tar.gz…");
+            println!("→ packing pip_packages.tar.gz…");
             let tar_status = std::process::Command::new("tar")
                 .args([
                     "-czf",
@@ -2169,13 +2171,13 @@ fn build_file_with_bundle(
                 Ok(s) if s.success() => {}
                 Ok(s) => {
                     eprintln!(
-                        "✗ tar -czf del pip_packages tarball falló (exit code: {:?})",
+                        "✗ tar -czf of the pip_packages tarball failed (exit code: {:?})",
                         s.code()
                     );
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("✗ no se pudo invocar `tar` para empacar pip: {}", e);
+                    eprintln!("✗ could not invoke `tar` to pack pip: {}", e);
                     std::process::exit(1);
                 }
             }
@@ -2186,7 +2188,7 @@ fn build_file_with_bundle(
             // build — the cache simply won't work next time.
             if let Err(e) = fs::write(&pip_hash_sidecar, &pip_inputs_hash) {
                 eprintln!(
-                    "Warning: no se pudo escribir cache sidecar `{}`: {}",
+                    "Warning: could not write cache sidecar `{}`: {}",
                     pip_hash_sidecar.display(),
                     e
                 );
@@ -2194,7 +2196,7 @@ fn build_file_with_bundle(
             match pip_tarball_path.canonicalize() {
                 Ok(p) => Some(p),
                 Err(e) => {
-                    eprintln!("✗ canonicalize del pip tarball falló: {}", e);
+                    eprintln!("✗ canonicalize of the pip tarball failed: {}", e);
                     std::process::exit(1);
                 }
             }
@@ -2271,14 +2273,14 @@ fn build_file_with_bundle(
     let output = match output {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("Error invocando cargo (launcher): {}", e);
+            eprintln!("Error invoking cargo (launcher): {}", e);
             std::process::exit(1);
         }
     };
     if !output.status.success() {
-        eprintln!("✗ cargo build del launcher falló:");
+        eprintln!("✗ cargo build of the launcher failed:");
         eprintln!(
-            "   (revisá {} para ver el código generado.)",
+            "   (check {} to see the generated code.)",
             launcher_src.display()
         );
         eprintln!("--- stderr ---");
@@ -2446,7 +2448,7 @@ fn dispatch_cli(registry: &fitz::cli::CliRegistry, argv: &[String]) -> i32 {
                 Ok(fitz::value::Value::Int(n)) => n as i32,
                 Ok(other) => {
                     eprintln!(
-                        "error: el comando devolvió `{}` en lugar de Int (exit code)",
+                        "error: the command returned `{}` instead of Int (exit code)",
                         other.type_name()
                     );
                     1
@@ -2507,7 +2509,7 @@ fn run_file(
             }
         } else {
             eprintln!(
-                "✗ {} — {} error(es) de tipo:",
+                "✗ {} — {} type error(s):",
                 path.display(),
                 type_errors.len()
             );
@@ -2515,7 +2517,7 @@ fn run_file(
                 eprintln!("  {}", e);
             }
             eprintln!(
-                "   Usá `fitz check` para revisar, o `fitz run --no-typecheck {}` para correr igual.",
+                "   Use `fitz check` to review, or `fitz run --no-typecheck {}` to run anyway.",
                 path.display()
             );
             std::process::exit(1);
@@ -2606,13 +2608,13 @@ fn run_file(
 /// `fn main`.
 fn template_cli(name: &str) -> String {
     format!(
-        "// main.fitz — generado por `fitz new`\n\
+        "// main.fitz — generated by `fitz new`\n\
          //\n\
-         // Tu primer programa Fitz. Corrélo con `fitz run src/main.fitz`.\n\
-         // Cuando 9.y.2 aterrice, también vas a poder simplemente `fitz run`\n\
-         // desde la raíz del proyecto (lee `fitz.toml` automáticamente).\n\
+         // Your first Fitz program. Run it with `fitz run src/main.fitz`.\n\
+         // When 9.y.2 lands, you will also be able to just `fitz run`\n\
+         // from the project root (it reads `fitz.toml` automatically).\n\
          \n\
-         print(\"Hola desde {name} 🏔️\")\n"
+         print(\"Hello from {name} 🏔️\")\n"
     )
 }
 
@@ -2621,14 +2623,14 @@ fn template_cli(name: &str) -> String {
 /// `@server(...) fn main() => 0` pattern from guide chapter 17.
 fn template_http(name: &str) -> String {
     format!(
-        "// main.fitz — generado por `fitz new --http`\n\
+        "// main.fitz — generated by `fitz new --http`\n\
          //\n\
-         // Servidor HTTP mínimo. Corrélo con `fitz run src/main.fitz` y\n\
-         // probá: curl http://127.0.0.1:3000/\n\
+         // Minimal HTTP server. Run it with `fitz run src/main.fitz` and\n\
+         // try: curl http://127.0.0.1:3000/\n\
          \n\
          @get(\"/\")\n\
          fn index() -> Str {{\n\
-         \x20   return \"Hola desde {name} 🏔️\"\n\
+         \x20   return \"Hello from {name} 🏔️\"\n\
          }}\n\
          \n\
          @server(3000)\n\
@@ -2639,11 +2641,11 @@ fn template_http(name: &str) -> String {
 /// Template for the `.gitignore`. `fitz.lock` is NOT here: the
 /// lockfile is committed (Cargo-style), not ignored.
 fn template_gitignore() -> &'static str {
-    "# Artefactos de compilación\n\
+    "# Build artifacts\n\
      target/\n\
      \n\
-     # Binarios generados por `fitz build` adyacentes al fuente.\n\
-     # Si publicás un paquete, ajustá esto a tus necesidades.\n\
+     # Binaries generated by `fitz build` next to the source.\n\
+     # If you publish a package, adjust this to your needs.\n\
      *.exe\n\
      *.pdb\n"
 }
@@ -2653,9 +2655,9 @@ fn template_gitignore() -> &'static str {
 fn new_project(name: &str, http: bool, no_git: bool) {
     if !manifest::is_valid_package_name(name) {
         eprintln!(
-            "✗ nombre inválido: `{name}`. Debe matchear `^[a-z][a-z0-9_-]{{0,63}}$` \
-             (lowercase, empezar con letra, contener solo letras/dígitos/`-`/`_`, máx \
-             64 caracteres)."
+            "✗ invalid name: `{name}`. Must match `^[a-z][a-z0-9_-]{{0,63}}$` \
+             (lowercase, start with a letter, contain only letters/digits/`-`/`_`, max \
+             64 characters)."
         );
         std::process::exit(1);
     }
@@ -2663,16 +2665,16 @@ fn new_project(name: &str, http: bool, no_git: bool) {
     let target = PathBuf::from(name);
     if target.exists() {
         eprintln!(
-            "✗ `{}` ya existe — borralo o elegí otro nombre.",
+            "✗ `{}` already exists — delete it or pick another name.",
             target.display()
         );
         std::process::exit(1);
     }
 
     scaffold_project(&target, name, http, no_git);
-    println!("✓ proyecto Fitz creado en `{}`", target.display());
+    println!("✓ Fitz project created at `{}`", target.display());
     println!();
-    println!("Para probarlo:");
+    println!("To try it out:");
     println!("  cd {}", target.display());
     println!("  fitz run src/main.fitz");
 }
@@ -2682,7 +2684,7 @@ fn new_project(name: &str, http: bool, no_git: bool) {
 /// already exists.
 fn init_project(name_override: Option<&str>, http: bool, no_git: bool) {
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        eprintln!("✗ could not read the current directory: {e}");
         std::process::exit(1);
     });
 
@@ -2692,8 +2694,8 @@ fn init_project(name_override: Option<&str>, http: bool, no_git: bool) {
             Some(n) => n.to_string(),
             None => {
                 eprintln!(
-                    "✗ no se pudo derivar el nombre del directorio actual. \
-                     Pasalo explícito con `--name <nombre>`."
+                    "✗ could not derive the name from the current directory. \
+                     Pass it explicitly with `--name <name>`."
                 );
                 std::process::exit(1);
             }
@@ -2702,27 +2704,24 @@ fn init_project(name_override: Option<&str>, http: bool, no_git: bool) {
 
     if !manifest::is_valid_package_name(&name) {
         eprintln!(
-            "✗ nombre inválido: `{name}`. Debe matchear `^[a-z][a-z0-9_-]{{0,63}}$`. \
-             Pasá `--name <nombre-válido>` si el directorio no respeta el formato."
+            "✗ invalid name: `{name}`. Must match `^[a-z][a-z0-9_-]{{0,63}}$`. \
+             Pass `--name <valid-name>` if the directory does not match the format."
         );
         std::process::exit(1);
     }
 
     if cwd.join(manifest::MANIFEST_FILE).exists() {
         eprintln!(
-            "✗ `{}` ya existe en el directorio actual.",
+            "✗ `{}` already exists in the current directory.",
             manifest::MANIFEST_FILE
         );
         std::process::exit(1);
     }
 
     scaffold_project(&cwd, &name, http, no_git);
-    println!(
-        "✓ proyecto Fitz `{name}` inicializado en `{}`",
-        cwd.display()
-    );
+    println!("✓ Fitz project `{name}` initialized at `{}`", cwd.display());
     println!();
-    println!("Para probarlo:");
+    println!("To try it out:");
     println!("  fitz run src/main.fitz");
 }
 
@@ -2735,7 +2734,7 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
     // Create directories.
     let src = target.join("src");
     if let Err(e) = fs::create_dir_all(&src) {
-        eprintln!("✗ no se pudo crear `{}`: {e}", src.display());
+        eprintln!("✗ could not create `{}`: {e}", src.display());
         std::process::exit(1);
     }
 
@@ -2756,7 +2755,7 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
     };
     let toml_path = target.join(manifest::MANIFEST_FILE);
     if let Err(e) = fs::write(&toml_path, toml_text) {
-        eprintln!("✗ no se pudo escribir `{}`: {e}", toml_path.display());
+        eprintln!("✗ could not write `{}`: {e}", toml_path.display());
         std::process::exit(1);
     }
 
@@ -2768,14 +2767,14 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
     };
     let main_path = src.join("main.fitz");
     if let Err(e) = fs::write(&main_path, main_text) {
-        eprintln!("✗ no se pudo escribir `{}`: {e}", main_path.display());
+        eprintln!("✗ could not write `{}`: {e}", main_path.display());
         std::process::exit(1);
     }
 
     // Write .gitignore.
     let gi_path = target.join(".gitignore");
     if let Err(e) = fs::write(&gi_path, template_gitignore()) {
-        eprintln!("✗ no se pudo escribir `{}`: {e}", gi_path.display());
+        eprintln!("✗ could not write `{}`: {e}", gi_path.display());
         std::process::exit(1);
     }
 
@@ -2792,15 +2791,15 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
             Ok(status) if status.success() => {}
             Ok(status) => {
                 eprintln!(
-                    "  (aviso: `git init` salió con código {} — el proyecto se creó igual. \
-                     Pasá `--no-git` para silenciar este aviso.)",
+                    "  (notice: `git init` exited with code {} — the project was created anyway. \
+                     Pass `--no-git` to silence this notice.)",
                     status.code().unwrap_or(-1)
                 );
             }
             Err(e) => {
                 eprintln!(
-                    "  (aviso: no se pudo ejecutar `git init` ({e}). El proyecto se creó \
-                     igual. Pasá `--no-git` para silenciar este aviso.)"
+                    "  (notice: could not run `git init` ({e}). The project was created \
+                     anyway. Pass `--no-git` to silence this notice.)"
                 );
             }
         }
@@ -2866,7 +2865,7 @@ fn add_dep_cmd(
 
     let manifest_path = find_local_manifest_or_exit();
     let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        eprintln!("✗ could not read `{}`: {e}", manifest_path.display());
         std::process::exit(1);
     });
     let new_text = match manifest::add_dep_to_manifest(&text, name, &spec) {
@@ -2897,7 +2896,7 @@ fn add_dep_cmd(
 fn remove_dep_cmd(name: &str) {
     let manifest_path = find_local_manifest_or_exit();
     let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        eprintln!("✗ could not read `{}`: {e}", manifest_path.display());
         std::process::exit(1);
     });
     let (new_text, removed) = match manifest::remove_dep_from_manifest(&text, name) {
@@ -2932,11 +2931,11 @@ fn remove_dep_cmd(name: &str) {
             if lock_path.exists() {
                 if let Err(e) = std::fs::remove_file(&lock_path) {
                     eprintln!(
-                        "  (aviso: no se pudo borrar `{}`: {e})",
+                        "  (notice: could not delete `{}`: {e})",
                         lock_path.display()
                     );
                 } else {
-                    println!("✓ borrado {} (deps vacías)", lock_path.display());
+                    println!("✓ deleted {} (empty deps)", lock_path.display());
                 }
             }
         }
@@ -2955,7 +2954,7 @@ fn update_deps_cmd(name_filter: Option<&str>) {
     // Parse the manifest without touching the resolver — we only
     // need the [dependencies] list to iterate.
     let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        eprintln!("✗ could not read `{}`: {e}", manifest_path.display());
         std::process::exit(1);
     });
     let parsed = match manifest::Manifest::parse(&text) {
@@ -2985,14 +2984,14 @@ fn update_deps_cmd(name_filter: Option<&str>) {
                 let cache_path = match fitz::git_dep::cache_path_for(url, &gitref) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("✗ dep `{dep_name}`: no se pudo computar el cache path: {e}");
+                        eprintln!("✗ dep `{dep_name}`: could not compute the cache path: {e}");
                         std::process::exit(1);
                     }
                 };
                 if cache_path.exists() {
                     if let Err(e) = std::fs::remove_dir_all(&cache_path) {
                         eprintln!(
-                            "✗ no se pudo borrar el cache de `{dep_name}` en `{}`: {e}",
+                            "✗ could not delete the cache of `{dep_name}` at `{}`: {e}",
                             cache_path.display()
                         );
                         std::process::exit(1);
@@ -3009,7 +3008,7 @@ fn update_deps_cmd(name_filter: Option<&str>) {
     if let Some(filter) = name_filter {
         if !parsed.dependencies.contains_key(filter) {
             eprintln!(
-                "✗ la dep `{filter}` no está en `[dependencies]` de `{}`.",
+                "✗ dep `{filter}` is not in `[dependencies]` of `{}`.",
                 manifest_path.display()
             );
             std::process::exit(1);
@@ -3018,11 +3017,11 @@ fn update_deps_cmd(name_filter: Option<&str>) {
 
     if busted.is_empty() {
         match name_filter {
-            Some(_) => println!("(no había nada que actualizar — dep sin cache)"),
-            None => println!("(no había git deps con cache para invalidar)"),
+            Some(_) => println!("(nothing to update — dep without cache)"),
+            None => println!("(no git deps with cache to invalidate)"),
         }
     } else {
-        println!("✓ cache invalidado para: {}", busted.join(", "));
+        println!("✓ cache invalidated for: {}", busted.join(", "));
     }
 
     // Re-resolve via manifest mode (which will re-clone the git
@@ -3070,10 +3069,10 @@ fn fmt_cmd(files: Vec<PathBuf>, check: bool) {
         match fmt_one_file(path, check) {
             Ok(FmtResult::Unchanged) => {}
             Ok(FmtResult::Wrote) => {
-                println!("✓ formateado {}", path.display());
+                println!("✓ formatted {}", path.display());
             }
             Ok(FmtResult::WouldChange) => {
-                println!("✗ {} no está en formato canónico", path.display());
+                println!("✗ {} is not in canonical format", path.display());
                 any_diff = true;
             }
             Err(e) => {
@@ -3084,7 +3083,7 @@ fn fmt_cmd(files: Vec<PathBuf>, check: bool) {
     }
 
     if errors > 0 {
-        eprintln!("\n{errors} archivo(s) con errores de parsing — fmt no pudo procesarlos.");
+        eprintln!("\n{errors} file(s) with parsing errors — fmt could not process them.");
         std::process::exit(1);
     }
     if check && any_diff {
@@ -3170,16 +3169,16 @@ fn collect_fitz_recursive(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
 /// project's `fitz.toml` or exits with a clear error.
 fn find_local_manifest_or_exit() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        eprintln!("✗ could not read the current directory: {e}");
         std::process::exit(1);
     });
     match manifest::find_manifest(&cwd) {
         Some(p) => p,
         None => {
             eprintln!(
-                "✗ no se encontró `{}` en `{}` ni en directorios padre. \
-                 Creá un proyecto con `fitz new <nombre>` / `fitz init` antes de \
-                 usar `add`/`remove`/`update`.",
+                "✗ could not find `{}` in `{}` or in parent directories. \
+                 Create a project with `fitz new <name>` / `fitz init` before \
+                 using `add`/`remove`/`update`.",
                 manifest::MANIFEST_FILE,
                 cwd.display()
             );
@@ -3232,9 +3231,9 @@ fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
 
     if sources.is_empty() {
         eprintln!(
-            "✗ no se encontraron archivos con tests.\n\
-             En manifest mode, descubrimos `[lib].entry` (o `[bin].main`) + \
-             `tests/*.fitz` top-level. En single-file, pasá `--file <archivo.fitz>`."
+            "✗ no test files found.\n\
+             In manifest mode we discover `[lib].entry` (or `[bin].main`) + \
+             top-level `tests/*.fitz`. In single-file, pass `--file <file.fitz>`."
         );
         std::process::exit(1);
     }
@@ -3295,7 +3294,7 @@ fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
 fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegistry) {
     let manifest_path = find_local_manifest_or_exit();
     let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        eprintln!("✗ could not read `{}`: {e}", manifest_path.display());
         std::process::exit(1);
     });
     let parsed_manifest = manifest::Manifest::parse(&manifest_text).unwrap_or_else(|e| {
@@ -3653,16 +3652,16 @@ fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
     // every start (if the user edits `[bin].main`, it's
     // respected).
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        eprintln!("✗ could not read the current directory: {e}");
         std::process::exit(1);
     });
     let manifest_path = match manifest::find_manifest(&cwd) {
         Some(p) => p,
         None => {
             eprintln!(
-                "✗ no se encontró `{}` en `{}` ni en directorios padre.\n   \
-                 Pasá un archivo explícito (`fitz dev --file archivo.fitz`) o creá \
-                 un proyecto con `fitz new <nombre>` / `fitz init`.",
+                "✗ could not find `{}` in `{}` or in parent directories.\n   \
+                 Pass an explicit file (`fitz dev --file file.fitz`) or create \
+                 a project with `fitz new <name>` / `fitz init`.",
                 manifest::MANIFEST_FILE,
                 cwd.display()
             );
@@ -3678,8 +3677,8 @@ fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
         .ok()
         .and_then(|t| manifest::Manifest::parse(&t).ok())
     {
-        Some(m) => format!("proyecto `{}`", m.package.name),
-        None => format!("proyecto en `{}`", manifest_dir.display()),
+        Some(m) => format!("project `{}`", m.package.name),
+        None => format!("project at `{}`", manifest_dir.display()),
     };
     DevTarget {
         watch_dir: manifest_dir,
@@ -3698,11 +3697,11 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
     // channel.
     let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = notify::recommended_watcher(notify_tx)
-        .map_err(|e| format!("no se pudo crear el file watcher: {e}"))?;
+        .map_err(|e| format!("could not create the file watcher: {e}"))?;
     use notify::Watcher;
     watcher
         .watch(&target.watch_dir, notify::RecursiveMode::Recursive)
-        .map_err(|e| format!("no se pudo watch-ear `{}`: {e}", target.watch_dir.display()))?;
+        .map_err(|e| format!("could not watch `{}`: {e}", target.watch_dir.display()))?;
 
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
     std::thread::spawn(move || {
@@ -3718,7 +3717,7 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
     });
 
     let bin = std::env::current_exe()
-        .map_err(|e| format!("no se pudo encontrar el binario `fitz` actual: {e}"))?;
+        .map_err(|e| format!("could not find the current `fitz` binary: {e}"))?;
 
     let mut run_count: u32 = 1;
     loop {
@@ -3735,7 +3734,7 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("✗ no se pudo spawnear el child: {e}");
+                eprintln!("✗ could not spawn the child: {e}");
                 // If we can't spawn, we still want to keep
                 // listening in case the user fixes things
                 // (missing path, permissions, etc.). Wait for a
@@ -3757,13 +3756,13 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
                 )
                 .await;
                 eprintln!(
-                    "\n↻ cambio detectado en {} — reiniciando ...",
+                    "\n↻ change detected in {} — restarting ...",
                     relative_to(&path, &target.watch_dir)
                 );
                 true
             }
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("\n👋 Ctrl+C recibido — matando child y saliendo");
+                eprintln!("\n👋 Ctrl+C received — killing child and exiting");
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 return Ok(());
@@ -3774,20 +3773,20 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
                 // status and wait for a change to restart.
                 match status {
                     Ok(s) if s.success() => {
-                        eprintln!("\n✓ programa terminó OK (exit 0) — esperando cambios ...");
+                        eprintln!("\n✓ program finished OK (exit 0) — waiting for changes ...");
                     }
                     Ok(s) => {
                         eprintln!(
-                            "\n✗ programa terminó con error (exit {}) — esperando cambios ...",
+                            "\n✗ program finished with error (exit {}) — waiting for changes ...",
                             s.code().unwrap_or(-1)
                         );
                     }
                     Err(e) => {
-                        eprintln!("\n✗ error esperando al child: {e}");
+                        eprintln!("\n✗ error waiting for the child: {e}");
                     }
                 }
                 drain_until_change(&mut tokio_rx, &target.watch_dir).await;
-                eprintln!("\n↻ reiniciando ...");
+                eprintln!("\n↻ restarting ...");
                 false
             }
         };
@@ -4173,26 +4172,26 @@ async fn handle_special_command(
         }
         "load" => {
             if args.is_empty() {
-                println!("uso: `:load <archivo.fitz>`");
+                println!("usage: `:load <file.fitz>`");
             } else {
                 load_into_repl_env(args, env, base_dir).await;
             }
         }
         other => {
-            println!("comando desconocido `:{other}`. Tipeá `:help` para la lista.");
+            println!("unknown command `:{other}`. Type `:help` for the list.");
         }
     }
     ReplCommandResult::Continue
 }
 
 fn print_repl_help() {
-    println!("Comandos del REPL:");
-    println!("  :help, :h       — esta ayuda");
-    println!("  :quit, :q       — salir (también Ctrl+D)");
-    println!("  :env            — listar variables y fns definidas en el scope");
-    println!("  :reset          — limpiar el scope (perdés todo)");
-    println!("  :type <expr>    — mostrar el tipo de una expresión");
-    println!("  :load <archivo> — evaluar un .fitz en el scope actual");
+    println!("REPL commands:");
+    println!("  :help, :h       — this help");
+    println!("  :quit, :q       — exit (also Ctrl+D)");
+    println!("  :env            — list variables and fns defined in the scope");
+    println!("  :reset          — clear the scope (you lose everything)");
+    println!("  :type <expr>    — show the type of an expression");
+    println!("  :load <file>    — evaluate a .fitz in the current scope");
 }
 
 /// Prints the root scope's variables, excluding builtins
@@ -4206,10 +4205,10 @@ fn print_repl_env(env: &fitz::env::EnvRef) {
         .filter(|n| !builtins.contains(n.as_str()))
         .collect();
     if user_names.is_empty() {
-        println!("(scope vacío — no definiste nada todavía)");
+        println!("(empty scope — you have not defined anything yet)");
         return;
     }
-    println!("Definido en el scope:");
+    println!("Defined in the scope:");
     for name in user_names {
         let value = env.lock().get(&name);
         match value {
@@ -4259,10 +4258,10 @@ fn print_repl_type(expr_src: &str, _env: &fitz::env::EnvRef) {
         if let Some(t) = types.type_at(span) {
             println!(":: {}", t.display(&type_env));
         } else {
-            println!(":: <no resoluble> (deuda: el checker no registró span)");
+            println!(":: <unresolved> (debt: the checker did not record a span)");
         }
     } else {
-        println!("✗ no pude evaluar la expresión");
+        println!("✗ could not evaluate the expression");
     }
 }
 
@@ -4499,9 +4498,9 @@ fn lint_cmd(files: Vec<PathBuf>, deny: Vec<String>) {
 
 /// Prints a finding cargo-clippy-style:
 /// ```text
-/// warning: variable `x` declarada pero no usada
+/// warning: variable `x` declared but never used
 ///   --> src/main.fitz:3:5
-///   = nota: si es intencional, prefijá con `_` ...
+///   = note: if intentional, prefix it with `_` ...
 /// ```
 /// With `--deny <name>`, "error:" red is used instead of
 /// "warning:" yellow.
@@ -4528,7 +4527,7 @@ fn print_lint_finding(
             finding.column
         );
         if let Some(hint) = &finding.hint {
-            println!("  \x1b[2m= nota:\x1b[0m {}", hint);
+            println!("  \x1b[2m= note:\x1b[0m {}", hint);
         }
     } else {
         println!("\n{}: {} [{}]", label, finding.message, finding.name);
@@ -4539,7 +4538,7 @@ fn print_lint_finding(
             finding.column
         );
         if let Some(hint) = &finding.hint {
-            println!("  = nota: {}", hint);
+            println!("  = note: {}", hint);
         }
     }
 }
@@ -4588,8 +4587,8 @@ fn docker_init_cmd(force: bool) {
             // an explicit file, but `docker init` does not
             // accept a file arg — this branch is defensive.
             eprintln!(
-                "✗ `fitz docker init` requiere un proyecto Fitz con `fitz.toml`. \
-                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+                "✗ `fitz docker init` requires a Fitz project with `fitz.toml`. \
+                 Create one with `fitz new <name>` or `fitz init` first."
             );
             std::process::exit(1);
         }
@@ -4597,7 +4596,7 @@ fn docker_init_cmd(force: bool) {
 
     let source = fs::read_to_string(&resolved.entry).unwrap_or_else(|e| {
         eprintln!(
-            "✗ no se pudo leer el entry point `{}`: {e}",
+            "✗ could not read the entry point `{}`: {e}",
             resolved.entry.display(),
         );
         std::process::exit(1);
@@ -4616,31 +4615,31 @@ fn docker_init_cmd(force: bool) {
     let shape = docker::detect_shape(&program, ctx.manifest.package.name.clone());
 
     let result = docker::init(&ctx.manifest_dir, &shape, force).unwrap_or_else(|e| {
-        eprintln!("✗ no se pudo generar los archivos Docker: {e}");
+        eprintln!("✗ could not generate the Docker files: {e}");
         std::process::exit(1);
     });
 
     println!(
-        "▶ fitz docker init — proyecto `{}` en `{}`",
+        "▶ fitz docker init — project `{}` at `{}`",
         shape.package_name,
         ctx.manifest_dir.display(),
     );
     if let Some(port) = shape.server_port {
-        println!("   detectado: @server(port = {})", port);
+        println!("   detected: @server(port = {})", port);
     } else {
-        println!("   detectado: programa CLI (sin @server)");
+        println!("   detected: CLI program (no @server)");
     }
     if shape.uses_db {
-        println!("   detectado: uso de DB (db.X(...)) → compose suma postgres:16-alpine");
+        println!("   detected: DB usage (db.X(...)) → compose adds postgres:16-alpine");
     }
     if shape.uses_python {
         println!(
-            "   detectado: interop Python → runtime fallback a python:3.12-slim-bookworm \
+            "   detected: Python interop → runtime falls back to python:3.12-slim-bookworm \
              (libpython3.12 + wget)"
         );
     }
     if shape.uses_cron {
-        println!("   detectado: @cron → compose suma restart: unless-stopped");
+        println!("   detected: @cron → compose adds restart: unless-stopped");
     }
     println!();
 
@@ -4648,14 +4647,14 @@ fn docker_init_cmd(force: bool) {
         let rel = path
             .strip_prefix(&ctx.manifest_dir)
             .unwrap_or(path.as_path());
-        println!("✓ escrito: {}", rel.display());
+        println!("✓ wrote: {}", rel.display());
     }
     for path in &result.skipped {
         let rel = path
             .strip_prefix(&ctx.manifest_dir)
             .unwrap_or(path.as_path());
         println!(
-            "- skipeado (ya existe, pasá --force para sobrescribir): {}",
+            "- skipped (already exists, pass --force to overwrite): {}",
             rel.display()
         );
     }
@@ -4663,7 +4662,7 @@ fn docker_init_cmd(force: bool) {
     if !result.skipped.is_empty() && !force {
         println!();
         println!(
-            "Sugerencia: para reemplazar archivos existentes corré \
+            "Tip: to replace existing files run \
              `fitz docker init --force`."
         );
     }
@@ -4680,8 +4679,8 @@ fn docker_build_cmd(tag: Option<String>) {
         Some(c) => c,
         None => {
             eprintln!(
-                "✗ `fitz docker build` requiere un proyecto Fitz con `fitz.toml`. \
-                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+                "✗ `fitz docker build` requires a Fitz project with `fitz.toml`. \
+                 Create one with `fitz new <name>` or `fitz init` first."
             );
             std::process::exit(1);
         }
@@ -4690,8 +4689,8 @@ fn docker_build_cmd(tag: Option<String>) {
     let dockerfile_path = ctx.manifest_dir.join("Dockerfile");
     if !dockerfile_path.is_file() {
         eprintln!(
-            "✗ no se encontró `Dockerfile` en `{}`. Corré `fitz docker init` para \
-             generarlo.",
+            "✗ `Dockerfile` not found in `{}`. Run `fitz docker init` to \
+             generate it.",
             ctx.manifest_dir.display(),
         );
         std::process::exit(1);
@@ -4700,7 +4699,7 @@ fn docker_build_cmd(tag: Option<String>) {
     let tag = tag.unwrap_or_else(|| format!("{}:latest", ctx.manifest.package.name));
 
     println!(
-        "▶ fitz docker build — tag `{}` en `{}`",
+        "▶ fitz docker build — tag `{}` at `{}`",
         tag,
         ctx.manifest_dir.display(),
     );
@@ -4724,8 +4723,8 @@ fn docker_build_cmd(tag: Option<String>) {
         }
         Err(e) => {
             eprintln!(
-                "✗ no se pudo invocar `docker build`: {e}. ¿Está Docker instalado y \
-                 corriendo? (`docker --version` para verificar)"
+                "✗ could not invoke `docker build`: {e}. Is Docker installed and \
+                 running? (`docker --version` to verify)"
             );
             std::process::exit(1);
         }
@@ -4745,8 +4744,8 @@ fn deploy_docker_cmd(tag: Option<String>, no_push: bool) {
         Some(c) => c,
         None => {
             eprintln!(
-                "✗ `fitz deploy docker` requiere un proyecto Fitz con `fitz.toml`. \
-                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+                "✗ `fitz deploy docker` requires a Fitz project with `fitz.toml`. \
+                 Create one with `fitz new <name>` or `fitz init` first."
             );
             std::process::exit(1);
         }
@@ -4760,7 +4759,7 @@ fn deploy_docker_cmd(tag: Option<String>, no_push: bool) {
     };
 
     println!(
-        "▶ fitz deploy docker — proyecto `{}` en `{}`",
+        "▶ fitz deploy docker — project `{}` at `{}`",
         ctx.manifest.package.name,
         ctx.manifest_dir.display(),
     );
@@ -4774,7 +4773,7 @@ fn deploy_docker_cmd(tag: Option<String>, no_push: bool) {
         Ok(result) => {
             println!();
             println!(
-                "✓ deploy OK — {} comando(s) ejecutado(s)",
+                "✓ deploy OK — {} command(s) executed",
                 result.commands.len()
             );
             for cmd in &result.commands {
@@ -4796,8 +4795,8 @@ fn deploy_compose_cmd(no_detach: bool, no_build: bool) {
         Some(c) => c,
         None => {
             eprintln!(
-                "✗ `fitz deploy compose` requiere un proyecto Fitz con `fitz.toml`. \
-                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+                "✗ `fitz deploy compose` requires a Fitz project with `fitz.toml`. \
+                 Create one with `fitz new <name>` or `fitz init` first."
             );
             std::process::exit(1);
         }
@@ -4811,7 +4810,7 @@ fn deploy_compose_cmd(no_detach: bool, no_build: bool) {
     };
 
     println!(
-        "▶ fitz deploy compose — proyecto `{}` en `{}`",
+        "▶ fitz deploy compose — project `{}` at `{}`",
         ctx.manifest.package.name,
         ctx.manifest_dir.display(),
     );
@@ -4825,7 +4824,7 @@ fn deploy_compose_cmd(no_detach: bool, no_build: bool) {
         Ok(result) => {
             println!();
             println!(
-                "✓ deploy OK — {} comando(s) ejecutado(s)",
+                "✓ deploy OK — {} command(s) executed",
                 result.commands.len()
             );
             for cmd in &result.commands {
@@ -4848,7 +4847,7 @@ fn resolve_db_url(explicit: Option<String>) -> Result<String, String> {
     match explicit {
         Some(u) => Ok(u),
         None => std::env::var("DATABASE_URL").map_err(|_| {
-            "URL Postgres no provista. Pasá `--url postgres://...` o seteá `DATABASE_URL` env."
+            "Postgres URL not provided. Pass `--url postgres://...` or set the `DATABASE_URL` env var."
                 .to_string()
         }),
     }
@@ -4866,17 +4865,17 @@ fn resolve_db_entry(file: Option<PathBuf>) -> Result<PathBuf, String> {
     }
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     let manifest_path = manifest::find_manifest(&cwd).ok_or_else(|| {
-        "no se pudo encontrar el entry — pasá `<archivo.fitz>` o asegurate de estar en un proyecto con `fitz.toml`".to_string()
+        "could not find the entry — pass `<file.fitz>` or make sure you are in a project with `fitz.toml`".to_string()
     })?;
     let manifest_text = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("leyendo `{}`: {e}", manifest_path.display()))?;
+        .map_err(|e| format!("reading `{}`: {e}", manifest_path.display()))?;
     let m = manifest::Manifest::parse(&manifest_text).map_err(|e| format!("manifest: {e}"))?;
     let bin_main = m.bin.as_ref().map(|b| b.main.clone()).ok_or_else(|| {
-        "el manifest no tiene `[bin].main` — pasá `<archivo.fitz>` explícito".to_string()
+        "the manifest has no `[bin].main` — pass an explicit `<file.fitz>`".to_string()
     })?;
     let manifest_dir = manifest_path
         .parent()
-        .ok_or_else(|| "manifest sin parent".to_string())?
+        .ok_or_else(|| "manifest has no parent".to_string())?
         .to_path_buf();
     Ok(manifest_dir.join(bin_main))
 }
@@ -4885,13 +4884,13 @@ fn resolve_db_entry(file: Option<PathBuf>) -> Result<PathBuf, String> {
 /// TypeEnv). Used by `db diff` to build the expected schema.
 fn load_program_for_db(entry: &std::path::Path) -> Result<(ast::Program, types::TypeEnv), String> {
     let src = std::fs::read_to_string(entry)
-        .map_err(|e| format!("leyendo `{}`: {e}", entry.display()))?;
+        .map_err(|e| format!("reading `{}`: {e}", entry.display()))?;
     let tokens = lexer::tokenize(&src).map_err(|e| format!("lexer: {e}"))?;
     let program = parser::parse(tokens).map_err(|e| format!("parser: {e}"))?;
     let (env, _type_info, _def_info, errs) = types::check_program(&program);
     if !errs.is_empty() {
         return Err(format!(
-            "checker tipos ({} errores). Corré `fitz check` para detalles.",
+            "type checker ({} errors). Run `fitz check` for details.",
             errs.len()
         ));
     }
@@ -4922,7 +4921,7 @@ fn db_diff_cmd(
     let (program, env) = match load_program_for_db(&entry) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("✗ cargando programa: {e}");
+            eprintln!("✗ loading program: {e}");
             std::process::exit(1);
         }
     };
@@ -4957,7 +4956,7 @@ fn db_diff_cmd(
     };
     let changes = migrations::diff_schemas(&current, &target);
     if changes.is_empty() {
-        eprintln!("✓ schema sincronizado — no hay cambios pendientes");
+        eprintln!("✓ schema in sync — no pending changes");
         return;
     }
     // v0.10.31 (Tier A.1) — classification + guard. Aborts if
@@ -4971,17 +4970,17 @@ fn db_diff_cmd(
         );
         if destructive > 0 && !allow_destructive {
             eprintln!(
-                "✗ {} change(s) destructive detectado(s) — rechazado por `--check-destructive`",
+                "✗ {} destructive change(s) detected — rejected by `--check-destructive`",
                 destructive
             );
-            eprintln!("  Lista de changes destructivos:");
+            eprintln!("  List of destructive changes:");
             for c in &changes {
                 if c.severity() == migrations::Severity::Destructive {
                     eprintln!("    • {}", change_short_label_for_cli(c));
                 }
             }
-            eprintln!("  Para emitir igual: re-corré con `--allow-destructive`.");
-            eprintln!("  Para refactor seguro: marcá renames con `@renamed_from(\"old\")`.");
+            eprintln!("  To emit anyway: re-run with `--allow-destructive`.");
+            eprintln!("  For a safe refactor: mark renames with `@renamed_from(\"old\")`.");
             std::process::exit(1);
         }
     }
@@ -4994,14 +4993,14 @@ fn db_diff_cmd(
     match out {
         Some(path) => {
             if let Err(e) = std::fs::write(&path, &sql) {
-                eprintln!("✗ escribiendo `{}`: {e}", path.display());
+                eprintln!("✗ writing `{}`: {e}", path.display());
                 std::process::exit(1);
             }
             eprintln!("✓ {} change(s) → {}", changes.len(), path.display());
         }
         None => {
             print!("{}", sql);
-            eprintln!("✓ {} change(s) emitidos a stdout", changes.len());
+            eprintln!("✓ {} change(s) emitted to stdout", changes.len());
         }
     }
 }
@@ -5326,16 +5325,16 @@ fn db_new_cmd(name: String, dir: Option<PathBuf>) {
     let filename = format!("{timestamp}_{sanitized}.sql");
     let path = dir.join(&filename);
     if path.exists() {
-        eprintln!("✗ ya existe: `{}`", path.display());
+        eprintln!("✗ already exists: `{}`", path.display());
         std::process::exit(1);
     }
     let stub = format!(
         "-- Migration: {sanitized}\n\
          -- Created: {iso}\n\
          --\n\
-         -- Editá este archivo con los statements SQL necesarios.\n\
-         -- Tip: usá `fitz db diff > {filename}` para generar el SQL\n\
-         -- automático desde los `@table` types del programa.\n\n\
+         -- Edit this file with the SQL statements you need.\n\
+         -- Tip: use `fitz db diff > {filename}` to generate the SQL\n\
+         -- automatically from the program's `@table` types.\n\n\
          -- UP\n\
          \n\n\
          -- DOWN\n\
@@ -5343,7 +5342,7 @@ fn db_new_cmd(name: String, dir: Option<PathBuf>) {
         iso = now.to_rfc3339(),
     );
     if let Err(e) = std::fs::write(&path, &stub) {
-        eprintln!("✗ escribiendo `{}`: {e}", path.display());
+        eprintln!("✗ writing `{}`: {e}", path.display());
         std::process::exit(1);
     }
     println!("✓ {}", path.display());
@@ -5383,9 +5382,9 @@ fn db_rollback_cmd(url: Option<String>, dir: Option<PathBuf>, count: usize) {
         }
     };
     if reverted.is_empty() {
-        eprintln!("✓ no hay migrations aplicadas para revertir");
+        eprintln!("✓ no applied migrations to revert");
     } else {
-        eprintln!("✓ {} migration(s) revertida(s):", reverted.len());
+        eprintln!("✓ {} migration(s) reverted:", reverted.len());
         for v in &reverted {
             eprintln!("    {v}");
         }
@@ -5431,18 +5430,18 @@ async fn rollback_n_dispatch(
     for v in &target_versions {
         let m = by_version.get(v.as_str()).ok_or_else(|| {
             format!(
-                "rollback: la version `{v}` está aplicada en la DB pero \
-                 NO hay archivo en el dir de migrations. Restaurá el \
-                 archivo o stampealá manualmente."
+                "rollback: version `{v}` is applied in the DB but \
+                 there is NO file in the migrations dir. Restore the \
+                 file or stamp it manually."
             )
         })?;
         match &m.kind {
             migrations::MigrationKind::Sql { down_sql, .. } => {
                 if down_sql.is_none() {
                     return Err(format!(
-                        "rollback: migration `{}` no tiene sección `-- DOWN` — \
-                         no se puede revertir. Editá el archivo agregando \
-                         `-- DOWN` con el SQL inverso y reintentá.",
+                        "rollback: migration `{}` has no `-- DOWN` section — \
+                         it cannot be reverted. Edit the file adding \
+                         `-- DOWN` with the inverse SQL and retry.",
                         m.filename
                     ));
                 }
@@ -5450,9 +5449,9 @@ async fn rollback_n_dispatch(
             migrations::MigrationKind::Fitz { source, .. } => {
                 if !fitz_migration_has_rollback(source) {
                     return Err(format!(
-                        "rollback: migration `{}` (`.fitz`) no declara \
+                        "rollback: migration `{}` (`.fitz`) does not declare \
                          `async fn rollback(db: DbConn) -> Result<Null>`. \
-                         Agregá la fn al archivo y reintentá.",
+                         Add the fn to the file and retry.",
                         m.filename
                     ));
                 }
@@ -5461,7 +5460,7 @@ async fn rollback_n_dispatch(
     }
     let mut reverted = Vec::with_capacity(target_versions.len());
     for v in target_versions {
-        let m = by_version.get(v.as_str()).expect("pre-flight validó");
+        let m = by_version.get(v.as_str()).expect("pre-flight validated");
         match &m.kind {
             migrations::MigrationKind::Sql { .. } => {
                 migrations::revert_migration(conn, m)
@@ -5619,14 +5618,14 @@ async fn run_fitz_migration_callback(
     let result = env
         .lock()
         .get("__fitz_mig_result")
-        .ok_or_else(|| "interno: __fitz_mig_result no quedó bindeado".to_string())?;
+        .ok_or_else(|| "internal: __fitz_mig_result was not bound".to_string())?;
     match result {
         Value::Result(variant) => match variant {
             fitz::value::ResultVariant::Ok(_) => Ok(()),
-            fitz::value::ResultVariant::Err(e) => Err(format!("`{fn_name}` retornó Err: {}", *e)),
+            fitz::value::ResultVariant::Err(e) => Err(format!("`{fn_name}` returned Err: {}", *e)),
         },
         other => Err(format!(
-            "`async fn {fn_name}` debe retornar Result<Null>, recibió: {other}"
+            "`async fn {fn_name}` must return Result<Null>, received: {other}"
         )),
     }
 }
@@ -5663,7 +5662,7 @@ fn db_check_cmd(file: Option<PathBuf>, url: Option<String>) {
     let (program, env) = match load_program_for_db(&entry) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("✗ cargando programa: {e}");
+            eprintln!("✗ loading program: {e}");
             std::process::exit(1);
         }
     };
@@ -5691,21 +5690,18 @@ fn db_check_cmd(file: Option<PathBuf>, url: Option<String>) {
     };
     let changes = migrations::diff_schemas(&current, &target);
     if changes.is_empty() {
-        eprintln!("✓ schema sincronizado — schema declarado matchea la DB");
+        eprintln!("✓ schema in sync — declared schema matches the DB");
         std::process::exit(0);
     }
     // Drift detected: pending SQL to stderr (visible in CI
     // logs), count to stdout (parseable), exit 1.
     let sql = migrations::changes_to_sql(&changes);
-    eprintln!(
-        "✗ drift detectado — {} change(s) pendiente(s):",
-        changes.len()
-    );
+    eprintln!("✗ drift detected — {} pending change(s):", changes.len());
     eprintln!();
     eprintln!("{}", sql);
     eprintln!(
-        "💡 corré `fitz db diff > migrations/<file>.sql` + `fitz db migrate` \
-         para sincronizar."
+        "💡 run `fitz db diff > migrations/<file>.sql` + `fitz db migrate` \
+         to sync."
     );
     std::process::exit(1);
 }
@@ -5715,8 +5711,8 @@ fn db_stamp_cmd(version: Option<String>, all: bool, url: Option<String>, dir: Op
     // we validate that at least ONE is present.
     if version.is_none() && !all {
         eprintln!(
-            "✗ `fitz db stamp` requiere `<version>` o `--all`. \
-             Ejemplos:\n  fitz db stamp 20260530120000\n  fitz db stamp --all"
+            "✗ `fitz db stamp` requires `<version>` or `--all`. \
+             Examples:\n  fitz db stamp 20260530120000\n  fitz db stamp --all"
         );
         std::process::exit(1);
     }
@@ -5769,8 +5765,8 @@ fn db_stamp_cmd(version: Option<String>, all: bool, url: Option<String>, dir: Op
     let in_dir = migrations_list.iter().any(|m| m.version == version);
     if !in_dir {
         eprintln!(
-            "⚠ version `{version}` NO existe en `{}` — stamped igual, \
-             pero verificá que no sea un typo.",
+            "⚠ version `{version}` does NOT exist in `{}` — stamped anyway, \
+             but make sure it is not a typo.",
             dir.display()
         );
     }
@@ -5792,7 +5788,7 @@ fn db_stamp_cmd(version: Option<String>, all: bool, url: Option<String>, dir: Op
     if inserted {
         eprintln!("✓ stamped: {version}");
     } else {
-        eprintln!("✓ no-op: version `{version}` ya estaba aplicada");
+        eprintln!("✓ no-op: version `{version}` was already applied");
     }
 }
 
@@ -5822,13 +5818,13 @@ fn db_history_cmd(url: Option<String>, dir: Option<PathBuf>) {
         }
     };
     if entries.is_empty() {
-        eprintln!("✓ sin migrations aplicadas todavía");
+        eprintln!("✓ no migrations applied yet");
         return;
     }
     println!("{:<20} {:<32} filename", "version", "applied_at");
     println!("{:-<20} {:-<32} {:-<40}", "", "", "");
     for e in &entries {
-        let filename = e.filename.as_deref().unwrap_or("(file removido)");
+        let filename = e.filename.as_deref().unwrap_or("(file removed)");
         println!("{:<20} {:<32} {}", e.version, e.applied_at, filename);
     }
     println!("\n{} migration(s) applied.", entries.len());
@@ -5856,7 +5852,7 @@ fn db_squash_cmd(
         (Some(f), Some(t)) => (f, t),
         _ => {
             eprintln!(
-                "✗ squash: no se encontraron las versions `{from}` y/o `{to}` en `{}`",
+                "✗ squash: versions `{from}` and/or `{to}` not found in `{}`",
                 dir.display()
             );
             std::process::exit(1);
@@ -5864,22 +5860,22 @@ fn db_squash_cmd(
     };
     if from_idx > to_idx {
         eprintln!(
-            "✗ squash: `from` (`{from}`) viene DESPUÉS de `to` (`{to}`) en orden cronológico. \
-             Pasalas en orden."
+            "✗ squash: `from` (`{from}`) comes AFTER `to` (`{to}`) in chronological order. \
+             Pass them in order."
         );
         std::process::exit(1);
     }
     let range = &migrations_list[from_idx..=to_idx];
     if range.len() < 2 {
-        eprintln!("✗ squash: el rango tiene <2 migrations — nada para combinar");
+        eprintln!("✗ squash: range has <2 migrations — nothing to combine");
         std::process::exit(1);
     }
     // 2. Reject .fitz in the range (squashing only SQL in MVP).
     for m in range {
         if m.is_fitz() {
             eprintln!(
-                "✗ squash: `{}` es `.fitz` data migration — squashing solo soporta `.sql` \
-                 en MVP. Excluí la `.fitz` del rango o aplicala manualmente.",
+                "✗ squash: `{}` is a `.fitz` data migration — squashing only supports `.sql` \
+                 in MVP. Exclude the `.fitz` from the range or apply it manually.",
                 m.filename
             );
             std::process::exit(1);
@@ -5908,7 +5904,7 @@ fn db_squash_cmd(
                     None => all_have_down = false,
                 }
             }
-            migrations::MigrationKind::Fitz { .. } => unreachable!("filtrado arriba"),
+            migrations::MigrationKind::Fitz { .. } => unreachable!("filtered above"),
         }
     }
     // DOWN goes in reverse order (reverts newest first).
@@ -5918,7 +5914,7 @@ fn db_squash_cmd(
     let squashed_path = dir.join(&squashed_filename);
     if squashed_path.exists() {
         eprintln!(
-            "✗ squash: ya existe `{}`. Borralo o usá otro `from` antes de re-squashear.",
+            "✗ squash: `{}` already exists. Delete it or use a different `from` before re-squashing.",
             squashed_path.display()
         );
         std::process::exit(1);
@@ -5926,16 +5922,16 @@ fn db_squash_cmd(
     let now = chrono::Utc::now();
     let mut squashed = String::new();
     squashed.push_str(&format!(
-        "-- Squashed: combinación de {} migrations del rango [{}, {}]\n",
+        "-- Squashed: combination of {} migrations in range [{}, {}]\n",
         range.len(),
         from,
         to
     ));
     squashed.push_str(&format!("-- Created: {}\n", now.to_rfc3339()));
-    squashed.push_str("-- Generado por `fitz db squash`. Los archivos originales se movieron\n");
-    squashed.push_str("-- a `migrations/squashed/`. NO editar este archivo a mano salvo que\n");
-    squashed.push_str("-- sepas lo que estás haciendo — re-correr `fitz db squash` no es\n");
-    squashed.push_str("-- idempotente sobre un dir ya squasheado.\n");
+    squashed.push_str("-- Generated by `fitz db squash`. The original files were moved\n");
+    squashed.push_str("-- to `migrations/squashed/`. Do NOT edit this file by hand unless\n");
+    squashed.push_str("-- you know what you are doing — re-running `fitz db squash` is\n");
+    squashed.push_str("-- not idempotent on an already-squashed dir.\n");
     squashed.push('\n');
     squashed.push_str("-- UP\n");
     squashed.push_str(&up_parts.join("\n\n"));
@@ -5945,13 +5941,13 @@ fn db_squash_cmd(
         squashed.push_str(&down_parts.join("\n\n"));
         squashed.push('\n');
     } else {
-        squashed.push_str("\n-- (sin sección -- DOWN porque al menos una migration del rango\n");
-        squashed.push_str("-- no tenía DOWN. Si querés rollback, agregá la sección a mano.)\n");
+        squashed.push_str("\n-- (no -- DOWN section because at least one migration in the range\n");
+        squashed.push_str("-- had no DOWN. If you want rollback, add the section by hand.)\n");
     }
     // 5. Move the original files to `migrations/squashed/`.
     let squashed_dir = dir.join("squashed");
     if let Err(e) = std::fs::create_dir_all(&squashed_dir) {
-        eprintln!("✗ squash: creando `{}`: {e}", squashed_dir.display());
+        eprintln!("✗ squash: creating `{}`: {e}", squashed_dir.display());
         std::process::exit(1);
     }
     for m in range {
@@ -5959,7 +5955,7 @@ fn db_squash_cmd(
         let dst = squashed_dir.join(&m.filename);
         if let Err(e) = std::fs::rename(&src, &dst) {
             eprintln!(
-                "✗ squash: moviendo `{}` → `{}`: {e}",
+                "✗ squash: moving `{}` → `{}`: {e}",
                 src.display(),
                 dst.display()
             );
@@ -5968,7 +5964,7 @@ fn db_squash_cmd(
     }
     // 6. Write the squashed file.
     if let Err(e) = std::fs::write(&squashed_path, &squashed) {
-        eprintln!("✗ squash: escribiendo `{}`: {e}", squashed_path.display());
+        eprintln!("✗ squash: writing `{}`: {e}", squashed_path.display());
         std::process::exit(1);
     }
     // 7. Tracking: if any in the range was applied, delete all
@@ -5979,8 +5975,8 @@ fn db_squash_cmd(
             Ok(u) => u,
             Err(e) => {
                 eprintln!(
-                    "⚠ squash: archivo squashed creado pero no se pudo actualizar tracking: {e}. \
-                     Re-corré con `--url <url>` o seteá DATABASE_URL para sincronizar."
+                    "⚠ squash: squashed file created but tracking could not be updated: {e}. \
+                     Re-run with `--url <url>` or set DATABASE_URL to sync."
                 );
                 std::process::exit(1);
             }
@@ -6016,19 +6012,19 @@ fn db_squash_cmd(
         });
         match result {
             Ok(true) => eprintln!(
-                "✓ tracking actualizado: {} versions removidas, stamped `{}`",
+                "✓ tracking updated: {} versions removed, stamped `{}`",
                 target_versions.len(),
                 target_versions[0]
             ),
-            Ok(false) => eprintln!("✓ tracking sin cambios (ninguna del rango estaba applied)"),
+            Ok(false) => eprintln!("✓ tracking unchanged (none in range was applied)"),
             Err(e) => {
-                eprintln!("⚠ squash: archivos OK pero tracking falló: {e}");
+                eprintln!("⚠ squash: files OK but tracking failed: {e}");
                 std::process::exit(1);
             }
         }
     }
     eprintln!(
-        "✓ {} migration(s) squashed → `{}`. Originales en `{}`.",
+        "✓ {} migration(s) squashed → `{}`. Originals in `{}`.",
         range.len(),
         squashed_path.display(),
         squashed_dir.display()
