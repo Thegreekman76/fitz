@@ -3941,7 +3941,7 @@ mod tests {
     #[test]
     fn changes_to_sql_empty_is_empty_string() {
         let sql = changes_to_sql(&[]);
-        assert!(sql.trim().is_empty(), "esperaba string vacío, got: {sql:?}");
+        assert!(sql.trim().is_empty(), "expected empty string, got: {sql:?}");
     }
 
     #[test]
@@ -4303,7 +4303,7 @@ type Plain {
         let changes = diff_schemas(&current, &target);
         assert!(
             changes.is_empty(),
-            "esperaba diff vacío (idempotente), got: {changes:?}"
+            "expected empty diff (idempotent), got: {changes:?}"
         );
     }
 
@@ -4338,7 +4338,7 @@ type Plain {
         let changes = diff_schemas(&current, &target);
         assert!(
             changes.is_empty(),
-            "esperaba diff vacío (cast strippeado), got: {changes:?}"
+            "expected empty diff (cast stripped), got: {changes:?}"
         );
     }
 
@@ -4413,7 +4413,7 @@ type Plain {
         let changes = diff_schemas(&current, &schema);
         assert!(
             changes.is_empty(),
-            "esperaba diff vacío post-round-trip, got: {changes:?}"
+            "expected empty diff post-round-trip, got: {changes:?}"
         );
     }
 
@@ -4454,7 +4454,7 @@ type Plain {
         assert!(up.contains("A;"));
         assert!(
             down.is_none(),
-            "DOWN whitespace-only debería normalizarse a None"
+            "whitespace-only DOWN should normalize to None"
         );
     }
 
@@ -4582,7 +4582,7 @@ type Plain {
         for c in &changes {
             assert!(
                 !matches!(c, Change::CreateTable(_) | Change::DropTable(_)),
-                "rename no debería emitir CREATE/DROP TABLE; got: {c:?}"
+                "rename should not emit CREATE/DROP TABLE; got: {c:?}"
             );
         }
     }
@@ -4630,7 +4630,7 @@ type Plain {
         for c in &changes {
             assert!(
                 !matches!(c, Change::AddColumn { .. } | Change::DropColumn { .. }),
-                "rename no debería emitir ADD/DROP COLUMN; got: {c:?}"
+                "rename should not emit ADD/DROP COLUMN; got: {c:?}"
             );
         }
     }
@@ -4803,7 +4803,7 @@ type Plain {
         let changes = diff_schemas(&s, &s);
         assert!(
             changes.is_empty(),
-            "diff de schemas iguales debe ser vacío (check exit 0)"
+            "diff of equal schemas must be empty (check exit 0)"
         );
     }
 
@@ -4816,7 +4816,7 @@ type Plain {
         let changes = diff_schemas(&current, &target);
         assert!(
             !changes.is_empty(),
-            "diff entre vacío y populated NO debe ser vacío (check exit 1)"
+            "diff between empty and populated must NOT be empty (check exit 1)"
         );
     }
 
@@ -4980,13 +4980,10 @@ type Plain {
     fn format_inspection_text_filter_by_table() {
         let s = inspect_schema_fixture();
         let text = format_inspection_text(&s, None, Some("users"));
-        assert!(
-            text.contains("Table: users"),
-            "users debería aparecer: {text}"
-        );
+        assert!(text.contains("Table: users"), "users should appear: {text}");
         assert!(
             !text.contains("Table: posts"),
-            "posts NO debería aparecer cuando filtramos a users: {text}"
+            "posts should NOT appear when filtering to users: {text}"
         );
     }
 
@@ -5083,12 +5080,12 @@ type Plain {
         let text = format_inspection_text(&schema, None, None);
         assert!(
             text.contains("Primary key: (user_id, group_id)"),
-            "composite PK debería listarse: {text}"
+            "composite PK should be listed: {text}"
         );
         // Must not mark PK inline on cols (because is_primary=false).
         assert!(
             !text.contains("user_id  bigint    NOT NULL  PK"),
-            "composite PK no debería tagear PK inline: {text}"
+            "composite PK should not tag PK inline: {text}"
         );
     }
 
@@ -5145,7 +5142,7 @@ type Plain {
         let sql = changes_to_sql(&[change]);
         assert!(
             !sql.contains("USING"),
-            "btree default no debería emitir USING: {sql}"
+            "btree default should not emit USING: {sql}"
         );
     }
 
@@ -5481,7 +5478,7 @@ type Plain {
         let text = format_inspection_text_all_schemas(&s, None);
         assert!(
             text.contains("no user-defined tables detected"),
-            "esperaba mensaje vacío, fue: {text}"
+            "expected empty message, was: {text}"
         );
     }
 }

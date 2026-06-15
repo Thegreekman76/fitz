@@ -39,14 +39,14 @@ fn pg_url() -> String {
 #[ignore]
 async fn connect_and_select_one() {
     let url = pg_url();
-    let conn = connect_url(&url).await.expect("connect debería funcionar");
+    let conn = connect_url(&url).await.expect("connect should work");
     let qr = conn
         .query("SELECT 1 AS n", &[])
         .await
-        .expect("SELECT 1 debería funcionar");
+        .expect("SELECT 1 should work");
     assert_eq!(qr.rows.len(), 1);
     let row = &qr.rows[0];
-    let n = row.get("n").expect("columna `n` debería existir");
+    let n = row.get("n").expect("column `n` should exist");
     assert_eq!(n, &PgValue::Int(1));
     conn.close().await.unwrap();
 }
@@ -63,7 +63,7 @@ async fn select_with_parameterized_args() {
             &[PgValue::Int(42), PgValue::Text("hola".into())],
         )
         .await
-        .expect("query con args debería funcionar");
+        .expect("query with args should work");
     assert_eq!(qr.rows.len(), 1);
     let row = &qr.rows[0];
     assert_eq!(row.get("a"), Some(&PgValue::Int(42)));
@@ -84,7 +84,7 @@ async fn create_temp_insert_select_full_cycle() {
         &[],
     )
     .await
-    .expect("CREATE TEMP TABLE debería funcionar");
+    .expect("CREATE TEMP TABLE should work");
 
     let n_inserted = conn
         .exec(
@@ -97,7 +97,7 @@ async fn create_temp_insert_select_full_cycle() {
             ],
         )
         .await
-        .expect("INSERT debería funcionar");
+        .expect("INSERT should work");
     assert_eq!(n_inserted, 2);
 
     let qr = conn
@@ -106,7 +106,7 @@ async fn create_temp_insert_select_full_cycle() {
             &[PgValue::Int(25)],
         )
         .await
-        .expect("SELECT debería funcionar");
+        .expect("SELECT should work");
     assert_eq!(qr.rows.len(), 2);
     assert_eq!(qr.rows[0].get("name"), Some(&PgValue::Text("ada".into())));
     assert_eq!(qr.rows[0].get("age"), Some(&PgValue::Int(30)));
@@ -119,7 +119,7 @@ async fn create_temp_insert_select_full_cycle() {
             &[PgValue::Int(40)],
         )
         .await
-        .expect("DELETE debería funcionar");
+        .expect("DELETE should work");
     assert_eq!(n_deleted, 1);
 
     conn.close().await.unwrap();
@@ -225,7 +225,7 @@ async fn error_response_parses_server_message() {
     let qr = conn
         .query("SELECT 1", &[])
         .await
-        .expect("conn debería seguir usable tras ErrorResponse");
+        .expect("conn should remain usable after ErrorResponse");
     assert_eq!(qr.rows.len(), 1);
     conn.close().await.unwrap();
 }
@@ -270,7 +270,7 @@ async fn tx_happy_path_commit_persists() {
             Ok(2)
         })
         .await
-        .expect("tx debería commitear");
+        .expect("tx should commit");
     assert_eq!(n, 2);
 
     // Validar que los 2 rows persisten post-COMMIT.
@@ -310,7 +310,7 @@ async fn tx_explicit_rollback_nothing_persists() {
             Err(fitz::db::DbError::Protocol("intencional rollback".into()))
         })
         .await;
-    assert!(r.is_err(), "tx debería propagar el Err del callback");
+    assert!(r.is_err(), "tx should propagate the Err from the callback");
 
     // Validar que el INSERT NO persistió (rollback automático).
     let qr = conn
@@ -359,7 +359,7 @@ async fn tx_conn_returns_to_pool_after_tx() {
             }
         })
         .await
-        .expect("tx debería completar sin colgarse");
+        .expect("tx should complete without hanging");
     }
 
     let qr = conn
@@ -399,7 +399,7 @@ async fn pool_concurrent_queries_do_not_serialize() {
                     &[PgValue::Int(i as i64)],
                 )
                 .await
-                .expect("query con sleep debería funcionar");
+                .expect("query with sleep should work");
             qr.rows[0].get("n").cloned()
         }));
     }
@@ -653,7 +653,7 @@ async fn orm_where_filters_by_age() {
     assert!(names.contains(&"alan".to_string()));
     assert!(
         !names.contains(&"kid".to_string()),
-        "kid no debería estar (age=10)"
+        "kid should not be present (age=10)"
     );
 
     let _ = seed.exec("DROP TABLE fitz_orm_where_test", &[]).await;
@@ -1008,10 +1008,10 @@ async fn orm_insert_update_delete_e2e() {
         )
     };
 
-    assert_eq!(updated, 1, "1 row debería haber updated");
-    assert_eq!(ada_age_post, 31, "age de ada debería ser 31 tras update");
-    assert_eq!(deleted, 1, "1 row debería haber deleted (alan)");
-    assert_eq!(total, 1, "después del delete queda 1 (ada)");
+    assert_eq!(updated, 1, "1 row should have been updated");
+    assert_eq!(ada_age_post, 31, "age of ada should be 31 after update");
+    assert_eq!(deleted, 1, "1 row should have been deleted (alan)");
+    assert_eq!(total, 1, "after delete 1 remains (ada)");
 
     let _ = seed.exec("DROP TABLE fitz_orm_crud_test", &[]).await;
     seed.close().await.unwrap();
@@ -1255,7 +1255,7 @@ fn orm_belongs_to_and_has_many_parity_codegen_e2e() {
         .expect("invocar fitz build");
     assert!(
         build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr),
     );
@@ -1401,7 +1401,7 @@ fn orm_navigation_with_column_override_in_fk_source_parity_codegen_e2e() {
         .expect("invocar fitz build");
     assert!(
         build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr),
     );
@@ -2621,7 +2621,7 @@ fn orm_order_by_limit_offset_parity_codegen_e2e() {
                 && stdout.contains("top1=5:70")
                 && stdout.contains("mid0=2:30")
                 && stdout.contains("mid1=1:50"),
-            "esperaba orden + paginación correcta, fue: {}",
+            "expected correct order + pagination, was: {}",
             stdout
         );
     });
@@ -2733,7 +2733,7 @@ fn run_paridad_program(src: &str, stem: &str, assert_stdout: impl FnOnce(&str)) 
         .expect("invocar fitz build");
     assert!(
         build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr),
     );
@@ -2850,7 +2850,7 @@ fn orm_where_combinatorial_parity_codegen_e2e() {
         .expect("invocar fitz build");
     assert!(
         build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr),
     );
@@ -2980,7 +2980,7 @@ fn orm_where_between_mod_external_var_parity_codegen_e2e() {
         .expect("invocar fitz build");
     assert!(
         build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr),
     );
@@ -3100,7 +3100,7 @@ fn orm_where_array_ops_parity_codegen_e2e() {
         .expect("invocar fitz build");
     assert!(
         build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr),
     );
@@ -3226,7 +3226,7 @@ fn orm_arrays_and_jsonb_parity_codegen_e2e() {
         .expect("invocar fitz build");
     assert!(
         build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr),
     );
@@ -3424,7 +3424,7 @@ async fn orm_aggregate_over_empty_set_returns_null() {
         }
         other => panic!("esperaba Map, fue {:?}", other),
     };
-    assert_eq!(sum, Value::Null, "SUM sobre set vacío debe ser Null");
+    assert_eq!(sum, Value::Null, "SUM over empty set must be Null");
 
     let _ = seed.exec("DROP TABLE fitz_orm_empty_agg", &[]).await;
     seed.close().await.unwrap();
@@ -4291,7 +4291,7 @@ async fn orm_arrays_empty_and_nullable_e2e() {
     match ints {
         Value::List(s) => {
             let items = s.lock();
-            assert!(items.is_empty(), "esperaba lista vacía");
+            assert!(items.is_empty(), "expected empty list");
         }
         other => panic!("esperaba List, fue {:?}", other),
     }
@@ -4833,7 +4833,7 @@ async fn introspect_and_diff_round_trip_using_gin_method() {
     let sql = fitz::migrations::changes_to_sql(&[create_change]);
     seed.exec(&sql, &[])
         .await
-        .expect("CREATE INDEX ... USING gin debe ser válido");
+        .expect("CREATE INDEX ... USING gin must be valid");
 
     // Introspect debe reportar el method "gin".
     let schema = fitz::migrations::introspect_schema(&seed)
@@ -4852,7 +4852,7 @@ async fn introspect_and_diff_round_trip_using_gin_method() {
     assert_eq!(
         idx.using.as_deref(),
         Some("gin"),
-        "introspect debería reportar using=gin, got {:?}",
+        "introspect should report using=gin, got {:?}",
         idx.using
     );
 
@@ -4860,7 +4860,7 @@ async fn introspect_and_diff_round_trip_using_gin_method() {
     let text = fitz::migrations::format_inspection_text(&schema, None, Some("fitz_using_e2e_docs"));
     assert!(
         text.contains("USING gin"),
-        "inspect text debería contener `USING gin`: {text}"
+        "inspect text should contain `USING gin`: {text}"
     );
 
     // Cross-check: format_inspection_json devuelve "using":"gin".
@@ -4931,7 +4931,7 @@ async fn tier_a4_nested_transaction_savepoint_inner_rollback() {
             Ok(())
         })
         .await;
-    assert!(r.is_ok(), "outer tx debería committear: {:?}", r);
+    assert!(r.is_ok(), "outer tx should commit: {:?}", r);
 
     // Validar: 2 rows (outer1, outer2). Sin "inner-rolled-back".
     let qr = conn
@@ -5035,7 +5035,7 @@ async fn tier_a9_transaction_isolation_serializable() {
             Ok(())
         })
         .await;
-    assert!(r.is_ok(), "tx SERIALIZABLE debería commitear: {:?}", r);
+    assert!(r.is_ok(), "tx SERIALIZABLE should commit: {:?}", r);
 
     let qr = conn.query("SELECT n FROM fitz_a9_iso", &[]).await.unwrap();
     assert_eq!(qr.rows.len(), 1);
@@ -5061,7 +5061,7 @@ async fn tier_a9_transaction_isolation_read_committed_and_repeatable_read() {
             .await;
         assert!(
             r.is_ok(),
-            "isolation `{}` debería aceptarse: {:?}",
+            "isolation `{}` should be accepted: {:?}",
             level,
             r
         );
@@ -5138,7 +5138,7 @@ async fn tier_c2_expression_index_creates_lowercase_unique() {
         &[],
     )
     .await
-    .expect("CREATE expression INDEX debería compilar");
+    .expect("CREATE expression INDEX should compile");
 
     // Validar: insert con cases distintos del mismo email rechaza.
     conn.exec(
@@ -5270,7 +5270,7 @@ async fn tier_c1_ts_rank_order_by_works() {
         .expect("body");
     assert!(
         first_body.contains("fitz fitz fitz"),
-        "esperaba `fitz fitz fitz` primero (más rank), fue: {first_body}"
+        "expected `fitz fitz fitz` first (higher rank), was: {first_body}"
     );
 
     let _ = conn.exec("DROP TABLE fitz_c1_rank", &[]).await;
@@ -5318,7 +5318,7 @@ async fn tier_a8_introspect_cross_schema_fk_populates_references_schema() {
     assert_eq!(
         fk.references_schema.as_deref(),
         Some("fitz_a8_ns"),
-        "references_schema debería ser `fitz_a8_ns` (A.8): {:?}",
+        "references_schema should be `fitz_a8_ns` (A.8): {:?}",
         fk.references_schema
     );
     assert_eq!(fk.references_table, "parents");

@@ -1059,7 +1059,7 @@ mod tests {
             env,
             CronJobOptions::default(),
         );
-        assert!(res.is_ok(), "register debería pasar: {:?}", res);
+        assert!(res.is_ok(), "register should pass: {:?}", res);
         assert!(registry.has_jobs());
         let jobs = registry.jobs_snapshot();
         assert_eq!(jobs.len(), 1);

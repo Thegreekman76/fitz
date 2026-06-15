@@ -67,8 +67,8 @@ impl FitzError {
     //                    frequent error patterns ----
     //
     // Previously the evaluator/checker/codegen call sites formatted
-    // inconsistent messages ("no tiene método X" vs "el tipo X no
-    // soporta" vs "espera N args" vs "espera N argumentos"). These
+    // inconsistent messages ("has no method X" vs "type X does not
+    // support" vs "expects N args" vs "expects N arguments"). These
     // helpers pin the canonical wording and reduce duplication.
     //
     // Migration: for every new error, prefer one of these
@@ -143,12 +143,12 @@ impl std::fmt::Display for FitzError {
         } else {
             write!(
                 f,
-                "Error en línea {}:{} — {}",
+                "Error at line {}:{} — {}",
                 self.line, self.column, self.message
             )?;
         }
         if let Some(hint) = &self.hint {
-            write!(f, "\n  Sugerencia: {}", hint)?;
+            write!(f, "\n  Hint: {}", hint)?;
         }
         Ok(())
     }

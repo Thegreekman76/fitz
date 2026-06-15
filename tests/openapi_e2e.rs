@@ -26,10 +26,10 @@ fn run_openapi(test_name: &str, src: &str) -> serde_json::Value {
         .args(["openapi"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz openapi");
+        .expect("invoke fitz openapi");
     assert!(
         output.status.success(),
-        "fitz openapi falló:\nstdout: {}\nstderr: {}",
+        "fitz openapi failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -37,7 +37,7 @@ fn run_openapi(test_name: &str, src: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout).unwrap_or_else(|e| {
         panic!(
-            "fitz openapi stdout no es JSON válido: {}\nstdout:\n{}",
+            "fitz openapi stdout is not valid JSON: {}\nstdout:\n{}",
             e, stdout
         )
     })
@@ -117,23 +117,23 @@ fn fitz_openapi_aborts_with_type_errors() {
     let src = "@get(\"/x\")\nfn h() -> Str => 42\n";
     let dir = std::env::temp_dir().join("fitz-openapi-typecheck-fail");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
     let fitz_src = dir.join("prog.fitz");
-    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+    std::fs::write(&fitz_src, src).expect("write .fitz");
 
     let output = Command::new(fitz_bin())
         .args(["openapi"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz openapi");
+        .expect("invoke fitz openapi");
     assert!(
         !output.status.success(),
-        "esperaba que fitz openapi fallara por error de tipo, salió OK"
+        "expected fitz openapi to fail due to type error, exited OK"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("error") && stderr.contains("tipo"),
-        "stderr esperado mencionando errores de tipo, fue: {}",
+        stderr.contains("error") && stderr.contains("type"),
+        "expected stderr mentioning type errors, was: {}",
         stderr
     );
 }

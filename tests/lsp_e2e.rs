@@ -50,10 +50,10 @@ fn read_message<R: Read>(stream: &mut R) -> String {
     let n: usize = header_str
         .lines()
         .find_map(|l| l.strip_prefix("Content-Length:"))
-        .map(|v| v.trim().parse().expect("Content-Length numérico"))
-        .expect("header Content-Length");
+        .map(|v| v.trim().parse().expect("numeric Content-Length"))
+        .expect("Content-Length header");
     let mut body = vec![0u8; n];
-    stream.read_exact(&mut body).expect("EOF leyendo body");
+    stream.read_exact(&mut body).expect("EOF reading body");
     String::from_utf8(body).expect("body UTF-8")
 }
 
@@ -89,7 +89,7 @@ fn handshake_initialize_shutdown_devuelve_server_info_correcto() {
     );
     assert!(
         !init_resp.contains(r#""error""#),
-        "initialize devolvió error: {init_resp}",
+        "initialize returned error: {init_resp}",
     );
 
     // 2. initialized notification (sin id, sin response esperada).
@@ -126,7 +126,7 @@ fn handshake_initialize_shutdown_devuelve_server_info_correcto() {
     );
     assert!(
         !shutdown_resp.contains(r#""error""#),
-        "shutdown devolvió error: {shutdown_resp}",
+        "shutdown returned error: {shutdown_resp}",
     );
 
     // 4. Cerramos stdin para que tower-lsp termine el loop. No
@@ -147,7 +147,7 @@ fn wait_for_clean_exit(child: &mut std::process::Child) {
         }
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("fitz-lsp no terminó en 5s tras cerrar stdin");
+            panic!("fitz-lsp did not terminate within 5s after closing stdin");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -234,7 +234,7 @@ fn did_open_documento_roto_publica_diagnostic_con_error_de_tipo() {
     // tiene que haber al menos un error.
     assert!(
         !publish.contains(r#""diagnostics":[]"#),
-        "publishDiagnostics con lista vacía: {publish}",
+        "publishDiagnostics with empty list: {publish}",
     );
 
     // Cerramos prolijo: shutdown + cierre de stdin.
@@ -326,7 +326,7 @@ fn hover_sobre_literal_int_devuelve_tipo_en_markdown() {
     );
     assert!(
         !hover_resp.contains(r#""error""#),
-        "hover devolvió error: {hover_resp}",
+        "hover returned error: {hover_resp}",
     );
 
     // Hover en una posición sin spans (línea 2 — fuera del documento)
@@ -348,7 +348,7 @@ fn hover_sobre_literal_int_devuelve_tipo_en_markdown() {
     };
     assert!(
         null_resp.contains(r#""result":null"#) || null_resp.contains(r#""result": null"#),
-        "hover en posición sin spans debería ser null: {null_resp}",
+        "hover at position without spans should be null: {null_resp}",
     );
 
     drop(stdin);
@@ -430,11 +430,11 @@ fn goto_definition_sobre_uso_de_var_local_devuelve_location_de_let() {
     );
     assert!(
         def_resp.contains(r#""line":0"#) || def_resp.contains(r#""line": 0"#),
-        "definition range no apunta a línea 0: {def_resp}",
+        "definition range does not point to line 0: {def_resp}",
     );
     assert!(
         !def_resp.contains(r#""error""#),
-        "definition devolvió error: {def_resp}",
+        "definition returned error: {def_resp}",
     );
 
     // Cursor sobre el builtin `print` (no debería resolver). Lo armamos
@@ -474,7 +474,7 @@ fn goto_definition_sobre_uso_de_var_local_devuelve_location_de_let() {
     };
     assert!(
         null_resp.contains(r#""result":null"#) || null_resp.contains(r#""result": null"#),
-        "definition sobre builtin debería ser null: {null_resp}",
+        "definition over builtin should be null: {null_resp}",
     );
 
     drop(stdin);
@@ -569,12 +569,12 @@ fn completion_after_dot_sobre_str_lista_metodos_built_in() {
     }
     assert!(
         !comp_resp.contains(r#""error""#),
-        "completion devolvió error: {comp_resp}",
+        "completion returned error: {comp_resp}",
     );
     // Sin métodos de List (que no aplican a Str).
     assert!(
         !comp_resp.contains(r#""label":"push""#) && !comp_resp.contains(r#""label": "push""#),
-        "completion no debería incluir métodos de List: {comp_resp}",
+        "completion should not include List methods: {comp_resp}",
     );
 
     // Segundo request: completion scope-level en línea 2 col 0
@@ -696,7 +696,7 @@ fn completion_after_at_lista_decorators_v0_10_12() {
 
     assert!(
         !comp_resp.contains(r#""error""#),
-        "completion devolvió error: {comp_resp}",
+        "completion returned error: {comp_resp}",
     );
 
     // Decorators core de cada familia deben aparecer.
@@ -749,7 +749,7 @@ fn completion_after_at_lista_decorators_v0_10_12() {
     assert!(
         comp_resp.contains(r#""insertText":"hidden""#)
             || comp_resp.contains(r#""insertText": "hidden""#),
-        "completion @hidden debería ser plano sin paréntesis: {comp_resp}",
+        "completion @hidden should be plain without parentheses: {comp_resp}",
     );
 
     drop(stdin);
@@ -838,13 +838,13 @@ fn v3_formatting_doc_no_formateado_devuelve_textedit_con_codigo_formateado() {
     );
     assert!(
         !fmt_resp.contains(r#""error""#),
-        "formatting devolvió error: {fmt_resp}",
+        "formatting returned error: {fmt_resp}",
     );
     // El newText NO debe contener tabs (el formatter las normaliza).
     // Buscamos el escape `\t` literal en el JSON — si está, fallar.
     assert!(
         !fmt_resp.contains(r#"\t"#),
-        "formatting newText conservó tabs: {fmt_resp}",
+        "formatting newText preserved tabs: {fmt_resp}",
     );
 
     drop(stdin);
@@ -910,7 +910,7 @@ fn v3_formatting_doc_con_parser_error_devuelve_null_no_aborta() {
     // Sobre doc roto, esperamos `result: null` (no crash, no error).
     assert!(
         fmt_resp.contains(r#""result":null"#) || fmt_resp.contains(r#""result": null"#),
-        "formatting sobre doc roto debería devolver result:null, recibió: {fmt_resp}",
+        "formatting over broken doc should return result:null, received: {fmt_resp}",
     );
     assert!(
         !fmt_resp.contains(r#""error""#),
@@ -1078,7 +1078,7 @@ fn v4_signature_help_segundo_arg_active_parameter_es_1() {
 
     assert!(
         sig_resp.contains(r#""activeParameter":1"#) || sig_resp.contains(r#""activeParameter": 1"#),
-        "signatureHelp con activeParameter incorrecto (esperaba 1 después de la coma): {sig_resp}",
+        "signatureHelp with wrong activeParameter (expected 1 after the comma): {sig_resp}",
     );
 
     drop(stdin);

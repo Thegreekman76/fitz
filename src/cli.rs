@@ -343,7 +343,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
             None => {
                 return ParseResult::Error(
                     format!(
-                        "comando desconocido: `{}`. Run `--help` para ver comandos disponibles.",
+                        "unknown command: `{}`. Run `--help` to see available commands.",
                         sub_name
                     ),
                     2,
@@ -355,7 +355,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
         // Modo single: solo un comando, el subcomando NO se especifica.
         // argv son directamente los args del comando.
         if cmds.is_empty() {
-            return ParseResult::Error("no hay comandos `@command` registrados".into(), 1);
+            return ParseResult::Error("no `@command` commands registered".into(), 1);
         }
         (cmds[0].clone(), argv)
     };
@@ -443,7 +443,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
                 } else {
                     // Espera valor en el siguiente token.
                     if i + 1 >= remaining.len() {
-                        return ParseResult::Error(format!("flag `--{}` espera un valor", key), 2);
+                        return ParseResult::Error(format!("flag `--{}` expects a value", key), 2);
                     }
                     flag_values.insert(key.to_string(), Some(remaining[i + 1].clone()));
                     i += 2;
@@ -472,7 +472,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
                 None => {
                     return ParseResult::Error(
                         format!(
-                            "flag corta desconocida `-{}`. Disponibles: {}",
+                            "unknown short flag `-{}`. Available: {}",
                             first,
                             short_map
                                 .iter()
@@ -492,7 +492,7 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
             } else {
                 if i + 1 >= remaining.len() {
                     return ParseResult::Error(
-                        format!("flag `-{}` (--{}) espera un valor", first, long_name),
+                        format!("flag `-{}` (--{}) expects a value", first, long_name),
                         2,
                     );
                 }
@@ -751,7 +751,7 @@ mod tests {
         let result = parse_argv(&["foo".to_string()], &reg);
         match result {
             ParseResult::Error(msg, code) => {
-                assert!(msg.contains("desconocido"));
+                assert!(msg.contains("unknown"));
                 assert_eq!(code, 2);
             }
             _ => panic!("esperaba Error"),

@@ -184,7 +184,7 @@ async fn iter2b_cleanup_expired_deletes_only_expired_rows() {
         )
         .await
         .unwrap();
-    assert_eq!(qr_vivo.rows.len(), 1, "el jti vivo debería seguir");
+    assert_eq!(qr_vivo.rows.len(), 1, "the live jti should remain");
 
     let qr_muerto = conn
         .query(
@@ -243,9 +243,9 @@ async fn iter2b_blacklist_re_blacklist_same_jti_updates_expires_at() {
     assert_eq!(qr.rows.len(), 1);
     match qr.rows[0].values().first() {
         Some(PgValue::Int(n)) => {
-            assert_eq!(*n, now + 3600, "expires_at debe matchear el último update");
+            assert_eq!(*n, now + 3600, "expires_at must match the last update");
         }
-        other => panic!("esperaba Int, recibí {:?}", other),
+        other => panic!("expected Int, received {:?}", other),
     }
 
     cleanup_jti(&conn, "iter2b-jti-doble").await;

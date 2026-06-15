@@ -80,7 +80,7 @@ fn new_without_no_git_initializes_repo() {
     // (los devs de Fitz tienen git).
     assert!(
         tmp.path().join("mi-git").join(".git").is_dir(),
-        ".git/ no se creó — ¿git está instalado en el PATH?"
+        ".git/ was not created — is git installed in the PATH?"
     );
 }
 
@@ -98,7 +98,7 @@ fn new_aborts_if_folder_already_exists() {
     std::fs::create_dir_all(tmp.path().join("existente")).unwrap();
     let (_stdout, stderr, code) = run_fitz(&["new", "existente", "--no-git"], tmp.path());
     assert_eq!(code, 1);
-    assert!(stderr.contains("ya existe"), "stderr: {stderr}");
+    assert!(stderr.contains("already exists"), "stderr: {stderr}");
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn new_aborts_with_invalid_name() {
     let tmp = tempfile::tempdir().unwrap();
     let (_stdout, stderr, code) = run_fitz(&["new", "Foo", "--no-git"], tmp.path());
     assert_eq!(code, 1);
-    assert!(stderr.contains("nombre inválido"), "stderr: {stderr}");
+    assert!(stderr.contains("invalid name"), "stderr: {stderr}");
     assert!(
         stderr.contains("Foo"),
         "stderr no menciona el nombre: {stderr}"
@@ -146,7 +146,7 @@ fn init_aborts_if_manifest_already_exists() {
     std::fs::write(project.join("fitz.toml"), "[package]\nname = \"x\"\n").unwrap();
     let (_stdout, stderr, code) = run_fitz(&["init", "--no-git"], &project);
     assert_eq!(code, 1);
-    assert!(stderr.contains("ya existe"), "stderr: {stderr}");
+    assert!(stderr.contains("already exists"), "stderr: {stderr}");
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn init_aborts_if_directory_has_invalid_name_without_override() {
     std::fs::create_dir_all(&project).unwrap();
     let (_stdout, stderr, code) = run_fitz(&["init", "--no-git"], &project);
     assert_eq!(code, 1);
-    assert!(stderr.contains("nombre inválido"), "stderr: {stderr}");
+    assert!(stderr.contains("invalid name"), "stderr: {stderr}");
     assert!(
         stderr.contains("--name"),
         "stderr no sugiere --name: {stderr}"
@@ -177,14 +177,14 @@ fn program_generated_by_new_runs_with_fitz_run() {
         .expect("fitz run");
     assert!(
         output.status.success(),
-        "fitz run sobre el template falló:\nstdout: {}\nstderr: {}",
+        "fitz run over the template failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Hola desde demo-app"),
-        "stdout inesperado: {stdout}"
+        stdout.contains("Hello from demo-app"),
+        "unexpected stdout: {stdout}"
     );
 }
 
@@ -194,7 +194,7 @@ fn program_generated_by_new_runs_with_fitz_run() {
 /// `tmp` y devuelve el path del proyecto.
 fn create_project(tmp_root: &Path, name: &str) -> std::path::PathBuf {
     let (_stdout, stderr, code) = run_fitz(&["new", name, "--no-git"], tmp_root);
-    assert_eq!(code, 0, "fitz new falló: {stderr}");
+    assert_eq!(code, 0, "fitz new failed: {stderr}");
     tmp_root.join(name)
 }
 
@@ -205,8 +205,8 @@ fn run_without_args_inside_project_executes_bin_main() {
     let (stdout, stderr, code) = run_fitz(&["run"], &project);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
-        stdout.contains("Hola desde run-test"),
-        "stdout inesperado: {stdout}"
+        stdout.contains("Hello from run-test"),
+        "unexpected stdout: {stdout}"
     );
 }
 
@@ -217,8 +217,8 @@ fn check_without_args_inside_project_checks_bin_main() {
     let (stdout, _stderr, code) = run_fitz(&["check"], &project);
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("sin errores de tipo"),
-        "stdout inesperado: {stdout}"
+        stdout.contains("no type errors"),
+        "unexpected stdout: {stdout}"
     );
 }
 
@@ -230,7 +230,7 @@ fn run_camina_hacia_arriba_buscando_manifest() {
     std::fs::create_dir_all(&nested).unwrap();
     let (stdout, stderr, code) = run_fitz(&["run"], &nested);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("Hola desde walk-test"), "stdout: {stdout}");
+    assert!(stdout.contains("Hello from walk-test"), "stdout: {stdout}");
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn convert_to_lib(project_dir: &Path, name: &str, version: &str) {
     std::fs::create_dir_all(project_dir.join("src")).unwrap();
     std::fs::write(
         project_dir.join("src").join("lib.fitz"),
-        "// lib mínima para tests\nfn helper(x: Int) -> Int => x + 1\n",
+        "// minimal lib for tests\nfn helper(x: Int) -> Int => x + 1\n",
     )
     .unwrap();
 }
@@ -378,7 +378,7 @@ fn check_is_idempotent_without_rewriting_lockfile() {
     let (stdout2, _, _) = run_fitz(&["check"], &app_dir);
     assert!(
         !stdout2.contains("actualizado"),
-        "segunda corrida no debía notificar update: {stdout2}"
+        "second run should not have notified update: {stdout2}"
     );
 }
 
@@ -416,7 +416,7 @@ fn project_without_deps_does_not_emit_lockfile() {
     assert_eq!(code, 0);
     assert!(
         !project.join("fitz.lock").exists(),
-        "no debió crearse fitz.lock para proyecto sin deps"
+        "fitz.lock should not have been created for project without deps"
     );
 }
 
@@ -547,7 +547,7 @@ fn unreferenced_run_dep_does_not_fail_if_not_imported() {
     assert!(stdout.contains("sin imports"));
     assert!(
         app_dir.join("fitz.lock").is_file(),
-        "lockfile debió emitirse"
+        "lockfile should have been emitted"
     );
 }
 
@@ -623,7 +623,7 @@ fn init_git_repo_with_tag(dir: &Path, tag: &str) -> String {
             .expect("invocar git");
         assert!(
             output.status.success(),
-            "git {} falló:\n{}",
+            "git {} failed:\n{}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -775,7 +775,7 @@ fn git_dep_reuses_cache_without_re_cloning() {
 
     assert!(
         marker.is_file(),
-        "el marker se borró — el cache fue re-clonado en lugar de reusado"
+        "the marker was deleted — the cache was re-cloned instead of reused"
     );
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),
@@ -806,7 +806,7 @@ fn git_dep_lockfile_idempotent_if_commit_does_not_change() {
     let (stdout2, _, _) = run_fitz_with_cache(&["check"], &app_dir, &cache_dir);
     assert!(
         !stdout2.contains("actualizado"),
-        "lockfile no debió re-escribirse: {stdout2}"
+        "lockfile should not have been rewritten: {stdout2}"
     );
 }
 
@@ -868,11 +868,11 @@ fn build_resolves_from_dep_import_via_dep_registry() {
     let bin_path = app_dir.join("target").join("release").join(bin_name);
     assert!(
         bin_path.is_file(),
-        "binario no existe en {}",
+        "binary does not exist at {}",
         bin_path.display()
     );
 
-    let output = Command::new(&bin_path).output().expect("ejecutar binario");
+    let output = Command::new(&bin_path).output().expect("execute binary");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("d=42"), "stdout del binario: {stdout}");
@@ -919,7 +919,7 @@ fn add_without_flags_aborts_requesting_path_or_git() {
     );
     assert!(
         stderr.contains("9.y.5"),
-        "stderr debería mencionar el registry: {stderr}"
+        "stderr should mention the registry: {stderr}"
     );
 }
 
@@ -981,7 +981,7 @@ fn add_overwrites_existing_dep() {
     );
     assert!(
         !manifest.contains("../lib-uno"),
-        "el path viejo no debió persistir:\n{manifest}"
+        "the old path should not have persisted:\n{manifest}"
     );
 }
 
@@ -1006,7 +1006,7 @@ fn remove_existing_dep_removes_and_updates_lockfile() {
     assert!(!manifest.contains("[dependencies]"));
     assert!(
         !app_dir.join("fitz.lock").exists(),
-        "fitz.lock debió borrarse al quedar sin deps"
+        "fitz.lock should have been deleted when no deps remained"
     );
 }
 
@@ -1030,7 +1030,7 @@ fn update_without_git_deps_reports_no_op() {
 
     let (stdout, _, code) = run_fitz(&["update"], &app_dir);
     assert_eq!(code, 0);
-    assert!(stdout.contains("no había git deps"), "stdout: {stdout}");
+    assert!(stdout.contains("no git deps"), "stdout: {stdout}");
 }
 
 #[test]
@@ -1071,19 +1071,19 @@ fn update_invalidates_git_dep_cache_and_re_clones() {
 
     let (stdout, _, code) = run_fitz_with_cache(&["update"], &app_dir, &cache_dir);
     assert_eq!(code, 0);
-    assert!(stdout.contains("cache invalidado"), "stdout: {stdout}");
+    assert!(stdout.contains("cache invalidated"), "stdout: {stdout}");
 
     // El cache fue re-clonado: el marker NO debería existir más.
     let cache_entries_after: Vec<_> = std::fs::read_dir(&git_cache).unwrap().collect();
     assert_eq!(
         cache_entries_after.len(),
         1,
-        "debió quedar exactamente un clone"
+        "exactly one clone should remain"
     );
     let new_clone = cache_entries_after[0].as_ref().unwrap().path();
     assert!(
         !new_clone.join("FITZ_TEST_MARKER").exists(),
-        "el marker debió desaparecer tras re-clone"
+        "the marker should have disappeared after re-clone"
     );
 }
 
@@ -1098,7 +1098,7 @@ fn update_nonexistent_dep_aborts() {
 
     let (_, stderr, code) = run_fitz(&["update", "no-existe"], &app_dir);
     assert_eq!(code, 1);
-    assert!(stderr.contains("no está"), "stderr: {stderr}");
+    assert!(stderr.contains("is not in"), "stderr: {stderr}");
 }
 
 // ---- Fase 9.z.1.a — `fitz fmt` ----
@@ -1132,9 +1132,9 @@ fn fmt_archivo_explicito_canonicaliza_indent_y_blocks() {
     let after = std::fs::read_to_string(&file).unwrap();
     assert!(
         after.contains("fn double(n: Int) -> Int {\n    return n * 2\n}"),
-        "fn no quedó multi-línea con indent:\n{after}"
+        "fn did not stay multi-line with indent:\n{after}"
     );
-    assert!(after.ends_with('\n'), "debería terminar con newline");
+    assert!(after.ends_with('\n'), "should end with newline");
 }
 
 #[test]
@@ -1200,7 +1200,7 @@ fn fmt_does_not_emit_warning_post_9z1b() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("⚠"),
-        "post-9.z.1.b no debe haber warning de pérdida: {stderr}"
+        "post-9.z.1.b there must be no loss warning: {stderr}"
     );
     assert!(
         !stderr.contains("9.z.1.b"),
@@ -1232,17 +1232,20 @@ fn fmt_preserves_comments_and_blank_lines() {
     let after = std::fs::read_to_string(&file).unwrap();
     assert!(
         after.contains("// header"),
-        "comment header se borró: {after}"
+        "comment header was deleted: {after}"
     );
-    assert!(after.contains("// trailing"), "trailing se borró: {after}");
+    assert!(
+        after.contains("// trailing"),
+        "trailing was deleted: {after}"
+    );
     assert!(
         after.contains("// entre stmts"),
-        "comment intermedio se borró: {after}"
+        "middle comment was deleted: {after}"
     );
     // Blank line entre el header y `let x = 1` debe estar presente.
     assert!(
         after.contains("// header\n\nlet x"),
-        "blank entre header y let se borró: {after}"
+        "blank between header and let was deleted: {after}"
     );
 }
 
@@ -1321,7 +1324,7 @@ fn fmt_without_args_inside_project_discovers_src_files() {
     let after = std::fs::read_to_string(&main).unwrap();
     assert!(
         after.contains("fn x() -> Int {\n    return 1\n}"),
-        "src/main.fitz no se reformateó:\n{after}"
+        "src/main.fitz was not reformatted:\n{after}"
     );
 }
 
@@ -1344,17 +1347,17 @@ fn build_without_args_emits_to_target_release_with_pkg_name() {
     let bin_path = project.join("target").join("release").join(bin_name);
     assert!(
         bin_path.exists(),
-        "binario no existe en {}",
+        "binary does not exist at {}",
         bin_path.display()
     );
 
     // Ejecutar el binario y verificar el output.
-    let output = Command::new(&bin_path).output().expect("ejecutar binario");
+    let output = Command::new(&bin_path).output().expect("execute binary");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Hola desde build-target-test"),
-        "stdout del binario: {stdout}"
+        stdout.contains("Hello from build-target-test"),
+        "binary stdout: {stdout}"
     );
 }
 
@@ -1563,7 +1566,7 @@ fn test_without_manifest_and_file_aborts_with_clear_message() {
     let (_stdout, stderr, code) = run_fitz(&["test"], tmp.path());
     assert_eq!(code, 1);
     assert!(
-        stderr.contains("no se encontró") || stderr.contains("fitz.toml"),
+        stderr.contains("not found") || stderr.contains("fitz.toml"),
         "stderr: {stderr}"
     );
 }
@@ -1742,7 +1745,7 @@ fn cap_16b_greeter_example_runs_and_generates_lockfile() {
     // El lockfile debe haberse generado en greeter/fitz.lock con la
     // dep `greetings` registrada.
     let lockfile = root.join("greeter").join("fitz.lock");
-    assert!(lockfile.exists(), "fitz.lock no se generó");
+    assert!(lockfile.exists(), "fitz.lock was not generated");
     let lock_text = std::fs::read_to_string(&lockfile).expect("leer fitz.lock");
     assert!(
         lock_text.contains("name = \"greetings\""),
@@ -1804,7 +1807,7 @@ fn cap_16b_fitz_build_compila_greeter_a_binario_nativo() {
     );
 
     // Ejecutar y comparar output.
-    let output = Command::new(&bin_path).output().expect("ejecutar binario");
+    let output = Command::new(&bin_path).output().expect("execute binary");
     assert!(output.status.success(), "exit: {:?}", output.status.code());
     let bin_stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -1967,10 +1970,10 @@ fn docker_init_pure_cli_writes_three_files_without_expose_or_db() {
     assert!(!compose.contains("    ports:"));
 
     // stdout reporta CLI puro.
-    assert!(stdout.contains("programa CLI (sin @server)"));
-    assert!(stdout.contains("escrito: Dockerfile"));
-    assert!(stdout.contains("escrito: .dockerignore"));
-    assert!(stdout.contains("escrito: docker-compose.yml"));
+    assert!(stdout.contains("CLI program (no @server)"));
+    assert!(stdout.contains("wrote: Dockerfile"));
+    assert!(stdout.contains("wrote: .dockerignore"));
+    assert!(stdout.contains("wrote: docker-compose.yml"));
 }
 
 #[test]
@@ -2014,7 +2017,7 @@ fn main() => 0
     assert!(compose.contains("DATABASE_URL:"));
     assert!(compose.contains("depends_on:"));
     assert!(compose.contains("\nvolumes:\n  pgdata:"));
-    assert!(stdout.contains("uso de DB"));
+    assert!(stdout.contains("DB usage"));
 }
 
 #[test]
@@ -2027,9 +2030,9 @@ fn docker_init_skips_existing_files_and_suggests_force() {
     assert_eq!(code, 0, "stderr: {stderr}");
 
     let dockerfile = std::fs::read_to_string(project.join("Dockerfile")).unwrap();
-    assert_eq!(dockerfile, "viejo", "skip preservó el archivo viejo");
+    assert_eq!(dockerfile, "viejo", "skip preserved the old file");
 
-    assert!(stdout.contains("skipeado"));
+    assert!(stdout.contains("skipped"));
     assert!(stdout.contains("--force"));
 }
 
@@ -2073,10 +2076,10 @@ fn docker_init_uses_python_reporta_runtime_fallback() {
     let dockerfile = std::fs::read_to_string(project.join("Dockerfile")).unwrap();
     assert!(
         dockerfile.contains("FROM python:3.12-slim-bookworm"),
-        "Dockerfile esperado con runtime python:3.12-slim-bookworm: {dockerfile}",
+        "Dockerfile expected with runtime python:3.12-slim-bookworm: {dockerfile}",
     );
     assert!(!dockerfile.contains("FROM gcr.io/distroless/cc-debian12"));
-    assert!(stdout.contains("interop Python"));
+    assert!(stdout.contains("Python interop"));
     assert!(stdout.contains("python:3.12-slim-bookworm"));
 }
 

@@ -124,7 +124,7 @@ fn format_body(v: &Value, spec: &FormatSpec) -> Result<(String, bool), String> {
                 .ok()
                 .and_then(char::from_u32)
                 .ok_or_else(|| format!(
-                    "`c` requiere un Int en rango de Unicode codepoint válido (0..=0x10FFFF, sin surrogates), recibió `{}`",
+                    "`c` requires an Int in valid Unicode codepoint range (0..=0x10FFFF, no surrogates), received `{}`",
                     n
                 ))?;
             Ok((c.to_string(), false))
@@ -149,7 +149,7 @@ fn coerce_float(v: &Value) -> Option<f64> {
 
 fn numeric_err(expected: &str, v: &Value, kind: &str) -> String {
     format!(
-        "format spec `{}` esperaba {}, recibió `{}`",
+        "format spec `{}` expected {}, received `{}`",
         kind,
         expected,
         v.type_name()
@@ -212,7 +212,7 @@ fn general_format(f: f64, precision: usize, upper: bool) -> String {
         let s = format!("{:.*e}", prec_after, f);
         s
     } else {
-        // Fijo: ajusta precisión a "dígitos totales".
+        // Fixed: adjusts precision to "total digits".
         let after = (precision as i32 - 1 - exp).max(0) as usize;
         let s = format!("{:.*}", after, f);
         // Strip trailing zeros (Python lo hace).

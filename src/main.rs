@@ -1660,7 +1660,7 @@ fn build_file(
 
     if let Err(e) = fs::copy(&release_bin_path, &bin_out) {
         eprintln!(
-            "Error copiando {} a {}: {}",
+            "Error copying {} to {}: {}",
             release_bin_path.display(),
             bin_out.display(),
             e
@@ -2321,7 +2321,7 @@ fn build_file_with_bundle(
     }
     if let Err(e) = fs::copy(&launcher_release_path, &bin_out) {
         eprintln!(
-            "Error copiando {} a {}: {}",
+            "Error copying {} to {}: {}",
             launcher_release_path.display(),
             bin_out.display(),
             e

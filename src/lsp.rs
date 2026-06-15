@@ -124,7 +124,7 @@ fn error_to_diagnostic(err: &FitzError, source: Option<&str>) -> Diagnostic {
     // on the CLI.
     let mut message = err.message.clone();
     if let Some(hint) = &err.hint {
-        message.push_str("\n  Sugerencia: ");
+        message.push_str("\n  Hint: ");
         message.push_str(hint);
     }
 
@@ -3369,7 +3369,7 @@ mod tests {
 
     #[test]
     fn error_without_position_maps_to_degenerate_range_at_start() {
-        let errs = vec![err_at(0, 0, "sin línea ni columna")];
+        let errs = vec![err_at(0, 0, "without line or column")];
         let diags = fitz_errors_to_diagnostics(&errs);
         assert_eq!(diags[0].range.start, Position::new(0, 0));
         assert_eq!(diags[0].range.end, Position::new(0, 0));
@@ -3377,27 +3377,25 @@ mod tests {
 
     #[test]
     fn error_with_hint_concatenates_suggestion_to_message() {
-        let err = err_at(1, 1, "variable no definida").with_hint("¿quisiste decir `name`?");
+        let err = err_at(1, 1, "undefined variable").with_hint("did you mean `name`?");
         let diags = fitz_errors_to_diagnostics(&[err]);
         assert!(
-            diags[0].message.contains("variable no definida"),
+            diags[0].message.contains("undefined variable"),
             "message base: {}",
             diags[0].message,
         );
         assert!(
-            diags[0]
-                .message
-                .contains("Sugerencia: ¿quisiste decir `name`?"),
-            "message con hint: {}",
+            diags[0].message.contains("Hint: did you mean `name`?"),
+            "message with hint: {}",
             diags[0].message,
         );
     }
 
     #[test]
     fn error_without_hint_does_not_add_suggestion_word() {
-        let errs = vec![err_at(1, 1, "tipo incompatible")];
+        let errs = vec![err_at(1, 1, "incompatible type")];
         let diags = fitz_errors_to_diagnostics(&errs);
-        assert!(!diags[0].message.contains("Sugerencia"));
+        assert!(!diags[0].message.contains("Hint"));
     }
 
     #[test]
@@ -3411,13 +3409,13 @@ mod tests {
         let errs = vec![
             err_at(1, 1, "primero"),
             err_at(5, 3, "segundo"),
-            err_at(0, 0, "tercero sin posición"),
+            err_at(0, 0, "third without position"),
         ];
         let diags = fitz_errors_to_diagnostics(&errs);
         assert_eq!(diags.len(), 3);
         assert_eq!(diags[0].message, "primero");
         assert_eq!(diags[1].message, "segundo");
-        assert_eq!(diags[2].message, "tercero sin posición");
+        assert_eq!(diags[2].message, "third without position");
     }
 
     // Tests over `check_source` — entire LSP-style pipeline.
@@ -3433,7 +3431,7 @@ mod tests {
     fn check_source_type_error_comes_from_checker() {
         let src = "let x: Int = \"texto\"";
         let errs = check_source(src);
-        assert!(!errs.is_empty(), "checker debería rechazar Int = Str");
+        assert!(!errs.is_empty(), "checker should reject Int = Str");
         assert!(
             errs.iter().any(|e| matches!(e.kind, ErrorKind::TypeError)),
             "esperaba al menos un TypeError: {errs:?}",
@@ -3449,10 +3447,7 @@ mod tests {
         // panic) over input with broken syntax.
         let src = "let x = ???\nlet y = 1\nlet z: Int = \"mal\"";
         let errs = check_source(src);
-        assert!(
-            !errs.is_empty(),
-            "debería haber al menos un error de parser",
-        );
+        assert!(!errs.is_empty(), "should have at least one parser error",);
     }
 
     // Tests over `check_source_with_types` — variant for hover
@@ -3466,7 +3461,7 @@ mod tests {
         assert!(errors.is_empty(), "errores inesperados: {errors:?}");
         assert!(
             !type_info.is_empty(),
-            "TypeInfo no debería estar vacío sobre un programa con Exprs",
+            "TypeInfo should not be empty on a program with Exprs",
         );
     }
 
@@ -3476,13 +3471,10 @@ mod tests {
         // so `TypeInfo` can't be populated.
         let src = "let x = \"sin cerrar";
         let (_program, _env, type_info, _defs, errors) = check_source_with_types(src);
-        assert!(
-            !errors.is_empty(),
-            "lexer debería rechazar string sin cerrar"
-        );
+        assert!(!errors.is_empty(), "lexer should reject unclosed string");
         assert!(
             type_info.is_empty(),
-            "TypeInfo debería estar vacío si la pipeline aborta en el lexer",
+            "TypeInfo should be empty if the pipeline aborts in the lexer",
         );
     }
 
@@ -3493,10 +3485,10 @@ mod tests {
         // "best-effort" type.
         let src = "let x = 42\nlet y: Int = \"mal\"";
         let (_program, _env, type_info, _defs, errors) = check_source_with_types(src);
-        assert!(!errors.is_empty(), "debería haber un TypeError");
+        assert!(!errors.is_empty(), "should have a TypeError");
         assert!(
             !type_info.is_empty(),
-            "TypeInfo debería retener tipos de los Exprs válidos pese al error",
+            "TypeInfo should retain types of valid Exprs despite the error",
         );
     }
 
@@ -3540,7 +3532,10 @@ mod tests {
         let src = "let x = 1";
         let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 5, 0);
-        assert!(ty.is_none(), "esperaba None en línea sin spans, dio {ty:?}");
+        assert!(
+            ty.is_none(),
+            "expected None on line without spans, got {ty:?}"
+        );
     }
 
     #[test]
@@ -3563,7 +3558,7 @@ mod tests {
         let src = "let x = 42\n   ";
         let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 1, 0);
-        assert!(ty.is_none(), "no debería cruzar líneas, dio {ty:?}");
+        assert!(ty.is_none(), "should not cross lines, got {ty:?}");
     }
 
     #[test]
@@ -3597,7 +3592,7 @@ mod tests {
         // Combined smoke: pipeline + hover over the literal `42`.
         let src = "let x = 42";
         let (_program, env, type_info, _defs, _errs) = check_source_with_types(src);
-        let ty = hover_for_position(&type_info, 0, 8).expect("debería matchear");
+        let ty = hover_for_position(&type_info, 0, 8).expect("should match");
         let hover = make_hover(ty, &env);
         if let HoverContents::Markup(MarkupContent { value, .. }) = &hover.contents {
             assert_eq!(value, "```fitz\nInt\n```");
@@ -3634,7 +3629,7 @@ mod tests {
         let src = "let x = 1\nlet y = x\n";
         let (_program, _env, _type_info, def_info, _errs) = check_source_with_types(src);
         let def_span = definition_for_position(&def_info, 1, 8).expect("uso de x debe resolver");
-        assert_eq!(def_span.line, 1, "def en línea 1 (1-based)");
+        assert_eq!(def_span.line, 1, "def on line 1 (1-based)");
     }
 
     #[test]
@@ -3789,7 +3784,7 @@ mod tests {
         // Case 1: pure ASCII — col 6 points to `=`. For ASCII,
         // char_utf16 == char_unicode == byte_offset.
         let text = "let x = 42";
-        let offset = position_to_offset(text, 0, 6).expect("offset válido");
+        let offset = position_to_offset(text, 0, 6).expect("valid offset");
         assert_eq!(&text[offset..offset + 1], "=", "col 6 en ASCII → `=`");
         // Case 2: with emoji 😀 (4 bytes UTF-8, 2 UTF-16 code units,
         // 1 Unicode char). The comment starts at col_utf16 0 = `/`,
@@ -3798,7 +3793,7 @@ mod tests {
         let text = "// 😀 hola";
         // Cursor at col_utf16 5 (right after emoji + space) → byte
         // offset = `// ` (3) + emoji UTF-8 (4) = 7.
-        let offset = position_to_offset(text, 0, 5).expect("offset válido tras emoji");
+        let offset = position_to_offset(text, 0, 5).expect("valid offset after emoji");
         assert_eq!(
             offset, 7,
             "offset esperado tras emoji + espacio = 7 bytes UTF-8 (col_utf16 5)"
@@ -3806,7 +3801,7 @@ mod tests {
         // Cursor at col_utf16 3 (start of the emoji's surrogate
         // pair) → byte offset = 3 (right after the `// `, on the
         // emoji).
-        let offset = position_to_offset(text, 0, 3).expect("offset válido sobre el emoji");
+        let offset = position_to_offset(text, 0, 3).expect("valid offset over the emoji");
         assert_eq!(offset, 3, "col_utf16 3 = inicio del emoji → byte offset 3");
     }
 
@@ -3848,8 +3843,8 @@ mod tests {
         let text = "🎉a";
         let offset_a = text.find('a').unwrap();
         let (line, character) = offset_to_position(text, offset_a);
-        assert_eq!(line, 0, "misma línea");
-        assert_eq!(character, 2, "`a` está en char_utf16 2 (post-emoji)");
+        assert_eq!(line, 0, "same line");
+        assert_eq!(character, 2, "`a` is at char_utf16 2 (post-emoji)");
     }
 
     #[test]
@@ -3892,7 +3887,7 @@ mod tests {
         assert_eq!(
             utf16_to_unicode_char(text, 0, 10),
             9,
-            "fin de línea → unicode 9"
+            "end of line → unicode 9"
         );
     }
 
@@ -3904,11 +3899,11 @@ mod tests {
         assert_eq!(
             utf16_to_unicode_char(text, 0, 2),
             1,
-            "fin línea 0 post-emoji"
+            "end of line 0 post-emoji"
         );
         // Line 1: pure ASCII.
-        assert_eq!(utf16_to_unicode_char(text, 1, 4), 4, "línea 1, col_utf16 4");
-        assert_eq!(utf16_to_unicode_char(text, 1, 0), 0, "línea 1, col_utf16 0");
+        assert_eq!(utf16_to_unicode_char(text, 1, 4), 4, "line 1, col_utf16 4");
+        assert_eq!(utf16_to_unicode_char(text, 1, 0), 0, "line 1, col_utf16 0");
     }
 
     #[test]
@@ -3927,7 +3922,7 @@ mod tests {
         // At least 1 reported error (a field was expected).
         assert!(
             !errors.is_empty(),
-            "recovery debe reportar el error del `.` huérfano"
+            "recovery must report the error of the orphan `.`"
         );
         // The second stmt must be Expr::Field with an empty
         // `field`, NOT Stmt::Error.
@@ -3936,10 +3931,10 @@ mod tests {
             "esperaba al menos 2 stmts: el let + el user.<EOF>. Got: {} stmts",
             program.len()
         );
-        let last = program.last().expect("último stmt");
+        let last = program.last().expect("last stmt");
         match last {
             Stmt::Expr(Expr::Field { object, field, .. }, _) => {
-                assert_eq!(field, "", "field debe ser placeholder vacío");
+                assert_eq!(field, "", "field must be empty placeholder");
                 assert!(
                     matches!(object.as_ref(), Expr::Ident(name, _) if name == "user"),
                     "object debe ser Ident(\"user\"), got: {:?}",
@@ -4109,7 +4104,7 @@ mod tests {
         let items = completion_at_position(src, &program, &type_info, &env, 0, 16);
         assert!(
             items.is_empty(),
-            "sin URI, FromImportList debe devolver vacío. Got: {items:?}"
+            "without URI, FromImportList must return empty. Got: {items:?}"
         );
     }
 
@@ -4159,7 +4154,7 @@ mod tests {
         // Must not include top-level: we're already in after-dot.
         assert!(
             !labels.contains(&"print"),
-            "no debería incluir builtins en after-dot"
+            "should not include builtins in after-dot"
         );
         // The kind must be FIELD.
         let item_x = items.iter().find(|i| i.label == "x").unwrap();
@@ -4176,7 +4171,7 @@ mod tests {
         for expected in ["push", "pop", "map", "filter", "find", "len"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` de List: {labels:?}"
+                "missing method `{expected}` of List: {labels:?}"
             );
         }
         let item_map = items.iter().find(|i| i.label == "map").unwrap();
@@ -4226,7 +4221,7 @@ mod tests {
         for expected in ["recv", "send", "broadcast", "close"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` de WsConn<Bytes>: {labels:?}"
+                "missing method `{expected}` of WsConn<Bytes>: {labels:?}"
             );
         }
         // `recv` detail must type `Result<Bytes>` and mention the
@@ -4235,11 +4230,11 @@ mod tests {
         let detail = recv.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("Result<Bytes>"),
-            "recv detail debería tipar Result<Bytes>, fue: {detail}"
+            "recv detail should type Result<Bytes>, was: {detail}"
         );
         assert!(
             detail.contains("Binary"),
-            "recv detail debería mencionar Binary cuando T=Bytes, fue: {detail}"
+            "recv detail should mention Binary when T=Bytes, was: {detail}"
         );
         // `send` detail must ask for a Bytes arg and mention raw
         // binary.
@@ -4265,13 +4260,13 @@ mod tests {
         let recv_detail = recv.detail.as_deref().unwrap_or("");
         assert!(
             recv_detail.contains("Result<Str>"),
-            "recv detail debería tipar Result<Str> (recv=Str), fue: {recv_detail}"
+            "recv detail should type Result<Str> (recv=Str), was: {recv_detail}"
         );
         let send = items.iter().find(|i| i.label == "send").unwrap();
         let send_detail = send.detail.as_deref().unwrap_or("");
         assert!(
             send_detail.contains("msg: ChatMsg"),
-            "send detail debería pedir ChatMsg (send), fue: {send_detail}"
+            "send detail should require ChatMsg (send), was: {send_detail}"
         );
     }
 
@@ -4292,7 +4287,7 @@ mod tests {
         assert!(detail.contains("Result<Str>"));
         assert!(
             !detail.contains("Message::Binary"),
-            "WsConn<Str>.recv no debería mencionar Binary, fue: {detail}"
+            "WsConn<Str>.recv should not mention Binary, was: {detail}"
         );
     }
 
@@ -4314,7 +4309,7 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             labels.contains(&"as_int") && labels.contains(&"type_name"),
-            "esperaba métodos universales de Type::Any (F13.D), got: {:?}",
+            "expected universal methods of Type::Any (F13.D), got: {:?}",
             labels
         );
     }
@@ -4343,7 +4338,7 @@ mod tests {
         ] {
             assert!(
                 labels.contains(&expected),
-                "falta método en Str: `{expected}` (S+Mb): {labels:?}"
+                "missing method in Str: `{expected}` (S+Mb): {labels:?}"
             );
         }
         // Sanity: the original 3 still work.
@@ -4363,7 +4358,7 @@ mod tests {
         for expected in ["sort", "reverse", "contains"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda S.3) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch S.3) in List: {labels:?}"
             );
         }
         // The detail of `contains` must reflect the element type.
@@ -4381,7 +4376,7 @@ mod tests {
         for expected in ["enumerate", "zip", "chain"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda It) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch It) in List: {labels:?}"
             );
         }
         // The detail of `enumerate` must reflect the element type.
@@ -4502,11 +4497,11 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             labels.contains(&"greet"),
-            "esperaba `greet` (público), dio: {labels:?}"
+            "expected `greet` (public), got: {labels:?}"
         );
         assert!(
             !labels.contains(&"_hidden"),
-            "método `_hidden` (privado) NO debería aparecer, dio: {labels:?}"
+            "method `_hidden` (private) should NOT appear, got: {labels:?}"
         );
     }
 
@@ -4523,11 +4518,11 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             labels.contains(&"name"),
-            "esperaba `name` (público) en completion, dio: {labels:?}"
+            "expected `name` (public) in completion, got: {labels:?}"
         );
         assert!(
             !labels.contains(&"_balance"),
-            "campo `_balance` (privado) NO debería aparecer en completion, dio: {labels:?}"
+            "field `_balance` (private) should NOT appear in completion, got: {labels:?}"
         );
     }
 
@@ -4541,7 +4536,7 @@ mod tests {
         for expected in ["any", "all", "count", "find_index"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Lx): {labels:?}"
+                "missing method `{expected}` (mini-batch Lx): {labels:?}"
             );
         }
         let count = items.iter().find(|i| i.label == "count").unwrap();
@@ -4562,7 +4557,7 @@ mod tests {
         for expected in ["flatten", "sort_by"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb) in List: {labels:?}"
             );
         }
         let item_sort_by = items.iter().find(|i| i.label == "sort_by").unwrap();
@@ -4589,7 +4584,7 @@ mod tests {
         for expected in ["enumerate", "zip", "chain", "len"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Ir) en Range: {labels:?}"
+                "missing method `{expected}` (mini-batch Ir) in Range: {labels:?}"
             );
         }
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
@@ -4609,7 +4604,7 @@ mod tests {
         for expected in ["min", "max", "sum"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb2) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb2) in List: {labels:?}"
             );
         }
     }
@@ -4623,7 +4618,7 @@ mod tests {
         for expected in ["pad_start", "pad_end"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb2) en Str: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb2) in Str: {labels:?}"
             );
         }
         let pad_start = items.iter().find(|i| i.label == "pad_start").unwrap();
@@ -4669,7 +4664,7 @@ mod tests {
         for expected in ["reduce", "product", "to_map"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb3) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb3) in List: {labels:?}"
             );
         }
     }
@@ -4711,7 +4706,7 @@ mod tests {
         for expected in ["unique", "partition"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb4) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb4) in List: {labels:?}"
             );
         }
     }
@@ -4751,7 +4746,7 @@ mod tests {
         for expected in ["group_by", "zip_with", "max_by", "min_by"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb5) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb5) in List: {labels:?}"
             );
         }
     }
@@ -4765,7 +4760,7 @@ mod tests {
         for expected in ["scan", "windows"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb6) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb6) in List: {labels:?}"
             );
         }
     }
@@ -4785,7 +4780,7 @@ mod tests {
         ] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb8) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb8) in List: {labels:?}"
             );
         }
     }
@@ -4799,7 +4794,7 @@ mod tests {
         for expected in ["left", "right", "center"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb8) en Str: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb8) in Str: {labels:?}"
             );
         }
     }
@@ -4813,7 +4808,7 @@ mod tests {
         for expected in ["take", "drop", "init", "tail", "intersperse", "cycle"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb7) en List: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb7) in List: {labels:?}"
             );
         }
     }
@@ -4863,7 +4858,7 @@ mod tests {
         for expected in ["lines", "is_empty"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda Mb5) en Str: {labels:?}"
+                "missing method `{expected}` (mini-batch Mb5) in Str: {labels:?}"
             );
         }
     }
@@ -4926,15 +4921,15 @@ mod tests {
         // Custom methods (R.3 / V.5).
         assert!(
             labels.contains(&"greet"),
-            "falta método `greet`: {labels:?}"
+            "missing method `greet`: {labels:?}"
         );
         assert!(
             labels.contains(&"double"),
-            "falta método `double`: {labels:?}"
+            "missing method `double`: {labels:?}"
         );
         assert!(
             labels.contains(&"fetch"),
-            "falta método async `fetch`: {labels:?}"
+            "missing async method `fetch`: {labels:?}"
         );
         // Kind: fields as FIELD, methods as METHOD.
         let it_id = items.iter().find(|i| i.label == "id").unwrap();
@@ -4966,7 +4961,7 @@ mod tests {
         for expected in ["swap_case", "title", "is_alpha", "is_digit", "is_numeric"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (Mb9) en Str: {labels:?}"
+                "missing method `{expected}` (Mb9) in Str: {labels:?}"
             );
         }
     }
@@ -5030,7 +5025,7 @@ mod tests {
         let src = "let foo_bar = 42";
         // Cursor in the middle of the ident "foo_bar" (col 6 = `o`
         // of "foo").
-        let range = ident_range_at_position(src, 0, 6).expect("debería resolver");
+        let range = ident_range_at_position(src, 0, 6).expect("should resolve");
         assert_eq!(range.start, Position::new(0, 4)); // start of "foo_bar"
         assert_eq!(range.end, Position::new(0, 11)); // end of "foo_bar"
     }
@@ -5048,7 +5043,7 @@ mod tests {
         // def_span points to "let" (col 1 = "l"). The helper must
         // skip "let " and return the range of "foo".
         let span = Span::new(1, 1);
-        let range = ident_range_from_def(src, span).expect("debería resolver");
+        let range = ident_range_from_def(src, span).expect("should resolve");
         assert_eq!(range.start, Position::new(0, 4)); // start of "foo"
         assert_eq!(range.end, Position::new(0, 7)); // end of "foo"
     }
@@ -5057,7 +5052,7 @@ mod tests {
     fn lspy_ident_range_from_def_skips_fn_keyword() {
         let src = "fn greet(name: Str) -> Str { return name }";
         let span = Span::new(1, 1);
-        let range = ident_range_from_def(src, span).expect("debería resolver");
+        let range = ident_range_from_def(src, span).expect("should resolve");
         assert_eq!(range.start, Position::new(0, 3)); // start of "greet"
         assert_eq!(range.end, Position::new(0, 8)); // end of "greet"
     }
@@ -5138,7 +5133,7 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             !labels.contains(&"posterior"),
-            "no debería incluir let posterior: {labels:?}"
+            "should not include later let: {labels:?}"
         );
     }
 
@@ -5151,7 +5146,7 @@ mod tests {
         // We check parsing was clean (no Error nodes).
         assert!(
             !program.iter().any(|s| matches!(s, Stmt::Error(_))),
-            "parser emitió Error nodes: {errs:?}"
+            "parser emitted Error nodes: {errs:?}"
         );
         // Cursor inside the for body (line 3, in the let).
         let items = completion_at_position(src, &program, &type_info, &env, 2, 10);
@@ -5197,11 +5192,11 @@ mod tests {
                 Stmt::FromImport { span, .. } => Some(*span),
                 _ => None,
             })
-            .expect("debería haber FromImport");
+            .expect("should have FromImport");
 
         // Resolve `User`: must point at foo.fitz line 1.
         let resolved = resolve_cross_module_definition(&program, &doc_uri, import_span, "User")
-            .expect("esperaba resolución cross-module");
+            .expect("expected cross-module resolution");
         let (target_uri, target_span) = resolved;
         // target_uri is the file:// of the canonicalized foo.fitz.
         let target_path = target_uri.to_file_path().unwrap();
@@ -5213,16 +5208,16 @@ mod tests {
         );
         assert_eq!(
             target_span.line, 1,
-            "esperaba línea 1 (type User), dio: {}",
+            "expected line 1 (type User), got: {}",
             target_span.line
         );
 
         // Resolve `CAP`: line 2 (let CAP = 100).
         let resolved_cap = resolve_cross_module_definition(&program, &doc_uri, import_span, "CAP")
-            .expect("esperaba resolución de CAP");
+            .expect("expected resolution of CAP");
         assert_eq!(
             resolved_cap.1.line, 2,
-            "esperaba línea 2 (let CAP), dio: {}",
+            "expected line 2 (let CAP), got: {}",
             resolved_cap.1.line
         );
 
@@ -5309,7 +5304,7 @@ mod tests {
         let db_item = items
             .iter()
             .find(|i| i.label == "db")
-            .expect("falta módulo `db`");
+            .expect("missing module `db`");
         assert_eq!(db_item.kind, Some(CompletionItemKind::MODULE));
         // Built-in types DbConn and DbRow appear as CLASS.
         for t in ["DbConn", "DbRow"] {
@@ -5329,7 +5324,7 @@ mod tests {
         // — confirms the dispatch by receiver name.
         assert!(
             !labels.contains(&"encode"),
-            "no debería incluir jwt.encode: {labels:?}"
+            "should not include jwt.encode: {labels:?}"
         );
     }
 
@@ -5350,7 +5345,7 @@ mod tests {
         for expected in ["query", "exec", "close", "is_closed", "transaction"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}`: {labels:?}"
+                "missing method `{expected}`: {labels:?}"
             );
         }
     }
@@ -5370,7 +5365,7 @@ mod tests {
         for expected in ["get_int", "get_str", "get_float", "get_bool", "len"] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` sobre DbRow: {labels:?}"
+                "missing method `{expected}` on DbRow: {labels:?}"
             );
         }
     }
@@ -5385,7 +5380,7 @@ mod tests {
         for expected in ["all", "where", "first", "count", "insert", "bulk_insert"] {
             assert!(
                 labels.contains(&expected),
-                "falta estático ORM `{expected}`: {labels:?}"
+                "missing ORM static `{expected}`: {labels:?}"
             );
         }
         // The detail of `all` must mention `User` (the concrete type).
@@ -5419,7 +5414,7 @@ mod tests {
         ] {
             assert!(
                 labels.contains(&expected),
-                "falta método QB `{expected}`: {labels:?}"
+                "missing QB method `{expected}`: {labels:?}"
             );
         }
         // The detail of `all` must mention the row type `User`.
@@ -5442,11 +5437,11 @@ mod tests {
         // These must not appear.
         assert!(
             !labels.contains(&"all"),
-            "Plain sin @table no debería tener `all`: {labels:?}"
+            "Plain without @table should not have `all`: {labels:?}"
         );
         assert!(
             !labels.contains(&"where"),
-            "Plain sin @table no debería tener `where`: {labels:?}"
+            "Plain without @table should not have `where`: {labels:?}"
         );
     }
 }

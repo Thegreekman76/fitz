@@ -52,11 +52,11 @@ fn template_launcher_compiles_with_dummy_paths() {
         .args(["check", "--release", "--quiet"])
         .current_dir(&dir)
         .output()
-        .expect("invocar cargo check");
+        .expect("invoke cargo check");
 
     assert!(
         output.status.success(),
-        "el template del launcher NO compila como Rust válido:\nstdout: {}\nstderr: {}",
+        "the launcher template does NOT compile as valid Rust:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

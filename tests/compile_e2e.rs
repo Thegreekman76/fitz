@@ -69,10 +69,10 @@ fn build_and_run(test_name: &str, src: &str) -> (String, i32) {
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -108,10 +108,10 @@ fn build_expect_fail(test_name: &str, src: &str) -> String {
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         !output.status.success(),
-        "esperaba que fitz build fallara, pero salió OK:\nstdout: {}",
+        "expected fitz build to fail, but exited OK:\nstdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     String::from_utf8_lossy(&output.stderr).into_owned()
@@ -133,10 +133,10 @@ fn build_and_run_with_stderr(test_name: &str, src: &str) -> (String, String, i32
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -174,10 +174,10 @@ fn build_and_run_with_env(test_name: &str, src: &str, env_vars: &[(&str, &str)])
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -206,13 +206,13 @@ fn assert_lines(stdout: &str, expected: &[&str]) {
     assert_eq!(
         lines.len(),
         expected.len(),
-        "esperaba {} líneas, hubo {}: {:?}",
+        "expected {} lines, was {}: {:?}",
         expected.len(),
         lines.len(),
         lines
     );
     for (i, (l, e)) in lines.iter().zip(expected.iter()).enumerate() {
-        assert_eq!(l, e, "línea {} difiere", i + 1);
+        assert_eq!(l, e, "line {} differs", i + 1);
     }
 }
 
@@ -534,8 +534,8 @@ fn build_aborts_with_strict_type_errors() {
         "let x: Int = \"no soy int\"\nprint(x)\n",
     );
     assert!(
-        stderr.contains("error(es) de tipo"),
-        "esperaba mensaje de error de tipo, fue: {}",
+        stderr.contains("type error(s)"),
+        "expected type error message, was: {}",
         stderr
     );
 }
@@ -729,8 +729,8 @@ fn build_aborts_if_codegen_does_not_support_feature() {
         "@get(\"/\") fn main() => 0\n",
     );
     assert!(
-        stderr.contains("`fn main` solo admite `@server"),
-        "esperaba mensaje sobre fn main + decorator HTTP, fue: {}",
+        stderr.contains("`fn main` only accepts `@server"),
+        "expected message about fn main + HTTP decorator, was: {}",
         stderr
     );
 }
@@ -892,7 +892,7 @@ fn h() -> Str => \"ok\"
     let lower = raw_headers.to_lowercase();
     assert!(
         lower.contains("access-control-allow-origin: https://b.com"),
-        "esperaba echo del Origin permitido, fue: {}",
+        "expected echo of permitted Origin, was: {}",
         raw_headers
     );
 }
@@ -925,7 +925,7 @@ fn h() -> Str => \"ok\"
     // El resto de headers CORS sí.
     assert!(
         lower.contains("access-control-allow-methods"),
-        "esperaba allow-methods igual: {}",
+        "expected allow-methods equal: {}",
         raw_headers
     );
 }
@@ -980,10 +980,10 @@ fn build_spawn_request_raw_with_headers(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -1016,7 +1016,7 @@ fn build_spawn_request_raw_with_headers(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto {} en 3s", port);
+        panic!("server did not open port {} within 3s", port);
     }
 
     use std::io::{Read, Write};
@@ -1093,10 +1093,10 @@ fn build_spawn_request_raw(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -1129,7 +1129,7 @@ fn build_spawn_request_raw(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto {} en 3s", port);
+        panic!("server did not open port {} within 3s", port);
     }
 
     use std::io::{Read, Write};
@@ -1322,10 +1322,10 @@ fn build_and_run_multi(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -1366,10 +1366,10 @@ fn build_expect_fail_multi(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         !output.status.success(),
-        "esperaba que fitz build fallara, pero salió OK:\nstdout: {}",
+        "expected fitz build to fail, but exited OK:\nstdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     String::from_utf8_lossy(&output.stderr).into_owned()
@@ -1601,8 +1601,8 @@ fn y() -> Int => 2
     let stderr =
         build_expect_fail_multi("f15-ciclo-imports", main, &[("a.fitz", a), ("b.fitz", b)]);
     assert!(
-        stderr.contains("ciclo de imports"),
-        "esperaba mensaje sobre ciclo de imports, fue: {}",
+        stderr.contains("import cycle"),
+        "expected message about import cycle, was: {}",
         stderr
     );
 }
@@ -1719,10 +1719,10 @@ fn build_spawn_request(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -1758,7 +1758,7 @@ fn build_spawn_request(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto {} en 3s", port);
+        panic!("server did not open port {} within 3s", port);
     }
 
     // Construir la request HTTP a mano (sin reqwest).
@@ -1855,7 +1855,7 @@ fn http_result_ok_responde_200_err_responde_500() {
     assert_eq!(status_err, 500);
     assert!(
         body_err.contains("\"error\":\"div por cero\""),
-        "esperaba error JSON con mensaje, fue: {}",
+        "expected JSON error with message, was: {}",
         body_err
     );
 }
@@ -1876,7 +1876,7 @@ fn http_post_body_deserializa_tipo_custom() {
     assert_eq!(status, 200);
     assert!(
         body.contains("\"msg\":\"hola\"") && body.contains("\"times\":3"),
-        "esperaba body con msg y times, fue: {}",
+        "expected body with msg and times, was: {}",
         body
     );
 }
@@ -1897,7 +1897,7 @@ fn http_post_body_aplica_defaults_a_campos_faltantes() {
     assert_eq!(status, 200);
     assert!(
         body.contains("\"times\":7"),
-        "esperaba default `times: 7` aplicado, fue: {}",
+        "expected default `times: 7` applied, was: {}",
         body
     );
 }
@@ -1917,8 +1917,8 @@ fn http_post_body_extra_field_es_400() {
     );
     assert_eq!(status, 400);
     assert!(
-        body.contains("campo no declarado"),
-        "esperaba mensaje sobre campo no declarado, fue: {}",
+        body.contains("undeclared field"),
+        "expected message about undeclared field, was: {}",
         body
     );
 }
@@ -1947,10 +1947,10 @@ fn build_spawn_request_with_ct(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -1983,7 +1983,7 @@ fn build_spawn_request_with_ct(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto {} en 3s", port);
+        panic!("server did not open port {} within 3s", port);
     }
 
     use std::io::{Read, Write};
@@ -2050,12 +2050,12 @@ fn uc_http_post_urlencoded_parsea_a_map_str_str() {
     );
     assert_eq!(
         status, 200,
-        "esperaba 200, fue: status={} body={}",
+        "expected 200, was: status={} body={}",
         status, body
     );
     assert!(
         body.contains("\"name\":\"Fitz\"") && body.contains("\"age\":\"25\""),
-        "esperaba body parsea pares name/age, fue: {}",
+        "expected body parses name/age pairs, was: {}",
         body
     );
 }
@@ -2077,7 +2077,7 @@ fn uc_http_post_urlencoded_with_url_encoding() {
     assert_eq!(status, 200);
     assert!(
         body.contains("\"greeting\":\"hola mundo\"") && body.contains("\"place\":\"Fitz Roy\""),
-        "esperaba URL-decoding aplicado, fue: {}",
+        "expected URL-decoding applied, was: {}",
         body
     );
 }
@@ -2106,15 +2106,15 @@ fn ha_http_content_type_text_plain_is_415_with_clear_msg() {
         status, body
     );
     assert!(
-        body.contains("unsupported Content-Type"),
-        "expected `unsupported Content-Type`, was: {}",
+        body.contains("Content-Type not supported"),
+        "expected `Content-Type not supported`, was: {}",
         body
     );
     assert!(
         body.contains("application/json")
             && body.contains("application/x-www-form-urlencoded")
             && body.contains("multipart/form-data"),
-        "esperaba que el mensaje mencione los 3 CTs soportados, fue: {}",
+        "expected the message to mention the 3 supported CTs, was: {}",
         body
     );
 }
@@ -2142,7 +2142,7 @@ fn dz_division_int_by_zero_compiles_and_panics_with_aligned_msg() {
         .expect("fitz build");
     assert!(
         out.status.success(),
-        "esperaba que `fitz build` con `10/0` compile (no const-eval reject), stderr: {}",
+        "expected `fitz build` with `10/0` to compile (no const-eval reject), stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let bin = dir.join(if cfg!(windows) {
@@ -2154,13 +2154,13 @@ fn dz_division_int_by_zero_compiles_and_panics_with_aligned_msg() {
     let run = Command::new(&bin).output().expect("run prog");
     assert!(
         !run.status.success(),
-        "esperaba exit code != 0 (panic), fue: {:?}",
+        "expected exit code != 0 (panic), was: {:?}",
         run.status
     );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
         stderr.contains("division by zero"),
-        "esperaba msg `division by zero`, stderr: {}",
+        "expected msg `division by zero`, stderr: {}",
         stderr
     );
 }
@@ -2186,11 +2186,11 @@ fn dz_division_float_by_zero_compiles_and_panics_with_aligned_msg() {
         stem.to_string()
     });
     let run = Command::new(&bin).output().expect("run");
-    assert!(!run.status.success(), "esperaba panic");
+    assert!(!run.status.success(), "expected panic");
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
         stderr.contains("division by zero"),
-        "esperaba msg `division by zero`, stderr: {}",
+        "expected msg `division by zero`, stderr: {}",
         stderr
     );
 }
@@ -2248,7 +2248,7 @@ print(false != \"f\")
     assert_eq!(
         run_stdout.replace("\r\n", "\n"),
         build_stdout.replace("\r\n", "\n"),
-        "esperaba paridad bit-a-bit `run` ↔ `build`"
+        "expected bit-for-bit parity `run` ↔ `build`"
     );
     assert!(run_stdout.contains("false"));
     assert!(run_stdout.contains("true"));
@@ -2272,10 +2272,10 @@ fn mp_build_multipart_text_field_compila_y_parsea() {
         Some("--X\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nFitz\r\n--X--"),
         Some("multipart/form-data; boundary=X"),
     );
-    assert_eq!(status, 200, "esperaba 200, fue: {} body={}", status, body);
+    assert_eq!(status, 200, "expected 200, was: {} body={}", status, body);
     assert!(
         body.contains("got Fitz"),
-        "esperaba body con `got Fitz`, fue: {}",
+        "expected body with `got Fitz`, was: {}",
         body
     );
 }
@@ -2300,10 +2300,10 @@ fn mp_build_multipart_file_field_compila_y_parsea() {
         Some("--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents\r\n--X--"),
         Some("multipart/form-data; boundary=X"),
     );
-    assert_eq!(status, 200, "esperaba 200, fue: {} body={}", status, body);
+    assert_eq!(status, 200, "expected 200, was: {} body={}", status, body);
     assert!(
         body.contains("size=13"),
-        "esperaba `size=13` (len de 'file contents'), fue: {}",
+        "expected `size=13` (len of 'file contents'), was: {}",
         body
     );
 }
@@ -2321,10 +2321,10 @@ fn mp_build_multipart_without_boundary_is_400() {
         Some("--X\r\n--X--"),
         Some("multipart/form-data"),
     );
-    assert_eq!(status, 400, "esperaba 400, fue: {} body={}", status, body);
+    assert_eq!(status, 400, "expected 400, was: {} body={}", status, body);
     assert!(
         body.contains("boundary"),
-        "esperaba mención de boundary, fue: {}",
+        "expected mention of boundary, was: {}",
         body
     );
 }
@@ -2334,7 +2334,7 @@ fn f13_spike_heterogeneous_list_compiles_and_bit_for_bit_parity() {
     // F13 SPIKE — última residual del bloque post-Fase-8.
     // Listas heterogéneas (`[1, "dos", true]`) ya compilan a binario
     // nativo y producen output bit-a-bit idéntico a `fitz run`.
-    // Antes del SPIKE el codegen rechazaba con "homogénea requerida".
+    // Before SPIKE the codegen rejected with "homogeneous required".
     // T2 (v0.10.13) — unique stem.
     let stem = "f13_spike";
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
@@ -2358,7 +2358,7 @@ print(len(ys))
         .expect("fitz run");
     assert!(
         out_run.status.success(),
-        "fitz run falló: {}",
+        "fitz run failed: {}",
         String::from_utf8_lossy(&out_run.stderr)
     );
     let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
@@ -2370,7 +2370,7 @@ print(len(ys))
         .expect("fitz build");
     assert!(
         out_build.status.success(),
-        "fitz build falló (F13 SPIKE no aplicó): {}",
+        "fitz build failed (F13 SPIKE did not apply): {}",
         String::from_utf8_lossy(&out_build.stderr)
     );
     let bin = dir.join(if cfg!(windows) {
@@ -2379,7 +2379,7 @@ print(len(ys))
         stem.to_string()
     });
     let exec = Command::new(&bin).output().expect("ejecutar binario");
-    assert!(exec.status.success(), "binario fallló al ejecutar");
+    assert!(exec.status.success(), "binary failed to execute");
     let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
 
     assert_eq!(
@@ -2424,7 +2424,7 @@ print(xs)
         .expect("fitz build");
     assert!(
         out_build.status.success(),
-        "build falló: {}",
+        "build failed: {}",
         String::from_utf8_lossy(&out_build.stderr)
     );
     let bin = dir.join(if cfg!(windows) {
@@ -2541,12 +2541,12 @@ fn wrapped() -> Str => \"handler\"
         .expect("fitz build");
     assert!(
         !out.status.success(),
-        "esperaba que `fitz build` rechace wrap-style mws"
+        "expected `fitz build` to reject wrap-style mws"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("wrap-style") && stderr.contains("fitz run"),
-        "esperaba msg sobre wrap-style + workaround `fitz run`, fue: {}",
+        "expected msg about wrap-style + workaround `fitz run`, was: {}",
         stderr
     );
 }
@@ -2586,7 +2586,7 @@ print(len(s))
         .expect("fitz run");
     assert!(
         out_run.status.success(),
-        "fitz run falló: {}",
+        "fitz run failed: {}",
         String::from_utf8_lossy(&out_run.stderr)
     );
     let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
@@ -2598,7 +2598,7 @@ print(len(s))
         .expect("fitz build");
     assert!(
         out_build.status.success(),
-        "fitz build falló: {}",
+        "fitz build failed: {}",
         String::from_utf8_lossy(&out_build.stderr)
     );
     let bin = dir.join(if cfg!(windows) {
@@ -2613,7 +2613,7 @@ print(len(s))
     assert_eq!(
         run_stdout.replace("\r\n", "\n"),
         build_stdout.replace("\r\n", "\n"),
-        "esperaba paridad bit-a-bit `run` ↔ `build`"
+        "expected bit-for-bit parity `run` ↔ `build`"
     );
     // Sanity sobre el contenido.
     assert!(run_stdout.contains("b\"hola\""));
@@ -2653,7 +2653,7 @@ fn h(id: Int) -> Int {
         .expect("fitz build");
     assert!(
         out.status.success(),
-        "esperaba compile OK, stderr: {}",
+        "expected compile OK, stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
@@ -2666,7 +2666,7 @@ fn h(id: Int) -> Int {
     let schema = String::from_utf8_lossy(&openapi.stdout);
     assert!(
         schema.contains("\"404\""),
-        "esperaba 404 en el schema OpenAPI, fue: {}",
+        "expected 404 in the OpenAPI schema, was: {}",
         schema
     );
 }
@@ -2751,8 +2751,8 @@ fn fnexpr_without_param_annotation_aborts_build() {
         "let f: Fn(Int) -> Int = fn(x) => x * 2\n",
     );
     assert!(
-        stderr.contains("anónima") && stderr.contains("anotación"),
-        "esperaba mensaje sobre fn anónima sin anotación, fue: {}",
+        stderr.contains("anonymous") && stderr.contains("annotation"),
+        "expected message about anonymous fn without annotation, was: {}",
         stderr
     );
 }
@@ -2884,7 +2884,7 @@ fn smoke_ejemplos_guia_compilables_compilan() {
             .args(["build"])
             .arg(&src_path)
             .output()
-            .expect("invocar fitz build");
+            .expect("invoke fitz build");
         if !output.status.success() {
             failures.push(format!(
                 "{}\n--- stderr ---\n{}",
@@ -2940,10 +2940,10 @@ fn build_spawn_requests(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -2976,7 +2976,7 @@ fn build_spawn_requests(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto {} en 3s", port);
+        panic!("server did not open port {} within 3s", port);
     }
 
     use std::io::{Read, Write};
@@ -3044,7 +3044,7 @@ fn http_state_get_lista_compartida() {
             && body.contains("\"name\":\"ana\"")
             && body.contains("\"id\":2")
             && body.contains("\"name\":\"luis\""),
-        "esperaba lista con ambos users, body fue: {}",
+        "expected list with both users, body was: {}",
         body
     );
 }
@@ -3077,19 +3077,19 @@ fn http_state_post_persiste_entre_requests() {
     assert_eq!(results[0].0, 200);
     assert!(
         !results[0].1.contains("sofi"),
-        "primer GET no debería tener `sofi`, body: {}",
+        "first GET should not have `sofi`, body: {}",
         results[0].1
     );
     assert_eq!(results[1].0, 200);
     assert!(
         results[1].1.contains("\"name\":\"sofi\""),
-        "POST debería devolver el nuevo user, body: {}",
+        "POST should return the new user, body: {}",
         results[1].1
     );
     assert_eq!(results[2].0, 200);
     assert!(
         results[2].1.contains("\"name\":\"sofi\"") && results[2].1.contains("\"name\":\"ana\""),
-        "GET final debería ver ambos users (state persiste), body: {}",
+        "final GET should see both users (state persists), body: {}",
         results[2].1
     );
 }
@@ -3123,13 +3123,13 @@ fn http_state_put_field_mutation() {
     assert_eq!(results[0].0, 200);
     assert!(
         results[0].1.contains("\"name\":\"ana actualizada\""),
-        "PUT debería devolver el user mutado, body: {}",
+        "PUT should return the mutated user, body: {}",
         results[0].1
     );
     assert_eq!(results[1].0, 200);
     assert!(
         results[1].1.contains("\"name\":\"ana actualizada\""),
-        "GET posterior debería ver la mutación, body: {}",
+        "subsequent GET should see the mutation, body: {}",
         results[1].1
     );
 }
@@ -3159,7 +3159,7 @@ fn http_state_delete_reconstruccion_lista() {
     assert_eq!(results[1].0, 200);
     assert!(
         results[1].1.contains("\"name\":\"ana\"") && !results[1].1.contains("\"name\":\"luis\""),
-        "GET post-delete debería tener solo ana, body: {}",
+        "GET post-delete should have only ana, body: {}",
         results[1].1
     );
 }
@@ -3176,7 +3176,7 @@ fn http_state_var_no_referenciada_no_se_promueve() {
     assert_eq!(results[0].0, 200);
     assert!(
         results[0].1.contains("ok"),
-        "GET / debería devolver `ok`, body: {}",
+        "GET / should return `ok`, body: {}",
         results[0].1
     );
 }
@@ -3218,10 +3218,10 @@ fn http_status_codes_custom_401_y_body_json() {
                }\n";
     let (status, body) =
         build_spawn_request("http-status-401", src, 43400, "GET", "/protected", None);
-    assert_eq!(status, 401, "esperaba status 401");
+    assert_eq!(status, 401, "expected status 401");
     assert!(
         body.contains("\"message\":\"no autorizado\""),
-        "body debería contener `message`, fue: {}",
+        "body should contain `message`, was: {}",
         body
     );
 }
@@ -3246,7 +3246,7 @@ fn http_status_codes_polimorfico_mix_ok_y_404() {
     assert_eq!(status_404, 404);
     assert!(
         body_404.contains("\"error\":\"no encontrado\""),
-        "body 404 debería contener `error`, fue: {}",
+        "404 body should contain `error`, was: {}",
         body_404
     );
 }
@@ -3291,8 +3291,8 @@ fn http_query_param_obligatorio_faltante_es_400() {
     );
     assert_eq!(status, 400);
     assert!(
-        body.contains("query param 'limit'") && body.contains("obligatorio"),
-        "body debería decir 'obligatorio', fue: {}",
+        body.contains("query param 'limit'") && body.contains("required"),
+        "body should say 'required', was: {}",
         body
     );
 }
@@ -3369,7 +3369,7 @@ fn http_query_param_parse_error_es_400() {
     assert_eq!(status, 400);
     assert!(
         body.contains("query param 'limit'"),
-        "body debería mencionar el query param, fue: {}",
+        "body should mention the query param, was: {}",
         body
     );
 }
@@ -3450,7 +3450,7 @@ fn fase_8_7_2_build_call_python_excepcion_es_err() {
     assert_eq!(exit, 0);
     assert!(
         stdout.contains("caught: ValueError"),
-        "output debería citar `ValueError`, fue: {}",
+        "output should cite `ValueError`, was: {}",
         stdout
     );
 }
@@ -3474,7 +3474,7 @@ fn fase_8_7_2_build_call_python_marshalla_list_fitz_a_list_python() {
     // a `__str__` Python → cita literal del JSON entre comillas.
     assert!(
         stdout.contains("[1, 2, 3]"),
-        "esperaba salida con [1, 2, 3], fue: {}",
+        "expected output with [1, 2, 3], was: {}",
         stdout
     );
 }
@@ -3498,7 +3498,7 @@ fn fase_8_7_2_build_marshalla_instance_fitz_a_dict_python() {
     assert!(
         stdout.contains("{\\\"id\\\": 1, \\\"name\\\": \\\"Ada\\\"}")
             || stdout.contains("{\"id\": 1, \"name\": \"Ada\"}"),
-        "esperaba JSON con id+name preservando orden, fue: {}",
+        "expected JSON with id+name preserving order, was: {}",
         stdout
     );
 }
@@ -4590,13 +4590,13 @@ fn lt_let_panic_if_does_not_match() {
     // emite mensaje claro citando que el patrón no matcheó (vía stderr).
     let src = "let (1, x) = (2, 42)\nprint(x)\n";
     let (stdout, stderr, exit) = build_and_run_with_stderr("lt_let_panic", src);
-    assert_ne!(exit, 0, "esperaba exit code != 0 por panic, fue: 0");
-    // El binario produce "el `let` no matcheó el patrón" o similar
-    // (panic message del codegen). Aceptamos cualquier mención al `let`
-    // o al patrón.
+    assert_ne!(exit, 0, "expected exit code != 0 due to panic, was: 0");
+    // The binary produces "the `let` did not match the pattern" or similar
+    // (panic message from codegen). Accept any mention of `let`,
+    // `pattern`, or `match`.
     assert!(
-        stderr.contains("let") || stderr.contains("patrón") || stderr.contains("matche"),
-        "esperaba stderr que cite el let/patrón fallido, fue:\nstdout={}\nstderr={}",
+        stderr.contains("let") || stderr.contains("pattern") || stderr.contains("match"),
+        "expected stderr citing the failed let/pattern, was:\nstdout={}\nstderr={}",
         stdout,
         stderr
     );
@@ -5333,7 +5333,7 @@ fn h() -> Str => \"ok\"
     let lower = raw_headers.to_lowercase();
     assert!(
         !lower.contains("access-control-allow-origin:"),
-        "Echo sin Origin no debería emitir el header: {}",
+        "Echo without Origin should not emit the header: {}",
         raw_headers
     );
 }
@@ -5784,10 +5784,10 @@ fn build_spawn_auth_requests(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -5820,7 +5820,7 @@ fn build_spawn_auth_requests(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto {} en 3s", port);
+        panic!("server did not open port {} within 3s", port);
     }
 
     use std::io::{Read, Write};
@@ -5927,10 +5927,10 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         results[1].1
     );
 
-    // /me con token inválido → 401 con "token inválido"
+    // /me with invalid token → 401 with "token inválido" (Fitz source)
     assert_eq!(
         results[2].0, 401,
-        "/me token inválido 401, fue {:?}",
+        "/me invalid token 401, was {:?}",
         results[2]
     );
     assert!(
@@ -5942,7 +5942,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     // /me con user válido → 200 con "Alice"
     assert_eq!(
         results[3].0, 200,
-        "/me user válido 200, fue {:?}",
+        "/me valid user 200, was {:?}",
         results[3]
     );
     assert!(
@@ -6036,10 +6036,10 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (cross-module W12):\nstdout: {}\nstderr: {}",
+        "fitz build failed (cross-module W12):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -6072,7 +6072,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43902 en 3s");
+        panic!("server did not open port 43902 within 3s");
     }
 
     // Request runner inline (paralelo a build_spawn_auth_requests).
@@ -6134,7 +6134,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     assert_eq!(
         results[2].0, 401,
-        "/me token inválido 401, fue {:?}",
+        "/me invalid token 401, was {:?}",
         results[2]
     );
     assert!(
@@ -6145,7 +6145,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     assert_eq!(
         results[3].0, 200,
-        "/me user válido 200, fue {:?}",
+        "/me valid user 200, was {:?}",
         results[3]
     );
     assert!(
@@ -6243,10 +6243,10 @@ fn create(stub: Str, body: UserInput) -> User {\n\
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (W13):\nstdout: {}\nstderr: {}",
+        "fitz build failed (W13):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -6277,7 +6277,7 @@ fn create(stub: Str, body: UserInput) -> User {\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43912 en 3s");
+        panic!("server did not open port 43912 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -6453,10 +6453,10 @@ fn webhook(body: Map<Str, Any>) -> Str {\n\
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (T7):\nstdout: {}\nstderr: {}",
+        "fitz build failed (T7):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -6487,7 +6487,7 @@ fn webhook(body: Map<Str, Any>) -> Str {\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43917 en 3s");
+        panic!("server did not open port 43917 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -6678,7 +6678,7 @@ print(y)\n\
             || combined.contains("overflow")
             || combined.contains("finito")
             || combined.contains("Float"),
-        "esperaba mensaje sobre overflow/inf, fue:\nstdout={}\nstderr={}",
+        "expected message about overflow/inf, was:\nstdout={}\nstderr={}",
         stdout,
         stderr
     );
@@ -6728,10 +6728,10 @@ fn ok() -> Str => \"alive\"\n\
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (R6):\nstdout: {}\nstderr: {}",
+        "fitz build failed (R6):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -6762,7 +6762,7 @@ fn ok() -> Str => \"alive\"\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43916 en 3s");
+        panic!("server did not open port 43916 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -6825,7 +6825,7 @@ fn ok() -> Str => \"alive\"\n\
     assert_eq!(
         status,
         200,
-        "/ok después de panics → 200, fue {:?}",
+        "/ok after panics → 200, was {:?}",
         (status, &body)
     );
     assert!(body.contains("alive"), "/ok body: {:?}", body);
@@ -6934,10 +6934,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (W16):\nstdout: {}\nstderr: {}",
+        "fitz build failed (W16):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -6969,7 +6969,7 @@ fn main() => 0\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43915 en 3s");
+        panic!("server did not open port 43915 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -7079,7 +7079,7 @@ fn main() => 0\n\
     assert_eq!(
         status,
         400,
-        "POST título vacío → 400, fue {:?}",
+        "POST empty title → 400, was {:?}",
         (status, &body)
     );
     assert!(body.contains("título vacío"), "return 400 body: {:?}", body);
@@ -7207,10 +7207,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (W17):\nstdout: {}\nstderr: {}",
+        "fitz build failed (W17):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -7242,7 +7242,7 @@ fn main() => 0\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43916 en 3s");
+        panic!("server did not open port 43916 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -7348,10 +7348,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (@hidden):\nstdout: {}\nstderr: {}",
+        "fitz build failed (@hidden):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -7383,7 +7383,7 @@ fn main() => 0\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43917 en 3s");
+        panic!("server did not open port 43917 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -7528,10 +7528,10 @@ fn create(input: PostInput) -> Post {\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (W15 cross-module body):\nstdout: {}\nstderr: {}",
+        "fitz build failed (W15 cross-module body):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -7563,7 +7563,7 @@ fn create(input: PostInput) -> Post {\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43914 en 3s");
+        panic!("server did not open port 43914 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -7676,10 +7676,10 @@ fn create(input: PostInput, user: User) -> Post {\n\
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (W14):\nstdout: {}\nstderr: {}",
+        "fitz build failed (W14):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -7710,7 +7710,7 @@ fn create(input: PostInput, user: User) -> Post {\n\
     }
     if !connected {
         let _ = child.kill();
-        panic!("server no abrió el puerto 43913 en 3s");
+        panic!("server did not open port 43913 within 3s");
     }
 
     use std::io::{Read, Write};
@@ -7775,7 +7775,7 @@ fn create(input: PostInput, user: User) -> Post {\n\
     assert_eq!(
         status,
         401,
-        "token inválido → 401, fue {:?}",
+        "invalid token → 401, was {:?}",
         (status, &body)
     );
 
@@ -7849,10 +7849,10 @@ async fn ws_build_send_recv(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build WS falló:\nstdout: {}\nstderr: {}",
+        "fitz build WS failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -7885,7 +7885,7 @@ async fn ws_build_send_recv(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server WS no abrió el puerto {} en 3s", port);
+        panic!("WS server did not open port {} within 3s", port);
     }
 
     use futures_util::{SinkExt, StreamExt};
@@ -7904,7 +7904,7 @@ async fn ws_build_send_recv(
         .expect("ok");
     let txt = match frame {
         Message::Text(t) => t.to_string(),
-        other => panic!("esperaba text, fue {:?}", other),
+        other => panic!("expected text, was {:?}", other),
     };
     let _ = child.kill();
     let _ = child.wait();
@@ -7975,7 +7975,7 @@ fn ws_codegen_tipo_custom_marshaling_json() {
     });
     // serde_json preserve_order: el orden de los fields del struct se
     // mantiene en la serialización.
-    let v: serde_json::Value = serde_json::from_str(&resp).expect("JSON válido");
+    let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
     assert_eq!(v["user"], serde_json::json!("ada"));
     assert_eq!(v["text"], serde_json::json!("re:hi"));
 }
@@ -8007,10 +8007,10 @@ async fn ws_build_send_recv_binary(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build WS<Bytes> falló:\nstdout: {}\nstderr: {}",
+        "fitz build WS<Bytes> failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -8043,7 +8043,7 @@ async fn ws_build_send_recv_binary(
     }
     if !connected {
         let _ = child.kill();
-        panic!("server WS<Bytes> no abrió el puerto {} en 3s", port);
+        panic!("WS<Bytes> server did not open port {} within 3s", port);
     }
 
     use futures_util::{SinkExt, StreamExt};
@@ -8062,7 +8062,7 @@ async fn ws_build_send_recv_binary(
         .expect("ok");
     let bs = match frame {
         Message::Binary(b) => b.to_vec(),
-        other => panic!("esperaba binary, fue {:?}", other),
+        other => panic!("expected binary, was {:?}", other),
     };
     let _ = child.kill();
     let _ = child.wait();
@@ -8153,10 +8153,10 @@ fn ws_codegen_auth_via_subprotocol_accepts_token() {
             .args(["build"])
             .arg(&fitz_src)
             .output()
-            .expect("invocar fitz build");
+            .expect("invoke fitz build");
         assert!(
             output.status.success(),
-            "fitz build falló:\nstdout: {}\nstderr: {}",
+            "fitz build failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
@@ -8185,7 +8185,7 @@ fn ws_codegen_auth_via_subprotocol_accepts_token() {
         }
         if !connected {
             let _ = child.kill();
-            panic!("server WS no abrió el puerto en 3s");
+            panic!("WS server did not open port within 3s");
         }
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -8197,7 +8197,7 @@ fn ws_codegen_auth_via_subprotocol_accepts_token() {
         );
         let (mut ws, resp) = tokio_tungstenite::connect_async(req)
             .await
-            .expect("handshake debería pasar con bearer.secret-tok");
+            .expect("handshake should pass with bearer.secret-tok");
         let echoed = resp
             .headers()
             .get("sec-websocket-protocol")
@@ -8214,7 +8214,7 @@ fn ws_codegen_auth_via_subprotocol_accepts_token() {
             .expect("ok");
         let msg = match frame {
             tokio_tungstenite::tungstenite::Message::Text(t) => t.to_string(),
-            other => panic!("esperaba text, fue {:?}", other),
+            other => panic!("expected text, was {:?}", other),
         };
         let _ = child.kill();
         let _ = child.wait();
@@ -8256,16 +8256,16 @@ fn r_bug_deadlock_str_interp_re_lock_same_arc_does_not_hang() {
     let (stdout, exit) = build_and_run("r-bug-deadlock-str-interp", src);
     assert_eq!(
         exit, 0,
-        "binario debió terminar limpio (timeout = deadlock)"
+        "binary should have terminated cleanly (timeout = deadlock)"
     );
     assert!(
         stdout.contains("len=2"),
-        "esperaba `len=2` en stdout, fue: {}",
+        "expected `len=2` in stdout, was: {}",
         stdout
     );
     assert!(
         stdout.contains("total=3"),
-        "esperaba `total=3` en stdout, fue: {}",
+        "expected `total=3` in stdout, was: {}",
         stdout
     );
 }
@@ -8303,7 +8303,7 @@ fn fase_8_7_bis_build_pyany_a_list_int_via_anotacion() {
     assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
     assert!(
         stdout.contains("len=3 sum=6"),
-        "esperaba `len=3 sum=6` en stdout, fue: {}",
+        "expected `len=3 sum=6` in stdout, was: {}",
         stdout
     );
 }
@@ -8337,7 +8337,7 @@ fn fase_8_7_bis_build_pyany_a_instance_via_anotacion() {
     // El default `email = ""` se aplica porque el dict no trae la key.
     assert!(
         stdout.contains("id=7 name=ada email=''"),
-        "esperaba `id=7 name=ada email=''` en stdout, fue: {}",
+        "expected `id=7 name=ada email=''` in stdout, was: {}",
         stdout
     );
 }
@@ -8366,7 +8366,7 @@ fn fase_8_7_bis_build_pyany_a_list_de_instances() {
     assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
     assert!(
         stdout.contains("n=2 first=ada"),
-        "esperaba `n=2 first=ada` en stdout, fue: {}",
+        "expected `n=2 first=ada` in stdout, was: {}",
         stdout
     );
 }
@@ -8412,7 +8412,7 @@ fn env_builtin_var_missing_propagates_err() {
     assert_eq!(exit, 0);
     assert!(
         stdout.contains("caught:") && stdout.contains("FITZ_E2E_NUNCA_EXISTE_XYZ"),
-        "esperaba caught con key, fue: {}",
+        "expected caught with key, was: {}",
         stdout
     );
 }
@@ -8480,7 +8480,7 @@ fn load_env_builtin_loads_file_and_reads_vars() {
     assert_eq!(exit, 0, "stdout fue: {}", stdout);
     assert!(
         stdout.contains("k1=valor1 k2=con espacios"),
-        "esperaba k1+k2 cargados del archivo, fue: {}",
+        "expected k1+k2 loaded from file, was: {}",
         stdout
     );
 }
@@ -8620,10 +8620,10 @@ fn loader_absoluto_data_sibling_import_compila_en_fitz_build() {
         .args(["build"])
         .arg(&main_fitz)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -8671,7 +8671,7 @@ fn db_connect_invalid_url_compiles_and_runs() {
     assert_eq!(code, 0, "stdout: {}", stdout);
     assert!(
         stdout.contains("URL") || stdout.contains("postgres"),
-        "esperaba mensaje de error de URL, fue: {}",
+        "expected URL error message, was: {}",
         stdout,
     );
 }
@@ -8694,7 +8694,7 @@ fn db_connect_sslmode_require_compiles_and_fails_with_message() {
     assert_eq!(code, 0, "stdout: {}", stdout);
     assert!(
         stdout.contains("sslmode") || stdout.contains("TLS"),
-        "esperaba mensaje sobre sslmode, fue: {}",
+        "expected message about sslmode, was: {}",
         stdout,
     );
 }
@@ -8723,7 +8723,7 @@ fn db_query_exec_close_compile_emit_helpers() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -8749,7 +8749,7 @@ fn db_map_lit_homogeneo_a_field_any_compila_w1() {
     assert_eq!(code, 0, "stdout: {}", stdout);
     assert!(
         stdout.contains("event 1"),
-        "esperaba `event 1`, fue: {}",
+        "expected `event 1`, was: {}",
         stdout
     );
 }
@@ -8784,12 +8784,12 @@ fn db_match_nullable_refinement_w2() {
     assert_eq!(code, 0, "stdout: {}", stdout);
     assert!(
         stdout.contains("ada"),
-        "esperaba `ada` en output, fue: {}",
+        "expected `ada` in output, was: {}",
         stdout
     );
     assert!(
         stdout.contains("sin usuario"),
-        "esperaba `sin usuario` en output, fue: {}",
+        "expected `sin usuario` in output, was: {}",
         stdout,
     );
 }
@@ -8844,10 +8844,10 @@ fn db_orm_cross_module_at_table_compila_w8() {
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló cross-module:\nstdout: {}\nstderr: {}",
+        "fitz build failed cross-module:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -8867,7 +8867,7 @@ fn db_orm_cross_module_at_table_compila_w8() {
     // URL inválida → run().await devuelve Err → driver imprime "err".
     assert!(
         stdout.contains("err"),
-        "esperaba `err` en stdout, fue: {}",
+        "expected `err` in stdout, was: {}",
         stdout,
     );
 }
@@ -8923,10 +8923,10 @@ fn jsonb_cross_module_compila_w11() {
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló cross-module JSONB:\nstdout: {}\nstderr: {}",
+        "fitz build failed cross-module JSONB:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -8993,10 +8993,10 @@ fn ws_jobs_cross_module_compila_w10() {
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló cross-module WS+jobs:\nstdout: {}\nstderr: {}",
+        "fitz build failed cross-module WS+jobs:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -9039,7 +9039,7 @@ fn db_upd_with_map_var_compiles_to_binary_w7() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -9075,7 +9075,7 @@ fn orm_insert_compiles_emits_insert_returning_without_postgres() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9105,7 +9105,7 @@ fn orm_insert_with_nullable_and_column_override_compiles() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9182,7 +9182,7 @@ fn orm_where_chain_with_order_and_limit_compiles_to_binary() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9212,7 +9212,7 @@ fn orm_qb_upd_with_where_compiles_to_binary() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9239,7 +9239,7 @@ fn orm_delete_with_where_compiles_to_binary() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9268,7 +9268,7 @@ fn orm_chain_first_with_multiple_wheres_compiles_to_binary() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -9307,7 +9307,7 @@ fn orm_sum_directo_sobre_type_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9337,7 +9337,7 @@ fn orm_avg_chain_with_where_compiles_to_binary() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -9383,7 +9383,7 @@ fn orm_list_int_array_field_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9408,7 +9408,7 @@ fn orm_list_str_array_field_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9436,7 +9436,7 @@ fn orm_list_float_bool_arrays_combinados_compilan() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -9479,7 +9479,7 @@ fn orm_where_chain_combinatorio_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9511,7 +9511,7 @@ fn orm_where_like_ilike_starts_ends_contains_compilan() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9541,7 +9541,7 @@ fn orm_where_is_null_is_in_with_not_compilan() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -9573,7 +9573,7 @@ fn orm_map_str_any_jsonb_field_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9600,7 +9600,7 @@ fn orm_map_str_any_jsonb_nullable_compila() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9634,7 +9634,7 @@ fn orm_belongs_to_navigation_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9668,7 +9668,7 @@ fn orm_has_many_navigation_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9701,7 +9701,7 @@ fn orm_has_one_navigation_compila_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 #[test]
@@ -9730,7 +9730,7 @@ fn orm_min_y_max_combinados_compilan_a_binario() {
          print(driver().await)\n",
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
-    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
 }
 
 // ===== T5 — tipos custom compilados con cobertura más profunda =====
@@ -10008,10 +10008,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10079,10 +10079,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10153,10 +10153,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10267,10 +10267,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10281,14 +10281,14 @@ fn main() => 0\n\
     // `if self.author.is_some()` para `author` (BelongsToCompanion).
     let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
     if main_rs.exists() {
-        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        let content = std::fs::read_to_string(&main_rs).expect("read main.rs");
         assert!(
             content.contains("if !__g.is_empty() { __obj.insert(\"posts\""),
-            "main.rs debe emitir el conditional has_many para `posts` (#7 fix)"
+            "main.rs must emit the has_many conditional for `posts` (#7 fix)"
         );
         assert!(
             content.contains("if self.author.is_some() { __obj.insert(\"author\""),
-            "main.rs debe emitir el conditional companion para `author` (#7 fix)"
+            "main.rs must emit the companion conditional for `author` (#7 fix)"
         );
     }
 }
@@ -10333,10 +10333,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10351,7 +10351,7 @@ fn main() => 0\n\
         let insert_line = content
             .lines()
             .find(|l| l.contains("INSERT INTO \\\"users\\\""))
-            .expect("no se emitió INSERT INTO users");
+            .expect("INSERT INTO users was not emitted");
         // El INSERT line tiene formato:
         //   INSERT INTO "users" (cols...) VALUES (...) RETURNING cols...
         // Partimos por VALUES para separar.
@@ -10417,10 +10417,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10442,7 +10442,7 @@ fn main() => 0\n\
         );
         assert!(
             !content.contains("<Result<i64, String> as __ToFitzJson>"),
-            "main.rs NO debe serializar `Result<i64, String>` entero (regresión del fix #6)"
+            "main.rs must NOT serialize `Result<i64, String>` whole (regression of fix #6)"
         );
     }
 }
@@ -10488,10 +10488,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (`.has(var)` sobre array):\nstdout: {}\nstderr: {}",
+        "fitz build failed (`.has(var)` over array):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10576,10 +10576,10 @@ fn main() => 0\n\
         .args(["build"])
         .arg(&main_path)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló (W18):\nstdout: {}\nstderr: {}",
+        "fitz build failed (W18):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -10639,7 +10639,7 @@ fn parity_run_vs_build(test_name: &str, src: &str) -> String {
         .expect("fitz run");
     assert!(
         out_run.status.success(),
-        "fitz run falló:\nstdout: {}\nstderr: {}",
+        "fitz run failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out_run.stdout),
         String::from_utf8_lossy(&out_run.stderr),
     );
@@ -10652,7 +10652,7 @@ fn parity_run_vs_build(test_name: &str, src: &str) -> String {
         .expect("fitz build");
     assert!(
         out_build.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out_build.stdout),
         String::from_utf8_lossy(&out_build.stderr),
     );
@@ -10664,7 +10664,7 @@ fn parity_run_vs_build(test_name: &str, src: &str) -> String {
     let exec = Command::new(&bin).output().expect("exec build");
     assert!(
         exec.status.success(),
-        "binario falló:\nstdout: {}\nstderr: {}",
+        "binary failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&exec.stdout),
         String::from_utf8_lossy(&exec.stderr),
     );
@@ -10673,7 +10673,7 @@ fn parity_run_vs_build(test_name: &str, src: &str) -> String {
     assert_eq!(
         run_stdout.replace("\r\n", "\n"),
         build_stdout.replace("\r\n", "\n"),
-        "esperaba paridad bit-a-bit `fitz run` ↔ `fitz build`",
+        "expected bit-for-bit parity `fitz run` ↔ `fitz build`",
     );
     run_stdout
 }
@@ -10949,7 +10949,7 @@ print(bomb.to_str())
     // run debe fallar con error claro.
     assert!(
         !out_run.status.success(),
-        "esperaba que `fitz run` aborte por overflow"
+        "expected `fitz run` to abort due to overflow"
     );
     let stderr = String::from_utf8_lossy(&out_run.stderr);
     let stdout = String::from_utf8_lossy(&out_run.stdout);
@@ -10959,7 +10959,7 @@ print(bomb.to_str())
     // es el ya escalado, no el original).
     assert!(
         combined.contains("add_months") && combined.contains("overflow"),
-        "esperaba mensaje con `add_months` y `overflow`, fue:\n{}",
+        "expected message with `add_months` and `overflow`, was:\n{}",
         combined
     );
 }
@@ -10982,7 +10982,7 @@ print(bomb.to_str())
     );
     assert!(
         stderr.contains("add_days") && stderr.contains("Int"),
-        "esperaba error citando `add_days` + `Int`, fue:\n{}",
+        "expected error citing `add_days` + `Int`, was:\n{}",
         stderr
     );
 }
@@ -11009,7 +11009,7 @@ fn build_and_run_cli(test_name: &str, src: &str, extra_args: &[&str]) -> (String
         .expect("fitz build");
     assert!(
         out.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -11146,8 +11146,8 @@ fn status() -> Int {
 }
 ";
     let (_, stderr, code) = build_and_run_cli("fase13_unknown_cmd", src, &["bogus"]);
-    assert_eq!(code, 2, "esperaba exit 2 para comando desconocido");
-    assert!(stderr.contains("desconocido"), "stderr: {stderr}");
+    assert_eq!(code, 2, "expected exit 2 for unknown command");
+    assert!(stderr.contains("unknown"), "stderr: {stderr}");
 }
 
 #[test]
@@ -11161,7 +11161,7 @@ fn greet(name: Str) -> Int {
 ";
     let (_, stderr, code) = build_and_run_cli("fase13_missing_pos", src, &[]);
     assert_eq!(code, 2);
-    assert!(stderr.contains("falta"), "stderr: {stderr}");
+    assert!(stderr.contains("missing argument"), "stderr: {stderr}");
 }
 
 #[test]
@@ -11236,8 +11236,8 @@ fn greet(name: Str, loud: Bool = false) -> Int {
     let (_, stderr, code) = build_and_run_cli("fase13_short_unknown", src, &["Ada", "-z"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("desconocida") || stderr.contains("-z"),
-        "esperaba mensaje sobre -z, fue: {stderr}"
+        stderr.contains("unknown") || stderr.contains("-z"),
+        "expected message about -z, was: {stderr}"
     );
 }
 
@@ -11378,7 +11378,7 @@ fn go(loud: Bool = false, level: Int = 1) -> Int {
     let stderr = build_expect_fail("fase13_short_collision", src);
     assert!(
         stderr.contains("conflict") || stderr.contains("colisi") || stderr.contains("comparten"),
-        "esperaba mensaje de colisión, fue: {stderr}"
+        "expected collision message, was: {stderr}"
     );
 }
 
@@ -11476,10 +11476,10 @@ fn build_and_run_with_env_and_stderr(
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -11524,39 +11524,39 @@ print(\"done\")
     assert_eq!(exit, 0, "exit code: {} stderr: {}", exit, stderr);
     assert!(
         stdout.contains("done"),
-        "esperaba 'done' en stdout: {}",
+        "expected 'done' in stdout: {}",
         stdout
     );
     // Stderr debe tener UNA línea con JSON shape flat.
     assert!(
         stderr.contains("\"level\":\"INFO\""),
-        "esperaba 'level':'INFO' en stderr: {}",
+        "expected 'level':'INFO' in stderr: {}",
         stderr
     );
     assert!(
         stderr.contains("\"msg\":\"login ok\""),
-        "esperaba 'msg':'login ok' en stderr: {}",
+        "expected 'msg':'login ok' in stderr: {}",
         stderr
     );
     assert!(
         stderr.contains("\"user_id\":42"),
-        "esperaba 'user_id':42 en stderr: {}",
+        "expected 'user_id':42 in stderr: {}",
         stderr
     );
     assert!(
         stderr.contains("\"role\":\"admin\""),
-        "esperaba 'role':'admin' en stderr: {}",
+        "expected 'role':'admin' in stderr: {}",
         stderr
     );
     assert!(
         stderr.contains("\"active\":true"),
-        "esperaba 'active':true en stderr: {}",
+        "expected 'active':true in stderr: {}",
         stderr
     );
     // El timestamp debe tener shape ISO 8601 con 'Z' final.
     assert!(
         stderr.contains("\"timestamp\":") && stderr.contains("Z\""),
-        "esperaba timestamp ISO 8601 en stderr: {}",
+        "expected ISO 8601 timestamp in stderr: {}",
         stderr
     );
 }
@@ -11577,12 +11577,12 @@ log.info(\"visible\")
     assert_eq!(exit, 0);
     assert!(
         !stderr.contains("oculto"),
-        "log.debug debería estar filtrado con default level=info: {}",
+        "log.debug should be filtered with default level=info: {}",
         stderr
     );
     assert!(
         stderr.contains("\"msg\":\"visible\""),
-        "log.info debería aparecer con default level=info: {}",
+        "log.info should appear with default level=info: {}",
         stderr
     );
 }
@@ -11633,7 +11633,7 @@ let _ = rotate()
     assert_eq!(exit, 0);
     assert!(
         stderr.contains("\"token\":\"<redacted>\""),
-        "esperaba token redacted en stderr: {}",
+        "expected redacted token in stderr: {}",
         stderr
     );
     assert!(
@@ -11684,10 +11684,10 @@ fn health() -> Str => \"ok\"\n\
         .args(["build"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build");
+        .expect("invoke fitz build");
     assert!(
         output.status.success(),
-        "fitz build falló:\nstdout: {}\nstderr: {}",
+        "fitz build failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

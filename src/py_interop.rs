@@ -352,7 +352,7 @@ fn py_coro_to_fitz_future(coro: &Bound<'_, PyAny>) -> PyResult<FitzFuture> {
     };
     if bridge.tx.send(request).is_err() {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "el thread asyncio de Fitz terminó inesperadamente",
+            "Fitz asyncio thread terminated unexpectedly",
         ));
     }
     let fitz_future: FitzFuture = Box::pin(async move {
@@ -362,7 +362,7 @@ fn py_coro_to_fitz_future(coro: &Bound<'_, PyAny>) -> PyResult<FitzFuture> {
                 ErrorKind::UndefinedVariable("RuntimeError".to_string()),
                 0,
                 0,
-                "el thread asyncio no respondió a la corutina (loop cerrado?)".to_string(),
+                "asyncio thread did not respond to the coroutine (loop closed?)".to_string(),
             )),
         }
     });
@@ -582,7 +582,7 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
                      bignum support llega en una fase posterior",
                     obj.str()
                         .map(|s| s.to_string())
-                        .unwrap_or_else(|_| "<repr falló>".into()),
+                        .unwrap_or_else(|_| "<repr failed>".into()),
                 ),
             )),
         };
@@ -679,36 +679,36 @@ mod tests {
 
     #[test]
     fn importing_math_returns_pyobject() {
-        let v = import_module("math").expect("math debería importar");
+        let v = import_module("math").expect("math should import");
         assert!(matches!(v, Value::PyObject(_)));
     }
 
     #[test]
     fn importing_json_returns_pyobject() {
-        let v = import_module("json").expect("json debería importar");
+        let v = import_module("json").expect("json should import");
         assert!(matches!(v, Value::PyObject(_)));
     }
 
     #[test]
     fn importing_submodule_returns_pyobject() {
         // `os.path` always exists in any Python installation.
-        let v = import_module("os.path").expect("os.path debería importar");
+        let v = import_module("os.path").expect("os.path should import");
         assert!(matches!(v, Value::PyObject(_)));
     }
 
     #[test]
     fn modulo_inexistente_da_error_claro() {
-        let err = import_module("este_modulo_no_existe_xyz_8_1_2")
-            .expect_err("el módulo no debería existir");
+        let err =
+            import_module("este_modulo_no_existe_xyz_8_1_2").expect_err("module should not exist");
         // Esperamos algo como "ModuleNotFoundError: No module named 'este_modulo_no_existe_xyz_8_1_2'"
         assert!(
             err.message.contains("ModuleNotFoundError"),
-            "mensaje debería citar ModuleNotFoundError, fue: {}",
+            "message should cite ModuleNotFoundError, was: {}",
             err.message
         );
         assert!(
             err.message.contains("este_modulo_no_existe_xyz_8_1_2"),
-            "mensaje debería citar el nombre del módulo buscado, fue: {}",
+            "message should cite the searched module name, was: {}",
             err.message
         );
     }
@@ -749,7 +749,7 @@ mod tests {
         match v {
             Value::Result(ResultVariant::Ok(inner)) => *inner,
             Value::Result(ResultVariant::Err(msg)) => {
-                panic!("esperaba Ok(...), llegó Err({:?})", msg)
+                panic!("expected Ok(...), got Err({:?})", msg)
             }
             other => panic!("esperaba Value::Result, fue {:?}", other),
         }
@@ -763,10 +763,10 @@ mod tests {
         match v {
             Value::Result(ResultVariant::Err(inner)) => match *inner {
                 Value::Str(s) => s,
-                other => panic!("Err debería envolver Str, fue {:?}", other),
+                other => panic!("Err should wrap Str, was {:?}", other),
             },
             Value::Result(ResultVariant::Ok(inner)) => {
-                panic!("esperaba Err(...), llegó Ok({:?})", inner)
+                panic!("expected Err(...), got Ok({:?})", inner)
             }
             other => panic!("esperaba Value::Result, fue {:?}", other),
         }
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     fn get_attr_math_pi_es_float() {
         let math = handle_of(import_module("math").unwrap());
-        let v = get_attr(&math, "pi").expect("math.pi debería existir");
+        let v = get_attr(&math, "pi").expect("math.pi should exist");
         match v {
             Value::Float(f) => {
                 // Approximate comparison — math.pi's exact value
@@ -791,17 +791,17 @@ mod tests {
         // `sqrt` is a Python function — not a primitive, must
         // wrap as an opaque PyObject for invocation in 8.1.4.
         let math = handle_of(import_module("math").unwrap());
-        let v = get_attr(&math, "sqrt").expect("math.sqrt debería existir");
+        let v = get_attr(&math, "sqrt").expect("math.sqrt should exist");
         assert!(matches!(v, Value::PyObject(_)), "got: {:?}", v);
     }
 
     #[test]
     fn get_attr_missing_emits_attributeerror() {
         let math = handle_of(import_module("math").unwrap());
-        let err = get_attr(&math, "no_existe_xyz_813").expect_err("attr no debería existir");
+        let err = get_attr(&math, "no_existe_xyz_813").expect_err("attr should not exist");
         assert!(
             err.message.contains("AttributeError"),
-            "mensaje debería citar AttributeError, fue: {}",
+            "message should cite AttributeError, was: {}",
             err.message,
         );
     }
@@ -917,7 +917,7 @@ mod tests {
         let msg = err_message(v);
         assert!(
             msg.contains("ValueError"),
-            "mensaje debería citar ValueError, fue: {}",
+            "message should cite ValueError, was: {}",
             msg,
         );
     }
@@ -934,7 +934,7 @@ mod tests {
         let msg = err_message(v);
         assert!(
             msg.contains("Range") && msg.contains("arg0"),
-            "mensaje debería citar Range + arg0, fue: {}",
+            "message should cite Range + arg0, was: {}",
             msg,
         );
     }
@@ -1325,7 +1325,7 @@ mod tests {
         let msg = err_message(v);
         assert!(
             msg.contains("JSONDecodeError"),
-            "mensaje del Err debería citar JSONDecodeError, fue: {}",
+            "Err message should cite JSONDecodeError, was: {}",
             msg,
         );
     }
@@ -1340,7 +1340,7 @@ mod tests {
         let msg = err_message(v);
         assert!(
             msg.starts_with("ValueError:"),
-            "mensaje debería empezar con `ValueError:`, fue: {}",
+            "message should start with `ValueError:`, was: {}",
             msg,
         );
     }
@@ -1364,6 +1364,6 @@ mod tests {
             msg
         );
         assert_eq!(parts[0], "ValueError");
-        assert!(!parts[1].is_empty(), "message body vacío");
+        assert!(!parts[1].is_empty(), "empty message body");
     }
 }

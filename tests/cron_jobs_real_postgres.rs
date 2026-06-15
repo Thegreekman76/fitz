@@ -332,7 +332,7 @@ async fn v0_15_13_ensure_storage_initialized_avoids_race_with_10_parallel() {
 
     let mut failures = Vec::new();
     for h in handles {
-        let (i, result) = h.await.expect("task no panicó");
+        let (i, result) = h.await.expect("task did not panic");
         if let Err(e) = result {
             failures.push((i, e));
         }
@@ -357,7 +357,7 @@ async fn v0_15_13_ensure_storage_initialized_avoids_race_with_10_parallel() {
     let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_runs", &[]).await;
     let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_jobs", &[]).await;
     Arc::try_unwrap(conn)
-        .expect("último Arc")
+        .expect("last Arc")
         .close()
         .await
         .unwrap();
@@ -399,7 +399,7 @@ async fn v0_15_13_ensure_storage_initialized_caches_result_second_call_does_not_
     let res = conn.exec("SELECT 1 FROM fitz_cron_jobs LIMIT 0", &[]).await;
     assert!(
         res.is_err(),
-        "fitz_cron_jobs debería seguir droppeada (el segundo init reusó cache), pero existe"
+        "fitz_cron_jobs should remain dropped (the second init reused cache), but it exists"
     );
 
     conn.close().await.unwrap();

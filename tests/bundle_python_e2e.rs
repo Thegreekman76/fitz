@@ -25,7 +25,7 @@ fn fitz_bin() -> &'static str {
 fn bundle_python_without_from_python_import_aborts_with_clear_message() {
     let dir = std::env::temp_dir().join("fitz-bundle-validation-no-python");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
 
     let fitz_src = dir.join("prog.fitz");
     std::fs::write(
@@ -35,31 +35,31 @@ let x = 42
 print(x)
 "#,
     )
-    .expect("escribir .fitz");
+    .expect("write .fitz");
 
     let output = Command::new(fitz_bin())
         .args(["build", "--bundle-python"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build --bundle-python");
+        .expect("invoke fitz build --bundle-python");
 
-    // Debe abortar — el programa NO usa interop Python.
+    // Must abort — the program does NOT use Python interop.
     assert!(
         !output.status.success(),
-        "esperaba que abortara: el programa no usa `from python import`"
+        "expected it to abort: the program does not use `from python import`"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Mensaje específico debe mencionar el flag y la condición.
+    // The specific message must mention the flag and the condition.
     assert!(
         stderr.contains("--bundle-python") && stderr.contains("from python import"),
-        "mensaje debe explicar el constraint del flag. Got stderr:\n{}",
+        "message must explain the flag constraint. Got stderr:\n{}",
         stderr
     );
-    // Sugerencia de fix también.
+    // Fix suggestion too.
     assert!(
-        stderr.contains("sin el flag"),
-        "mensaje debería sugerir omitir el flag. Got stderr:\n{}",
+        stderr.contains("without the flag"),
+        "message should suggest omitting the flag. Got stderr:\n{}",
         stderr
     );
 }
@@ -71,10 +71,10 @@ fn bundle_pip_implies_bundle_python_and_aborts_without_from_python_import() {
     // mensaje que `--bundle-python` directo.
     let dir = std::env::temp_dir().join("fitz-bundle-pip-no-python");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
 
     let fitz_src = dir.join("prog.fitz");
-    std::fs::write(&fitz_src, "print(\"hola sin python\")\n").expect("escribir .fitz");
+    std::fs::write(&fitz_src, "print(\"hola sin python\")\n").expect("write .fitz");
 
     let output = Command::new(fitz_bin())
         .args(["build", "--bundle-pip", "requests"])
@@ -104,10 +104,10 @@ fn bundle_pip_repeatable_accepts_multiple_packages() {
     // error es el de validación tardía, no el de parsing.
     let dir = std::env::temp_dir().join("fitz-bundle-pip-multiple");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
 
     let fitz_src = dir.join("prog.fitz");
-    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("escribir .fitz");
+    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("write .fitz");
 
     let output = Command::new(fitz_bin())
         .args([
@@ -130,13 +130,13 @@ fn bundle_pip_repeatable_accepts_multiple_packages() {
     // Sin error de clap (error de parsing del CLI).
     assert!(
         !stderr.contains("error: invalid value") && !stderr.contains("error: the argument"),
-        "clap NO debería rechazar el flag repetido. Got stderr:\n{}",
+        "clap should NOT reject the repeated flag. Got stderr:\n{}",
         stderr
     );
     // SÍ debería tener el error de validation tardía.
     assert!(
         stderr.contains("from python import"),
-        "debe llegar a la validación tardía. Got stderr:\n{}",
+        "must reach late validation. Got stderr:\n{}",
         stderr
     );
 }
@@ -148,13 +148,13 @@ fn bundle_pip_requirements_implies_bundle_python_and_aborts_without_from_python_
     // import` en el código, debe abortar con el mismo mensaje.
     let dir = std::env::temp_dir().join("fitz-bundle-pip-req-no-python");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
 
     let req_file = dir.join("requirements.txt");
     std::fs::write(&req_file, "requests\nsqlalchemy==2.0.0\n").expect("escribir requirements.txt");
 
     let fitz_src = dir.join("prog.fitz");
-    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("escribir .fitz");
+    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("write .fitz");
 
     let output = Command::new(fitz_bin())
         .args(["build", "--bundle-pip-requirements"])
@@ -182,10 +182,10 @@ fn bundle_pip_requirements_nonexistent_file_aborts_with_clear_message() {
     // claro del lado de Fitz (no llegar a pip).
     let dir = std::env::temp_dir().join("fitz-bundle-pip-req-missing");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
 
     let fitz_src = dir.join("prog.fitz");
-    std::fs::write(&fitz_src, "from python import math\nprint(math.pi)\n").expect("escribir .fitz");
+    std::fs::write(&fitz_src, "from python import math\nprint(math.pi)\n").expect("write .fitz");
 
     let missing = dir.join("no-existe.txt");
 
@@ -211,7 +211,7 @@ fn bundle_pip_requirements_nonexistent_file_aborts_with_clear_message() {
     assert!(
         !stderr.contains("→ compilando real binary")
             && !stderr.contains("→ asegurando PBS tarball"),
-        "validación temprana — no se debe llegar al pipeline. Got stderr:\n{}",
+        "early validation — must not reach the pipeline. Got stderr:\n{}",
         stderr
     );
 }
@@ -222,14 +222,14 @@ fn bundle_pip_requirements_combinable_with_bundle_pip() {
     // validación tardía sigue siendo la de `from python import`.
     let dir = std::env::temp_dir().join("fitz-bundle-pip-req-combined");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
 
     let req_file = dir.join("requirements.txt");
     std::fs::write(&req_file, "# comentario\nrequests\n\nsqlalchemy\n")
         .expect("escribir requirements.txt");
 
     let fitz_src = dir.join("prog.fitz");
-    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("escribir .fitz");
+    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("write .fitz");
 
     let output = Command::new(fitz_bin())
         .args(["build", "--bundle-pip", "psycopg2-binary"])
@@ -244,13 +244,13 @@ fn bundle_pip_requirements_combinable_with_bundle_pip() {
     // Sin error de CLI parsing — clap aceptó ambos.
     assert!(
         !stderr.contains("error: invalid value") && !stderr.contains("error: the argument"),
-        "clap NO debería rechazar la combinación. Got stderr:\n{}",
+        "clap should NOT reject the combination. Got stderr:\n{}",
         stderr
     );
     // La validación tardía (sin from python import) sí.
     assert!(
         stderr.contains("from python import"),
-        "debe llegar a la validación tardía. Got stderr:\n{}",
+        "must reach late validation. Got stderr:\n{}",
         stderr
     );
 }
@@ -259,17 +259,17 @@ fn bundle_pip_requirements_combinable_with_bundle_pip() {
 fn bundle_python_with_syntax_error_aborts_before_bundling() {
     let dir = std::env::temp_dir().join("fitz-bundle-validation-syntax-err");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    std::fs::create_dir_all(&dir).expect("create tempdir");
 
     let fitz_src = dir.join("prog.fitz");
     // Programa con error sintáctico: `let` sin valor.
-    std::fs::write(&fitz_src, "from python import math\nlet x =\n").expect("escribir .fitz");
+    std::fs::write(&fitz_src, "from python import math\nlet x =\n").expect("write .fitz");
 
     let output = Command::new(fitz_bin())
         .args(["build", "--bundle-python"])
         .arg(&fitz_src)
         .output()
-        .expect("invocar fitz build --bundle-python");
+        .expect("invoke fitz build --bundle-python");
 
     assert!(
         !output.status.success(),

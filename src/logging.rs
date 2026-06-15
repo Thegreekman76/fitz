@@ -621,8 +621,8 @@ mod tests {
         ];
         let line = format_json("info", "login ok", &kvs);
         // We parse so we don't depend on the exact whitespace.
-        let parsed: JsonValue = serde_json::from_str(&line).expect("debería ser JSON válido");
-        let obj = parsed.as_object().expect("Object esperado");
+        let parsed: JsonValue = serde_json::from_str(&line).expect("should be valid JSON");
+        let obj = parsed.as_object().expect("Object expected");
         assert_eq!(obj.get("level"), Some(&JsonValue::String("INFO".into())));
         assert_eq!(obj.get("msg"), Some(&JsonValue::String("login ok".into())));
         assert_eq!(obj.get("user_id"), Some(&JsonValue::Number(42.into())));
@@ -633,11 +633,7 @@ mod tests {
             .get("timestamp")
             .and_then(|v| v.as_str())
             .expect("timestamp string esperado");
-        assert!(
-            ts.ends_with('Z'),
-            "timestamp debería terminar en Z, fue {}",
-            ts
-        );
+        assert!(ts.ends_with('Z'), "timestamp should end in Z, was {}", ts);
     }
 
     #[test]
@@ -657,7 +653,7 @@ mod tests {
         // The real secret must NEVER leak into the output.
         assert!(
             !line.contains("super-secret"),
-            "el secret se filtró: {}",
+            "the secret leaked: {}",
             line
         );
     }
@@ -674,7 +670,7 @@ mod tests {
         )];
         let line = format_json("info", "rotating", &kvs);
         // The secret must not leak even from inside the list.
-        assert!(!line.contains("hidden-token"), "filtración: {}", line);
+        assert!(!line.contains("hidden-token"), "leak: {}", line);
         assert!(
             line.contains("<redacted>"),
             "esperaba redacted en: {}",
@@ -700,7 +696,7 @@ mod tests {
             ]),
         )];
         let line = format_json("info", "starting", &kvs);
-        assert!(!line.contains("sk-live-12345"), "filtración: {}", line);
+        assert!(!line.contains("sk-live-12345"), "leak: {}", line);
         assert!(line.contains("<redacted>"));
         assert!(line.contains("postgres://..."));
     }
@@ -865,8 +861,8 @@ mod tests {
     fn span_context_new_root_generates_distinct_ids_between_calls() {
         let a = SpanContext::new_root();
         let b = SpanContext::new_root();
-        assert_ne!(a.trace_id, b.trace_id, "trace_id debería ser único");
-        assert_ne!(a.span_id, b.span_id, "span_id debería ser único");
+        assert_ne!(a.trace_id, b.trace_id, "trace_id should be unique");
+        assert_ne!(a.span_id, b.span_id, "span_id should be unique");
     }
 
     #[test]
@@ -1001,7 +997,7 @@ mod tests {
         let trace_id_expected = ctx.trace_id.clone();
         let span_id_expected = ctx.span_id.clone();
         with_span_context(ctx, || async move {
-            let observed = current_span_context().expect("debería estar set");
+            let observed = current_span_context().expect("should be set");
             assert_eq!(observed.trace_id, trace_id_expected);
             assert_eq!(observed.span_id, span_id_expected);
         })
@@ -1017,8 +1013,14 @@ mod tests {
         let line = format_json("info", "test", &[]);
         let parsed: JsonValue = serde_json::from_str(&line).unwrap();
         let obj = parsed.as_object().unwrap();
-        assert!(obj.get("trace_id").is_none(), "trace_id no debería estar");
-        assert!(obj.get("span_id").is_none(), "span_id no debería estar");
+        assert!(
+            obj.get("trace_id").is_none(),
+            "trace_id should not be present"
+        );
+        assert!(
+            obj.get("span_id").is_none(),
+            "span_id should not be present"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1073,11 +1075,11 @@ mod tests {
         let stripped = strip_ansi(&line);
         assert!(
             !stripped.contains("trace="),
-            "trace= no debería estar sin span"
+            "trace= should not be present without span"
         );
         assert!(
             !stripped.contains("span="),
-            "span= no debería estar sin span"
+            "span= should not be present without span"
         );
     }
 
@@ -1112,11 +1114,13 @@ mod tests {
         with_span_context(ctx, || async move {
             let line = format_pretty("info", "msg", &[("user_id".into(), Value::Int(42))]);
             let stripped = strip_ansi(&line);
-            let trace_pos = stripped.find("trace=").expect("trace= debería estar");
-            let user_pos = stripped.find("user_id=").expect("user_id= debería estar");
+            let trace_pos = stripped.find("trace=").expect("trace= should be present");
+            let user_pos = stripped
+                .find("user_id=")
+                .expect("user_id= should be present");
             assert!(
                 trace_pos < user_pos,
-                "trace= debería ir antes que kwargs del user: {}",
+                "trace= should come before user kwargs: {}",
                 stripped
             );
         })

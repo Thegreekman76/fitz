@@ -377,15 +377,15 @@ fn parse_ssl_params(query: Option<&str>) -> DbResult<(SslMode, Option<std::path:
                     "verify-full" => SslMode::VerifyFull,
                     "prefer" | "allow" => {
                         return Err(DbError::NotImplemented(format!(
-                            "sslmode={v} (negociación dinámica) queda \
-                             out-of-scope MVP; usá `require` si querés TLS, \
-                             `disable` si no, o `verify-full` para validar \
-                             cert (recomendado producción)"
+                            "sslmode={v} (dynamic negotiation) is \
+                             out-of-scope for MVP; use `require` if you want TLS, \
+                             `disable` if not, or `verify-full` to validate \
+                             cert (recommended for production)"
                         )))
                     }
                     other => {
                         return Err(DbError::InvalidUrl(format!(
-                            "sslmode desconocido: '{other}' (válidos: \
+                            "unknown sslmode: '{other}' (valid: \
                              disable, require, verify-ca, verify-full)"
                         )))
                     }
@@ -409,22 +409,22 @@ fn parse_ssl_params(query: Option<&str>) -> DbResult<(SslMode, Option<std::path:
     // without TLS thinking they were protected.
     if !mode_seen && root_cert.is_some() {
         return Err(DbError::InvalidUrl(
-            "sslrootcert= sin sslmode= no tiene sentido: el cert no \
-             se va a usar. Agregá sslmode=verify-ca o verify-full"
+            "sslrootcert= without sslmode= makes no sense: the cert won't \
+             be used. Add sslmode=verify-ca or verify-full"
                 .into(),
         ));
     }
     if mode == SslMode::Disable && root_cert.is_some() {
         return Err(DbError::InvalidUrl(
-            "sslrootcert= con sslmode=disable es contradictorio. Usá \
-             sslmode=verify-ca o verify-full para activar la validación"
+            "sslrootcert= with sslmode=disable is contradictory. Use \
+             sslmode=verify-ca or verify-full to enable validation"
                 .into(),
         ));
     }
     if mode == SslMode::Require && root_cert.is_some() {
         return Err(DbError::InvalidUrl(
-            "sslrootcert= con sslmode=require es inconsistente: require \
-             NO verifica el cert. Usá sslmode=verify-ca o verify-full"
+            "sslrootcert= with sslmode=require is inconsistent: require \
+             does NOT verify the cert. Use sslmode=verify-ca or verify-full"
                 .into(),
         ));
     }
@@ -593,7 +593,7 @@ fn build_tls_client_config(config: &ConnectionConfig) -> DbResult<rustls::Client
                 rustls::client::WebPkiServerVerifier::builder(std::sync::Arc::new(root_store))
                     .build()
                     .map_err(|e| {
-                        DbError::Tls(format!("no se pudo construir WebPkiServerVerifier: {e}"))
+                        DbError::Tls(format!("could not build WebPkiServerVerifier: {e}"))
                     })?;
             let verifier: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> =
                 if config.sslmode == SslMode::VerifyCa {
@@ -1980,7 +1980,7 @@ fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, us
                 }
             }
         }
-        Err(DbError::Protocol("array element: quoted no cerrado".into()))
+        Err(DbError::Protocol("array element: unclosed quoted".into()))
     } else {
         // Unquoted: read until ',' or '}'.
         let mut idx = start;
@@ -2854,7 +2854,7 @@ impl DbPool {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| DbError::Protocol("pool: semaphore cerrado".into()))?;
+            .map_err(|_| DbError::Protocol("pool: closed semaphore".into()))?;
         // Try to grab an idle conn (fast path).
         let maybe_idle = self.idle.lock().expect("pool mutex poisoned").pop();
         let conn = match maybe_idle {
@@ -3891,7 +3891,7 @@ mod tests {
             BackendMessage::AuthenticationMd5Password { salt } => {
                 assert_eq!(salt, [0xde, 0xad, 0xbe, 0xef]);
             }
-            _ => panic!("esperaba MD5"),
+            _ => panic!("expected MD5"),
         }
     }
 
@@ -3907,7 +3907,7 @@ mod tests {
             BackendMessage::AuthenticationSasl { mechanisms } => {
                 assert_eq!(mechanisms, vec!["SCRAM-SHA-256", "SCRAM-SHA-256-PLUS"]);
             }
-            _ => panic!("esperaba SASL"),
+            _ => panic!("expected SASL"),
         }
     }
 
@@ -3951,7 +3951,7 @@ mod tests {
                 assert_eq!(fields[1].name, "name");
                 assert_eq!(fields[1].type_oid, 25);
             }
-            _ => panic!("esperaba RowDescription"),
+            _ => panic!("expected RowDescription"),
         }
     }
 
@@ -3976,7 +3976,7 @@ mod tests {
                 assert!(values[1].is_none());
                 assert_eq!(values[2].as_deref(), Some(&b"hola"[..]));
             }
-            _ => panic!("esperaba DataRow"),
+            _ => panic!("expected DataRow"),
         }
     }
 
@@ -3998,7 +3998,7 @@ mod tests {
                 assert_eq!(ef.code, "42P01");
                 assert_eq!(ef.message, "relation \"users\" does not exist");
             }
-            _ => panic!("esperaba ErrorResponse"),
+            _ => panic!("expected ErrorResponse"),
         }
     }
 
@@ -4142,7 +4142,7 @@ mod tests {
         let v = parse_text_value(oid::FLOAT8, Some(b"2.5")).unwrap();
         match v {
             PgValue::Float(x) => assert!((x - 2.5).abs() < 1e-9),
-            _ => panic!("esperaba Float"),
+            _ => panic!("expected Float"),
         }
     }
 
@@ -4226,7 +4226,7 @@ mod tests {
                     vec![PgValue::Int(1), PgValue::Int(2), PgValue::Int(3)]
                 );
             }
-            other => panic!("esperaba Array, got {:?}", other),
+            other => panic!("expected Array, got {:?}", other),
         }
     }
 
@@ -4235,7 +4235,7 @@ mod tests {
         let v = parse_text_value(oid::INT8_ARRAY, Some(b"{}")).unwrap();
         match v {
             PgValue::Array { values, .. } => assert!(values.is_empty()),
-            _ => panic!("esperaba Array vacío"),
+            _ => panic!("expected empty Array"),
         }
     }
 
@@ -4250,7 +4250,7 @@ mod tests {
                     vec![PgValue::Text("hola".into()), PgValue::Text("chau".into())]
                 );
             }
-            _ => panic!("esperaba Array text"),
+            _ => panic!("expected Array text"),
         }
     }
 
@@ -4638,7 +4638,7 @@ mod tests {
         );
         // The original string has 200 chars; truncated to 80 + `…`.
         // The log must not contain the full 200-'x' run.
-        assert!(line.contains("…"), "debería truncar: {line}");
+        assert!(line.contains("…"), "should truncate: {line}");
         assert!(
             !line.contains(&"x".repeat(200)),
             "no debe filtrar full: {line}"
@@ -4676,7 +4676,7 @@ mod tests {
         // Without args, the params section should not appear.
         assert!(
             !line.contains("params="),
-            "sin args no debe haber sección params: {line}"
+            "without args there must be no params section: {line}"
         );
     }
 
@@ -4767,7 +4767,7 @@ mod tests {
         );
         assert!(
             line.contains("$1=<redacted>"),
-            "esperaba $1 enmascarado, fue: {line}"
+            "expected $1 masked, was: {line}"
         );
         assert!(
             !line.contains("super_secret_xyz"),
@@ -4788,7 +4788,7 @@ mod tests {
         );
         assert!(
             line.contains("$1=\"ada@example.com\""),
-            "esperaba email visible (no sensitive), fue: {line}"
+            "expected email visible (not sensitive), was: {line}"
         );
     }
 
@@ -4821,10 +4821,7 @@ mod tests {
             message: "duplicate key value violates unique constraint \"users_email_key\"".into(),
         };
         let s = err.to_string();
-        assert!(
-            s.contains("[23505]"),
-            "esperaba SQLSTATE entre corchetes: {s}"
-        );
+        assert!(s.contains("[23505]"), "expected SQLSTATE in brackets: {s}");
         assert!(s.starts_with("ERROR [23505]:"), "{s}");
     }
 
@@ -4833,11 +4830,11 @@ mod tests {
         let err = DbError::Server {
             severity: "ERROR".into(),
             code: String::new(),
-            message: "algo falló".into(),
+            message: "something failed".into(),
         };
         let s = err.to_string();
-        assert!(!s.contains("[]"), "no debe haber [] vacíos: {s}");
-        assert_eq!(s, "ERROR: algo falló");
+        assert!(!s.contains("[]"), "must not have empty []: {s}");
+        assert_eq!(s, "ERROR: something failed");
     }
 
     #[test]
@@ -4872,7 +4869,7 @@ mod tests {
         let s = enriched.to_string();
         assert!(
             s.contains("$1=<redacted>"),
-            "esperaba redaction del password: {s}"
+            "expected redaction of the password: {s}"
         );
         assert!(
             !s.contains("super_secret_xyz"),
@@ -4899,7 +4896,7 @@ mod tests {
         };
         let enriched = enrich_db_error_with_context(err, &long_sql, &[PgValue::Int(1)]);
         let s = enriched.to_string();
-        assert!(s.contains("…"), "esperaba SQL truncado: {s}");
+        assert!(s.contains("…"), "expected truncated SQL: {s}");
         assert!(s.len() < long_sql.len() + 100, "no debe inflar masivamente");
     }
 
@@ -4919,7 +4916,7 @@ mod tests {
         // $2 corresponds to api_key → redacted.
         assert!(
             line.contains("$2=<redacted>"),
-            "esperaba api_key redacted, fue: {line}"
+            "expected api_key redacted, was: {line}"
         );
         assert!(
             !line.contains("sk-very-secret"),
