@@ -50,7 +50,7 @@ fn now_secs() -> i64 {
 
 #[tokio::test]
 #[ignore]
-async fn iter2b_blacklist_jti_y_luego_is_blacklisted_devuelve_true() {
+async fn iter2b_blacklist_jti_then_is_blacklisted_returns_true() {
     let conn = connect_url(&pg_url()).await.unwrap();
     ensure_token_blacklist_table(&conn).await.unwrap();
     cleanup_jti(&conn, "iter2b-test-jti-1").await;
@@ -84,7 +84,7 @@ async fn iter2b_blacklist_jti_y_luego_is_blacklisted_devuelve_true() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2b_is_blacklisted_para_jti_inexistente_devuelve_false() {
+async fn iter2b_is_blacklisted_for_nonexistent_jti_returns_false() {
     let conn = connect_url(&pg_url()).await.unwrap();
     ensure_token_blacklist_table(&conn).await.unwrap();
     cleanup_jti(&conn, "iter2b-jti-no-existe").await;
@@ -105,7 +105,7 @@ async fn iter2b_is_blacklisted_para_jti_inexistente_devuelve_false() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2b_is_blacklisted_con_expires_at_pasado_devuelve_false() {
+async fn iter2b_is_blacklisted_with_past_expires_at_returns_false() {
     let conn = connect_url(&pg_url()).await.unwrap();
     ensure_token_blacklist_table(&conn).await.unwrap();
     cleanup_jti(&conn, "iter2b-jti-expirado").await;
@@ -141,7 +141,7 @@ async fn iter2b_is_blacklisted_con_expires_at_pasado_devuelve_false() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2b_cleanup_expired_borra_solo_filas_vencidas() {
+async fn iter2b_cleanup_expired_deletes_only_expired_rows() {
     let conn = connect_url(&pg_url()).await.unwrap();
     ensure_token_blacklist_table(&conn).await.unwrap();
     cleanup_jti(&conn, "iter2b-cleanup-vivo").await;
@@ -201,7 +201,7 @@ async fn iter2b_cleanup_expired_borra_solo_filas_vencidas() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2b_blacklist_re_blacklist_mismo_jti_actualiza_expires_at() {
+async fn iter2b_blacklist_re_blacklist_same_jti_updates_expires_at() {
     // ON CONFLICT (jti) DO UPDATE SET expires_at = EXCLUDED.expires_at:
     // si re-blacklisteás el mismo jti, el expires_at se actualiza sin
     // fallar con duplicate key.
@@ -254,7 +254,7 @@ async fn iter2b_blacklist_re_blacklist_mismo_jti_actualiza_expires_at() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2b_ensure_token_blacklist_table_es_idempotente() {
+async fn iter2b_ensure_token_blacklist_table_is_idempotent() {
     // Llamar `ensure_token_blacklist_table` dos veces no debe fallar
     // (CREATE TABLE IF NOT EXISTS).
     let conn = connect_url(&pg_url()).await.unwrap();

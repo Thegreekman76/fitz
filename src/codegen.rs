@@ -4693,10 +4693,7 @@ fn collect_module_sigs(
                 }
                 let ret = match return_type {
                     Some(te) => resolve_type_expr(te, env).map_err(|e| {
-                        loader_err(format!(
-                            "module fn `{}`: return type: {}",
-                            name, e.message
-                        ))
+                        loader_err(format!("module fn `{}`: return type: {}", name, e.message))
                     })?,
                     None => Type::Null,
                 };
@@ -14832,10 +14829,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!(
-                        "`load_env(path)` expects 1 argument, got {}",
-                        args.len()
-                    ),
+                    format!("`load_env(path)` expects 1 argument, got {}", args.len()),
                 ));
             }
             let (p_code, p_ty) = self.gen_expr(&args[0])?;
@@ -14855,10 +14849,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!(
-                        "`secret(key)` expects 1 argument (Str), got {}",
-                        args.len()
-                    ),
+                    format!("`secret(key)` expects 1 argument (Str), got {}", args.len()),
                 ));
             }
             let (k_code, k_ty) = self.gen_expr(&args[0])?;
@@ -14928,10 +14919,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!(
-                        "`flag(name)` expects 1 argument (Str), got {}",
-                        args.len()
-                    ),
+                    format!("`flag(name)` expects 1 argument (Str), got {}", args.len()),
                 ));
             }
             let (k_code, k_ty) = self.gen_expr(&args[0])?;
@@ -14949,10 +14937,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!(
-                        "`sleep` expects 1 argument (ms: Int), got {}",
-                        args.len()
-                    ),
+                    format!("`sleep` expects 1 argument (ms: Int), got {}", args.len()),
                 ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
@@ -15153,10 +15138,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let sig = self.fn_sigs.get(target_name).cloned().ok_or_else(|| {
             self.err_at(
                 call_span,
-                format!(
-                    "spawn: fn `{}` is not defined in this scope.",
-                    target_name
-                ),
+                format!("spawn: fn `{}` is not defined in this scope.", target_name),
             )
         })?;
         // Generate the args' code, coercing to the param's type.
@@ -15261,9 +15243,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                    "`{}` does not support named arguments (indirect callee without name info)",
-                    callee_expr
-                ),
+                        "`{}` does not support named arguments (indirect callee without name info)",
+                        callee_expr
+                    ),
                 ));
             }
             if sig.has_varargs {
@@ -15292,10 +15274,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         .ok_or_else(|| {
                             self.err_at(
                                 call_span,
-                                format!(
-                                    "`{}` has no parameter named `{}`",
-                                    callee_expr, name
-                                ),
+                                format!("`{}` has no parameter named `{}`", callee_expr, name),
                             )
                         })?;
                     if slots[idx].is_some() {
@@ -15307,10 +15286,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     slots[idx] = Some((**value).clone());
                 } else {
                     if after_named {
-                        return Err(self.err_at(call_span, format!(
-                            "`{}`: cannot pass a positional argument after a named one",
-                            callee_expr
-                        )));
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "`{}`: cannot pass a positional argument after a named one",
+                                callee_expr
+                            ),
+                        ));
                     }
                     if next_pos >= sig.param_names.len() {
                         return Err(self.err_at(
@@ -15409,9 +15391,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     self.err_at(
                         call_span,
                         format!(
-                        "`{}`: parameter {} has no default and was not provided (internal bug)",
-                        callee_expr, i + 1,
-                    ),
+                            "`{}`: parameter {} has no default and was not provided (internal bug)",
+                            callee_expr,
+                            i + 1,
+                        ),
                     )
                 })?;
                 let (code, ty) = self.gen_expr(default_expr)?;
@@ -17010,11 +16993,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if args.len() != 1 {
             return Err(self.err_at(
                 call_span,
-                format!(
-                    "`{}(other)` expects 1 arg Date, got {}",
-                    method,
-                    args.len()
-                ),
+                format!("`{}(other)` expects 1 arg Date, got {}", method, args.len()),
             ));
         }
         let (code, ty) = self.gen_expr(&args[0])?;
@@ -17603,10 +17582,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let target_id = self.env.lookup(&rel.target_type).ok_or_else(|| {
             self.err_at(
                 call_span,
-                format!(
-                    "navigation: type `{}` is not registered",
-                    rel.target_type
-                ),
+                format!("navigation: type `{}` is not registered", rel.target_type),
             )
         })?;
         let target_ty = Type::Nominal(target_id);
@@ -18817,10 +18793,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
-                        format!(
-                            "`.first(db)` expects 1 argument (db), got {}",
-                            args.len()
-                        ),
+                        format!("`.first(db)` expects 1 argument (db), got {}", args.len()),
                     ));
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
@@ -18865,10 +18838,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
-                        format!(
-                            "`.count(db)` expects 1 argument (db), got {}",
-                            args.len()
-                        ),
+                        format!("`.count(db)` expects 1 argument (db), got {}", args.len()),
                     ));
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
@@ -18906,8 +18876,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if is_aggregated {
                     return Err(self.err_at(
                         call_span,
-                        "`.update(db, ...)` is not valid over a GROUP BY (Aggregated)"
-                            .to_string(),
+                        "`.update(db, ...)` is not valid over a GROUP BY (Aggregated)".to_string(),
                     ));
                 }
                 if args.len() != 2 {
@@ -18966,10 +18935,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
-                        format!(
-                            "`.delete(db)` expects 1 argument (db), got {}",
-                            args.len()
-                        ),
+                        format!("`.delete(db)` expects 1 argument (db), got {}", args.len()),
                     ));
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
@@ -19441,10 +19407,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if args.len() != 1 {
             return Err(self.err_at(
                 call_span,
-                format!(
-                    "`.limit(n)` expects 1 argument (Int), got {}",
-                    args.len()
-                ),
+                format!("`.limit(n)` expects 1 argument (Int), got {}", args.len()),
             ));
         }
         let (n_code, n_ty) = self.gen_expr(&args[0])?;
@@ -19465,10 +19428,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if args.len() != 1 {
             return Err(self.err_at(
                 call_span,
-                format!(
-                    "`.offset(n)` expects 1 argument (Int), got {}",
-                    args.len()
-                ),
+                format!("`.offset(n)` expects 1 argument (Int), got {}", args.len()),
             ));
         }
         let (n_code, n_ty) = self.gen_expr(&args[0])?;
@@ -19517,10 +19477,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
             },
             _ => {
-                return Err(self.err_at(
-                    call_span,
-                    "`.group_by(closure)`: body must be `u.field`",
-                ));
+                return Err(self.err_at(call_span, "`.group_by(closure)`: body must be `u.field`"));
             }
         };
         let sql_col = meta
@@ -20199,7 +20156,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         if !args.is_empty() {
                             return Err(self.err_at(
                                 call_span,
-                                format!("`WsConn.close()` does not accept args, got {}", args.len()),
+                                format!(
+                                    "`WsConn.close()` does not accept args, got {}",
+                                    args.len()
+                                ),
                             ));
                         }
                         return Ok((format!("({{ ({}).close(); () }})", obj_code), Type::Null));
@@ -20351,10 +20311,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     if args.len() != 1 {
                         return Err(self.err_at(
                             call_span,
-                            format!(
-                                "`Date.format(fmt)` expects 1 arg Str, got {}",
-                                args.len()
-                            ),
+                            format!("`Date.format(fmt)` expects 1 arg Str, got {}", args.len()),
                         ));
                     }
                     let (fmt_code, fmt_ty) = self.gen_expr(&args[0])?;
@@ -24472,9 +24429,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         iter.span(),
                         format!(
-                        "comprehension needs an iterable (`Range` or `List<T>`), got `{}`",
-                        display_type(other, self.env)
-                    ),
+                            "comprehension needs an iterable (`Range` or `List<T>`), got `{}`",
+                            display_type(other, self.env)
+                        ),
                     ));
                 }
             };
@@ -36398,8 +36355,8 @@ mod tests {
         // outer call to the Rc::new path and the presence of the vec! macro
         // with the 3 items having i64 suffix.
         assert_eq!(ast_test::call_path(init).as_deref(), Some("Arc :: new"));
-        let vec_args = ast_test::find_macro_args(init, "vec")
-            .expect("expected a vec! macro inside the init");
+        let vec_args =
+            ast_test::find_macro_args(init, "vec").expect("expected a vec! macro inside the init");
         for n in ["1i64", "2i64", "3i64"] {
             assert!(
                 vec_args.contains(n),
@@ -36423,8 +36380,8 @@ mod tests {
             "expected xs to be typed as List<Float>"
         );
         let init = ast_test::local_init_expr(l).unwrap();
-        let vec_args = ast_test::find_macro_args(init, "vec")
-            .expect("expected a vec! macro inside the init");
+        let vec_args =
+            ast_test::find_macro_args(init, "vec").expect("expected a vec! macro inside the init");
         // The Ints (1, 3) are coerced to f64 with `(N as f64)`; the Float
         // stays literal.
         assert!(
@@ -36679,8 +36636,8 @@ mod tests {
         );
         // The panic with the interpreter message stays as a string
         // (it's a bit-a-bit contract with the evaluator).
-        let panic_args = ast_test::find_macro_args(init, "panic")
-            .expect("expected a panic! inside the block");
+        let panic_args =
+            ast_test::find_macro_args(init, "panic").expect("expected a panic! inside the block");
         assert!(
             panic_args.contains("key not found in map"),
             "expected interpreter message in panic!, was: {}",
@@ -37639,8 +37596,8 @@ mod tests {
         let src = "@get(\"/u/{id}\") fn get_user(id: Int) -> Str => \"x\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
-        let handler =
-            ast_test::find_item_fn(&file, "__handler_get_user").expect("missing __handler_get_user");
+        let handler = ast_test::find_item_fn(&file, "__handler_get_user")
+            .expect("missing __handler_get_user");
         let pats_tys = ast_test::fn_param_pats_and_types(handler);
         assert!(
             pats_tys.iter().any(|(p, t)| {
@@ -38946,8 +38903,8 @@ mod tests {
         .unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let println_args =
-            ast_test::first_macro_args_in_stmts(stmts, "println").expect("missing println! in main");
+        let println_args = ast_test::first_macro_args_in_stmts(stmts, "println")
+            .expect("missing println! in main");
         assert!(
             println_args.contains("Ok (__v)")
                 && println_args.contains("format !")
@@ -39050,7 +39007,8 @@ mod tests {
     fn module_let_int_top_level_is_emitted_as_pub_const() {
         let code = gen_module("let MAX_RETRIES: Int = 5").unwrap();
         let file = ast_test::parse(&code);
-        let max = ast_test::find_item_const(&file, "MAX_RETRIES").expect("missing const MAX_RETRIES");
+        let max =
+            ast_test::find_item_const(&file, "MAX_RETRIES").expect("missing const MAX_RETRIES");
         assert!(
             ast_test::vis_is_pub(&max.vis),
             "expected `pub const MAX_RETRIES`"
@@ -41180,10 +41138,19 @@ mod tests {
             "foo", false, false, false, false, false, false, false, false, false, false, false,
             false,
         );
-        assert!(!toml.contains("sha2"), "sha2 should not be present without db");
-        assert!(!toml.contains("hmac"), "hmac should not be present without db");
+        assert!(
+            !toml.contains("sha2"),
+            "sha2 should not be present without db"
+        );
+        assert!(
+            !toml.contains("hmac"),
+            "hmac should not be present without db"
+        );
         // v0.10.23 — without db, no TLS deps either.
-        assert!(!toml.contains("rustls"), "rustls should not be present without db");
+        assert!(
+            !toml.contains("rustls"),
+            "rustls should not be present without db"
+        );
         assert!(
             !toml.contains("tokio-rustls"),
             "tokio-rustls should not be present without db"

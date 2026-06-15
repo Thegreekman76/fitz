@@ -789,7 +789,10 @@ async fn run_cron_job(job: CronJob) {
     // ---- Normal loop ----
     loop {
         let Some(next_in_tz) = job.schedule.upcoming(job.tz).next() else {
-            eprintln!("🕐 cron job '{}' exhausted its schedule, terminating.", job.name);
+            eprintln!(
+                "🕐 cron job '{}' exhausted its schedule, terminating.",
+                job.name
+            );
             return;
         };
         let next_utc = next_in_tz.with_timezone(&Utc);

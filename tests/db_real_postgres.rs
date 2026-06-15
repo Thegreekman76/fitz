@@ -37,7 +37,7 @@ fn pg_url() -> String {
 
 #[tokio::test]
 #[ignore]
-async fn connect_y_select_uno() {
+async fn connect_and_select_one() {
     let url = pg_url();
     let conn = connect_url(&url).await.expect("connect debería funcionar");
     let qr = conn
@@ -53,7 +53,7 @@ async fn connect_y_select_uno() {
 
 #[tokio::test]
 #[ignore]
-async fn select_con_args_parametrizados() {
+async fn select_with_parameterized_args() {
     // Extended Query Protocol con $1/$2.
     let url = pg_url();
     let conn = connect_url(&url).await.unwrap();
@@ -127,7 +127,7 @@ async fn create_temp_insert_select_full_cycle() {
 
 #[tokio::test]
 #[ignore]
-async fn tipos_oid_core_round_trip() {
+async fn oid_core_types_round_trip() {
     // Valida marshaling de los 11 tipos OID del MVP. Cada uno
     // pasa como arg de un cast `$1::tipo` y vuelve como Postgres
     // lo serializa en text format.
@@ -201,7 +201,7 @@ async fn tipos_oid_core_round_trip() {
 
 #[tokio::test]
 #[ignore]
-async fn error_response_parsea_mensaje_del_servidor() {
+async fn error_response_parses_server_message() {
     // Query sintácticamente invalida → ErrorResponse Postgres.
     // El driver lo traduce a `DbError::Server { severity, code,
     // message }`, y `Display` lo formatea como `<severity>:
@@ -243,7 +243,7 @@ async fn error_response_parsea_mensaje_del_servidor() {
 
 #[tokio::test]
 #[ignore]
-async fn tx_happy_path_commit_persiste() {
+async fn tx_happy_path_commit_persists() {
     let url = pg_url();
     let conn = connect_url(&url).await.unwrap();
     // Setup: tabla limpia.
@@ -288,7 +288,7 @@ async fn tx_happy_path_commit_persiste() {
 
 #[tokio::test]
 #[ignore]
-async fn tx_rollback_explicito_nada_persiste() {
+async fn tx_explicit_rollback_nothing_persists() {
     let url = pg_url();
     let conn = connect_url(&url).await.unwrap();
     conn.exec(
@@ -331,7 +331,7 @@ async fn tx_rollback_explicito_nada_persiste() {
 
 #[tokio::test]
 #[ignore]
-async fn tx_conn_vuelve_al_pool_despues_de_tx() {
+async fn tx_conn_returns_to_pool_after_tx() {
     // Después de una tx (sea OK o Err), la conn vuelve al pool
     // y queries siguientes la pueden reusar. Test contra leak.
     let url = pg_url();
@@ -378,7 +378,7 @@ async fn tx_conn_vuelve_al_pool_despues_de_tx() {
 
 #[tokio::test]
 #[ignore]
-async fn pool_queries_concurrentes_no_se_serializan() {
+async fn pool_concurrent_queries_do_not_serialize() {
     // Test del pool: lanzamos N queries en paralelo y validamos
     // que el tiempo total << N * tiempo_individual (serializado).
     // Cada query hace pg_sleep(0.1) para forzar I/O wait.
@@ -436,7 +436,7 @@ async fn pool_queries_concurrentes_no_se_serializan() {
 
 #[tokio::test]
 #[ignore]
-async fn close_idempotente_y_queries_post_close_fallan() {
+async fn close_idempotent_and_queries_post_close_fail() {
     let url = pg_url();
     let conn = connect_url(&url).await.unwrap();
     conn.close().await.unwrap();
@@ -478,7 +478,7 @@ async fn seed_orm_test_table(url: &str) -> std::sync::Arc<fitz::db::DbConnHandle
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_user_all_db_devuelve_instancias_reales() {
+async fn orm_user_all_db_returns_real_instances() {
     // Setup: tabla con 2 rows.
     let url = pg_url();
     let seed_conn = seed_orm_test_table(&url).await;
@@ -571,7 +571,7 @@ async fn orm_user_all_db_devuelve_instancias_reales() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_where_filtra_por_age() {
+async fn orm_where_filters_by_age() {
     // Setup: tabla con 3 rows de edades distintas.
     let url = pg_url();
     let seed = connect_url(&url).await.unwrap();
@@ -662,7 +662,7 @@ async fn orm_where_filtra_por_age() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_where_chain_combina_con_and() {
+async fn orm_where_chain_combines_with_and() {
     // `.where(f).where(g)` combina con AND. Filtramos por
     // age > 18 AND name == 'ada'.
     let url = pg_url();
@@ -1023,7 +1023,7 @@ async fn orm_insert_update_delete_e2e() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_belongs_to_y_has_many_e2e() {
+async fn orm_belongs_to_and_has_many_e2e() {
     // Setup: 2 tablas relacionadas. users + posts con FK author_id.
     let url = pg_url();
     let seed = connect_url(&url).await.unwrap();
@@ -1146,7 +1146,7 @@ async fn orm_belongs_to_y_has_many_e2e() {
 // =============================================================
 // Fase 10.b.7 — Paridad fitz build ↔ fitz run sobre navigation
 //
-// El test de arriba (orm_belongs_to_y_has_many_e2e) valida el
+// El test de arriba (orm_belongs_to_and_has_many_e2e) valida el
 // path del intérprete (`fitz run`). Este test paralelo compila el
 // MISMO programa con `fitz build` y ejecuta el binario standalone,
 // confirmando que las navigation queries SQL emitidas son
@@ -1155,7 +1155,7 @@ async fn orm_belongs_to_y_has_many_e2e() {
 
 #[test]
 #[ignore]
-fn orm_belongs_to_y_has_many_paridad_codegen_e2e() {
+fn orm_belongs_to_and_has_many_parity_codegen_e2e() {
     use std::process::Command;
     let url = pg_url();
 
@@ -1304,7 +1304,7 @@ fn orm_belongs_to_y_has_many_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
+fn orm_navigation_with_column_override_in_fk_source_parity_codegen_e2e() {
     use std::process::Command;
     let url = pg_url();
 
@@ -1442,7 +1442,7 @@ fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_preload_has_many_paridad_codegen_e2e() {
+fn orm_preload_has_many_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1553,7 +1553,7 @@ fn orm_preload_has_many_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_preload_belongs_to_companion_paridad_codegen_e2e() {
+fn orm_preload_belongs_to_companion_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1666,7 +1666,7 @@ fn orm_preload_belongs_to_companion_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_dynamic_chain_conditional_paridad_codegen_e2e() {
+fn orm_dynamic_chain_conditional_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1764,7 +1764,7 @@ fn orm_dynamic_chain_conditional_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_jsonb_operators_in_where_paridad_codegen_e2e() {
+fn orm_jsonb_operators_in_where_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1858,7 +1858,7 @@ fn orm_jsonb_operators_in_where_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_jsonb_path_operators_in_where_paridad_codegen_e2e() {
+fn orm_jsonb_path_operators_in_where_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -1962,7 +1962,7 @@ fn orm_jsonb_path_operators_in_where_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_group_by_aggregate_paridad_codegen_e2e() {
+fn orm_group_by_aggregate_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2047,7 +2047,7 @@ fn orm_group_by_aggregate_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_navigation_chain_paridad_codegen_e2e() {
+fn orm_navigation_chain_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2163,7 +2163,7 @@ fn orm_navigation_chain_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_map_str_concreto_paridad_codegen_e2e() {
+fn orm_map_str_concrete_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2253,7 +2253,7 @@ fn orm_map_str_concreto_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_list_nullable_inner_paridad_codegen_e2e() {
+fn orm_list_nullable_inner_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2329,7 +2329,7 @@ fn orm_list_nullable_inner_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_update_con_list_y_map_literal_paridad_codegen_e2e() {
+fn orm_update_with_list_and_map_literal_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2412,7 +2412,7 @@ fn orm_update_con_list_y_map_literal_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_basics_all_first_count_paridad_codegen_e2e() {
+fn orm_basics_all_first_count_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2478,7 +2478,7 @@ fn orm_basics_all_first_count_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_crud_lifecycle_insert_update_delete_paridad_codegen_e2e() {
+fn orm_crud_lifecycle_insert_update_delete_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2558,7 +2558,7 @@ fn orm_crud_lifecycle_insert_update_delete_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_order_by_limit_offset_paridad_codegen_e2e() {
+fn orm_order_by_limit_offset_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2635,7 +2635,7 @@ fn orm_order_by_limit_offset_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_aggregates_scalar_paridad_codegen_e2e() {
+fn orm_aggregates_scalar_parity_codegen_e2e() {
     let url = pg_url();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2762,7 +2762,7 @@ fn run_paridad_program(src: &str, stem: &str, assert_stdout: impl FnOnce(&str)) 
 
 #[test]
 #[ignore]
-fn orm_where_combinatorio_paridad_codegen_e2e() {
+fn orm_where_combinatorial_parity_codegen_e2e() {
     use std::process::Command;
     let url = pg_url();
 
@@ -2897,7 +2897,7 @@ fn orm_where_combinatorio_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_where_between_mod_var_externa_paridad_codegen_e2e() {
+fn orm_where_between_mod_external_var_parity_codegen_e2e() {
     use std::process::Command;
     let url = pg_url();
 
@@ -3021,7 +3021,7 @@ fn orm_where_between_mod_var_externa_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_where_array_ops_paridad_codegen_e2e() {
+fn orm_where_array_ops_parity_codegen_e2e() {
     use std::process::Command;
     let url = pg_url();
 
@@ -3147,7 +3147,7 @@ fn orm_where_array_ops_paridad_codegen_e2e() {
 
 #[test]
 #[ignore]
-fn orm_arrays_y_jsonb_paridad_codegen_e2e() {
+fn orm_arrays_and_jsonb_parity_codegen_e2e() {
     use std::process::Command;
     let url = pg_url();
 
@@ -3366,7 +3366,7 @@ async fn orm_aggregates_sum_avg_min_max_e2e() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_aggregate_sobre_set_vacio_devuelve_null() {
+async fn orm_aggregate_over_empty_set_returns_null() {
     // SUM/AVG/MIN/MAX sobre 0 rows → Postgres devuelve NULL.
     // El ORM lo expone como Value::Null adentro de Result::Ok.
     let url = pg_url();
@@ -3432,7 +3432,7 @@ async fn orm_aggregate_sobre_set_vacio_devuelve_null() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_group_by_count_y_sum_e2e() {
+async fn orm_group_by_count_and_sum_e2e() {
     // E2E del GROUP BY: tabla con users de varios países, group_by
     // country + count → cuántos users por país; group_by country +
     // sum(age) → suma de edades por país.
@@ -3739,7 +3739,7 @@ async fn orm_jsonb_insert_select_round_trip() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_jsonb_nullable_acepta_null() {
+async fn orm_jsonb_nullable_accepts_null() {
     // Field `Map<Str, Any>?` nullable: el Value::Null se manda como
     // NULL real (no como string "null") gracias al short-circuit
     // en `fitz_value_to_jsonb`.
@@ -3908,7 +3908,7 @@ async fn orm_where_and_or_not_e2e() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_where_filters_completos_e2e() {
+async fn orm_where_filters_complete_e2e() {
     // Test combinado de is_in / is_null / starts_with / contains.
     let url = pg_url();
     let seed = connect_url(&url).await.unwrap();
@@ -4218,7 +4218,7 @@ async fn orm_arrays_text_e2e() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn orm_arrays_vacio_y_nullable_e2e() {
+async fn orm_arrays_empty_and_nullable_e2e() {
     // (a) Array vacío `[]` round-trip OK como `{}`.
     // (b) Nullable `List<Int>?` con `null` → NULL real en Postgres.
     let url = pg_url();
@@ -4651,7 +4651,7 @@ async fn orm_uuid_array_e2e() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn inspect_schema_text_y_json_contienen_todo_el_shape() {
+async fn inspect_schema_text_and_json_contain_all_the_shape() {
     let url = pg_url();
     let seed = connect_url(&url).await.expect("connect");
 
@@ -4792,7 +4792,7 @@ async fn inspect_schema_text_y_json_contienen_todo_el_shape() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
-async fn introspect_y_diff_round_trip_using_gin_method() {
+async fn introspect_and_diff_round_trip_using_gin_method() {
     use fitz::migrations::{Change, Index, TableRef};
 
     let url = pg_url();
@@ -4954,7 +4954,7 @@ async fn tier_a4_nested_transaction_savepoint_inner_rollback() {
 
 #[tokio::test]
 #[ignore]
-async fn tier_a4_nested_transaction_savepoint_inner_commit_persiste() {
+async fn tier_a4_nested_transaction_savepoint_inner_commit_persists() {
     // Hermano del test anterior: inner Ok → RELEASE SAVEPOINT, outer
     // commit persiste las 3 rows.
     let url = pg_url();
@@ -5047,7 +5047,7 @@ async fn tier_a9_transaction_isolation_serializable() {
 
 #[tokio::test]
 #[ignore]
-async fn tier_a9_transaction_isolation_read_committed_y_repeatable_read() {
+async fn tier_a9_transaction_isolation_read_committed_and_repeatable_read() {
     // Sanity: los otros 2 niveles también se aceptan.
     let url = pg_url();
     let conn = connect_url(&url).await.unwrap();

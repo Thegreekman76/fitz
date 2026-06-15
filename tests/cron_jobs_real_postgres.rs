@@ -52,7 +52,7 @@ async fn cleanup_job(conn: &Arc<DbConnHandle>, name: &str) {
 
 #[tokio::test]
 #[ignore]
-async fn iter2_init_storage_crea_las_tablas_y_es_idempotente() {
+async fn iter2_init_storage_creates_tables_and_is_idempotent() {
     let conn = connect_url(&pg_url()).await.expect("connect");
     init_storage(&conn).await.expect("primer init_storage");
     // Segunda vez: `CREATE TABLE IF NOT EXISTS` debe ser no-op sin
@@ -74,7 +74,7 @@ async fn iter2_init_storage_crea_las_tablas_y_es_idempotente() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2_upsert_job_row_inserta_y_actualiza() {
+async fn iter2_upsert_job_row_inserts_and_updates() {
     let conn = connect_url(&pg_url()).await.unwrap();
     init_storage(&conn).await.unwrap();
     cleanup_job(&conn, "iter2_upsert_test").await;
@@ -130,7 +130,7 @@ async fn iter2_upsert_job_row_inserta_y_actualiza() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2_record_run_start_y_finish_persisten_status() {
+async fn iter2_record_run_start_and_finish_persist_status() {
     let conn = connect_url(&pg_url()).await.unwrap();
     init_storage(&conn).await.unwrap();
     cleanup_job(&conn, "iter2_run_test").await;
@@ -174,7 +174,7 @@ async fn iter2_record_run_start_y_finish_persisten_status() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2_record_run_finish_failed_lleva_error_message() {
+async fn iter2_record_run_finish_failed_carries_error_message() {
     let conn = connect_url(&pg_url()).await.unwrap();
     init_storage(&conn).await.unwrap();
     cleanup_job(&conn, "iter2_fail_test").await;
@@ -207,7 +207,7 @@ async fn iter2_record_run_finish_failed_lleva_error_message() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2_update_job_last_run_se_refleja_en_read_last_run_at() {
+async fn iter2_update_job_last_run_reflects_in_read_last_run_at() {
     let conn = connect_url(&pg_url()).await.unwrap();
     init_storage(&conn).await.unwrap();
     cleanup_job(&conn, "iter2_last_run_test").await;
@@ -275,7 +275,7 @@ async fn iter2_update_job_last_run_se_refleja_en_read_last_run_at() {
 
 #[tokio::test]
 #[ignore]
-async fn iter2_read_last_run_at_para_job_inexistente_es_none() {
+async fn iter2_read_last_run_at_for_nonexistent_job_is_none() {
     let conn = connect_url(&pg_url()).await.unwrap();
     init_storage(&conn).await.unwrap();
     cleanup_job(&conn, "iter2_inexistente").await;
@@ -306,7 +306,7 @@ async fn iter2_read_last_run_at_para_job_inexistente_es_none() {
 /// completan OK.
 #[tokio::test]
 #[ignore]
-async fn v0_15_13_ensure_storage_initialized_evita_race_con_10_paralelos() {
+async fn v0_15_13_ensure_storage_initialized_avoids_race_with_10_parallel() {
     // Setup: connect + drop tablas para forzar el path "no existe".
     let conn = Arc::new(connect_url(&pg_url()).await.expect("connect"));
     let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_runs", &[]).await;
@@ -376,7 +376,7 @@ async fn v0_15_13_ensure_storage_initialized_evita_race_con_10_paralelos() {
 /// con dependency injection).
 #[tokio::test]
 #[ignore]
-async fn v0_15_13_ensure_storage_initialized_cachea_resultado_segundo_call_no_corre_create_table() {
+async fn v0_15_13_ensure_storage_initialized_caches_result_second_call_does_not_run_create_table() {
     let conn = connect_url(&pg_url()).await.expect("connect");
 
     fitz::cron_jobs::reset_init_storage_once_for_tests();

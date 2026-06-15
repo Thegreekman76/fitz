@@ -1159,10 +1159,7 @@ fn register_test(
     // an evaluator bug.
     let is_async = match handler {
         Value::Function { is_async, .. } => *is_async,
-        _ => unreachable!(
-            "@test on fn '{}': handler is not Value::Function",
-            fn_name
-        ),
+        _ => unreachable!("@test on fn '{}': handler is not Value::Function", fn_name),
     };
 
     crate::testing::push_test(crate::testing::TestSpec {
@@ -1287,7 +1284,10 @@ fn collect_headers(
                     return Err(err(format!(
                         "@header(name=\"{}\") on fn '{}': param '{}' must be `Str` or `Str?`, \
                          but is declared as `{}`",
-                        http_name, fn_name, param_name, other.display_name(),
+                        http_name,
+                        fn_name,
+                        param_name,
+                        other.display_name(),
                     )));
                 }
             },
@@ -4627,10 +4627,7 @@ fn resolve_named_args(
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    format!(
-                        "`{}` has no parameter named `{}`",
-                        display_name, name
-                    ),
+                    format!("`{}` has no parameter named `{}`", display_name, name),
                 ))
             })?;
             // If the slot is already filled by a previous positional
@@ -5320,8 +5317,7 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
             Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => {
                 return Err(err(
-                    "spawn: the argument must be a literal call to a fn `@background`."
-                        .to_string(),
+                    "spawn: the argument must be a literal call to a fn `@background`.".to_string(),
                 ));
             }
         },
@@ -7983,7 +7979,10 @@ fn list_zip(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                 },
                 span.line,
                 span.column,
-                format!("`zip` expects another `List`, received `{}`", other.type_name()),
+                format!(
+                    "`zip` expects another `List`, received `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -8355,7 +8354,10 @@ fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`.insert_at()` does not accept negative idx: received {}", idx),
+            format!(
+                "`.insert_at()` does not accept negative idx: received {}",
+                idx
+            ),
         )));
     }
     let snapshot: Vec<Value> = items.lock().clone();
@@ -8661,7 +8663,10 @@ fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                 },
                 span.line,
                 span.column,
-                format!("`.windows()` expects `Int`, received `{}`", other.type_name()),
+                format!(
+                    "`.windows()` expects `Int`, received `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -9654,7 +9659,10 @@ fn str_left(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                 },
                 span.line,
                 span.column,
-                format!("`Str.left()` expects `Int`, received `{}`", other.type_name()),
+                format!(
+                    "`Str.left()` expects `Int`, received `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -9815,7 +9823,10 @@ fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
-            format!("`.repeat_with()` does not accept negative n: received {}", n),
+            format!(
+                "`.repeat_with()` does not accept negative n: received {}",
+                n
+            ),
         )));
     }
     let parts: Vec<&str> = std::iter::repeat_n(s.as_str(), n as usize).collect();
@@ -10208,7 +10219,9 @@ fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
         Eq => Ok(Value::Bool(l == r)),
         NotEq => Ok(Value::Bool(l != r)),
         Lt | LtEq | Gt | GtEq => compare(op, l, r, span),
-        And | Or | Xor => unreachable!("And/Or/Xor are handled in eval_logical before getting here"),
+        And | Or | Xor => {
+            unreachable!("And/Or/Xor are handled in eval_logical before getting here")
+        }
         // Mini-batch Bits — Int only. The checker statically rejects
         // other types; the runtime emits TypeError if a non-Int value
         // arrives through the gradual mode.
@@ -10580,10 +10593,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                         },
                         span.line,
                         span.column,
-                        format!(
-                            "list index must be Int, not `{}`",
-                            other.type_name()
-                        ),
+                        format!("list index must be Int, not `{}`", other.type_name()),
                     )))
                 }
             };
@@ -10620,10 +10630,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                         },
                         span.line,
                         span.column,
-                        format!(
-                            "Str index must be Int, not `{}`",
-                            other.type_name()
-                        ),
+                        format!("Str index must be Int, not `{}`", other.type_name()),
                     )))
                 }
             };
@@ -12212,10 +12219,7 @@ fn builtin_ws_broadcast(args: &[Value]) -> FitzResult<Value> {
             ErrorKind::TypeError,
             0,
             0,
-            format!(
-                "`ws_broadcast`: error serializing message to JSON: {}",
-                e
-            ),
+            format!("`ws_broadcast`: error serializing message to JSON: {}", e),
         )
     })?;
     let payload = serde_json::to_string(&payload_json).map_err(|e| {
@@ -12638,7 +12642,10 @@ fn builtin_uuid_v4(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Uuid.v4()` does not accept arguments, received {}", args.len()),
+            format!(
+                "`Uuid.v4()` does not accept arguments, received {}",
+                args.len()
+            ),
         ));
     }
     Ok(Value::Uuid(uuid::Uuid::new_v4()))
@@ -12657,7 +12664,10 @@ fn builtin_uuid_v7(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Uuid.v7()` does not accept arguments, received {}", args.len()),
+            format!(
+                "`Uuid.v7()` does not accept arguments, received {}",
+                args.len()
+            ),
         ));
     }
     Ok(Value::Uuid(uuid::Uuid::now_v7()))
@@ -12727,8 +12737,7 @@ fn builtin_datetime_epoch(args: &[Value]) -> FitzResult<Value> {
             ),
         ));
     }
-    let epoch =
-        chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch always valid");
+    let epoch = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch always valid");
     Ok(Value::DateTime(epoch))
 }
 
@@ -12783,7 +12792,10 @@ fn builtin_uuid_nil(args: &[Value]) -> FitzResult<Value> {
             },
             0,
             0,
-            format!("`Uuid.nil()` does not accept arguments, received {}", args.len()),
+            format!(
+                "`Uuid.nil()` does not accept arguments, received {}",
+                args.len()
+            ),
         ));
     }
     Ok(Value::Uuid(uuid::Uuid::nil()))
@@ -14116,7 +14128,9 @@ fn orm_qb_order_by(
                                     ErrorKind::InvalidSyntax,
                                     span.line,
                                     span.column,
-                                    format!("`.order_by`: field `{col}` does not exist in the type"),
+                                    format!(
+                                        "`.order_by`: field `{col}` does not exist in the type"
+                                    ),
                                 ));
                             }
                             let sql_col = state
@@ -14242,7 +14256,10 @@ fn extract_int_arg(args: &[Value], method: &str, span: Span) -> FitzResult<i64> 
             },
             span.line,
             span.column,
-            format!("`.{method}(n)` expects Int, received `{}`", other.type_name()),
+            format!(
+                "`.{method}(n)` expects Int, received `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -14487,8 +14504,7 @@ fn field_from_closure(
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                "the aggregate closure must be `u.field` (no operators or literals)"
-                    .to_string(),
+                "the aggregate closure must be `u.field` (no operators or literals)".to_string(),
             ));
         }
     };
@@ -17046,7 +17062,10 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
                 },
                 0,
                 0,
-                format!("`len` does not apply to a value of type `{}`", other.type_name()),
+                format!(
+                    "`len` does not apply to a value of type `{}`",
+                    other.type_name()
+                ),
             ));
         }
     };
@@ -24502,7 +24521,11 @@ let r = match n {
         let main = "from utils import b\n";
         let (_env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("does not export"), "msg: {}", err.message);
+        assert!(
+            err.message.contains("does not export"),
+            "msg: {}",
+            err.message
+        );
         assert!(err.message.contains("`b`"), "msg: {}", err.message);
         assert!(err.message.contains("`utils`"), "msg: {}", err.message);
     }
@@ -28823,11 +28846,7 @@ let r = match n {
         )
         .await;
         let err = res.unwrap_err();
-        assert!(
-            err.message.contains("out of range"),
-            "msg: {}",
-            err.message
-        );
+        assert!(err.message.contains("out of range"), "msg: {}", err.message);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -29205,7 +29224,7 @@ let r = match n {
     // ---- Mini-batch HTTP-Cors — Origin echo without filter ----
 
     #[test]
-    fn http_cors_allow_origin_echo_devuelve_request_origin() {
+    fn http_cors_allow_origin_echo_returns_request_origin() {
         use crate::http::AllowOrigin;
         let echo = AllowOrigin::Echo;
         assert_eq!(
@@ -29219,7 +29238,7 @@ let r = match n {
     }
 
     #[test]
-    fn http_cors_allow_origin_echo_sin_request_origin_es_none() {
+    fn http_cors_allow_origin_echo_without_request_origin_is_none() {
         use crate::http::AllowOrigin;
         let echo = AllowOrigin::Echo;
         assert_eq!(echo.resolve(None), None);
@@ -29228,7 +29247,7 @@ let r = match n {
     // ---- Mini-batch HTTP-Err — specific status codes by Err ----
 
     #[test]
-    fn http_err_value_to_outcome_con_instance_status_field_usa_ese_status() {
+    fn http_err_value_to_outcome_with_instance_status_field_uses_that_status() {
         // Build Value::Result(Err(Instance { status: 404, message: "..." }))
         // and verify that `value_to_outcome` maps it to HandlerOutcome with
         // status 404 (and body = serialized Instance, not `{"error": ...}`).
@@ -29250,15 +29269,14 @@ let r = match n {
         // `{"error": ...}`.
         let body_str = outcome.body.to_string();
         assert!(
-            body_str.contains("\"status\":404")
-                && body_str.contains("\"message\":\"not found\""),
+            body_str.contains("\"status\":404") && body_str.contains("\"message\":\"not found\""),
             "esperaba body de Instance serializada, fue: {}",
             body_str
         );
     }
 
     #[test]
-    fn http_err_sin_status_field_cae_al_500_historico() {
+    fn http_err_without_status_field_falls_back_to_500_historical() {
         // Without `status` field, fallback to 500 with `{"error": e}`.
         use crate::value::{ResultVariant, Value};
         use parking_lot::Mutex;
@@ -29283,7 +29301,7 @@ let r = match n {
     }
 
     #[test]
-    fn http_err_status_fuera_de_rango_cae_al_500() {
+    fn http_err_status_out_of_range_falls_back_to_500() {
         // status: 99 (outside 100..1000) → 500.
         use crate::value::{ResultVariant, Value};
         use parking_lot::Mutex;
@@ -30245,7 +30263,7 @@ let r = match n {
     }
 
     #[test]
-    fn auth_blacklist_primer_arg_debe_ser_dbconn() {
+    fn auth_blacklist_first_arg_must_be_dbconn() {
         let r = builtin_auth_blacklist(&[
             Value::Str("not a db".into()),
             Value::Str("jti-1".into()),
@@ -30256,7 +30274,7 @@ let r = match n {
     }
 
     #[test]
-    fn auth_blacklist_jti_debe_ser_str() {
+    fn auth_blacklist_jti_must_be_str() {
         // Build a dummy Value::DbConn with a hand-made handle. It is not
         // actually used (the error fires before the async path).
         // Without a real DbConnHandle, we simulate with Int in the DB slot to
@@ -30283,7 +30301,7 @@ let r = match n {
     }
 
     #[test]
-    fn auth_modulo_pre_registrado_y_acepta_field_access() {
+    fn auth_module_pre_registered_and_accepts_field_access() {
         // Verifies that `auth` is registered as Value::Module and that
         // `auth.blacklist`/`auth.is_blacklisted`/`auth.cleanup_expired`
         // are accessible as builtins.
@@ -31129,7 +31147,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_acceso_a_otra_var_es_error() {
+    fn translate_access_to_another_var_is_error() {
         let (fields, meta) = make_test_meta();
         // The closure tries to access `other.x` (not the parameter).
         let expr = parse_closure_body("fn (u) => other.age == 18");
@@ -31192,7 +31210,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_is_in_lista_vacia_devuelve_false() {
+    fn translate_is_in_empty_list_returns_false() {
         let (fields, meta) = make_test_meta();
         let expr = parse_closure_body("fn (u) => u.age.is_in([])");
         let mut args = Vec::new();
@@ -31265,7 +31283,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_method_call_combina_con_and() {
+    fn translate_method_call_combines_with_and() {
         let (fields, meta) = make_test_meta();
         let expr =
             parse_closure_body("fn (u) => u.name.starts_with(\"a\") and u.age.is_in([30, 42])");
@@ -31346,7 +31364,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_has_path_emite_predicate_jsonb_path() {
+    fn translate_has_path_emits_predicate_jsonb_path() {
         let (fields, meta) = make_jsonb_test_meta();
         let expr = parse_closure_body("fn (e) => e.data.has_path([\"user\", \"id\"])");
         let mut args = Vec::new();
@@ -31365,7 +31383,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_path_text_emite_extract_text() {
+    fn translate_path_text_emits_extract_text() {
         let (fields, meta) = make_jsonb_test_meta();
         let expr = parse_closure_body("fn (e) => e.data.path_text([\"a\", \"b\"]) == \"x\"");
         let mut args = Vec::new();
@@ -31375,7 +31393,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_path_int_emite_cast_bigint() {
+    fn translate_path_int_emits_cast_bigint() {
         let (fields, meta) = make_jsonb_test_meta();
         let expr = parse_closure_body("fn (e) => e.data.path_int([\"n\"]) == 42");
         let mut args = Vec::new();
@@ -31386,7 +31404,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_path_float_emite_cast_float8() {
+    fn translate_path_float_emits_cast_float8() {
         let (fields, meta) = make_jsonb_test_meta();
         let expr = parse_closure_body("fn (e) => e.data.path_float([\"score\"]) > 0.5");
         let mut args = Vec::new();
@@ -31396,7 +31414,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_path_bool_emite_cast_boolean() {
+    fn translate_path_bool_emits_cast_boolean() {
         let (fields, meta) = make_jsonb_test_meta();
         let expr = parse_closure_body("fn (e) => e.data.path_bool([\"flag\"])");
         let mut args = Vec::new();
@@ -31417,7 +31435,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_path_arg_no_lista_es_error() {
+    fn translate_path_arg_not_a_list_is_error() {
         let (fields, meta) = make_jsonb_test_meta();
         let expr = parse_closure_body("fn (e) => e.data.path_text(\"single\")");
         let mut args = Vec::new();
@@ -31428,7 +31446,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_path_methods_sobre_field_no_jsonb_es_error() {
+    fn translate_path_methods_over_non_jsonb_field_is_error() {
         let (fields, meta) = make_test_meta();
         let expr = parse_closure_body("fn (u) => u.name.path_text([\"k\"])");
         let mut args = Vec::new();
@@ -31439,7 +31457,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_path_key_no_literal_es_error() {
+    fn translate_path_key_non_literal_is_error() {
         let (fields, meta) = make_jsonb_test_meta();
         let expr = parse_closure_body("fn (e) => e.data.path_text([42])");
         let mut args = Vec::new();
@@ -31452,7 +31470,7 @@ let r = match n {
     // ----- v0.10.29 — Full-text search via tsvector (@@) -----
 
     #[test]
-    fn translate_matches_emite_to_tsquery() {
+    fn translate_matches_emits_to_tsquery() {
         let (fields, meta) = make_test_meta();
         let expr = parse_closure_body("fn (u) => u.name.matches(\"ada\")");
         let mut args = Vec::new();
@@ -31463,7 +31481,7 @@ let r = match n {
     }
 
     #[test]
-    fn translate_plainto_matches_emite_plainto_tsquery() {
+    fn translate_plainto_matches_emits_plainto_tsquery() {
         let (fields, meta) = make_test_meta();
         let expr = parse_closure_body("fn (u) => u.name.plainto_matches(\"hola mundo\")");
         let mut args = Vec::new();
@@ -31525,7 +31543,7 @@ let r = match n {
     }
 
     #[test]
-    fn list_elem_pg_oid_rechaza_no_lista() {
+    fn list_elem_pg_oid_rejects_non_list() {
         use crate::ast::TypeExpr;
         // Map<Str, Int> is NOT a list
         let t = TypeExpr::Generic {
@@ -31538,7 +31556,7 @@ let r = match n {
     }
 
     #[test]
-    fn list_elem_pg_oid_rechaza_list_de_compuestos() {
+    fn list_elem_pg_oid_rejects_list_of_composites() {
         use crate::ast::TypeExpr;
         // List<List<Int>> → not supported in MVP (nested)
         let t = TypeExpr::Generic {
@@ -31606,7 +31624,7 @@ let r = match n {
     }
 
     #[test]
-    fn fitz_list_to_pg_array_no_es_lista() {
+    fn fitz_list_to_pg_array_not_a_list() {
         // Passing a loose Int where List is expected → clear error.
         let v = Value::Int(42);
         let err = fitz_list_to_pg_array(&v, crate::db::oid::INT8).unwrap_err();
@@ -31626,7 +31644,7 @@ let r = match n {
     }
 
     #[test]
-    fn pg_value_to_fitz_array_devuelve_value_list() {
+    fn pg_value_to_fitz_array_returns_value_list() {
         let pg = crate::db::PgValue::Array {
             elem_oid: crate::db::oid::INT8,
             values: vec![
@@ -31724,14 +31742,14 @@ let r = match n {
     }
 
     #[test]
-    fn build_sql_sin_where_ni_clauses() {
+    fn build_sql_without_where_or_clauses() {
         let s = empty_state();
         let sql = build_select_sql(&s, None);
         assert_eq!(sql, "SELECT \"id\", \"name\", \"age\" FROM \"users\"");
     }
 
     #[test]
-    fn build_sql_con_where_y_order_by() {
+    fn build_sql_with_where_and_order_by() {
         let mut s = empty_state();
         s.where_sql = Some("(\"age\" > $1)".into());
         s.where_args = vec![crate::db::PgValue::Int(18)];
@@ -31745,7 +31763,7 @@ let r = match n {
     }
 
     #[test]
-    fn build_sql_con_limit_y_offset() {
+    fn build_sql_with_limit_and_offset() {
         let mut s = empty_state();
         s.limit = Some(10);
         s.offset = Some(20);
@@ -31757,7 +31775,7 @@ let r = match n {
     }
 
     #[test]
-    fn build_sql_override_limit_para_first() {
+    fn build_sql_override_limit_for_first() {
         // `first()` passes Some(1) as override; honored over the
         // user's state.limit (which could be != 1).
         let mut s = empty_state();
@@ -31767,7 +31785,7 @@ let r = match n {
     }
 
     #[test]
-    fn build_sql_limit_negativo_clampea_a_cero() {
+    fn build_sql_negative_limit_clamps_to_zero() {
         let mut s = empty_state();
         s.limit = Some(-5);
         let sql = build_select_sql(&s, None);
@@ -31813,7 +31831,7 @@ let r = match n {
     }
 
     #[test]
-    fn build_sql_belongs_to_field_no_es_virtual() {
+    fn build_sql_belongs_to_field_is_not_virtual() {
         // The field with @belongs_to IS real (it's the FK column).
         // It must appear in the normal SELECT.
         let mut s = empty_state();
@@ -31901,7 +31919,7 @@ let r = match n {
     }
 
     #[test]
-    fn renumber_placeholders_sin_args() {
+    fn renumber_placeholders_without_args() {
         // SQL without $N: passthrough.
         assert_eq!(
             renumber_placeholders("WHERE \"x\" IS NULL", 5),

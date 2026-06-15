@@ -44,7 +44,7 @@ fn run_openapi(test_name: &str, src: &str) -> serde_json::Value {
 }
 
 #[test]
-fn fitz_openapi_crud_basico_emite_schema_completo() {
+fn fitz_openapi_basic_crud_emits_complete_schema() {
     // CRUD chiquito con un tipo custom, un GET con path param y
     // return Result, un POST con body. Cubre lo necesario para
     // verificar el cableado E2E del subcomando.
@@ -91,7 +91,7 @@ fn create_user(body: User) -> User => body
 }
 
 #[test]
-fn fitz_openapi_programa_sin_rutas_emite_paths_vacios() {
+fn fitz_openapi_program_without_routes_emits_empty_paths() {
     // Programa sin decoradores HTTP — válido, pero el schema viene
     // con `paths` vacío. Las definiciones top-level (un `type`) sí
     // entran a `components.schemas` aunque ningún handler las use.
@@ -109,7 +109,7 @@ fn fitz_openapi_programa_sin_rutas_emite_paths_vacios() {
 }
 
 #[test]
-fn fitz_openapi_aborta_con_errores_de_tipo() {
+fn fitz_openapi_aborts_with_type_errors() {
     // Programa con error de tipo: el handler retorna Int pero la
     // anotación dice Str. `fitz openapi` corre en modo strict (igual
     // que `fitz build`) — no tiene sentido emitir schema de un

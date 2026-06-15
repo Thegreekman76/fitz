@@ -4473,7 +4473,7 @@ mod tests {
     // ----- redact_url -----
 
     #[test]
-    fn redact_url_oculta_password() {
+    fn redact_url_hides_password() {
         assert_eq!(
             redact_url("postgres://alice:secret@host/db"),
             "postgres://alice:***@host/db"
@@ -4493,7 +4493,7 @@ mod tests {
     }
 
     #[test]
-    fn redact_url_otros_schemes_passthrough() {
+    fn redact_url_other_schemes_passthrough() {
         // If the URL is not postgres://, return as-is (the caller
         // already failed to parse; redact is just defense).
         assert_eq!(redact_url("mysql://x:y@h/d"), "mysql://x:y@h/d");

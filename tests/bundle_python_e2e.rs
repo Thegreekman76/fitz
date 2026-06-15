@@ -22,7 +22,7 @@ fn fitz_bin() -> &'static str {
 }
 
 #[test]
-fn bundle_python_sin_from_python_import_aborta_con_mensaje_claro() {
+fn bundle_python_without_from_python_import_aborts_with_clear_message() {
     let dir = std::env::temp_dir().join("fitz-bundle-validation-no-python");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
@@ -65,7 +65,7 @@ print(x)
 }
 
 #[test]
-fn bundle_pip_implica_bundle_python_y_aborta_sin_from_python_import() {
+fn bundle_pip_implies_bundle_python_and_aborts_without_from_python_import() {
     // Fase 8.c: `--bundle-pip <pkg>` implica `--bundle-python`. Sin
     // `from python import` en el código, debe abortar con el mismo
     // mensaje que `--bundle-python` directo.
@@ -96,7 +96,7 @@ fn bundle_pip_implica_bundle_python_y_aborta_sin_from_python_import() {
 }
 
 #[test]
-fn bundle_pip_repetible_acepta_varios_paquetes() {
+fn bundle_pip_repeatable_accepts_multiple_packages() {
     // Validación del CLI parsing: --bundle-pip debe ser repetible.
     // No corremos el pipeline real (eso requiere red + Python), solo
     // validamos que el parser acepta el flag varias veces sin error.
@@ -142,7 +142,7 @@ fn bundle_pip_repetible_acepta_varios_paquetes() {
 }
 
 #[test]
-fn bundle_pip_requirements_implica_bundle_python_y_aborta_sin_from_python_import() {
+fn bundle_pip_requirements_implies_bundle_python_and_aborts_without_from_python_import() {
     // Cosecha de 8.c: `--bundle-pip-requirements <file>` implica
     // `--bundle-python` (igual que `--bundle-pip`). Sin `from python
     // import` en el código, debe abortar con el mismo mensaje.
@@ -177,7 +177,7 @@ fn bundle_pip_requirements_implica_bundle_python_y_aborta_sin_from_python_import
 }
 
 #[test]
-fn bundle_pip_requirements_archivo_inexistente_aborta_con_mensaje_claro() {
+fn bundle_pip_requirements_nonexistent_file_aborts_with_clear_message() {
     // El usuario pasa un path inválido; debe fail-fast con mensaje
     // claro del lado de Fitz (no llegar a pip).
     let dir = std::env::temp_dir().join("fitz-bundle-pip-req-missing");
@@ -217,7 +217,7 @@ fn bundle_pip_requirements_archivo_inexistente_aborta_con_mensaje_claro() {
 }
 
 #[test]
-fn bundle_pip_requirements_combinable_con_bundle_pip() {
+fn bundle_pip_requirements_combinable_with_bundle_pip() {
     // Ambos flags conviven: positionals + requirements files. La
     // validación tardía sigue siendo la de `from python import`.
     let dir = std::env::temp_dir().join("fitz-bundle-pip-req-combined");
@@ -256,7 +256,7 @@ fn bundle_pip_requirements_combinable_con_bundle_pip() {
 }
 
 #[test]
-fn bundle_python_con_error_de_sintaxis_aborta_antes_de_bundling() {
+fn bundle_python_with_syntax_error_aborts_before_bundling() {
     let dir = std::env::temp_dir().join("fitz-bundle-validation-syntax-err");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");

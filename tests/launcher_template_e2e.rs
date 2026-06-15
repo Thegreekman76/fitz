@@ -20,7 +20,7 @@ use std::sync::Mutex;
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
-fn template_launcher_compila_con_paths_dummies() {
+fn template_launcher_compiles_with_dummy_paths() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
     let dir = std::env::temp_dir().join("fitz-launcher-template-smoke");
@@ -63,7 +63,7 @@ fn template_launcher_compila_con_paths_dummies() {
 }
 
 #[test]
-fn template_launcher_compila_con_path_windows_y_espacios() {
+fn template_launcher_compiles_with_windows_path_and_spaces() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
     let dir = std::env::temp_dir().join("fitz-launcher-windows-paths-smoke");

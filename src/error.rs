@@ -85,10 +85,7 @@ impl FitzError {
             ErrorKind::TypeError,
             line,
             column,
-            format!(
-                "type `{}` has no method named `{}`",
-                type_name, method
-            ),
+            format!("type `{}` has no method named `{}`", type_name, method),
         )
     }
 
