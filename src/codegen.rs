@@ -5345,9 +5345,9 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             ErrorKind::TypeError,
                             0,
                             0,
-                            "`fn main` solo admite `@server(...)` como decorator. \
-                             Para registrar rutas HTTP, definí los handlers en fns \
-                             con nombre distinto a `main` (ej.: `fn index`, `fn get_user`)."
+                            "`fn main` only accepts `@server(...)` as decorator. \
+                             To register HTTP routes, define handlers in fns \
+                             with a name different from `main` (e.g., `fn index`, `fn get_user`)."
                                 .to_string(),
                         ));
                     }
@@ -5798,7 +5798,7 @@ fn parse_cron_retry_map(
             Expr::Ident(s, _) => s.clone(),
             _ => {
                 return Err(err(format!(
-                    "@cron sobre fn '{}': keys del Map `retry` deben ser identificadores o Str.",
+                    "@cron on fn '{}': `retry` Map keys must be identifiers or Str.",
                     fn_name
                 )));
             }
@@ -5807,13 +5807,13 @@ fn parse_cron_retry_map(
             "max" => {
                 let n = extract_int_lit(v_expr).ok_or_else(|| {
                     err(format!(
-                        "@cron sobre fn '{}': `retry.max` debe ser Int literal.",
+                        "@cron on fn '{}': `retry.max` must be an Int literal.",
                         fn_name
                     ))
                 })?;
                 if n < 0 {
                     return Err(err(format!(
-                        "@cron sobre fn '{}': `retry.max` debe ser >= 0 (es {}).",
+                        "@cron on fn '{}': `retry.max` must be >= 0 (was {}).",
                         fn_name, n
                     )));
                 }
@@ -5824,14 +5824,14 @@ fn parse_cron_retry_map(
                     Expr::Str(s, _) => s.clone(),
                     _ => {
                         return Err(err(format!(
-                            "@cron sobre fn '{}': `retry.backoff` debe ser Str literal.",
+                            "@cron on fn '{}': `retry.backoff` must be a Str literal.",
                             fn_name
                         )));
                     }
                 };
                 if !matches!(s.as_str(), "exponential" | "linear" | "constant") {
                     return Err(err(format!(
-                        "@cron sobre fn '{}': `retry.backoff` debe ser `exponential`/`linear`/`constant` (es `{}`).",
+                        "@cron on fn '{}': `retry.backoff` must be `exponential`/`linear`/`constant` (was `{}`).",
                         fn_name, s
                     )));
                 }
@@ -5840,13 +5840,13 @@ fn parse_cron_retry_map(
             "initial_secs" => {
                 let n = extract_int_lit(v_expr).ok_or_else(|| {
                     err(format!(
-                        "@cron sobre fn '{}': `retry.initial_secs` debe ser Int literal.",
+                        "@cron on fn '{}': `retry.initial_secs` must be an Int literal.",
                         fn_name
                     ))
                 })?;
                 if n < 1 {
                     return Err(err(format!(
-                        "@cron sobre fn '{}': `retry.initial_secs` debe ser >= 1 (es {}).",
+                        "@cron on fn '{}': `retry.initial_secs` must be >= 1 (was {}).",
                         fn_name, n
                     )));
                 }
@@ -5855,13 +5855,13 @@ fn parse_cron_retry_map(
             "max_secs" => {
                 let n = extract_int_lit(v_expr).ok_or_else(|| {
                     err(format!(
-                        "@cron sobre fn '{}': `retry.max_secs` debe ser Int literal.",
+                        "@cron on fn '{}': `retry.max_secs` must be an Int literal.",
                         fn_name
                     ))
                 })?;
                 if n < 1 {
                     return Err(err(format!(
-                        "@cron sobre fn '{}': `retry.max_secs` debe ser >= 1 (es {}).",
+                        "@cron on fn '{}': `retry.max_secs` must be >= 1 (was {}).",
                         fn_name, n
                     )));
                 }
@@ -10417,7 +10417,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             stmt.span(),
                             format!(
-                                "@command({}): el default de `{}` debe ser literal (Int/Float/Str/Bool) en MVP del codegen",
+                                "@command({}): the default of `{}` must be a literal (Int/Float/Str/Bool) in the codegen MVP",
                                 cmd_name, p.name
                             ),
                         ));
@@ -12428,11 +12428,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 name
             ))),
             Stmt::TypeDef { name, .. } => Err(self.err_at(stmt.span(), format!(
-                "`type {}`: solo se admite a nivel top, no adentro de funciones u otros bloques",
+                "`type {}`: only allowed at top level, not inside functions or other blocks",
                 name
             ))),
             Stmt::Import { .. } | Stmt::FromImport { .. } => Err(self.err_at(stmt.span(),
-                "`import`: solo se admite a nivel top del programa, no adentro de fns u otros bloques",
+                "`import`: only allowed at the top level of the program, not inside fns or other blocks",
             )),
             // Phase 9.0.1 (F15): defense against Error nodes —
             // `fitz build` uses strict `parse()`; this node
@@ -12780,7 +12780,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // should not let other types through. If it arrives
         // here it is a bug; we report clearly instead of panic.
         Err(self.err_at(stmt_span, format!(
-            "F12 hoist: tipo `{}` no soportado para `let {}` top-level (esperaba Int/Float/Bool/Str literal o const-eval)",
+            "F12 hoist: type `{}` not supported for top-level `let {}` (expected Int/Float/Bool/Str literal or const-eval)",
             display_type(&declared_ty, self.env),
             name,
         )))
@@ -17360,8 +17360,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // Other kind of expr — clear error.
                 Err(self.err_at(
                     args[0].span(),
-                    "`DbConn.transaction`: el callback debe ser una fn nombrada \
-                     (`my_handler`) o una FnExpr inline (`fn(tx) => ...` o \
+                    "`DbConn.transaction`: the callback must be a named fn \
+                     (`my_handler`) or an inline FnExpr (`fn(tx) => ...` or \
                      `async fn(tx) -> Result<T> { ... }`)."
                         .to_string(),
                 ))
@@ -23464,8 +23464,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     fn_span,
                     format!(
-                        "función anónima `fn({})`: el parámetro `{}` necesita una anotación de \
-                     tipo en el subset compilable (deuda 5b.1). Anotalo o usá `fitz run`.",
+                        "anonymous function `fn({})`: parameter `{}` needs a type annotation \
+                     in the compilable subset (debt 5b.1). Annotate it or use `fitz run`.",
                         p.name, p.name
                     ),
                 ));
@@ -35617,7 +35617,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("3i64") && init.contains("as f64"),
-            "expected init con coerción Int→Float, fue: {}",
+            "expected init with Int→Float coercion, was: {}",
             init
         );
     }
@@ -35631,7 +35631,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("String :: from") && init.contains("\"Fitz\""),
-            "expected init `String::from(\"Fitz\")`, fue: {}",
+            "expected init `String::from(\"Fitz\")`, was: {}",
             init
         );
     }
@@ -35645,7 +35645,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("1i64") && init.contains("2i64") && init.contains("+"),
-            "expected init `1i64 + 2i64`, fue: {}",
+            "expected init `1i64 + 2i64`, was: {}",
             init
         );
     }
@@ -35660,7 +35660,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("1i64") && init.contains("as f64") && init.contains("2f64"),
-            "expected coerción Int→Float en el init, fue: {}",
+            "expected Int→Float coercion in the init, was: {}",
             init
         );
     }
@@ -35672,7 +35672,7 @@ mod tests {
         let code = gen("let n = 5\nlet s = \"x es {n}\"").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let args = ast_test::first_macro_args_in_stmts(stmts, "format").expect("falta format!");
+        let args = ast_test::first_macro_args_in_stmts(stmts, "format").expect("missing format!");
         assert!(
             args.contains("\"x es {}\""),
             "expected template `\"x es {{}}\"`, got: {}",
@@ -35681,7 +35681,7 @@ mod tests {
         // n: Int (Copy) passes directly without .clone().
         assert!(
             !args.contains("n . clone") && !args.contains("n .clone"),
-            "Int no debería usar .clone(), got: {}",
+            "Int should not use .clone(), got: {}",
             args
         );
     }
@@ -35694,7 +35694,7 @@ mod tests {
         let code = gen("let name = \"Fitz\"\nlet s = \"hola, {name}\"").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let args = ast_test::first_macro_args_in_stmts(stmts, "format").expect("falta format!");
+        let args = ast_test::first_macro_args_in_stmts(stmts, "format").expect("missing format!");
         assert!(
             args.contains("\"hola, {}\"") && args.contains("name . clone"),
             "expected `format!(\"hola, {{}}\", name.clone())`, got: {}",
@@ -35709,7 +35709,7 @@ mod tests {
         assert_eq!(
             ast_test::count_macro_calls(stmts, "println"),
             1,
-            "expected exactamente 1 println!"
+            "expected exactly 1 println!"
         );
     }
 
@@ -35726,7 +35726,7 @@ mod tests {
         let last = ast_test::ts(stmts.last().unwrap());
         assert!(
             last.contains("println !") && last.contains(", a") && last.contains(", b"),
-            "expected println! con args a y b, fue: {}",
+            "expected println! with args a and b, was: {}",
             last
         );
     }
@@ -35741,7 +35741,7 @@ mod tests {
         // There must be no `,` inside the println!() — no args.
         assert!(
             last.contains("println ! ()") || last.contains("println !()"),
-            "expected println!() vacío, fue: {}",
+            "expected empty println!(), was: {}",
             last
         );
     }
@@ -35770,7 +35770,7 @@ mod tests {
         let body = ast_test::ts(&f.block);
         assert!(
             body.contains("return"),
-            "expected `return` en el body de la fn flecha, fue: {}",
+            "expected `return` in the arrow fn body, was: {}",
             body
         );
     }
@@ -35789,7 +35789,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("double") && init.contains("5i64"),
-            "expected init `double(5i64)`, fue: {}",
+            "expected init `double(5i64)`, was: {}",
             init
         );
     }
@@ -35800,7 +35800,7 @@ mod tests {
             &gen("let x = 1\nif (x > 0) { print(\"pos\") } else { print(\"neg\") }").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
-        let if_expr = ast_test::find_if(stmts).expect("falta if/else en main");
+        let if_expr = ast_test::find_if(stmts).expect("missing if/else in main");
         // Both branches present (else_branch != None).
         assert!(if_expr.else_branch.is_some(), "expected else branch");
         // The if test compares `x > 0`.
@@ -35812,34 +35812,34 @@ mod tests {
     fn while_generates_rust_structure() {
         let file = ast_test::parse(&gen("let n = 0\nwhile (n < 3) { n = n + 1 }").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
-        let w = ast_test::find_while_loop(stmts).expect("falta while loop");
+        let w = ast_test::find_while_loop(stmts).expect("missing while loop");
         let cond = ast_test::ts(&*w.cond);
         assert!(
             cond.contains("n") && cond.contains("<") && cond.contains("3i64"),
-            "cond del while: {}",
+            "while cond: {}",
             cond
         );
         // The body must reassign `n` (= not a `let`).
         let body = ast_test::ts(&w.body);
-        assert!(body.contains("n ="), "body del while: {}", body);
+        assert!(body.contains("n ="), "while body: {}", body);
     }
 
     #[test]
     fn for_in_range_generates_rust() {
         let file = ast_test::parse(&gen("for i in 0..3 { print(i) }").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
-        let f = ast_test::find_for_loop(stmts).expect("falta for loop");
+        let f = ast_test::find_for_loop(stmts).expect("missing for loop");
         // pat is `mut i`.
         assert!(
             ast_test::ts(&f.pat).contains("i"),
-            "pat del for: {}",
+            "for pat: {}",
             ast_test::ts(&f.pat)
         );
         // expr is a range `0..3` (both bounds present).
         let expr = ast_test::ts(&*f.expr);
         assert!(
             expr.contains("0i64") && expr.contains("3i64") && expr.contains(".."),
-            "expr del for: {}",
+            "for expr: {}",
             expr
         );
     }
@@ -35852,14 +35852,14 @@ mod tests {
         assert_eq!(
             ast_test::count_lets(stmts, "x"),
             1,
-            "expected exactamente 1 `let x`, hubo {}",
+            "expected exactly 1 `let x`, got {}",
             ast_test::count_lets(stmts, "x")
         );
         // And there must be an assignment Stmt `x = 2`.
-        let body = ast_test::ts(stmts.last().expect("stmts vacío"));
+        let body = ast_test::ts(stmts.last().expect("empty stmts"));
         assert!(
             body.contains("x =") && body.contains("2i64"),
-            "expected reasignación `x = 2`, último stmt: {}",
+            "expected reassignment `x = 2`, last stmt: {}",
             body
         );
     }
@@ -35873,7 +35873,7 @@ mod tests {
         // Unary operator `-` applied to the literal 5i64.
         assert!(
             init.contains("-") && init.contains("5i64"),
-            "expected unary `-5i64`, fue: {}",
+            "expected unary `-5i64`, was: {}",
             init
         );
     }
@@ -35888,7 +35888,7 @@ mod tests {
         // Fitz `and` → Rust `&&`.
         assert!(
             init.contains("&&") && init.contains("true") && init.contains("false"),
-            "expected `true && false`, fue: {}",
+            "expected `true && false`, was: {}",
             init
         );
     }
@@ -35901,7 +35901,7 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
             ast_test::contains_method_call(stmts, "as_str"),
-            "expected alguna call a `.as_str()` en la comparación"
+            "expected some call to `.as_str()` in the comparison"
         );
     }
 
@@ -35913,7 +35913,7 @@ mod tests {
     fn type_def_emits_struct_and_arc_mutex_alias() {
         let file = ast_test::parse(&gen("type User { id: Int, name: Str }").unwrap());
         // The UserData struct with its two fields.
-        let s = ast_test::find_item_struct(&file, "UserData").expect("falta UserData");
+        let s = ast_test::find_item_struct(&file, "UserData").expect("missing UserData");
         let field_names: Vec<String> = s
             .fields
             .iter()
@@ -35921,11 +35921,11 @@ mod tests {
             .collect();
         assert_eq!(field_names, vec!["id".to_string(), "name".to_string()]);
         // The alias `type User = Arc<Mutex<UserData>>;`.
-        let t = ast_test::find_item_type(&file, "User").expect("falta type alias User");
+        let t = ast_test::find_item_type(&file, "User").expect("missing type alias User");
         let ty = ast_test::ts(&*t.ty);
         assert!(
             ty.contains("Arc") && ty.contains("Mutex") && ty.contains("UserData"),
-            "expected alias `Arc<Mutex<UserData>>`, fue: {}",
+            "expected alias `Arc<Mutex<UserData>>`, was: {}",
             ty
         );
     }
@@ -35935,19 +35935,19 @@ mod tests {
         let code = gen("type User { id: Int, name: Str }").unwrap();
         let file = ast_test::parse(&code);
         let im = ast_test::find_impl(&file, "Display", "UserData")
-            .expect("falta impl Display for UserData");
+            .expect("missing impl Display for UserData");
         let impl_text = ast_test::ts(im);
         // The Display writes `User { id: <int>, name: "<str>" }` —
         // strings with quotes inside the instance (same as the
         // interpreter).
         assert!(
             impl_text.contains("\"User {{\""),
-            "falta el header del Display `\"User {{{{\"`, got:\n{}",
+            "missing the Display header `\"User {{{{\"`, got:\n{}",
             impl_text
         );
         assert!(
             impl_text.contains("\"\\\"{}\\\"\""),
-            "falta el patrón con comillas para Str, got:\n{}",
+            "missing the quoted pattern for Str, got:\n{}",
             impl_text
         );
     }
@@ -35965,12 +35965,12 @@ mod tests {
             init.contains("Arc :: new")
                 && init.contains("Mutex :: new")
                 && init.contains("UserData"),
-            "expected envoltorio Arc::new(Mutex::new(UserData {{ ... }})), fue: {}",
+            "expected wrapping Arc::new(Mutex::new(UserData {{ ... }})), was: {}",
             init
         );
         assert!(
             init.contains("1i64") && init.contains("\"x\""),
-            "expected que el init incluya los valores 1 y \"x\", fue: {}",
+            "expected init to include values 1 and \"x\", was: {}",
             init
         );
     }
@@ -35986,7 +35986,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("active : true"),
-            "expected que el default `active: true` esté inyectado, fue: {}",
+            "expected default `active: true` to be injected, was: {}",
             init
         );
     }
@@ -36000,7 +36000,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("email : None"),
-            "expected `email: None` (nullable omitido), fue: {}",
+            "expected `email: None` (omitted nullable), was: {}",
             init
         );
     }
@@ -36017,7 +36017,7 @@ mod tests {
             init.contains("email : Some")
                 && init.contains("String :: from")
                 && init.contains("\"a@b\""),
-            "expected `email: Some(String::from(\"a@b\"))`, fue: {}",
+            "expected `email: Some(String::from(\"a@b\"))`, was: {}",
             init
         );
     }
@@ -36032,7 +36032,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("email : None"),
-            "expected `email: None` (null literal), fue: {}",
+            "expected `email: None` (null literal), was: {}",
             init
         );
     }
@@ -36052,12 +36052,12 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("let __g") && init.contains("__g . id"),
-            "expected bloque `{{ let __g = ...; __g.id }}`, fue: {}",
+            "expected block `{{ let __g = ...; __g.id }}`, was: {}",
             init
         );
         assert!(
             !init.contains("__g . id . clone"),
-            "no se debe clonar Int (Copy), fue: {}",
+            "Int (Copy) should not be cloned, was: {}",
             init
         );
     }
@@ -36073,7 +36073,7 @@ mod tests {
         // Str is not Copy → lock + unwrap + clone (post-F17.4b).
         assert!(
             init.contains("lock") && init.contains("clone"),
-            "expected `lock` y `clone` en el field access de Str, fue: {}",
+            "expected `lock` and `clone` in the Str field access, was: {}",
             init
         );
     }
@@ -36087,7 +36087,7 @@ mod tests {
         // Post-F17.4b: field assign emits `(obj).lock().unwrap().<f> = ...`.
         assert!(
             ast_test::contains_method_call(stmts, "lock"),
-            "expected call a `.lock().unwrap()` para field assign"
+            "expected call to `.lock().unwrap()` for field assign"
         );
     }
 
@@ -36101,18 +36101,18 @@ mod tests {
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("missing let n");
-        let init_expr = ast_test::local_init_expr(l).expect("falta init de n");
+        let init_expr = ast_test::local_init_expr(l).expect("missing init of n");
         let call = match init_expr {
             syn::Expr::Call(c) => c,
-            other => panic!("expected init como Call, fue: {}", ast_test::ts(other)),
+            other => panic!("expected init as Call, was: {}", ast_test::ts(other)),
         };
-        assert_eq!(ast_test::ts(&*call.func), "f", "callee debería ser `f`");
+        assert_eq!(ast_test::ts(&*call.func), "f", "callee should be `f`");
         assert_eq!(call.args.len(), 1, "expected 1 arg");
         let arg = call.args.first().unwrap();
         let arg_text = ast_test::ts(arg);
         assert!(
             arg_text.contains("u") && arg_text.contains(". clone"),
-            "expected arg `u.clone()`, fue: {}",
+            "expected arg `u.clone()`, was: {}",
             arg_text
         );
     }
@@ -36124,12 +36124,12 @@ mod tests {
         let code = gen("type U { id: Int }\nlet u = U { id: 1 }\nprint(u)").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let args = ast_test::first_macro_args_in_stmts(stmts, "println").expect("falta println!");
+        let args = ast_test::first_macro_args_in_stmts(stmts, "println").expect("missing println!");
         assert!(
             args.contains("format !")
                 && (args.contains("& *") || args.contains("&*"))
                 && args.contains(". lock"),
-            "expected `format!(\"{{}}\", &*(...).lock().unwrap())` en el println!, got: {}",
+            "expected `format!(\"{{}}\", &*(...).lock().unwrap())` in the println!, got: {}",
             args
         );
     }
@@ -36140,16 +36140,16 @@ mod tests {
         // `Option<User>` (= `Option<Arc<Mutex<UserData>>>`).
         let file =
             ast_test::parse(&gen("type User { name: Str }\ntype Order { user: User? }").unwrap());
-        let s = ast_test::find_item_struct(&file, "OrderData").expect("falta OrderData");
+        let s = ast_test::find_item_struct(&file, "OrderData").expect("missing OrderData");
         let user_field = s
             .fields
             .iter()
             .find(|f| f.ident.as_ref().is_some_and(|i| i == "user"))
-            .expect("falta field user");
+            .expect("missing field user");
         let ty = ast_test::ts(&user_field.ty);
         assert!(
             ty.contains("Option") && ty.contains("User"),
-            "expected `Option<User>` para field `user`, fue: {}",
+            "expected `Option<User>` for field `user`, was: {}",
             ty
         );
     }
@@ -36168,11 +36168,11 @@ mod tests {
         let lock_count = init.matches(". lock").count();
         assert!(
             lock_count >= 2,
-            "expected al menos 2 `.lock().unwrap()` en la comparación, fue {} en: {}",
+            "expected at least 2 `.lock().unwrap()` in the comparison, was {} in: {}",
             lock_count,
             init
         );
-        assert!(init.contains("=="), "expected operador `==`, fue: {}", init);
+        assert!(init.contains("=="), "expected operator `==`, was: {}", init);
     }
 
     // ---- 5b.2+: if as expression with value ----
@@ -36189,7 +36189,7 @@ mod tests {
             "expected `x: i64`"
         );
         // The init is an Expr::If (optionally wrapped in parens).
-        let init = ast_test::local_init_expr(l).expect("falta init de x");
+        let init = ast_test::local_init_expr(l).expect("missing init of x");
         let mut e = init;
         while let syn::Expr::Paren(p) = e {
             e = &*p.expr;
@@ -36197,7 +36197,7 @@ mod tests {
         let if_expr = match e {
             syn::Expr::If(i) => i,
             _ => panic!(
-                "expected Expr::If como init de x, fue: {}",
+                "expected Expr::If as init of x, was: {}",
                 ast_test::ts(init)
             ),
         };
@@ -36207,29 +36207,29 @@ mod tests {
             .then_branch
             .stmts
             .last()
-            .expect("rama then sin stmts");
+            .expect("then branch without stmts");
         assert!(
             matches!(then_tail, syn::Stmt::Expr(_, None)),
-            "rama then debe terminar en tail sin `;`, last stmt: {}",
+            "then branch must end as tail without `;`, last stmt: {}",
             ast_test::ts(then_tail)
         );
         let else_block = match if_expr.else_branch.as_ref() {
             Some((_, expr)) => match expr.as_ref() {
                 syn::Expr::Block(b) => &b.block,
-                _ => panic!("else no es Block, fue: {}", ast_test::ts(expr.as_ref())),
+                _ => panic!("else is not Block, was: {}", ast_test::ts(expr.as_ref())),
             },
-            None => panic!("falta rama else"),
+            None => panic!("missing else branch"),
         };
-        let else_tail = else_block.stmts.last().expect("rama else sin stmts");
+        let else_tail = else_block.stmts.last().expect("else branch without stmts");
         assert!(
             matches!(else_tail, syn::Stmt::Expr(_, None)),
-            "rama else debe terminar en tail sin `;`"
+            "else branch must end as tail without `;`"
         );
         // Values 1 and 2 appear as i64 literals.
         let body = ast_test::ts(if_expr);
         assert!(
             body.contains("1i64") && body.contains("2i64"),
-            "expected `1i64` y `2i64` en las ramas, fue: {}",
+            "expected `1i64` and `2i64` in the branches, was: {}",
             body
         );
     }
@@ -36249,7 +36249,7 @@ mod tests {
         // The Int branch is coerced explicitly: `1i64 as f64`.
         assert!(
             init.contains("1i64 as f64"),
-            "expected coerción Int→Float en rama then, fue: {}",
+            "expected Int→Float coercion in then branch, was: {}",
             init
         );
     }
@@ -36262,28 +36262,28 @@ mod tests {
         let code = gen("if (true) { print(\"a\") } else { print(\"b\") }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let if_expr = ast_test::find_if(stmts).expect("falta if en main");
+        let if_expr = ast_test::find_if(stmts).expect("missing if in main");
         // The branches are Block; each emits the print as a stmt with `;`.
         let then_text = ast_test::ts(&if_expr.then_branch);
         assert!(
             then_text.contains("println !")
                 && then_text.contains("\"a\"")
                 && then_text.contains(";"),
-            "expected `println!(...\"a\"...);` en then, fue: {}",
+            "expected `println!(...\"a\"...);` in then, was: {}",
             then_text
         );
         let else_text = match if_expr.else_branch.as_ref() {
             Some((_, expr)) => match expr.as_ref() {
                 syn::Expr::Block(b) => ast_test::ts(&b.block),
-                _ => panic!("else no es Block"),
+                _ => panic!("else is not Block"),
             },
-            None => panic!("falta else"),
+            None => panic!("missing else"),
         };
         assert!(
             else_text.contains("println !")
                 && else_text.contains("\"b\"")
                 && else_text.contains(";"),
-            "expected `println!(...\"b\"...);` en else, fue: {}",
+            "expected `println!(...\"b\"...);` in else, was: {}",
             else_text
         );
     }
@@ -36295,18 +36295,18 @@ mod tests {
         // (with trailing `;`, not as a tail expression).
         let file = ast_test::parse(&gen("if (true) { 1 }").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
-        let if_expr = ast_test::find_if(stmts).expect("falta if");
-        assert!(if_expr.else_branch.is_none(), "el if no debe tener else");
+        let if_expr = ast_test::find_if(stmts).expect("missing if");
+        assert!(if_expr.else_branch.is_none(), "if must not have else");
         // The last stmt of the then-block must be `Stmt::Expr` with `;`
         // (semicolon present — would be a tail expression without it).
-        let last_then = if_expr.then_branch.stmts.last().expect("then vacío");
+        let last_then = if_expr.then_branch.stmts.last().expect("empty then");
         match last_then {
             syn::Stmt::Expr(_, semi) => assert!(
                 semi.is_some(),
-                "expected `1i64;` como stmt con semicolon, fue tail expression"
+                "expected `1i64;` as stmt with semicolon, was tail expression"
             ),
             other => panic!(
-                "expected Stmt::Expr al final del then, fue: {}",
+                "expected Stmt::Expr at the end of then, was: {}",
                 ast_test::ts(other)
             ),
         }
@@ -36324,11 +36324,11 @@ mod tests {
         // which counts bytes instead of chars).
         assert!(
             ast_test::contains_method_call(stmts, "chars"),
-            "expected `.chars()` en el init"
+            "expected `.chars()` in the init"
         );
         assert!(
             ast_test::contains_method_call(stmts, "count"),
-            "expected `.count()` en el init"
+            "expected `.count()` in the init"
         );
     }
 
@@ -36338,7 +36338,7 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
             ast_test::contains_method_call(stmts, "to_uppercase"),
-            "expected call a `.to_uppercase()`"
+            "expected call to `.to_uppercase()`"
         );
     }
 
@@ -36348,7 +36348,7 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
             ast_test::contains_method_call(stmts, "to_lowercase"),
-            "expected call a `.to_lowercase()`"
+            "expected call to `.to_lowercase()`"
         );
     }
 
@@ -36359,7 +36359,7 @@ mod tests {
     fn type_def_emits_derive_clone_and_impl_partialeq() {
         let code = gen("type U { id: Int }").unwrap();
         let file = ast_test::parse(&code);
-        let s = ast_test::find_item_struct(&file, "UData").expect("falta UData");
+        let s = ast_test::find_item_struct(&file, "UData").expect("missing UData");
         assert!(
             ast_test::struct_has_derive(s, "Clone"),
             "expected derive(Clone)"
@@ -36370,7 +36370,7 @@ mod tests {
         // nominal field).
         assert!(
             !ast_test::struct_has_derive(s, "PartialEq"),
-            "PartialEq NO debe derivarse post-F17.4b (Mutex no impl PartialEq)"
+            "PartialEq must NOT be derived post-F17.4b (Mutex does not impl PartialEq)"
         );
         assert!(
             ast_test::find_impl(&file, "PartialEq", "UData").is_some(),
@@ -36391,19 +36391,19 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < i64 > > >"),
-            "tipo declarado de xs"
+            "declared type of xs"
         );
-        let init = ast_test::local_init_expr(l).expect("falta init de xs");
+        let init = ast_test::local_init_expr(l).expect("missing init of xs");
         // The init is `Arc::new(Mutex::new(vec![...]))`. We confirm the
         // outer call to the Rc::new path and the presence of the vec! macro
         // with the 3 items having i64 suffix.
         assert_eq!(ast_test::call_path(init).as_deref(), Some("Arc :: new"));
         let vec_args = ast_test::find_macro_args(init, "vec")
-            .expect("expected un macro vec! adentro del init");
+            .expect("expected a vec! macro inside the init");
         for n in ["1i64", "2i64", "3i64"] {
             assert!(
                 vec_args.contains(n),
-                "expected item {} en vec!, fue: {}",
+                "expected item {} in vec!, was: {}",
                 n,
                 vec_args
             );
@@ -36420,16 +36420,16 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < f64 > > >"),
-            "expected que xs quede tipado List<Float>"
+            "expected xs to be typed as List<Float>"
         );
         let init = ast_test::local_init_expr(l).unwrap();
         let vec_args = ast_test::find_macro_args(init, "vec")
-            .expect("expected un macro vec! adentro del init");
+            .expect("expected a vec! macro inside the init");
         // The Ints (1, 3) are coerced to f64 with `(N as f64)`; the Float
         // stays literal.
         assert!(
             vec_args.contains("(1i64 as f64)") && vec_args.contains("(3i64 as f64)"),
-            "expected coerción Int→Float en los items Int, fue: {}",
+            "expected Int→Float coercion in Int items, was: {}",
             vec_args
         );
     }
@@ -36445,18 +36445,18 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < i64 > > >"),
-            "expected `List<Int>` por anotación"
+            "expected `List<Int>` from annotation"
         );
         // The init is `Arc::new(Mutex::new(Vec::new()))` — I verify
         // no vec! macro appears and that the Vec::new chain exists.
         let init = ast_test::local_init_expr(l).unwrap();
         assert!(
             ast_test::find_macro_args(init, "vec").is_none(),
-            "lista vacía no debería emitir macro vec!"
+            "empty list should not emit vec! macro"
         );
         assert!(
             ast_test::ts(init).contains("Vec :: new"),
-            "expected `Vec::new()` para lista vacía, fue: {}",
+            "expected `Vec::new()` for empty list, was: {}",
             ast_test::ts(init)
         );
     }
@@ -36470,16 +36470,16 @@ mod tests {
         let code = gen("let xs = [1, \"dos\"]").unwrap();
         assert!(
             code.contains("Vec<__FitzValue>"),
-            "expected tipo `Vec<__FitzValue>` para lista heterogénea, código:\n{}",
+            "expected type `Vec<__FitzValue>` for heterogeneous list, code:\n{}",
             code
         );
         assert!(
             code.contains("__FitzValue::Int(1i64)"),
-            "expected wrap `__FitzValue::Int(1i64)` para Int en lista heterogénea"
+            "expected wrap `__FitzValue::Int(1i64)` for Int in heterogeneous list"
         );
         assert!(
             code.contains("__FitzValue::Str(String::from"),
-            "expected wrap `__FitzValue::Str(...)` para Str en lista heterogénea"
+            "expected wrap `__FitzValue::Str(...)` for Str in heterogeneous list"
         );
     }
 
@@ -36490,7 +36490,7 @@ mod tests {
         let code = gen("let xs = [1, \"dos\", true]").unwrap();
         assert!(
             code.contains("enum __FitzValue"),
-            "expected definición de `enum __FitzValue` en el preludio"
+            "expected definition of `enum __FitzValue` in the prelude"
         );
         assert!(
             code.contains("impl PartialEq for __FitzValue"),
@@ -36509,7 +36509,7 @@ mod tests {
         let code = gen("let xs = [1, 2, 3]").unwrap();
         assert!(
             !code.contains("enum __FitzValue"),
-            "lista homogénea NO debe gatillar emisión de `__FitzValue`"
+            "homogeneous list must NOT trigger emission of `__FitzValue`"
         );
     }
 
@@ -36522,7 +36522,7 @@ mod tests {
         let code = gen("let xs = [1, b\"raw\"]").unwrap();
         assert!(
             code.contains("__FitzValue::Bytes("),
-            "expected wrap `__FitzValue::Bytes(...)` para Bytes en heterogéneo"
+            "expected wrap `__FitzValue::Bytes(...)` for Bytes in heterogeneous"
         );
     }
 
@@ -36534,11 +36534,11 @@ mod tests {
         let code = gen("let m = {\"a\": 1, \"b\": \"x\"}").unwrap();
         assert!(
             code.contains("Vec<(__FitzValue, __FitzValue)>"),
-            "expected Vec<(__FitzValue, __FitzValue)> para mapa heterogéneo"
+            "expected Vec<(__FitzValue, __FitzValue)> for heterogeneous map"
         );
         assert!(
             code.contains("__FitzValue::Str(String::from(\"a\"))"),
-            "expected wrap del lado homogéneo de keys"
+            "expected wrap of the homogeneous side of keys"
         );
     }
 
@@ -36548,7 +36548,7 @@ mod tests {
         let code = gen("let m = {\"a\": 1, \"b\": 2}").unwrap();
         assert!(
             !code.contains("__FitzValue"),
-            "mapa homogéneo NO debe gatillar emisión de `__FitzValue`"
+            "homogeneous map must NOT trigger emission of `__FitzValue`"
         );
     }
 
@@ -36564,11 +36564,11 @@ mod tests {
         .unwrap();
         assert!(
             code.contains("__FitzValue::Nominal(format!"),
-            "expected wrap `__FitzValue::Nominal(format!(...))` para Nominal en heterogéneo"
+            "expected wrap `__FitzValue::Nominal(format!(...))` for Nominal in heterogeneous"
         );
         assert!(
             code.contains(".lock().unwrap()"),
-            "expected lock del Arc<Mutex<UserData>> antes de Display"
+            "expected lock of Arc<Mutex<UserData>> before Display"
         );
     }
 
@@ -36582,11 +36582,11 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < (String , i64) > > >"),
-            "tipo declarado de m"
+            "declared type of m"
         );
         let init = ast_test::local_init_expr(l).unwrap();
         let vec_args =
-            ast_test::find_macro_args(init, "vec").expect("expected un macro vec! con los pares");
+            ast_test::find_macro_args(init, "vec").expect("expected a vec! macro with the pairs");
         // Verify that both (key, value) tuples appear.
         for pair in [
             "(String :: from (\"a\") , 1i64)",
@@ -36594,7 +36594,7 @@ mod tests {
         ] {
             assert!(
                 vec_args.contains(pair),
-                "expected par {} en vec!, fue: {}",
+                "expected pair {} in vec!, was: {}",
                 pair,
                 vec_args
             );
@@ -36610,13 +36610,13 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < (String , i64) > > >"),
-            "expected `Map<Str, Int>` por anotación"
+            "expected `Map<Str, Int>` from annotation"
         );
         // Empty map → no vec! macro.
         let init = ast_test::local_init_expr(l).unwrap();
         assert!(
             ast_test::find_macro_args(init, "vec").is_none(),
-            "mapa vacío no debería emitir macro vec!"
+            "empty map should not emit vec! macro"
         );
     }
 
@@ -36629,12 +36629,12 @@ mod tests {
         let code = gen("let m = {\"a\": 1, \"b\": \"x\"}").unwrap();
         assert!(
             code.contains("Vec<(__FitzValue, __FitzValue)>"),
-            "expected tipo `Vec<(__FitzValue, __FitzValue)>` para mapa heterogéneo, código:\n{}",
+            "expected type `Vec<(__FitzValue, __FitzValue)>` for heterogeneous map, code:\n{}",
             code
         );
         assert!(
             code.contains("__FitzValue::Int(1i64)"),
-            "expected wrap `__FitzValue::Int(1i64)` para value Int"
+            "expected wrap `__FitzValue::Int(1i64)` for Int value"
         );
     }
 
@@ -36657,7 +36657,7 @@ mod tests {
         // Verify the negative wrap (signature of the new emit).
         assert!(
             ts.contains("__len + __i"),
-            "expected wrap negativo `__len + __i`, fue: {}",
+            "expected negative wrap `__len + __i`, was: {}",
             ts
         );
     }
@@ -36674,13 +36674,13 @@ mod tests {
         // is inside the init: I check for the presence of key methods.
         assert!(
             ast_test::contains_method_call_in_expr(init, "find"),
-            "expected `.find(...)` en el init de n, fue: {}",
+            "expected `.find(...)` in the init of n, was: {}",
             ast_test::ts(init)
         );
         // The panic with the interpreter message stays as a string
         // (it's a bit-a-bit contract with the evaluator).
         let panic_args = ast_test::find_macro_args(init, "panic")
-            .expect("expected un panic! adentro del bloque");
+            .expect("expected a panic! inside the block");
         assert!(
             panic_args.contains("key not found in map"),
             "expected interpreter message in panic!, was: {}",
@@ -36697,7 +36697,7 @@ mod tests {
             &gen("let xs: List<Int> = [1, 2, 3]\nfor v in xs { print(v) }").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
-        let fl = ast_test::find_for_loop(stmts).expect("falta el for loop");
+        let fl = ast_test::find_for_loop(stmts).expect("missing for loop");
         // The iterable is a method chain: receiver → lock → unwrap →
         // clone → into_iter. The structural inspection ignores
         // parens and formatting.
@@ -36706,7 +36706,7 @@ mod tests {
             chain
                 .windows(3)
                 .any(|w| w == ["unwrap", "clone", "into_iter"]),
-            "expected chain `lock().unwrap().clone().into_iter()` en el for, fue: {:?}",
+            "expected chain `lock().unwrap().clone().into_iter()` in the for, was: {:?}",
             chain
         );
     }
@@ -36723,7 +36723,7 @@ mod tests {
         // `.push(...)` is emitted as a method call on `lock().unwrap()`.
         assert!(
             ast_test::contains_method_call(stmts, "lock"),
-            "expected `lock` antes del push"
+            "expected `lock` before push"
         );
         assert!(
             ast_test::contains_method_call(stmts, "push"),
@@ -36741,14 +36741,14 @@ mod tests {
         // `.expect(...)` panics with the same interpreter message.
         assert!(
             init.contains("lock") && init.contains("pop") && init.contains("expect"),
-            "expected pipeline lock + pop + expect, fue: {}",
+            "expected pipeline lock + pop + expect, was: {}",
             init
         );
         // The expect message must mention `pop` and `lista vacía`
         // (matches the interpreter's).
         assert!(
             init.contains("pop") && init.contains("vac"),
-            "expected mensaje del expect sobre lista vacía, fue: {}",
+            "expected expect message about empty list, was: {}",
             init
         );
     }
@@ -36763,7 +36763,7 @@ mod tests {
         let init = ast_test::local_init(l).unwrap();
         assert!(
             init.contains("lock") && init.contains("len") && init.contains("as i64"),
-            "expected pipeline lock + len + as i64, fue: {}",
+            "expected pipeline lock + len + as i64, was: {}",
             init
         );
     }
@@ -36787,7 +36787,7 @@ mod tests {
         let chain = ast_test::method_chain_names(init);
         assert!(
             chain.contains(&"lock".to_string()) && chain.contains(&"len".to_string()),
-            "expected chain con lock + len, fue: {:?}",
+            "expected chain with lock + len, was: {:?}",
             chain
         );
     }
@@ -36808,7 +36808,7 @@ mod tests {
         let chain = ast_test::method_chain_names(init);
         assert!(
             chain.contains(&"chars".to_string()) && chain.contains(&"count".to_string()),
-            "expected chain con chars + count, fue: {:?}",
+            "expected chain with chars + count, was: {:?}",
             chain
         );
     }
@@ -36824,7 +36824,7 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < i64 > > >"),
-            "expected que `ys` quede tipado List<Int>"
+            "expected `ys` to be typed as List<Int>"
         );
         // The init invokes `.map(|x: i64| -> i64 { ... })` inside an
         // Arc::new(Mutex::new(...)). Structural check: there is a
@@ -36833,18 +36833,18 @@ mod tests {
         let init = ast_test::local_init_expr(l).unwrap();
         assert!(
             ast_test::contains_method_call_in_expr(init, "map"),
-            "expected `.map(...)` en el init, fue: {}",
+            "expected `.map(...)` in the init, was: {}",
             ast_test::ts(init)
         );
         let init_text = ast_test::ts(init);
         assert!(
             init_text.contains("| x : i64 | -> i64"),
-            "expected closure `|x: i64| -> i64`, fue: {}",
+            "expected closure `|x: i64| -> i64`, was: {}",
             init_text
         );
         assert!(
             init_text.contains("Arc :: new (Mutex :: new"),
-            "expected envoltorio Arc::new(Mutex::new(...)), fue: {}",
+            "expected wrapping Arc::new(Mutex::new(...)), was: {}",
             init_text
         );
     }
@@ -36864,13 +36864,13 @@ mod tests {
         // `|x: i64| -> bool`.
         assert!(
             init_text.contains("let __cb = | x : i64 | -> bool"),
-            "expected binding del callback `__cb`, fue: {}",
+            "expected callback binding `__cb`, was: {}",
             init_text
         );
         // The callback is applied inside a for with clone of the item.
         assert!(
             init_text.contains("__cb (__it . clone ())"),
-            "expected aplicación `__cb(__it.clone())` adentro del for, fue: {}",
+            "expected application `__cb(__it.clone())` inside the for, was: {}",
             init_text
         );
     }
@@ -36914,12 +36914,12 @@ mod tests {
         let init = ast_test::local_init_expr(l).unwrap();
         assert!(
             ast_test::contains_method_call_in_expr(init, "iter"),
-            "expected `.iter()` en el init de b, fue: {}",
+            "expected `.iter()` in the init of b, was: {}",
             ast_test::ts(init)
         );
         assert!(
             ast_test::contains_method_call_in_expr(init, "any"),
-            "expected `.any(...)` en el init de b, fue: {}",
+            "expected `.any(...)` in the init of b, was: {}",
             ast_test::ts(init)
         );
         // The `b` binding's type is bool.
@@ -36937,19 +36937,19 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < String > > >"),
-            "expected que keys retorne List<Str>"
+            "expected keys to return List<Str>"
         );
         let init = ast_test::local_init_expr(l).unwrap();
         // The inner pipeline uses `.iter().map(...).collect()`.
         let init_text = ast_test::ts(init);
         assert!(
             init_text.contains(". iter () . map (| (__k , _) | __k . clone ())"),
-            "expected pipeline `.iter().map(|(__k, _)| __k.clone())`, fue: {}",
+            "expected pipeline `.iter().map(|(__k, _)| __k.clone())`, was: {}",
             init_text
         );
         assert!(
             init_text.contains("collect :: < Vec < _ > > ()"),
-            "expected `.collect::<Vec<_>>()`, fue: {}",
+            "expected `.collect::<Vec<_>>()`, was: {}",
             init_text
         );
     }
@@ -36964,18 +36964,18 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < Mutex < Vec < i64 > > >"),
-            "expected que values retorne List<Int>"
+            "expected values to return List<Int>"
         );
         let init = ast_test::local_init_expr(l).unwrap();
         let init_text = ast_test::ts(init);
         assert!(
             init_text.contains(". iter () . map (| (_ , __v) | __v . clone ())"),
-            "expected pipeline `.iter().map(|(_, __v)| __v.clone())`, fue: {}",
+            "expected pipeline `.iter().map(|(_, __v)| __v.clone())`, was: {}",
             init_text
         );
         assert!(
             init_text.contains("collect :: < Vec < _ > > ()"),
-            "expected `.collect::<Vec<_>>()`, fue: {}",
+            "expected `.collect::<Vec<_>>()`, was: {}",
             init_text
         );
     }
@@ -36996,7 +36996,7 @@ mod tests {
         let chain = ast_test::method_chain_names(init);
         assert!(
             chain.contains(&"lock".to_string()) && chain.contains(&"len".to_string()),
-            "expected chain con lock + len, fue: {:?}",
+            "expected chain with lock + len, was: {:?}",
             chain
         );
     }
@@ -37024,12 +37024,12 @@ mod tests {
         let init_text = ast_test::ts(init);
         assert!(
             init_text.contains("Err (String :: from (\"no encontrado\"))"),
-            "expected inicializador con `Err(\"no encontrado\")`, fue: {}",
+            "expected initializer with `Err(\"no encontrado\")`, was: {}",
             init_text
         );
         assert!(
             init_text.contains("__result = Ok (__it) ; break ;"),
-            "expected asignación `__result = Ok(__it); break;`, fue: {}",
+            "expected assignment `__result = Ok(__it); break;`, was: {}",
             init_text
         );
     }
@@ -37054,16 +37054,16 @@ mod tests {
         // (bit-a-bit contract with the interpreter) — I look for it inside
         // a format! macro call.
         let fmt = ast_test::find_macro_args(init, "format")
-            .expect("expected un format! con el mensaje del Err");
+            .expect("expected a format! with the Err message");
         assert!(
             fmt.contains("clave no encontrada: {}"),
-            "expected template `clave no encontrada: {{}}` en format!, fue: {}",
+            "expected template `clave no encontrada: {{}}` in format!, was: {}",
             fmt
         );
         let init_text = ast_test::ts(init);
         assert!(
             init_text.contains("__result = Ok (__v . clone ()) ; break ;"),
-            "expected asignación `__result = Ok(__v.clone()); break;`, fue: {}",
+            "expected assignment `__result = Ok(__v.clone()); break;`, was: {}",
             init_text
         );
     }
@@ -37081,14 +37081,14 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < dyn Fn (i64) -> i64 + Send + Sync >"),
-            "expected tipo `Arc<dyn Fn(i64) -> i64>`"
+            "expected type `Arc<dyn Fn(i64) -> i64>`"
         );
         // The init must contain `Arc::new(move |x: i64| ...)`. I verify
         // substring over the normalized representation.
         let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
             init_text.contains("Arc :: new (move | x : i64 |"),
-            "expected `Arc::new(move |x: i64| ...)`, fue: {}",
+            "expected `Arc::new(move |x: i64| ...)`, was: {}",
             init_text
         );
     }
@@ -37099,7 +37099,7 @@ mod tests {
         // the FnExpr (debt 5b.1). Without annotation → explicit message.
         assert_err_contains(
             "let f: Fn(Int) -> Int = fn(x) => x * 2",
-            &["anónima", "anotación de tipo"],
+            &["anonymous", "type annotation"],
         );
     }
 
@@ -37117,12 +37117,12 @@ mod tests {
         assert_eq!(
             ast_test::local_type(l).as_deref(),
             Some("Arc < dyn Fn (i64) -> i64 + Send + Sync >"),
-            "expected tipo `Arc<dyn Fn(i64) -> i64>`"
+            "expected type `Arc<dyn Fn(i64) -> i64>`"
         );
         let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
             init_text.contains("Arc :: new (square)"),
-            "expected `Arc::new(square)`, fue: {}",
+            "expected `Arc::new(square)`, was: {}",
             init_text
         );
     }
@@ -37142,12 +37142,12 @@ mod tests {
         assert_eq!(
             ast_test::fn_param_types(apply),
             vec!["Arc < dyn Fn (i64) -> i64 + Send + Sync >", "i64"],
-            "tipos de params de apply"
+            "param types of apply"
         );
         assert_eq!(
             ast_test::fn_return_type(apply).as_deref(),
             Some("i64"),
-            "return type de apply"
+            "return type of apply"
         );
         // The call `apply(square, 7)` must wrap `square` in
         // `Arc::new(square)`. I look for it as a substring over the
@@ -37156,7 +37156,7 @@ mod tests {
             ast_test::ts(ast_test::find_item_fn(&file, "main").expect("missing fn main"));
         assert!(
             main_text.contains("apply ((Arc :: new (square)"),
-            "expected `apply((Arc::new(square) as ...))` en main, fue: {}",
+            "expected `apply((Arc::new(square) as ...))` in main, was: {}",
             main_text
         );
     }
@@ -37179,18 +37179,18 @@ mod tests {
         assert_eq!(
             ast_test::fn_param_types(make_adder),
             vec!["i64"],
-            "tipos de params de make_adder"
+            "param types of make_adder"
         );
         assert_eq!(
             ast_test::fn_return_type(make_adder).as_deref(),
             Some("Arc < dyn Fn (i64) -> i64 + Send + Sync >"),
-            "return type de make_adder"
+            "return type of make_adder"
         );
         // The body of make_adder contains `Arc::new(move |y: i64| ...)`.
         let body_text = ast_test::ts(&make_adder.block);
         assert!(
             body_text.contains("Arc :: new (move | y : i64 |"),
-            "expected closure con `move` capturando x, fue: {}",
+            "expected closure with `move` capturing x, was: {}",
             body_text
         );
     }
@@ -37215,12 +37215,12 @@ mod tests {
         let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
             init_text.contains("let saludo = saludo . clone () ;"),
-            "expected clone de la captura antes del Rc::new, fue: {}",
+            "expected clone of the capture before Rc::new, was: {}",
             init_text
         );
         assert!(
             init_text.contains("Arc :: new (move | n : String |"),
-            "expected closure `Arc::new(move |n: String| ...)`, fue: {}",
+            "expected closure `Arc::new(move |n: String| ...)`, was: {}",
             init_text
         );
     }
@@ -37239,7 +37239,7 @@ mod tests {
             ast_test::ts(ast_test::find_item_fn(&file, "main").expect("missing fn main"));
         assert!(
             main_text.contains("f (10i64)"),
-            "expected `f(10i64)` en main, fue: {}",
+            "expected `f(10i64)` in main, was: {}",
             main_text
         );
     }
@@ -37258,7 +37258,7 @@ mod tests {
             ast_test::ts(ast_test::find_item_fn(&file, "main").expect("missing fn main"));
         assert!(
             main_text.contains("apply ((Arc :: new (move | n : i64 |"),
-            "expected el FnExpr emitido inline como arg de apply, fue: {}",
+            "expected the FnExpr emitted inline as arg of apply, was: {}",
             main_text
         );
     }
@@ -37272,7 +37272,7 @@ mod tests {
         // There must be a `println!` (it's the list print).
         assert!(
             ast_test::count_macro_calls(stmts, "println") >= 1,
-            "expected al menos un println! para imprimir xs"
+            "expected at least one println! to print xs"
         );
         // The inline block binds the Rc to `__list` before the borrow
         // (temporary lifetime). I verify by checking the total code
@@ -37280,13 +37280,13 @@ mod tests {
         let code = ast_test::ts(&file);
         assert!(
             code.contains("let __list ="),
-            "expected binding `let __list = ...` adentro del print, fue:\n{}",
+            "expected binding `let __list = ...` inside the print, was:\n{}",
             code
         );
         // The header `[` is emitted as Str literal inside the format.
         assert!(
             code.contains("String :: from (\"[\")"),
-            "expected `String::from(\"[\")` como header de lista, fue:\n{}",
+            "expected `String::from(\"[\")` as list header, was:\n{}",
             code
         );
     }
@@ -37297,17 +37297,17 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
             ast_test::count_macro_calls(stmts, "println") >= 1,
-            "expected al menos un println! para imprimir m"
+            "expected at least one println! to print m"
         );
         let code = ast_test::ts(&file);
         assert!(
             code.contains("let __map ="),
-            "expected binding `let __map = ...` adentro del print, fue:\n{}",
+            "expected binding `let __map = ...` inside the print, was:\n{}",
             code
         );
         assert!(
             code.contains("String :: from (\"{\")"),
-            "expected `String::from(\"{{\")` como header de mapa, fue:\n{}",
+            "expected `String::from(\"{{\")` as map header, was:\n{}",
             code
         );
     }
@@ -37341,15 +37341,15 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("pub struct __FitzSecret<T>(T)"),
-            "expected struct __FitzSecret en el preludio"
+            "expected struct __FitzSecret in the prelude"
         );
         assert!(
             code.contains("fn expose(self) -> T"),
-            "expected método expose() en __FitzSecret"
+            "expected method expose() in __FitzSecret"
         );
         assert!(
             code.contains("write!(f, \"<redacted Secret>\")"),
-            "expected Display/Debug redactado en __FitzSecret"
+            "expected redacted Display/Debug in __FitzSecret"
         );
     }
 
@@ -37360,12 +37360,12 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("__fitz_secret(&"),
-            "expected call a __fitz_secret(&...)"
+            "expected call to __fitz_secret(&...)"
         );
         // The builtin helper must exist in the prelude.
         assert!(
             code.contains("fn __fitz_secret(key: &str)"),
-            "expected helper __fitz_secret en preludio"
+            "expected helper __fitz_secret in prelude"
         );
     }
 
@@ -37377,11 +37377,11 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("let __default: i64 = 8080"),
-            "expected binding __default tipado Int"
+            "expected binding __default typed Int"
         );
         assert!(
             code.contains(".parse::<i64>()"),
-            "expected parse::<i64>() para coerción Int"
+            "expected parse::<i64>() for Int coercion"
         );
     }
 
@@ -37391,12 +37391,12 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("let __default: bool = false"),
-            "expected binding __default tipado Bool"
+            "expected binding __default typed Bool"
         );
         // The match must accept the documented variants.
         assert!(
             code.contains("\"true\" | \"1\" | \"yes\" | \"on\""),
-            "expected match con variantes truthy"
+            "expected match with truthy variants"
         );
     }
 
@@ -37412,7 +37412,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains(".expose()"),
-            "expected llamada a .expose() en el output Rust"
+            "expected call to .expose() in the Rust output"
         );
     }
 
@@ -37429,7 +37429,7 @@ mod tests {
         let err = gen_ignoring_check(src).unwrap_err();
         assert!(
             err.message.contains(".expose()"),
-            "expected mensaje citando .expose(), fue: {}",
+            "expected message citing .expose(), was: {}",
             err.message
         );
     }
@@ -37443,15 +37443,15 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("static __FITZ_DRAINING"),
-            "expected `static __FITZ_DRAINING` en el output"
+            "expected `static __FITZ_DRAINING` in the output"
         );
         assert!(
             code.contains("async fn __fitz_shutdown_signal"),
-            "expected `async fn __fitz_shutdown_signal` en el output"
+            "expected `async fn __fitz_shutdown_signal` in the output"
         );
         assert!(
             code.contains(".with_graceful_shutdown(__fitz_shutdown_signal("),
-            "expected `with_graceful_shutdown` en la línea de axum::serve"
+            "expected `with_graceful_shutdown` in the axum::serve line"
         );
     }
 
@@ -37496,15 +37496,15 @@ mod tests {
         );
         assert!(
             code.contains("let __r: bool = liveness();"),
-            "expected invocación sync `liveness()` con tipo bool"
+            "expected sync invocation `liveness()` with bool type"
         );
         assert!(
             code.contains("if __r { __fitz_health_ok() } else { __fitz_health_unhealthy(None) }"),
-            "expected mapping if/else Bool → ok/unhealthy"
+            "expected if/else Bool → ok/unhealthy mapping"
         );
         assert!(
             code.contains(".route(\"/healthz\", axum::routing::get(__fitz_user_healthz))"),
-            "expected que la route apunte al wrapper user en vez del default"
+            "expected route to point to the user wrapper instead of the default"
         );
     }
 
@@ -37529,11 +37529,11 @@ mod tests {
         let wrapper_section = &code[wrapper_start..wrapper_start + 800];
         assert!(
             wrapper_section.contains("__FITZ_DRAINING.load"),
-            "expected check de __FITZ_DRAINING adentro del wrapper readyz user"
+            "expected __FITZ_DRAINING check inside the user readyz wrapper"
         );
         assert!(
             code.contains("let __r: Result<(), String> = readiness();"),
-            "expected tipo `Result<(), String>` para Result<Null>"
+            "expected type `Result<(), String>` for Result<Null>"
         );
         assert!(
             code.contains("Ok(()) => __fitz_health_ok()"),
@@ -37551,7 +37551,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("let __r: bool = liveness().await;"),
-            "expected invocación async `liveness().await`"
+            "expected async invocation `liveness().await`"
         );
     }
 
@@ -37564,7 +37564,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains(".with_graceful_shutdown(__fitz_shutdown_signal(60))"),
-            "expected shutdown signal con timeout=60"
+            "expected shutdown signal with timeout=60"
         );
     }
 
@@ -37575,7 +37575,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains(".with_graceful_shutdown(__fitz_shutdown_signal(30))"),
-            "expected shutdown signal con timeout=30 (default)"
+            "expected shutdown signal with timeout=30 (default)"
         );
     }
 
@@ -37590,7 +37590,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
         let main = ast_test::find_item_fn(&file, "main").expect("missing fn main");
-        assert!(ast_test::fn_is_async(main), "fn main debería ser async");
+        assert!(ast_test::fn_is_async(main), "fn main should be async");
         let attrs = ast_test::fn_attrs(main);
         assert!(
             attrs.iter().any(|a| a.contains("tokio :: main")),
@@ -37601,13 +37601,13 @@ mod tests {
         // to multi-thread, the default — no explicit override).
         assert!(
             !attrs.iter().any(|a| a.contains("current_thread")),
-            "no esperaba `current_thread` en attrs, fue: {:?}",
+            "did not expect `current_thread` in attrs, was: {:?}",
             attrs
         );
         let body = ast_test::fn_body_text(main);
         assert!(
             body.contains("axum :: Router :: new"),
-            "expected `axum::Router::new()` en fn main body"
+            "expected `axum::Router::new()` in fn main body"
         );
     }
 
@@ -37617,10 +37617,10 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
         let handler = ast_test::find_item_fn(&file, "__handler_list_users")
-            .expect("falta async fn __handler_list_users");
+            .expect("missing async fn __handler_list_users");
         assert!(
             ast_test::fn_is_async(handler),
-            "__handler_list_users debería ser async"
+            "__handler_list_users should be async"
         );
         let routes = ast_test::find_route_registrations(&file);
         let users = routes
@@ -37640,7 +37640,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
         let handler =
-            ast_test::find_item_fn(&file, "__handler_get_user").expect("falta __handler_get_user");
+            ast_test::find_item_fn(&file, "__handler_get_user").expect("missing __handler_get_user");
         let pats_tys = ast_test::fn_param_pats_and_types(handler);
         assert!(
             pats_tys.iter().any(|(p, t)| {
@@ -37649,7 +37649,7 @@ mod tests {
                     && t.contains("axum :: extract :: Path")
                     && t.contains("i64")
             }),
-            "expected param `axum::extract::Path(id): axum::extract::Path<i64>` en __handler_get_user, got: {:?}",
+            "expected param `axum::extract::Path(id): axum::extract::Path<i64>` in __handler_get_user, got: {:?}",
             pats_tys
         );
     }
@@ -37660,7 +37660,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
         let handler =
-            ast_test::find_item_fn(&file, "__handler_greet").expect("falta __handler_greet");
+            ast_test::find_item_fn(&file, "__handler_greet").expect("missing __handler_greet");
         let pats_tys = ast_test::fn_param_pats_and_types(handler);
         assert!(
             pats_tys.iter().any(|(p, t)| {
@@ -37669,7 +37669,7 @@ mod tests {
                     && t.contains("axum :: extract :: Path")
                     && t.contains("String")
             }),
-            "expected param `axum::extract::Path(name): axum::extract::Path<String>` en __handler_greet, got: {:?}",
+            "expected param `axum::extract::Path(name): axum::extract::Path<String>` in __handler_greet, got: {:?}",
             pats_tys
         );
     }
@@ -37680,17 +37680,17 @@ mod tests {
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
         let wrapper =
-            ast_test::find_item_fn(&file, "__handler_divide").expect("falta __handler_divide");
+            ast_test::find_item_fn(&file, "__handler_divide").expect("missing __handler_divide");
         assert!(
             ast_test::fn_body_has_match_arm_pat(wrapper, "Ok (__v)")
                 || ast_test::fn_body_has_match_arm_pat(wrapper, "Ok(__v)"),
-            "expected arm `Ok(__v)` en el wrapper, body:\n{}",
+            "expected arm `Ok(__v)` in the wrapper, body:\n{}",
             ast_test::fn_body_text(wrapper)
         );
         assert!(
             ast_test::fn_body_has_match_arm_pat(wrapper, "Err (__e)")
                 || ast_test::fn_body_has_match_arm_pat(wrapper, "Err(__e)"),
-            "expected arm `Err(__e)` en el wrapper, body:\n{}",
+            "expected arm `Err(__e)` in the wrapper, body:\n{}",
             ast_test::fn_body_text(wrapper)
         );
         let body = ast_test::fn_body_text(wrapper);
@@ -37722,19 +37722,19 @@ mod tests {
         assert_eq!(
             ast_test::fn_return_type(protected).as_deref(),
             Some("__FitzResponse"),
-            "expected que protected retorne __FitzResponse"
+            "expected protected to return __FitzResponse"
         );
         assert!(
             ast_test::fn_body_returns_any_matching(
                 protected,
                 &["__FitzResponse", "status", "401i64", "as u16"],
             ),
-            "expected un `return __FitzResponse {{ status: (401i64) as u16, ... }}`, body:\n{}",
+            "expected a `return __FitzResponse {{ status: (401i64) as u16, ... }}`, body:\n{}",
             ast_test::fn_body_text(protected)
         );
         assert!(
             ast_test::fn_body_text(protected).contains("__to_fitz_json"),
-            "expected que el body se serialice con __to_fitz_json"
+            "expected body to be serialized with __to_fitz_json"
         );
     }
 
@@ -37754,7 +37754,7 @@ mod tests {
         // The Str "alice" return must be wrapped in status 200.
         assert!(
             ast_test::fn_body_returns_any_matching(get_user, &["__FitzResponse", "status : 200"],),
-            "expected return con `__FitzResponse {{ status: 200, ... }}`, body:\n{}",
+            "expected return with `__FitzResponse {{ status: 200, ... }}`, body:\n{}",
             ast_test::fn_body_text(get_user)
         );
         // The 404 return emits its custom status as a cast.
@@ -37763,7 +37763,7 @@ mod tests {
                 get_user,
                 &["__FitzResponse", "404i64", "as u16"],
             ),
-            "expected return con `status: (404i64) as u16`, body:\n{}",
+            "expected return with `status: (404i64) as u16`, body:\n{}",
             ast_test::fn_body_text(get_user)
         );
     }
@@ -37778,9 +37778,9 @@ mod tests {
                    }";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let wrapper = ast_test::find_item_fn(&file, "__handler_p").expect("falta __handler_p");
+        let wrapper = ast_test::find_item_fn(&file, "__handler_p").expect("missing __handler_p");
         let resp =
-            ast_test::find_local_in_fn(wrapper, "__resp").expect("missing let __resp en wrapper");
+            ast_test::find_local_in_fn(wrapper, "__resp").expect("missing let __resp in wrapper");
         assert_eq!(
             ast_test::local_type(&resp).as_deref(),
             Some("__FitzResponse"),
@@ -37816,7 +37816,7 @@ mod tests {
         // normal handlers in the same program).
         assert!(
             ast_test::find_item_struct(&file, "__FitzResponse").is_some(),
-            "expected `struct __FitzResponse` en el preludio HTTP, got:\n{}",
+            "expected `struct __FitzResponse` in the HTTP prelude, got:\n{}",
             code
         );
     }
@@ -37832,7 +37832,7 @@ mod tests {
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
         let wrapper = ast_test::find_item_fn(&file, "__handler_list_items")
-            .expect("falta __handler_list_items");
+            .expect("missing __handler_list_items");
         let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
             pats_tys.iter().any(|(p, t)| {
@@ -37846,7 +37846,7 @@ mod tests {
             pats_tys
         );
         let limit =
-            ast_test::find_local_in_fn(wrapper, "limit").expect("falta `let limit` en wrapper");
+            ast_test::find_local_in_fn(wrapper, "limit").expect("missing `let limit` in wrapper");
         assert_eq!(
             ast_test::local_type(&limit).as_deref(),
             Some("i64"),
@@ -37855,7 +37855,7 @@ mod tests {
         let init = ast_test::local_init(&limit).unwrap_or_default();
         assert!(
             init.contains("__qmap . get (\"limit\")") || init.contains("__qmap .get (\"limit\")"),
-            "expected init que matchea __qmap.get(\"limit\"), got: {}",
+            "expected init matching __qmap.get(\"limit\"), got: {}",
             init
         );
         // The error message for missing query is a user-visible contract,
@@ -37874,9 +37874,9 @@ mod tests {
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
         let wrapper = ast_test::find_item_fn(&file, "__handler_list_items")
-            .expect("falta __handler_list_items");
+            .expect("missing __handler_list_items");
         let limit =
-            ast_test::find_local_in_fn(wrapper, "limit").expect("falta `let limit` en wrapper");
+            ast_test::find_local_in_fn(wrapper, "limit").expect("missing `let limit` in wrapper");
         assert_eq!(
             ast_test::local_type(&limit).as_deref(),
             Some("Option < i64 >"),
@@ -37885,7 +37885,7 @@ mod tests {
         let init = ast_test::local_init(&limit).unwrap_or_default();
         assert!(
             init.contains("None => None"),
-            "expected branch `None => None` para query opcional, got init: {}",
+            "expected branch `None => None` for optional query, got init: {}",
             init
         );
     }
@@ -37896,9 +37896,9 @@ mod tests {
         let src = "@get(\"/x?name={name}\") fn h(name: Str) -> Str => name";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let wrapper = ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
+        let wrapper = ast_test::find_item_fn(&file, "__handler_h").expect("missing __handler_h");
         let name =
-            ast_test::find_local_in_fn(wrapper, "name").expect("falta `let name` en wrapper");
+            ast_test::find_local_in_fn(wrapper, "name").expect("missing `let name` in wrapper");
         assert_eq!(
             ast_test::local_type(&name).as_deref(),
             Some("String"),
@@ -37909,12 +37909,12 @@ mod tests {
             init.contains("Ok ::< String , String > (__s . clone ())")
                 || init.contains("Ok ::< String, String > (__s .clone ())")
                 || init.contains("Ok :: < String , String > (__s . clone ())"),
-            "expected coerción `Ok::<String, String>(__s.clone())`, got: {}",
+            "expected coercion `Ok::<String, String>(__s.clone())`, got: {}",
             init
         );
         assert!(
             !init.contains(". parse"),
-            "no debería haber `.parse::<...>()` para Str, got: {}",
+            "should not have `.parse::<...>()` for Str, got: {}",
             init
         );
     }
@@ -37924,8 +37924,8 @@ mod tests {
         let src = "@get(\"/x?on={on}\") fn h(on: Bool) -> Bool => on";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let wrapper = ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
-        let on = ast_test::find_local_in_fn(wrapper, "on").expect("falta `let on` en wrapper");
+        let wrapper = ast_test::find_item_fn(&file, "__handler_h").expect("missing __handler_h");
+        let on = ast_test::find_local_in_fn(wrapper, "on").expect("missing `let on` in wrapper");
         assert_eq!(
             ast_test::local_type(&on).as_deref(),
             Some("bool"),
@@ -37934,7 +37934,7 @@ mod tests {
         let init = ast_test::local_init(&on).unwrap_or_default();
         assert!(
             init.contains("\"true\" => Ok") || init.contains("\"true\"=> Ok"),
-            "expected arm contra `\"true\"`, got init: {}",
+            "expected arm against `\"true\"`, got init: {}",
             init
         );
     }
@@ -37948,7 +37948,7 @@ mod tests {
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
         let wrapper =
-            ast_test::find_item_fn(&file, "__handler_list").expect("falta __handler_list");
+            ast_test::find_item_fn(&file, "__handler_list").expect("missing __handler_list");
         let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
             pats_tys.iter().any(|(p, t)| {
@@ -37957,7 +37957,7 @@ mod tests {
                     && t.contains("axum :: extract :: Path")
                     && t.contains("i64")
             }),
-            "expected extractor Path<i64> para `id`, got: {:?}",
+            "expected extractor Path<i64> for `id`, got: {:?}",
             pats_tys
         );
         assert!(
@@ -37970,7 +37970,7 @@ mod tests {
             pats_tys
         );
         let limit =
-            ast_test::find_local_in_fn(wrapper, "limit").expect("falta `let limit` en wrapper");
+            ast_test::find_local_in_fn(wrapper, "limit").expect("missing `let limit` in wrapper");
         assert_eq!(
             ast_test::local_type(&limit).as_deref(),
             Some("Option < i64 >"),
@@ -37986,7 +37986,7 @@ mod tests {
         let err = gen(src).expect_err("expected error");
         assert!(
             err.message.contains("query param") && err.message.contains("limit"),
-            "expected mensaje sobre query param sin param correspondiente, fue: {}",
+            "expected message about query param without corresponding param, was: {}",
             err.message
         );
     }
@@ -38013,7 +38013,7 @@ mod tests {
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
         let wrapper =
-            ast_test::find_item_fn(&file, "__handler_echo").expect("falta __handler_echo");
+            ast_test::find_item_fn(&file, "__handler_echo").expect("missing __handler_echo");
         let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
             pats_tys.iter().any(|(p, t)| {
@@ -38025,7 +38025,7 @@ mod tests {
         let body = ast_test::fn_body_text(wrapper);
         assert!(
             body.contains("__FromFitzJson") && body.contains("__from_fitz_json"),
-            "expected que el body llame __from_fitz_json, got:\n{}",
+            "expected body to call __from_fitz_json, got:\n{}",
             body
         );
         assert!(
@@ -38045,11 +38045,11 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("body_body_bytes: axum::body::Bytes"),
-            "expected extractor `body_body_bytes: axum::body::Bytes`, no se encontró"
+            "expected extractor `body_body_bytes: axum::body::Bytes`, not found"
         );
         assert!(
             !code.contains("axum::Json(body_raw):"),
-            "no esperaba el viejo extractor `axum::Json(body_raw): axum::Json<serde_json::Value>`"
+            "did not expect the old extractor `axum::Json(body_raw): axum::Json<serde_json::Value>`"
         );
     }
 
@@ -38062,19 +38062,19 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("body_ct_primary"),
-            "expected bind `body_ct_primary` para Content-Type"
+            "expected bind `body_ct_primary` for Content-Type"
         );
         assert!(
             code.contains("\"application/json\""),
-            "expected branch para `application/json`"
+            "expected branch for `application/json`"
         );
         assert!(
             code.contains("\"application/x-www-form-urlencoded\""),
-            "expected branch para urlencoded"
+            "expected branch for urlencoded"
         );
         assert!(
             code.contains("__parse_urlencoded"),
-            "expected llamada a `__parse_urlencoded` para urlencoded"
+            "expected call to `__parse_urlencoded` for urlencoded"
         );
         assert!(
             code.contains("UNSUPPORTED_MEDIA_TYPE"),
@@ -38116,11 +38116,11 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("fn __parse_multipart(bytes: &[u8]"),
-            "expected helper `__parse_multipart` en el preludio HTTP"
+            "expected helper `__parse_multipart` in the HTTP prelude"
         );
         assert!(
             code.contains("fn __extract_multipart_boundary("),
-            "expected helper `__extract_multipart_boundary` en el preludio HTTP"
+            "expected helper `__extract_multipart_boundary` in the HTTP prelude"
         );
     }
 
@@ -38133,11 +38133,11 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("\"multipart/form-data\""),
-            "expected branch para multipart en el dispatch"
+            "expected branch for multipart in the dispatch"
         );
         assert!(
             code.contains("__parse_multipart"),
-            "expected llamada a `__parse_multipart` en el dispatch"
+            "expected call to `__parse_multipart` in the dispatch"
         );
     }
 
@@ -38149,11 +38149,11 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("fn __parse_urlencoded(bytes: &[u8])"),
-            "expected helper `__parse_urlencoded` en el preludio HTTP"
+            "expected helper `__parse_urlencoded` in the HTTP prelude"
         );
         assert!(
             code.contains("fn __url_decode(s: &str)"),
-            "expected helper `__url_decode` en el preludio HTTP"
+            "expected helper `__url_decode` in the HTTP prelude"
         );
     }
 
@@ -38167,7 +38167,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("__hmap: axum::http::HeaderMap"),
-            "expected que se extraiga el HeaderMap cuando hay body_param"
+            "expected HeaderMap to be extracted when there is body_param"
         );
     }
 
@@ -38183,7 +38183,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("__b == 0") && code.contains("división por cero"),
-            "expected check `__b == 0` + panic `división por cero`, got:\n{}",
+            "expected check `__b == 0` + panic with `división por cero`, got:\n{}",
             code
         );
     }
@@ -38210,7 +38210,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("división por cero"),
-            "expected panic msg `división por cero` en el output, got:\n{}",
+            "expected panic msg `división por cero` in the output, got:\n{}",
             code
         );
     }
@@ -38227,7 +38227,7 @@ mod tests {
         // We expect the pattern `{ let _ = ...; let _ = ...; false }`.
         assert!(
             code.contains("let _ = ") && code.contains("false }"),
-            "expected wrap CT con `let _` + literal false, got:\n{}",
+            "expected CT wrap with `let _` + literal false, got:\n{}",
             code
         );
     }
@@ -38238,7 +38238,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("let _ = ") && code.contains("true }"),
-            "expected wrap CT con `let _` + literal true para `!=`, got:\n{}",
+            "expected CT wrap with `let _` + literal true for `!=`, got:\n{}",
             code
         );
     }
@@ -38249,7 +38249,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("let _ = ") && code.contains("false }"),
-            "expected wrap CT con `let _` + literal false, got:\n{}",
+            "expected CT wrap with `let _` + literal false, got:\n{}",
             code
         );
     }
@@ -38262,7 +38262,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             code.contains("let _ = ") && code.contains("false }"),
-            "expected wrap CT con `let _` + literal false, got:\n{}",
+            "expected CT wrap with `let _` + literal false, got:\n{}",
             code
         );
     }
@@ -38275,7 +38275,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             !code.contains("let _ ="),
-            "Str==Str no debe disparar el wrap CT, got:\n{}",
+            "Str==Str must not trigger the CT wrap, got:\n{}",
             code
         );
     }
@@ -38287,7 +38287,7 @@ mod tests {
         let code = gen(src).unwrap();
         assert!(
             !code.contains("let _ ="),
-            "Int==Float coerce, no debe disparar el wrap CT, got:\n{}",
+            "Int==Float coerces, must not trigger the CT wrap, got:\n{}",
             code
         );
     }
@@ -38302,7 +38302,7 @@ mod tests {
         let body = ast_test::fn_body_text(main);
         assert!(
             body.contains("\"0.0.0.0:8080\" . parse") || body.contains("\"0.0.0.0:8080\".parse"),
-            "expected `\"0.0.0.0:8080\".parse()` en fn main, got:\n{}",
+            "expected `\"0.0.0.0:8080\".parse()` in fn main, got:\n{}",
             body
         );
     }
@@ -38334,12 +38334,12 @@ mod tests {
         // as a top-level item.
         assert!(
             ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_some(),
-            "expected static __FITZ_OPENAPI_SCHEMA en el archivo"
+            "expected static __FITZ_OPENAPI_SCHEMA in the file"
         );
         // The async handler exists.
         assert!(
             ast_test::find_item_fn(&file, "__serve_openapi_json").is_some(),
-            "expected fn __serve_openapi_json en el archivo"
+            "expected fn __serve_openapi_json in the file"
         );
         // The Router includes `.route("/openapi.json", ...)`.
         let main = ast_test::find_item_fn(&file, "main").expect("missing fn main");
@@ -38358,11 +38358,11 @@ mod tests {
         let file = ast_test::parse(&code);
         assert!(
             ast_test::find_item_static(&file, "__FITZ_SCALAR_HTML").is_some(),
-            "expected static __FITZ_SCALAR_HTML en el archivo"
+            "expected static __FITZ_SCALAR_HTML in the file"
         );
         assert!(
             ast_test::find_item_fn(&file, "__serve_docs").is_some(),
-            "expected fn __serve_docs en el archivo"
+            "expected fn __serve_docs in the file"
         );
         let main = ast_test::find_item_fn(&file, "main").expect("missing fn main");
         let body = ast_test::fn_body_text(main);
@@ -38383,21 +38383,21 @@ mod tests {
         let file = ast_test::parse(&code);
         assert!(
             ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_none(),
-            "con docs=false NO debería emitirse __FITZ_OPENAPI_SCHEMA"
+            "with docs=false __FITZ_OPENAPI_SCHEMA should NOT be emitted"
         );
         assert!(
             ast_test::find_item_static(&file, "__FITZ_SCALAR_HTML").is_none(),
-            "con docs=false NO debería emitirse __FITZ_SCALAR_HTML"
+            "with docs=false __FITZ_SCALAR_HTML should NOT be emitted"
         );
         assert!(
             ast_test::find_item_fn(&file, "__serve_openapi_json").is_none(),
-            "con docs=false NO debería emitirse __serve_openapi_json"
+            "with docs=false __serve_openapi_json should NOT be emitted"
         );
         let main = ast_test::find_item_fn(&file, "main").expect("missing fn main");
         let body = ast_test::fn_body_text(main);
         assert!(
             !body.contains("\"/openapi.json\"") && !body.contains("\"/docs\""),
-            "con docs=false el Router NO debería tener rutas /openapi.json ni /docs, got:\n{}",
+            "with docs=false the Router should NOT have /openapi.json or /docs routes, got:\n{}",
             body
         );
     }
@@ -38413,19 +38413,19 @@ mod tests {
         // /docs continues auto-registering (user didn't override it).
         assert!(
             ast_test::find_item_static(&file, "__FITZ_SCALAR_HTML").is_some(),
-            "/docs debería seguir auto-registrándose"
+            "/docs should keep auto-registering"
         );
         // The cached schema is NOT emitted (the user's route serves it).
         assert!(
             ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_none(),
-            "con /openapi.json del usuario, NO se debería emitir el schema cacheado"
+            "with user's /openapi.json, the cached schema should NOT be emitted"
         );
         // The user's handler is.
         let main = ast_test::find_item_fn(&file, "main").expect("missing fn main");
         let body = ast_test::fn_body_text(main);
         assert!(
             body.contains("__handler_custom"),
-            "expected que el handler del usuario aparezca en el Router, got:\n{}",
+            "expected user's handler to appear in the Router, got:\n{}",
             body
         );
     }
@@ -38441,7 +38441,7 @@ mod tests {
         // With docs=true (explicit default), auto routes are emitted.
         assert!(
             ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_some(),
-            "docs=true (explícito) debería emitir el schema embebido"
+            "docs=true (explicit) should emit the embedded schema"
         );
     }
 
@@ -38449,7 +38449,7 @@ mod tests {
     fn http_75_server_decorator_unknown_kwarg_is_error() {
         let src = "@server(3000, version=\"1.0\") fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
-        let err = gen(src).expect_err("expected error de codegen");
+        let err = gen(src).expect_err("expected codegen error");
         assert!(
             err.message.contains("version") && err.message.contains("unrecognized"),
             "expected message about unknown kwarg, was: {}",
@@ -38469,7 +38469,7 @@ mod tests {
         // The binary emits `bind("0.0.0.0:<port>")` with default port 3000.
         assert!(
             code.contains("0.0.0.0:3000") || code.contains("0.0.0.0 : 3000"),
-            "expected bind a 0.0.0.0:3000 con host kwarg solo, got:\n{}",
+            "expected bind to 0.0.0.0:3000 with host kwarg only, got:\n{}",
             &code[..code.len().min(2000)]
         );
     }
@@ -38482,7 +38482,7 @@ mod tests {
         // bind to 127.0.0.1:9090 (default host) with port kwarg.
         assert!(
             code.contains("127.0.0.1:9090") || code.contains("127.0.0.1 : 9090"),
-            "expected bind a 127.0.0.1:9090 con port kwarg solo, got:\n{}",
+            "expected bind to 127.0.0.1:9090 with port kwarg only, got:\n{}",
             &code[..code.len().min(2000)]
         );
     }
@@ -38495,7 +38495,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("0.0.0.0:8080") || code.contains("0.0.0.0 : 8080"),
-            "expected bind a 0.0.0.0:8080, got:\n{}",
+            "expected bind to 0.0.0.0:8080, got:\n{}",
             &code[..code.len().min(2000)]
         );
     }
@@ -38504,7 +38504,7 @@ mod tests {
     fn v0_15_13_server_port_double_positional_plus_kwarg_codegen_is_error() {
         let src = "@server(8080, port=9090) fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
-        let err = gen(src).expect_err("expected error de codegen");
+        let err = gen(src).expect_err("expected codegen error");
         assert!(
             err.message.contains("port") && err.message.contains("twice"),
             "unexpected message: {}",
@@ -38516,7 +38516,7 @@ mod tests {
     fn v0_15_13_server_host_double_positional_plus_kwarg_codegen_is_error() {
         let src = "@server(8080, \"127.0.0.1\", host=\"0.0.0.0\") fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
-        let err = gen(src).expect_err("expected error de codegen");
+        let err = gen(src).expect_err("expected codegen error");
         assert!(
             err.message.contains("host") && err.message.contains("twice"),
             "unexpected message: {}",
@@ -38529,10 +38529,10 @@ mod tests {
         // HTTP route decorators (@get/@post/@put/@delete) do NOT
         // accept kwargs today. Only @server and @header.
         let src = "@get(\"/x\", foo=1) fn h() -> Str => \"ok\"";
-        let err = gen(src).expect_err("expected error de codegen");
+        let err = gen(src).expect_err("expected codegen error");
         assert!(
             err.message.contains("@get") && err.message.contains("foo"),
-            "expected mensaje sobre kwarg en decorator HTTP de ruta, fue: {}",
+            "expected message about kwarg in HTTP route decorator, was: {}",
             err.message
         );
     }
@@ -38543,13 +38543,13 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
         let handler = ast_test::find_item_fn(&file, "__handler_protected")
-            .expect("falta __handler_protected");
+            .expect("missing __handler_protected");
         let body = ast_test::fn_body_text(handler);
         // HeaderMap extractor present.
         let attrs = ast_test::fn_param_pats_and_types(handler);
         assert!(
             attrs.iter().any(|(_, ty)| ty.contains("HeaderMap")),
-            "expected `__hmap: HeaderMap` en la firma, got params: {:?}",
+            "expected `__hmap: HeaderMap` in the signature, got params: {:?}",
             attrs
         );
         // Required binding with 400 if missing. The body is normalized
@@ -38558,7 +38558,7 @@ mod tests {
         assert!(
             body.contains("__hmap . get (\"authorization\")")
                 || body.contains("__hmap.get(\"authorization\")"),
-            "expected lookup case-insensitive en lowercase, body:\n{}",
+            "expected case-insensitive lookup in lowercase, body:\n{}",
             body
         );
         assert!(
@@ -38576,18 +38576,18 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
         let handler =
-            ast_test::find_item_fn(&file, "__handler_traced").expect("falta __handler_traced");
+            ast_test::find_item_fn(&file, "__handler_traced").expect("missing __handler_traced");
         let body = ast_test::fn_body_text(handler);
         // Option<String> for the binding.
         assert!(
             body.contains("Option < String >") || body.contains("Option<String>"),
-            "expected `Option<String>` en el binding del header nullable, body:\n{}",
+            "expected `Option<String>` in the nullable header binding, body:\n{}",
             body
         );
         // No 400 branch for this header.
         assert!(
             !body.contains("'X-Trace-Id': falta"),
-            "header nullable NO debería tener branch 400, body:\n{}",
+            "nullable header should NOT have 400 branch, body:\n{}",
             body
         );
     }
@@ -38602,12 +38602,12 @@ mod tests {
         // literal text `"in":"header"` in the codegen output.
         assert!(
             code.contains("\"in\":\"header\""),
-            "expected `\"in\":\"header\"` en el schema embebido. \
-             Si el formato cambia, ajustá el test."
+            "expected `\"in\":\"header\"` in the embedded schema. \
+             If the format changes, adjust the test."
         );
         assert!(
             code.contains("\"Authorization\""),
-            "expected el HTTP name del header en el schema embebido"
+            "expected the header's HTTP name in the embedded schema"
         );
     }
 
@@ -38617,10 +38617,10 @@ mod tests {
         // 5b.6 generated the async `fn main` from codegen, so the
         // route decorator on `fn main` was muted. R1 catches it.
         let src = "@get(\"/\") fn main() => 0";
-        let err = gen(src).expect_err("expected error de codegen");
+        let err = gen(src).expect_err("expected codegen error");
         assert!(
-            err.message.contains("`fn main` solo admite `@server"),
-            "expected mensaje sobre fn main + decorator HTTP, fue: {}",
+            err.message.contains("`fn main` only accepts `@server"),
+            "expected message about fn main + HTTP decorator, was: {}",
             err.message
         );
     }
@@ -38650,7 +38650,7 @@ mod tests {
         let body = ast_test::fn_body_text(list_users);
         assert!(
             body.contains("__FITZ_STATE_USERS") && body.contains(". clone"),
-            "expected materialización con `(*__FITZ_STATE_USERS).clone()`, got:\n{}",
+            "expected materialization with `(*__FITZ_STATE_USERS).clone()`, got:\n{}",
             body
         );
     }
@@ -38665,7 +38665,7 @@ mod tests {
         // The static must not appear (neither as item nor anywhere else).
         assert!(
             !code.contains("__FITZ_STATE_IGNORADA"),
-            "no esperaba el static __FITZ_STATE_IGNORADA, got:\n{}",
+            "did not expect static __FITZ_STATE_IGNORADA, got:\n{}",
             code
         );
     }
@@ -38691,17 +38691,17 @@ mod tests {
         .unwrap();
         assert!(
             project.cargo_toml.contains("axum = \"0.8\""),
-            "expected axum en Cargo.toml, got:\n{}",
+            "expected axum in Cargo.toml, got:\n{}",
             project.cargo_toml
         );
         assert!(
             project.cargo_toml.contains("tokio"),
-            "expected tokio en Cargo.toml, got:\n{}",
+            "expected tokio in Cargo.toml, got:\n{}",
             project.cargo_toml
         );
         assert!(
             project.cargo_toml.contains("serde_json"),
-            "expected serde_json en Cargo.toml, got:\n{}",
+            "expected serde_json in Cargo.toml, got:\n{}",
             project.cargo_toml
         );
     }
@@ -38724,7 +38724,7 @@ mod tests {
         .unwrap();
         assert!(
             !project.cargo_toml.contains("axum"),
-            "no debería haber axum en Cargo.toml sin HTTP, got:\n{}",
+            "should not have axum in Cargo.toml without HTTP, got:\n{}",
             project.cargo_toml
         );
     }
@@ -38805,12 +38805,12 @@ mod tests {
         let boom = ast_test::find_item_fn(&file, "boom").expect("missing fn boom");
         assert!(
             ast_test::fn_body_returns_any_matching(boom, &["Err", "42i64"]),
-            "expected Err(42i64) directo sin format!, body:\n{}",
+            "expected direct Err(42i64) without format!, body:\n{}",
             ast_test::fn_body_text(boom)
         );
         assert!(
             !ast_test::fn_body_text(boom).contains("format !"),
-            "NO debería haber format! ya que el Err es Int (no Str): {}",
+            "should NOT have format! since Err is Int (not Str): {}",
             ast_test::fn_body_text(boom)
         );
     }
@@ -38823,8 +38823,8 @@ mod tests {
         .unwrap();
         let file = ast_test::parse(&code);
         let describe = ast_test::find_item_fn(&file, "describe").expect("missing fn describe");
-        let u = ast_test::find_local_in_fn(describe, "u").expect("falta `let u`");
-        let init = ast_test::local_init_expr(&u).expect("`let u` sin init");
+        let u = ast_test::find_local_in_fn(describe, "u").expect("missing `let u`");
+        let init = ast_test::local_init_expr(&u).expect("`let u` without init");
         // Traverse optional outer parens and verify Try.
         let mut e = init;
         while let syn::Expr::Paren(p) = e {
@@ -38833,14 +38833,14 @@ mod tests {
         let try_node = match e {
             syn::Expr::Try(t) => t,
             _ => panic!(
-                "expected `Expr::Try` como init de `u`, got tokens: {}",
+                "expected `Expr::Try` as init of `u`, got tokens: {}",
                 ast_test::ts(init)
             ),
         };
         let inner = ast_test::ts(&*try_node.expr);
         assert!(
             inner.contains("find_user") && inner.contains("(id)"),
-            "expected `find_user(id)?`, inner del Try: {}",
+            "expected `find_user(id)?`, Try inner: {}",
             inner
         );
     }
@@ -38869,7 +38869,7 @@ mod tests {
         assert_eq!(
             ast_test::count_macro_calls(stmts, "panic"),
             0,
-            "no esperaba panic! (el match es exhaustivo)"
+            "did not expect panic! (the match is exhaustive)"
         );
     }
 
@@ -38904,7 +38904,7 @@ mod tests {
         assert_eq!(
             ast_test::count_macro_calls(stmts, "panic"),
             0,
-            "el wildcard ya es catch-all, no debería sumarse panic"
+            "the wildcard is already catch-all, no panic should be added"
         );
     }
 
@@ -38918,7 +38918,7 @@ mod tests {
         .unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let m = ast_test::find_match(stmts).expect("falta match en main");
+        let m = ast_test::find_match(stmts).expect("missing match in main");
         let ok_arm = m
             .arms
             .iter()
@@ -38928,11 +38928,11 @@ mod tests {
                 p.contains("Ok") && p.contains("u") && !p.contains("__v") && !p.contains("_")
                     || p == "Ok (u)"
             })
-            .expect("falta arm `Ok(u)`");
+            .expect("missing arm `Ok(u)`");
         let body = ast_test::ts(&*ok_arm.body);
         assert!(
             body.contains(". lock") && body.contains(". id"),
-            "expected field access tipo `u.lock().unwrap().id` en el arm body, got: {}",
+            "expected field access like `u.lock().unwrap().id` in the arm body, got: {}",
             body
         );
     }
@@ -38947,7 +38947,7 @@ mod tests {
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let println_args =
-            ast_test::first_macro_args_in_stmts(stmts, "println").expect("falta println! en main");
+            ast_test::first_macro_args_in_stmts(stmts, "println").expect("missing println! in main");
         assert!(
             println_args.contains("Ok (__v)")
                 && println_args.contains("format !")
@@ -38972,8 +38972,8 @@ mod tests {
         .unwrap();
         let file = ast_test::parse(&code);
         let first = ast_test::find_item_fn(&file, "first").expect("missing fn first");
-        let u = ast_test::find_local_in_fn(first, "u").expect("falta `let u` en first");
-        let init = ast_test::local_init_expr(&u).expect("`let u` sin init");
+        let u = ast_test::find_local_in_fn(first, "u").expect("missing `let u` in first");
+        let init = ast_test::local_init_expr(&u).expect("`let u` without init");
         // The init must be `<expr>?` — `syn::Expr::Try` (optionally
         // wrapped in parens).
         let mut e = init;
@@ -38982,7 +38982,7 @@ mod tests {
         }
         assert!(
             matches!(e, syn::Expr::Try(_)),
-            "expected que el init de `u` sea `<expr>?`, got tokens: {}",
+            "expected init of `u` to be `<expr>?`, got tokens: {}",
             ast_test::ts(init)
         );
     }
@@ -39008,12 +39008,12 @@ mod tests {
         let code = gen_module("type User { id: Int, name: Str }").unwrap();
         let file = ast_test::parse(&code);
         let user_data =
-            ast_test::find_item_struct(&file, "UserData").expect("falta struct UserData");
+            ast_test::find_item_struct(&file, "UserData").expect("missing struct UserData");
         assert!(
             ast_test::vis_is_pub(&user_data.vis),
             "expected `pub struct UserData`"
         );
-        let user_alias = ast_test::find_item_type(&file, "User").expect("falta type alias User");
+        let user_alias = ast_test::find_item_type(&file, "User").expect("missing type alias User");
         assert!(
             ast_test::vis_is_pub(&user_alias.vis),
             "expected `pub type User`"
@@ -39032,17 +39032,17 @@ mod tests {
     fn module_let_str_top_level_is_emitted_as_pub_static() {
         let code = gen_module("let MSG = \"hola\"").unwrap();
         let file = ast_test::parse(&code);
-        let msg = ast_test::find_item_static(&file, "MSG").expect("falta static MSG");
+        let msg = ast_test::find_item_static(&file, "MSG").expect("missing static MSG");
         assert!(ast_test::vis_is_pub(&msg.vis), "expected `pub static MSG`");
         assert_eq!(
             ast_test::ts(&*msg.ty),
             "& str",
-            "expected tipo &str para MSG"
+            "expected type &str for MSG"
         );
         assert_eq!(
             ast_test::ts(&*msg.expr),
             "\"hola\"",
-            "expected init literal `\"hola\"` para MSG"
+            "expected literal init `\"hola\"` for MSG"
         );
     }
 
@@ -39050,7 +39050,7 @@ mod tests {
     fn module_let_int_top_level_is_emitted_as_pub_const() {
         let code = gen_module("let MAX_RETRIES: Int = 5").unwrap();
         let file = ast_test::parse(&code);
-        let max = ast_test::find_item_const(&file, "MAX_RETRIES").expect("falta const MAX_RETRIES");
+        let max = ast_test::find_item_const(&file, "MAX_RETRIES").expect("missing const MAX_RETRIES");
         assert!(
             ast_test::vis_is_pub(&max.vis),
             "expected `pub const MAX_RETRIES`"
@@ -39058,12 +39058,12 @@ mod tests {
         assert_eq!(
             ast_test::ts(&*max.ty),
             "i64",
-            "expected tipo i64 para MAX_RETRIES"
+            "expected type i64 for MAX_RETRIES"
         );
         assert_eq!(
             ast_test::ts(&*max.expr),
             "5i64",
-            "expected init `5i64` para MAX_RETRIES"
+            "expected init `5i64` for MAX_RETRIES"
         );
     }
 
@@ -39073,9 +39073,9 @@ mod tests {
         // at module top-level is now accepted and emitted as `pub const`.
         let code = gen_module("let X = 1 + 1").unwrap();
         let file = ast_test::parse(&code);
-        let x = ast_test::find_item_const(&file, "X").expect("falta const X");
+        let x = ast_test::find_item_const(&file, "X").expect("missing const X");
         assert!(ast_test::vis_is_pub(&x.vis), "expected `pub const X`");
-        assert_eq!(ast_test::ts(&*x.ty), "i64", "expected tipo i64 para X");
+        assert_eq!(ast_test::ts(&*x.ty), "i64", "expected type i64 for X");
     }
 
     #[test]
@@ -39089,7 +39089,7 @@ mod tests {
         assert_eq!(
             ast_test::fn_return_type(x).as_deref(),
             Some("i64"),
-            "expected return type i64 para X()"
+            "expected return type i64 for X()"
         );
     }
 
@@ -39114,7 +39114,7 @@ mod tests {
                 && ret.contains("Mutex")
                 && ret.contains("Vec")
                 && ret.contains("i64"),
-            "expected return type `Arc<Mutex<Vec<i64>>>` para xs(), got: {}",
+            "expected return type `Arc<Mutex<Vec<i64>>>` for xs(), got: {}",
             ret
         );
     }
@@ -39132,7 +39132,7 @@ mod tests {
                 && ret.contains("Mutex")
                 && ret.contains("Vec")
                 && ret.contains("i64"),
-            "expected return type basado en Vec<(String, i64)> para m(), got: {}",
+            "expected return type based on Vec<(String, i64)> for m(), got: {}",
             ret
         );
     }
@@ -39163,12 +39163,12 @@ mod tests {
         let code = gen("let (a, b) = (1, 2)\nprint(a)\nprint(b)\n").unwrap();
         assert!(
             !code.contains("__destr_scrut"),
-            "expected path puro (sin __destr_scrut) para Ident/Tuple, got:\n{}",
+            "expected pure path (without __destr_scrut) for Ident/Tuple, got:\n{}",
             code
         );
         assert!(
             code.contains("let (a, b)"),
-            "expected `let (a, b)` directo, got:\n{}",
+            "expected direct `let (a, b)`, got:\n{}",
             code
         );
     }
@@ -39180,7 +39180,7 @@ mod tests {
         let code = gen("let (1, x) = (1, 42)\nprint(x)\n").unwrap();
         assert!(
             code.contains("__destr_scrut"),
-            "expected match wrapper (con __destr_scrut), got:\n{}",
+            "expected match wrapper (with __destr_scrut), got:\n{}",
             code
         );
         assert!(
@@ -39212,7 +39212,7 @@ mod tests {
         // Both bindings are emitted in the arm's return tuple.
         assert!(
             code.contains("(v, tag)"),
-            "expected retorno `(v, tag)`, got:\n{}",
+            "expected return `(v, tag)`, got:\n{}",
             code
         );
     }
@@ -39229,7 +39229,7 @@ mod tests {
         );
         assert!(
             code.contains("if __s_") && code.contains(".as_str() == \"ada\""),
-            "expected guard sobre __s_X.as_str(), got:\n{}",
+            "expected guard on __s_X.as_str(), got:\n{}",
             code
         );
     }
@@ -39252,7 +39252,7 @@ mod tests {
         let code = gen("let (1, x) = (1, 42)\nprint(x)\n").unwrap();
         assert!(
             code.contains("let mut x = match"),
-            "expected `let mut x = match ...` (sin paréntesis), got:\n{}",
+            "expected `let mut x = match ...` (without parens), got:\n{}",
             code
         );
     }
@@ -39267,7 +39267,7 @@ mod tests {
     fn extract_fail_body(code: &str) -> String {
         let idx = code
             .find("fn fail")
-            .expect("no encontré `fn fail` en el output");
+            .expect("`fn fail` not found in the output");
         // Take up to the next `fn ` that is not `fn fail`. Lean:
         // it's enough to cut at the next "\nfn " that would start a
         // different fn.
@@ -39290,7 +39290,7 @@ mod tests {
         let fail_body = extract_fail_body(&code);
         assert!(
             !fail_body.contains("Err(format!"),
-            "expected que el List se emita directo, no via format!; got:\n{}",
+            "expected List to be emitted directly, not via format!; got:\n{}",
             fail_body
         );
         assert!(
@@ -39315,7 +39315,7 @@ mod tests {
         let fail_body = extract_fail_body(&code);
         assert!(
             !fail_body.contains("Err(format!"),
-            "Map no debería ir por format!; got:\n{}",
+            "Map should not go via format!; got:\n{}",
             fail_body
         );
         assert!(
@@ -39336,14 +39336,14 @@ mod tests {
         let code = gen_module("from segundo import dos\nfn x() -> Int => dos()");
         assert!(
             code.is_err(),
-            "gen_module sin loader: el cuerpo de `x` referencia `dos` \
-             que no está en scope; debe ser error"
+            "gen_module without loader: the body of `x` references `dos` \
+             which is not in scope; must be an error"
         );
         // The message should NOT mention 5b.5 or "imports transitivos".
         let msg = code.unwrap_err().message;
         assert!(
-            !msg.contains("transitivos") && !msg.contains("5b.5"),
-            "el error ya no debe citar deuda transitiva post-F15; fue: {}",
+            !msg.contains("transitive") && !msg.contains("5b.5"),
+            "error must no longer cite transitive debt post-F15; was: {}",
             msg
         );
     }
@@ -39355,7 +39355,7 @@ mod tests {
         let code = gen_module("let GREETING: Str = \"hola, \" + \"Fitz\"").unwrap();
         let file = ast_test::parse(&code);
         let greeting = ast_test::find_item_fn(&file, "GREETING")
-            .expect("missing fn GREETING (esperaba accessor para Str concat)");
+            .expect("missing fn GREETING (expected accessor for Str concat)");
         assert!(
             ast_test::vis_is_pub(&greeting.vis),
             "expected `pub fn GREETING`"
@@ -39363,7 +39363,7 @@ mod tests {
         assert_eq!(
             ast_test::fn_return_type(greeting).as_deref(),
             Some("String"),
-            "expected return type String para GREETING()"
+            "expected return type String for GREETING()"
         );
     }
 
@@ -39376,7 +39376,7 @@ mod tests {
             gen_module("let PREFIX = \"hola, \"\nfn greet(name: Str) -> Str => \"{PREFIX}{name}\"")
                 .unwrap();
         let file = ast_test::parse(&code);
-        let prefix = ast_test::find_item_static(&file, "PREFIX").expect("falta static PREFIX");
+        let prefix = ast_test::find_item_static(&file, "PREFIX").expect("missing static PREFIX");
         assert!(
             ast_test::vis_is_pub(&prefix.vis),
             "expected `pub static PREFIX`"
@@ -39392,7 +39392,7 @@ mod tests {
             "expected pat `mut name`, got: {:?}",
             pats_tys
         );
-        assert_eq!(pats_tys[0].1, "String", "expected tipo String para name");
+        assert_eq!(pats_tys[0].1, "String", "expected type String for name");
         assert_eq!(
             ast_test::fn_return_type(greet).as_deref(),
             Some("String"),
@@ -39401,7 +39401,7 @@ mod tests {
         let body = ast_test::fn_body_text(greet);
         assert!(
             body.contains("String :: from (PREFIX)"),
-            "expected `String::from(PREFIX)` en el body, got:\n{}",
+            "expected `String::from(PREFIX)` in the body, got:\n{}",
             body
         );
     }
@@ -39415,18 +39415,18 @@ mod tests {
 
     #[test]
     fn build_accepts_from_python_import_emits_prelude() {
-        let code = gen("from python import math\n").expect("8.7.1: from python import compila");
+        let code = gen("from python import math\n").expect("8.7.1: from python import compiles");
         assert!(
             code.contains("use pyo3::prelude::*;"),
-            "expected `use pyo3::prelude::*;` en el preludio Python"
+            "expected `use pyo3::prelude::*;` in the Python prelude"
         );
         assert!(
             code.contains("__FitzPyObject"),
-            "expected struct __FitzPyObject en preludio"
+            "expected struct __FitzPyObject in prelude"
         );
         assert!(
             code.contains("__fitz_py_import"),
-            "expected helper __fitz_py_import en preludio"
+            "expected helper __fitz_py_import in prelude"
         );
         // 8.7.2: global binding = static + getter, no local `let`.
         assert!(
@@ -39441,14 +39441,14 @@ mod tests {
         );
         assert!(
             code.contains("__fitz_py_import(\"math\")"),
-            "expected `__fitz_py_import(\"math\")` en el getter, got:\n{}",
+            "expected `__fitz_py_import(\"math\")` in the getter, got:\n{}",
             code
         );
     }
 
     #[test]
     fn build_accepts_dotted_import_python_emits_binding_with_last_segment() {
-        let code = gen("import python.os.path\n").expect("8.7.1: import python.X compila");
+        let code = gen("import python.os.path\n").expect("8.7.1: import python.X compiles");
         // Convention: `import python.os.path` → `path` binding (last
         // segment), dotted Python `os.path`.
         assert!(
@@ -39466,7 +39466,7 @@ mod tests {
     #[test]
     fn build_python_alias_emits_binding_with_alias() {
         // `from python import math as m` → `m` binding, dotted `math`.
-        let code = gen("from python import math as m\n").expect("8.7.1: alias compila");
+        let code = gen("from python import math as m\n").expect("8.7.1: alias compiles");
         assert!(
             code.contains("static __FITZ_PY_BIND_M"),
             "expected static __FITZ_PY_BIND_M, got:\n{}",
@@ -39481,14 +39481,14 @@ mod tests {
 
     #[test]
     fn build_without_python_does_not_emit_prelude() {
-        let code = gen("let x = 1\nprint(x)\n").expect("CLI básico compila");
+        let code = gen("let x = 1\nprint(x)\n").expect("basic CLI compiles");
         assert!(
             !code.contains("__FitzPyObject"),
-            "no debería emitir preludio Python para programas sin imports Python"
+            "should not emit Python prelude for programs without Python imports"
         );
         assert!(
             !code.contains("use pyo3"),
-            "no debería emitir `use pyo3` para programas sin imports Python"
+            "should not emit `use pyo3` for programs without Python imports"
         );
     }
 
@@ -39498,7 +39498,7 @@ mod tests {
         // Type of `pi` ends up as `__FitzPyObject`. 8.7.2: the
         // receiver `math` translates to the getter `__fitz_py_bind_math()`.
         let code = gen("from python import math\nlet pi = math.pi\n")
-            .expect("8.7.1: field access opaco compila");
+            .expect("8.7.1: opaque field access compiles");
         assert!(
             code.contains("__fitz_py_get_attr_obj(&__fitz_py_bind_math()")
                 && code.contains("\"pi\""),
@@ -39512,10 +39512,10 @@ mod tests {
         // `let pi: Float = math.pi` → PyAny→Float coercion applies
         // `__fitz_py_extract_f64`.
         let code = gen("from python import math\nlet pi: Float = math.pi\n")
-            .expect("8.7.1: extracción a Float compila");
+            .expect("8.7.1: extraction to Float compiles");
         assert!(
             code.contains("__fitz_py_extract_f64"),
-            "expected __fitz_py_extract_f64 al asignar a Float, got:\n{}",
+            "expected __fitz_py_extract_f64 when assigning to Float, got:\n{}",
             code
         );
     }
@@ -39523,10 +39523,10 @@ mod tests {
     #[test]
     fn build_python_field_access_with_int_annotation_emits_extract() {
         let code = gen("from python import sys\nlet m: Int = sys.maxsize\n")
-            .expect("8.7.1: extracción a Int compila");
+            .expect("8.7.1: extraction to Int compiles");
         assert!(
             code.contains("__fitz_py_extract_i64"),
-            "expected __fitz_py_extract_i64 al asignar a Int, got:\n{}",
+            "expected __fitz_py_extract_i64 when assigning to Int, got:\n{}",
             code
         );
     }
@@ -39537,10 +39537,10 @@ mod tests {
         // |py| Ok(vec![{ let __a = ...; __a.__fitz_to_py(py, "arg0")? }]))`.
         // Result types as `Result<PyAny>`.
         let code = gen("from python import math\nlet raw = math.sqrt(16.0)\n")
-            .expect("8.7.2: call Python compila");
+            .expect("8.7.2: Python call compiles");
         assert!(
             code.contains("__fitz_py_invoke"),
-            "expected __fitz_py_invoke en el call site, got:\n{}",
+            "expected __fitz_py_invoke at the call site, got:\n{}",
             code
         );
         assert!(
@@ -39560,11 +39560,11 @@ mod tests {
         // The binding `let raw = math.sqrt(...)` (no annot) synthesizes
         // `Result<PyAny>`. rust_type_for emits `Result<__FitzPyObject, String>`.
         let code = gen("from python import math\nlet raw = math.sqrt(16.0)\n")
-            .expect("8.7.2: binding sin annot");
+            .expect("8.7.2: binding without annot");
         assert!(
             code.contains("Result < __FitzPyObject , String >")
                 || code.contains("Result<__FitzPyObject, String>"),
-            "expected tipo Result<__FitzPyObject, String>, got:\n{}",
+            "expected type Result<__FitzPyObject, String>, got:\n{}",
             code
         );
     }
@@ -39574,7 +39574,7 @@ mod tests {
         // Each primitive arg (Int, Float, Str, Bool) is marshalled via
         // `__fitz_to_py(py, "argN")` with the numbered path.
         let code = gen("from python import json\nlet raw = json.dumps([1, 2, 3])\n")
-            .expect("8.7.2: args primitivos compilan");
+            .expect("8.7.2: primitive args compile");
         assert!(
             code.contains("\"arg0\""),
             "expected path \"arg0\", got:\n{}",
@@ -39608,7 +39608,7 @@ mod tests {
         // The module must have been generated with content (not empty).
         assert!(
             !utils_rs.is_empty(),
-            "utils.rs vacío — el loader debería haberlo emitido. Cargo.toml:\n{}",
+            "utils.rs empty — the loader should have emitted it. Cargo.toml:\n{}",
             project.cargo_toml
         );
     }
@@ -39627,24 +39627,24 @@ mod tests {
         let (_tmp, _project, utils_rs) = gen_project_with_module(main_src, utils_src);
         assert!(
             utils_rs.contains("__FitzPyObject"),
-            "expected `__FitzPyObject` importado en utils.rs, got:\n{}",
+            "expected `__FitzPyObject` imported in utils.rs, got:\n{}",
             utils_rs
         );
         assert!(
             utils_rs.contains("__fitz_py_import"),
-            "expected `use crate::{{..., __fitz_py_import, ...}}` en utils.rs, got:\n{}",
+            "expected `use crate::{{..., __fitz_py_import, ...}}` in utils.rs, got:\n{}",
             utils_rs
         );
         assert!(
             utils_rs.contains("__fitz_py_get_attr_obj"),
-            "expected `__fitz_py_get_attr_obj` importado en utils.rs, got:\n{}",
+            "expected `__fitz_py_get_attr_obj` imported in utils.rs, got:\n{}",
             utils_rs
         );
         // The module must NOT duplicate the opaque struct definition
         // (it lives in main via the prelude).
         assert!(
             !utils_rs.contains("pub struct __FitzPyObject"),
-            "el módulo no debe redefinir __FitzPyObject — debe importarlo, got:\n{}",
+            "the module must not redefine __FitzPyObject — it must import it, got:\n{}",
             utils_rs
         );
     }
@@ -39663,17 +39663,17 @@ mod tests {
         let (_tmp, _project, utils_rs) = gen_project_with_module(main_src, utils_src);
         assert!(
             utils_rs.contains("static __FITZ_PY_BIND_MATH"),
-            "expected static __FITZ_PY_BIND_MATH local en utils.rs, got:\n{}",
+            "expected local static __FITZ_PY_BIND_MATH in utils.rs, got:\n{}",
             utils_rs
         );
         assert!(
             utils_rs.contains("fn __fitz_py_bind_math()"),
-            "expected getter local __fitz_py_bind_math en utils.rs, got:\n{}",
+            "expected local getter __fitz_py_bind_math in utils.rs, got:\n{}",
             utils_rs
         );
         assert!(
             utils_rs.contains("__fitz_py_import(\"math\")"),
-            "expected `__fitz_py_import(\"math\")` en el getter de utils.rs, got:\n{}",
+            "expected `__fitz_py_import(\"math\")` in the getter of utils.rs, got:\n{}",
             utils_rs
         );
     }
@@ -39692,19 +39692,19 @@ mod tests {
         let (_tmp, project, _utils_rs) = gen_project_with_module(main_src, utils_src);
         assert!(
             project.main_rs.contains("pub struct __FitzPyObject"),
-            "expected `pub struct __FitzPyObject` en main.rs (preludio Python), got main_rs:\n{}",
+            "expected `pub struct __FitzPyObject` in main.rs (Python prelude), got main_rs:\n{}",
             project.main_rs
         );
         assert!(
             project.main_rs.contains("pub(crate) fn __fitz_py_import"),
-            "expected helper `__fitz_py_import` pub(crate) en main.rs, got main_rs:\n{}",
+            "expected helper `__fitz_py_import` pub(crate) in main.rs, got main_rs:\n{}",
             project.main_rs
         );
         // The main does NOT declare its own __FITZ_PY_BIND_X statics
         // (no direct Python import) — the statics live in utils.rs.
         assert!(
             !project.main_rs.contains("static __FITZ_PY_BIND_MATH"),
-            "el main no debería emitir statics Python locales — solo utils los usa, got main_rs:\n{}",
+            "main should not emit local Python statics — only utils uses them, got main_rs:\n{}",
             project.main_rs
         );
     }
@@ -39722,7 +39722,7 @@ mod tests {
         let (_tmp, project, _utils_rs) = gen_project_with_module(main_src, utils_src);
         assert!(
             project.cargo_toml.contains("pyo3"),
-            "expected pyo3 en Cargo.toml (módulo transitivo usa Python), got:\n{}",
+            "expected pyo3 in Cargo.toml (transitive module uses Python), got:\n{}",
             project.cargo_toml
         );
     }
@@ -39757,19 +39757,19 @@ mod tests {
             project
                 .main_rs
                 .contains("pub(crate) fn __fitz_py_to_instance_User"),
-            "expected helper pub(crate) __fitz_py_to_instance_User en main, got:\n{}",
+            "expected helper pub(crate) __fitz_py_to_instance_User in main, got:\n{}",
             project.main_rs
         );
         assert!(
             project
                 .main_rs
                 .contains("pub(crate) fn __fitz_py_to_list_User"),
-            "expected helper pub(crate) __fitz_py_to_list_User en main, got:\n{}",
+            "expected helper pub(crate) __fitz_py_to_list_User in main, got:\n{}",
             project.main_rs
         );
         assert!(
             project.main_rs.contains("impl __FitzToPy for UserData"),
-            "expected impl __FitzToPy for UserData en main, got:\n{}",
+            "expected impl __FitzToPy for UserData in main, got:\n{}",
             project.main_rs
         );
     }
@@ -39822,7 +39822,7 @@ mod tests {
         // prefixes with `crate::__fitz_py_to_instance_User(`.
         assert!(
             utils_rs.contains("crate::__fitz_py_to_instance_User("),
-            "expected `crate::__fitz_py_to_instance_User(` en utils.rs (post-procesado), got:\n{}",
+            "expected `crate::__fitz_py_to_instance_User(` in utils.rs (post-processed), got:\n{}",
             utils_rs
         );
     }
@@ -39843,7 +39843,7 @@ mod tests {
         let (_tmp, _project, utils_rs) = gen_project_with_module(main_src, utils_src);
         assert!(
             utils_rs.contains("use crate::{__fitz_py_to_list_i64"),
-            "expected use crate::{{__fitz_py_to_list_i64, ...}} en utils.rs, got:\n{}",
+            "expected use crate::{{__fitz_py_to_list_i64, ...}} in utils.rs, got:\n{}",
             utils_rs
         );
     }
@@ -39871,13 +39871,13 @@ mod tests {
         // `(...).sqrt()` with method notation.
         assert!(
             project.main_rs.contains("sqrt(16f64)") || project.main_rs.contains("sqrt(16 f64)"),
-            "expected call a fn importada `sqrt(16f64)`, got main_rs:\n{}",
+            "expected call to imported fn `sqrt(16f64)`, got main_rs:\n{}",
             project.main_rs
         );
         assert!(
             !project.main_rs.contains("(16f64).sqrt()")
                 && !project.main_rs.contains("(16f64) . sqrt ()"),
-            "NO esperaba `(16f64).sqrt()` (método nativo de f64), got main_rs:\n{}",
+            "did NOT expect `(16f64).sqrt()` (f64 native method), got main_rs:\n{}",
             project.main_rs
         );
     }
@@ -39891,7 +39891,7 @@ mod tests {
         assert!(
             project.main_rs.contains("pow(2i64, 8i64)")
                 || project.main_rs.contains("pow (2i64 , 8i64)"),
-            "expected call a fn importada `pow(2, 8)`, NO `(2i64).pow(...)`. main_rs:\n{}",
+            "expected call to imported fn `pow(2, 8)`, NOT `(2i64).pow(...)`. main_rs:\n{}",
             project.main_rs
         );
     }
@@ -39903,10 +39903,10 @@ mod tests {
         // as before the fix).
         let main_src =
             "fn sqrt(x: Float) -> Float { return x + 1.0 }\nlet v: Float = sqrt(4.0)\nprint(v)\n";
-        let code = gen(main_src).expect("compila");
+        let code = gen(main_src).expect("compiles");
         assert!(
             code.contains("sqrt(4f64)"),
-            "expected call a fn local `sqrt(4f64)`, got:\n{}",
+            "expected call to local fn `sqrt(4f64)`, got:\n{}",
             code
         );
     }
@@ -39930,7 +39930,7 @@ mod tests {
         let mod_count = project.main_rs.matches("mod utils;").count();
         assert_eq!(
             mod_count, 1,
-            "expected `mod utils;` UNA vez, fue {} veces. main_rs:\n{}",
+            "expected `mod utils;` ONCE, was {} times. main_rs:\n{}",
             mod_count, project.main_rs
         );
     }
@@ -39942,12 +39942,12 @@ mod tests {
             gen("let n = 5\nlet s = match n { 0..10 => \"chico\", _ => \"grande\" }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let m = ast_test::find_match(stmts).expect("falta match en main");
+        let m = ast_test::find_match(stmts).expect("missing match in main");
         let guarded = m
             .arms
             .iter()
             .find(|a| a.guard.is_some())
-            .expect("falta arm con guard (range pattern)");
+            .expect("missing arm with guard (range pattern)");
         let guard_tokens = ast_test::ts(&guarded.guard.as_ref().unwrap().1);
         assert!(
             guard_tokens.contains("0i64")
@@ -39974,7 +39974,7 @@ mod tests {
         // The callback is emitted as a reference to the named fn `double`.
         assert!(
             code.contains(". map (double)") || code.contains(".map(double)"),
-            "expected `.map(double)` con fn nombrada, got:\n{}",
+            "expected `.map(double)` with named fn, got:\n{}",
             code
         );
     }
@@ -40001,7 +40001,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("let __cb = sumar"),
-            "expected `let __cb = sumar` (callback binario nombrado), got:\n{}",
+            "expected `let __cb = sumar` (named binary callback), got:\n{}",
             code
         );
     }
@@ -40022,7 +40022,7 @@ mod tests {
         let (_env, _types, _defs, errors) = check_program(&program);
         assert!(
             !errors.is_empty() && errors.iter().any(|e| e.message.contains("no_existe")),
-            "expected error del checker sobre `no_existe`, fue: {:?}",
+            "expected checker error about `no_existe`, was: {:?}",
             errors
         );
     }
@@ -40037,7 +40037,7 @@ mod tests {
         let (_env, _types, _defs, errors) = check_program(&program);
         assert!(
             !errors.is_empty() && errors.iter().any(|e| e.message.contains("1 ar")),
-            "expected error del checker sobre aridad, fue: {:?}",
+            "expected checker error about arity, was: {:?}",
             errors
         );
     }
@@ -40052,7 +40052,7 @@ mod tests {
         let (_env, _types, _defs, errors) = check_program(&program);
         assert!(
             !errors.is_empty() && errors.iter().any(|e| e.message.contains("Bool")),
-            "expected error del checker sobre ret type, fue: {:?}",
+            "expected checker error about ret type, was: {:?}",
             errors
         );
     }
@@ -40070,13 +40070,13 @@ mod tests {
         // The hoist emits `const MAX: i64 = 100;` before fns.
         assert!(
             code.contains("const MAX : i64 = 100") || code.contains("const MAX: i64 = 100"),
-            "expected `const MAX: i64 = 100;` hoisteado, got:\n{}",
+            "expected `const MAX: i64 = 100;` hoisted, got:\n{}",
             code
         );
         // The fn body references MAX directly (with or without if parens).
         assert!(
             code.contains("n > MAX") && code.contains("return MAX"),
-            "expected la fn `cap` referenciando MAX, got:\n{}",
+            "expected fn `cap` referencing MAX, got:\n{}",
             code
         );
     }
@@ -40089,7 +40089,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("static GREETING : & str") || code.contains("static GREETING: &str"),
-            "expected `static GREETING: &str = ...;` hoisteado, got:\n{}",
+            "expected `static GREETING: &str = ...;` hoisted, got:\n{}",
             code
         );
     }
@@ -40102,13 +40102,13 @@ mod tests {
         // There must NOT be a `const X: i64 = 42;` at top-level.
         assert!(
             !code.contains("const X : i64 = 42") && !code.contains("const X: i64 = 42"),
-            "X no debería hoistar (no es referenciado por fn), got:\n{}",
+            "X should not be hoisted (not referenced by any fn), got:\n{}",
             code
         );
         // Stays as a local let.
         assert!(
             code.contains("let mut X : i64 = 42") || code.contains("let mut X: i64"),
-            "X debería seguir como local de main(), got:\n{}",
+            "X should stay as a local of main(), got:\n{}",
             code
         );
     }
@@ -40117,7 +40117,7 @@ mod tests {
     fn cd_f12_let_reassigned_is_not_hoisted() {
         // Reassignment breaks the hoist (Rust const cannot be mutated).
         let src = "let X = 10\nX = 20\nfn read() -> Int { return X }\nprint(read())";
-        let err = gen(src).expect_err("expected error de codegen (X no hoisteable, reasignado)");
+        let err = gen(src).expect_err("expected codegen error (X not hoistable, reassigned)");
         assert!(
             err.message.contains("unknown") && err.message.contains("X"),
             "expected error about unknown `X` (not hoisted), was: {}",
@@ -40134,7 +40134,7 @@ mod tests {
         // 10 * 2 + 5 is still const-eval (pure BinOps).
         assert!(
             code.contains("const LIMIT : i64") || code.contains("const LIMIT: i64"),
-            "expected `const LIMIT: i64` hoisteado, got:\n{}",
+            "expected `const LIMIT: i64` hoisted, got:\n{}",
             code
         );
     }
@@ -40163,7 +40163,7 @@ mod tests {
         );
         assert!(
             toml.contains("\"signal\""),
-            "expected tokio feature `signal` para cron-only mode, got:\n{}",
+            "expected tokio feature `signal` for cron-only mode, got:\n{}",
             toml
         );
     }
@@ -40181,7 +40181,7 @@ mod tests {
         assert!(toml.contains("cron"));
         assert!(
             toml.contains("\"signal\""),
-            "post-12.1.c HTTP también necesita feature `signal` para shutdown_signal del main generado"
+            "post-12.1.c HTTP also needs `signal` feature for shutdown_signal of generated main"
         );
     }
 
@@ -40208,21 +40208,21 @@ mod tests {
         assert!(
             code.contains("__FITZ_CRON_INIT_STORAGE_ONCE")
                 && code.contains("tokio::sync::OnceCell"),
-            "expected `static __FITZ_CRON_INIT_STORAGE_ONCE: tokio::sync::OnceCell<...>` en el preludio, got code length {}",
+            "expected `static __FITZ_CRON_INIT_STORAGE_ONCE: tokio::sync::OnceCell<...>` in the prelude, got code length {}",
             code.len()
         );
 
         // The `__fitz_cron_init_storage` wrapper must call `get_or_init`.
         assert!(
             code.contains("__FITZ_CRON_INIT_STORAGE_ONCE") && code.contains("get_or_init"),
-            "expected wrapper que invoca `get_or_init` sobre el OnceCell, got code length {}",
+            "expected wrapper that calls `get_or_init` on the OnceCell, got code length {}",
             code.len()
         );
 
         // The real inner was renamed to `__fitz_cron_init_storage_inner`.
         assert!(
             code.contains("__fitz_cron_init_storage_inner"),
-            "expected helper inner `__fitz_cron_init_storage_inner` que hace los CREATE TABLE reales"
+            "expected inner helper `__fitz_cron_init_storage_inner` that performs the real CREATE TABLE"
         );
     }
 
@@ -40234,16 +40234,16 @@ mod tests {
         // The prelude helper must be present.
         assert!(
             code.contains("__fitz_run_cron_job"),
-            "expected helper `__fitz_run_cron_job` en el preludio"
+            "expected helper `__fitz_run_cron_job` in the prelude"
         );
         // Main generates the job's spawn.
         assert!(
             code.contains("cron::Schedule::from_str"),
-            "expected parseo del cron expression en main"
+            "expected cron expression parsing in main"
         );
         assert!(
             code.contains("tokio::spawn(__fitz_run_cron_job"),
-            "expected `tokio::spawn(__fitz_run_cron_job(...))` en main"
+            "expected `tokio::spawn(__fitz_run_cron_job(...))` in main"
         );
     }
 
@@ -40255,7 +40255,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("tokio::signal::ctrl_c().await"),
-            "expected bloqueo con ctrl_c en cron-only main"
+            "expected blocking on ctrl_c in cron-only main"
         );
     }
 
@@ -40286,23 +40286,23 @@ mod tests {
         // The state var must have been hoisted to a static (OnceCell post-v0.15.12).
         assert!(
             code.contains("static __FITZ_STATE_DB_RESULT"),
-            "expected state var hoisteada a `static __FITZ_STATE_DB_RESULT`"
+            "expected state var hoisted to `static __FITZ_STATE_DB_RESULT`"
         );
         // Local materialization must come BEFORE the spawn block.
         let materialize_idx = code.find("let db_result: Result<__FitzDbConn, String> = __FITZ_STATE_DB_RESULT.get()")
             .or_else(|| code.find("let db_result"))
-            .expect("expected `let db_result = __FITZ_STATE_DB_RESULT.get().expect(...).clone();` en __main_inner");
+            .expect("expected `let db_result = __FITZ_STATE_DB_RESULT.get().expect(...).clone();` in __main_inner");
         let spawn_idx = code
             .find("tokio::spawn(__fitz_run_cron_job")
-            .expect("expected `tokio::spawn(__fitz_run_cron_job(...))` en __main_inner");
+            .expect("expected `tokio::spawn(__fitz_run_cron_job(...))` in __main_inner");
         assert!(
             materialize_idx < spawn_idx,
-            "expected que la materialización de `db_result` precediera al spawn del cron"
+            "expected materialization of `db_result` to precede the cron spawn"
         );
         // The spawn must use the local name (not the static directly).
         assert!(
             code.contains("(&db_result).into_store()"),
-            "expected `(&db_result).into_store()` después de la materialización"
+            "expected `(&db_result).into_store()` after materialization"
         );
     }
 
@@ -40337,20 +40337,20 @@ mod tests {
         assert!(
             code.contains("__FITZ_STATE_DB.set(__init)")
                 || code.contains("__FITZ_STATE_DB . set (__init)"),
-            "expected `__FITZ_STATE_DB.set(__init).expect(...)` en el body del async fn main(), got:\n{}",
+            "expected `__FITZ_STATE_DB.set(__init).expect(...)` in the body of async fn main(), got:\n{}",
             code
         );
         // 3) Materialization in the handler must use `get().expect(...).clone()`.
         assert!(
             code.contains("__FITZ_STATE_DB.get()") || code.contains("__FITZ_STATE_DB . get ()"),
-            "expected `__FITZ_STATE_DB.get().expect(...).clone()` en el body del handler, got:\n{}",
+            "expected `__FITZ_STATE_DB.get().expect(...).clone()` in the handler body, got:\n{}",
             code
         );
         // 4) The old LazyLock pattern with .await inside must NOT remain
         //    (the original bug).
         assert!(
             !code.contains("LazyLock::new(|| (__fitz_db_connect"),
-            "expected que NO hubiera LazyLock con `.await` adentro (regresión del bug), got:\n{}",
+            "expected NO LazyLock with `.await` inside (bug regression), got:\n{}",
             code
         );
     }
@@ -40416,7 +40416,7 @@ mod tests {
             let value = extract_first_assign_value(src);
             assert!(
                 expr_contains_await(&value),
-                "expected que `{}` contuviera .await",
+                "expected `{}` to contain .await",
                 src
             );
         }
@@ -40432,7 +40432,7 @@ mod tests {
             let value = extract_first_assign_value(src);
             assert!(
                 !expr_contains_await(&value),
-                "expected que `{}` NO contuviera .await",
+                "expected `{}` NOT to contain .await",
                 src
             );
         }
@@ -40462,14 +40462,14 @@ mod tests {
         let shadow_idx = code
             .find("let new_id = new_id . clone ()")
             .or_else(|| code.find("let new_id = new_id.clone()"))
-            .expect("expected shadow `let new_id = new_id.clone()` antes del spawn");
+            .expect("expected shadow `let new_id = new_id.clone()` before spawn");
         let spawn_idx = code
             .find("tokio :: spawn (async move")
             .or_else(|| code.find("tokio::spawn(async move"))
             .expect("expected `tokio::spawn(async move ...)`");
         assert!(
             shadow_idx < spawn_idx,
-            "expected que el shadow clone precediera al tokio::spawn"
+            "expected shadow clone to precede tokio::spawn"
         );
     }
 
@@ -40512,7 +40512,7 @@ mod tests {
         // `job` must NOT be shadowed (it's a fn, not a var).
         assert!(
             !code.contains("let job = job . clone ()") && !code.contains("let job = job.clone()"),
-            "no esperaba shadow clone del nombre de fn `job`, got:\n{}",
+            "did not expect shadow clone of fn name `job`, got:\n{}",
             code
         );
     }
@@ -40528,12 +40528,12 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("tokio::spawn"),
-            "expected `tokio::spawn` en el codegen de spawn(...), got:\n{}",
+            "expected `tokio::spawn` in the codegen of spawn(...), got:\n{}",
             code
         );
         assert!(
             code.contains("Box::pin"),
-            "expected `Box::pin` que envuelve el JoinHandle en Future<T>"
+            "expected `Box::pin` wrapping the JoinHandle in Future<T>"
         );
     }
 
@@ -40546,7 +40546,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("fn send"),
-            "expected la fn definida igual que sin decorator"
+            "expected fn defined the same as without decorator"
         );
     }
 
@@ -40573,7 +40573,7 @@ mod tests {
         // NOT emit the wrapped Ok without coercion.
         assert!(
             code.contains("__fitz_py_extract_string"),
-            "expected __fitz_py_extract_string adentro del return Ok, output:\n{}",
+            "expected __fitz_py_extract_string inside return Ok, output:\n{}",
             code
         );
     }
@@ -40588,7 +40588,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("__fitz_py_extract_i64"),
-            "expected __fitz_py_extract_i64 adentro del return Ok, output:\n{}",
+            "expected __fitz_py_extract_i64 inside return Ok, output:\n{}",
             code
         );
     }
@@ -40607,13 +40607,13 @@ mod tests {
         // wrappers — inner is already pure `T`.
         assert!(
             !code.contains("__fitz_py_extract"),
-            "NO esperaba __fitz_py_extract para inner ya tipado correcto, output:\n{}",
+            "did NOT expect __fitz_py_extract for inner already correctly typed, output:\n{}",
             code
         );
         // The return exists (with the expected shape).
         assert!(
             code.contains("return Ok("),
-            "expected `return Ok(...)` en el body, output:\n{}",
+            "expected `return Ok(...)` in the body, output:\n{}",
             code
         );
     }
@@ -40636,7 +40636,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("__fitz_py_to_map_string_string"),
-            "expected helper __fitz_py_to_map_string_string en el output"
+            "expected helper __fitz_py_to_map_string_string in the output"
         );
     }
 
@@ -40651,7 +40651,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("__fitz_py_to_map_string_i64"),
-            "expected helper __fitz_py_to_map_string_i64 en el output"
+            "expected helper __fitz_py_to_map_string_i64 in the output"
         );
     }
 
@@ -40666,7 +40666,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("__fitz_py_to_map_string_f64"),
-            "expected helper __fitz_py_to_map_string_f64 en el output"
+            "expected helper __fitz_py_to_map_string_f64 in the output"
         );
     }
 
@@ -40681,7 +40681,7 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("__fitz_py_to_map_string_bool"),
-            "expected helper __fitz_py_to_map_string_bool en el output"
+            "expected helper __fitz_py_to_map_string_bool in the output"
         );
     }
 
@@ -40700,7 +40700,7 @@ mod tests {
         // Must NOT emit a helper for Map<Str, List<Int>> (falls to gradual).
         assert!(
             !code.contains("__fitz_py_to_map_string_list"),
-            "NO esperaba helper __fitz_py_to_map_string_list — Map<Str, List<...>> es gradual"
+            "did NOT expect helper __fitz_py_to_map_string_list — Map<Str, List<...>> is gradual"
         );
     }
 
@@ -40723,12 +40723,12 @@ mod tests {
         // The helper is emitted when uses_async + uses_python.
         assert!(
             code.contains("async fn __fitz_py_await_obj"),
-            "expected helper `__fitz_py_await_obj` en el preludio"
+            "expected helper `__fitz_py_await_obj` in the prelude"
         );
         // The call site uses the helper.
         assert!(
             code.contains("__fitz_py_await_obj(&"),
-            "expected `__fitz_py_await_obj(&fut).await?` en el body de run, output: ...{}...",
+            "expected `__fitz_py_await_obj(&fut).await?` in the body of run, output: ...{}...",
             &code[code.len().saturating_sub(2000)..]
         );
     }
@@ -40747,7 +40747,7 @@ mod tests {
         // Inline combined helper.
         assert!(
             code.contains("__fitz_py_invoke_await("),
-            "expected `__fitz_py_invoke_await` en el body (path inline)"
+            "expected `__fitz_py_invoke_await` in the body (inline path)"
         );
     }
 
@@ -40765,22 +40765,22 @@ mod tests {
         // UI handler defined.
         assert!(
             code.contains("async fn __serve_asyncapi("),
-            "expected `async fn __serve_asyncapi()` en el output"
+            "expected `async fn __serve_asyncapi()` in the output"
         );
         // The static with the embedded HTML.
         assert!(
             code.contains("__FITZ_ASYNCAPI_HTML"),
-            "expected `__FITZ_ASYNCAPI_HTML` static embebido"
+            "expected embedded `__FITZ_ASYNCAPI_HTML` static"
         );
         // Auto-registered route in the router.
         assert!(
             code.contains(".route(\"/asyncapi\", axum::routing::get(__serve_asyncapi))"),
-            "expected route `/asyncapi` en el router del codegen output"
+            "expected route `/asyncapi` in the codegen output router"
         );
         // The embedded HTML references the schema endpoint.
         assert!(
             code.contains("/asyncapi.json"),
-            "expected que el HTML embebido referencie /asyncapi.json"
+            "expected embedded HTML to reference /asyncapi.json"
         );
     }
 
@@ -40803,7 +40803,7 @@ mod tests {
         // must NOT appear (because the user wins).
         assert!(
             !code.contains(".route(\"/asyncapi\", axum::routing::get(__serve_asyncapi))"),
-            "auto-register de /asyncapi no debería estar cuando el user lo declara"
+            "auto-register of /asyncapi should not be present when user declares it"
         );
     }
 
@@ -40818,16 +40818,16 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             code.contains("fn __fitz_ws_extract_bearer_subprotocol"),
-            "expected helper de extracción de bearer subprotocol en preludio"
+            "expected bearer subprotocol extraction helper in prelude"
         );
         assert!(
             code.contains("__ws_bearer = __fitz_ws_extract_bearer_subprotocol(&__hmap)"),
-            "expected uso del helper en el wrapper de WS"
+            "expected helper usage in the WS wrapper"
         );
         // Echo the subprotocol with .protocols(...).
         assert!(
             code.contains("ws.protocols([proto.clone()])"),
-            "expected echo del subprotocol seleccionado via .protocols(...)"
+            "expected echo of the selected subprotocol via .protocols(...)"
         );
     }
 
@@ -40846,11 +40846,11 @@ mod tests {
         // The provider block must contain the injection logic.
         assert!(
             code.contains("if let Some((_, ref __tok)) = __ws_bearer"),
-            "expected branch de inyección Bearer en el wrapper auth"
+            "expected Bearer injection branch in the auth wrapper"
         );
         assert!(
             code.contains("format!(\"Bearer {}\", __tok)"),
-            "expected format!(`Bearer {{}}`, token) para el header authorization"
+            "expected format!(`Bearer {{}}`, token) for the authorization header"
         );
     }
 
@@ -40865,11 +40865,11 @@ mod tests {
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
             !code.contains("__serve_asyncapi"),
-            "no se esperaba `__serve_asyncapi` sin handlers @ws"
+            "did not expect `__serve_asyncapi` without @ws handlers"
         );
         assert!(
             !code.contains("__FITZ_ASYNCAPI_HTML"),
-            "no se esperaba static `__FITZ_ASYNCAPI_HTML` sin handlers @ws"
+            "did not expect static `__FITZ_ASYNCAPI_HTML` without @ws handlers"
         );
     }
 
@@ -40889,11 +40889,11 @@ mod tests {
         // text).
         assert!(
             !code.contains("async fn __fitz_py_await_obj"),
-            "no se esperaba la fn `__fitz_py_await_obj` sin async"
+            "did not expect fn `__fitz_py_await_obj` without async"
         );
         assert!(
             !code.contains("async fn __fitz_py_invoke_await"),
-            "no se esperaba la fn `__fitz_py_invoke_await` sin async"
+            "did not expect fn `__fitz_py_invoke_await` without async"
         );
     }
 
@@ -40909,7 +40909,7 @@ mod tests {
         // The Rust signature of `double` must type `n: i64`.
         assert!(
             code.contains("fn double(n: i64)") || code.contains("fn double(mut n: i64)"),
-            "expected `fn double(n: i64)` en el output (inferencia desde call site Int)"
+            "expected `fn double(n: i64)` in the output (inference from Int call site)"
         );
     }
 
@@ -40931,7 +40931,7 @@ mod tests {
         // Rust signature with the nominal type (alias `User`).
         assert!(
             code.contains("fn greet(u: User)") || code.contains("fn greet(mut u: User)"),
-            "expected `fn greet(u: User)` con tipo Nominal inferido"
+            "expected `fn greet(u: User)` with inferred Nominal type"
         );
     }
 
@@ -40958,7 +40958,7 @@ mod tests {
         // Str → String in Rust.
         assert!(
             code.contains("fn shout(s: String)") || code.contains("fn shout(mut s: String)"),
-            "expected `fn shout(s: String)` con tipo Str inferido"
+            "expected `fn shout(s: String)` with inferred Str type"
         );
     }
 
@@ -40991,17 +40991,17 @@ mod tests {
                 Stmt::FnDef { name, params, .. } if name == "greet" => Some(params),
                 _ => None,
             })
-            .expect("fn greet en el program");
+            .expect("fn greet in the program");
         let u_param = &greet[0];
         assert_eq!(u_param.name, "u");
         let te = u_param
             .type_
             .as_ref()
-            .expect("type_ debería estar populado tras fill_inferred");
+            .expect("type_ should be populated after fill_inferred");
         // Path #1 now covers Nominal: the TypeExpr is Named("User").
         match te {
             TypeExpr::Named(n) => assert_eq!(n, "User"),
-            other => panic!("expected TypeExpr::Named(\"User\"), fue {:?}", other),
+            other => panic!("expected TypeExpr::Named(\"User\"), was {:?}", other),
         }
     }
 
@@ -41019,11 +41019,11 @@ mod tests {
         .expect("codegen OK");
         assert!(
             rust.contains("__fitz_db_connect"),
-            "expected `__fitz_db_connect` en el output, fue: {rust}",
+            "expected `__fitz_db_connect` in the output, was: {rust}",
         );
         assert!(
             rust.contains("mod __fitz_db_runtime"),
-            "expected `mod __fitz_db_runtime` en el output",
+            "expected `mod __fitz_db_runtime` in the output",
         );
     }
 
@@ -41038,7 +41038,7 @@ mod tests {
         .expect("codegen OK");
         assert!(
             rust.contains("__fitz_db_query"),
-            "expected `__fitz_db_query` en el output",
+            "expected `__fitz_db_query` in the output",
         );
     }
 
@@ -41052,7 +41052,7 @@ mod tests {
         .expect("codegen OK");
         assert!(
             rust.contains("__fitz_db_exec"),
-            "expected `__fitz_db_exec` en el output",
+            "expected `__fitz_db_exec` in the output",
         );
     }
 
@@ -41068,7 +41068,7 @@ mod tests {
         .expect("codegen OK");
         assert!(
             rust.contains("__fitz_db_close"),
-            "expected `__fitz_db_close` en el output",
+            "expected `__fitz_db_close` in the output",
         );
     }
 
@@ -41089,16 +41089,16 @@ mod tests {
                  }\n\
              }\n\
              print(driver().await)\n")
-        .expect("codegen OK con `db.close().await?`");
+        .expect("codegen OK with `db.close().await?`");
         // The prelude helper returns Result<(), String> to propagate
         // close errors via ?.
         assert!(
             rust.contains("async fn __fitz_db_close(conn: &__FitzDbConn) -> Result<(), String>"),
-            "expected helper preludio con signature Result<(), String>, fue: {rust}",
+            "expected prelude helper with signature Result<(), String>, was: {rust}",
         );
         assert!(
             rust.contains(".map_err(|e| e.to_string())"),
-            "expected conversion .map_err sobre el cierre, fue: {rust}",
+            "expected .map_err conversion on close, was: {rust}",
         );
     }
 
@@ -41109,11 +41109,11 @@ mod tests {
         let rust = gen("let x = 42\nprint(x)").expect("codegen OK");
         assert!(
             !rust.contains("__fitz_db_runtime"),
-            "el preludio db debería estar AUSENTE en programas sin db",
+            "db prelude should be ABSENT in programs without db",
         );
         assert!(
             !rust.contains("__fitz_db_connect"),
-            "los helpers db deberían estar AUSENTES",
+            "db helpers should be ABSENT",
         );
     }
 
@@ -41127,30 +41127,30 @@ mod tests {
         );
         assert!(
             toml.contains("sha2 = \"0.10\""),
-            "expected sha2 en Cargo.toml: {toml}",
+            "expected sha2 in Cargo.toml: {toml}",
         );
         assert!(
             toml.contains("hmac = \"0.12\""),
-            "expected hmac en Cargo.toml: {toml}",
+            "expected hmac in Cargo.toml: {toml}",
         );
         assert!(
             toml.contains("base64 = \"0.22\""),
-            "expected base64 en Cargo.toml: {toml}",
+            "expected base64 in Cargo.toml: {toml}",
         );
         assert!(
             toml.contains("tokio"),
-            "expected tokio en Cargo.toml (driver lo necesita): {toml}",
+            "expected tokio in Cargo.toml (driver needs it): {toml}",
         );
         // tokio must include the `net`, `io-util`, `sync` features when
         // db is present.
-        assert!(toml.contains("\"net\""), "tokio.features debe incluir net");
+        assert!(toml.contains("\"net\""), "tokio.features must include net");
         assert!(
             toml.contains("\"io-util\""),
-            "tokio.features debe incluir io-util"
+            "tokio.features must include io-util"
         );
         assert!(
             toml.contains("\"sync\""),
-            "tokio.features debe incluir sync"
+            "tokio.features must include sync"
         );
         // v0.10.23 (Phase 10.1.b) — TLS stack of the Postgres driver.
         // The embedded runtime references rustls/tokio_rustls/
@@ -41158,19 +41158,19 @@ mod tests {
         // code does not compile.
         assert!(
             toml.contains("rustls = { version = \"0.23\""),
-            "expected rustls en Cargo.toml (TLS strict, v0.10.23): {toml}",
+            "expected rustls in Cargo.toml (TLS strict, v0.10.23): {toml}",
         );
         assert!(
             toml.contains("tokio-rustls = { version = \"0.26\""),
-            "expected tokio-rustls en Cargo.toml: {toml}",
+            "expected tokio-rustls in Cargo.toml: {toml}",
         );
         assert!(
             toml.contains("webpki-roots = \"0.26\""),
-            "expected webpki-roots en Cargo.toml: {toml}",
+            "expected webpki-roots in Cargo.toml: {toml}",
         );
         assert!(
             toml.contains("rustls-pemfile = \"2\""),
-            "expected rustls-pemfile en Cargo.toml: {toml}",
+            "expected rustls-pemfile in Cargo.toml: {toml}",
         );
     }
 
@@ -41180,17 +41180,17 @@ mod tests {
             "foo", false, false, false, false, false, false, false, false, false, false, false,
             false,
         );
-        assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
-        assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
+        assert!(!toml.contains("sha2"), "sha2 should not be present without db");
+        assert!(!toml.contains("hmac"), "hmac should not be present without db");
         // v0.10.23 — without db, no TLS deps either.
-        assert!(!toml.contains("rustls"), "rustls no debería estar sin db");
+        assert!(!toml.contains("rustls"), "rustls should not be present without db");
         assert!(
             !toml.contains("tokio-rustls"),
-            "tokio-rustls no debería estar sin db"
+            "tokio-rustls should not be present without db"
         );
         assert!(
             !toml.contains("webpki-roots"),
-            "webpki-roots no debería estar sin db"
+            "webpki-roots should not be present without db"
         );
     }
 
@@ -41214,15 +41214,15 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("SELECT \\\"id\\\", \\\"name\\\", \\\"age\\\" FROM \\\"users\\\""),
-            "expected el SELECT con cols quoted, fue: {rust}",
+            "expected the SELECT with quoted cols, was: {rust}",
         );
         assert!(
             rust.contains("__fitz_db_query"),
-            "expected __fitz_db_query en el output",
+            "expected __fitz_db_query in the output",
         );
         assert!(
             rust.contains("<UserData as __FromFitzDbRow>::from_fitz_db_row"),
-            "expected deserialización a UserData",
+            "expected deserialization to UserData",
         );
     }
 
@@ -41244,11 +41244,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("LIMIT 1"),
-            "expected LIMIT 1 para first(), fue: {rust}",
+            "expected LIMIT 1 for first(), was: {rust}",
         );
         assert!(
             rust.contains("\"no rows\".to_string()"),
-            "expected fallback Err(\"no rows\") cuando el resultset es vacío",
+            "expected Err(\"no rows\") fallback when the resultset is empty",
         );
     }
 
@@ -41266,11 +41266,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("SELECT COUNT(*) FROM \\\"items\\\""),
-            "expected SELECT COUNT(*) FROM \"items\", fue: {rust}",
+            "expected SELECT COUNT(*) FROM \"items\", was: {rust}",
         );
         assert!(
             rust.contains("__fitz_pg_to_i64"),
-            "expected __fitz_pg_to_i64 para parsear el scalar count",
+            "expected __fitz_pg_to_i64 to parse the scalar count",
         );
     }
 
@@ -41291,12 +41291,12 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\\\"author_id\\\""),
-            "expected `\"author_id\"` como nombre SQL en el SELECT, fue: {rust}",
+            "expected `\"author_id\"` as SQL name in the SELECT, was: {rust}",
         );
         // The deserializer also queries the row with the sql_name override
         assert!(
             rust.contains("__row.get(\"author_id\")"),
-            "expected lookup por sql_name override en __FromFitzDbRow",
+            "expected lookup by sql_name override in __FromFitzDbRow",
         );
     }
 
@@ -41318,11 +41318,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("impl __FromFitzDbRow for TaggedData"),
-            "expected `impl __FromFitzDbRow for TaggedData`, fue: {rust}",
+            "expected `impl __FromFitzDbRow for TaggedData`, was: {rust}",
         );
         assert!(
             !rust.contains("impl __FromFitzDbRow for UntaggedData"),
-            "NO esperaba impl __FromFitzDbRow for UntaggedData (sin @table)",
+            "did NOT expect impl __FromFitzDbRow for UntaggedData (no @table)",
         );
     }
 
@@ -41343,19 +41343,19 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("__FitzQueryBuilder::<UserData>::new"),
-            "expected el constructor del QueryBuilder tipado, fue: {rust}",
+            "expected the typed QueryBuilder constructor, was: {rust}",
         );
         assert!(
             rust.contains(".with_where(\"(\\\"age\\\" > $1)\""),
-            "expected el fragment WHERE traducido del closure, fue: {rust}",
+            "expected WHERE fragment translated from the closure, was: {rust}",
         );
         assert!(
             rust.contains("__FitzPgValue::Int(18i64)"),
-            "expected el binding parametrizado del literal Int, fue: {rust}",
+            "expected parameterized binding of the Int literal, was: {rust}",
         );
         assert!(
             rust.contains(".all(&db"),
-            "expected terminal .all(&db) en async block, fue: {rust}",
+            "expected terminal .all(&db) in async block, was: {rust}",
         );
     }
 
@@ -41383,30 +41383,30 @@ mod tests {
         // ends up as `\"` literal in the generated Rust output.
         assert!(
             rust.contains("INSERT INTO \\\"users\\\" (\\\"id\\\", \\\"name\\\", \\\"age\\\") VALUES ($1, $2, $3) RETURNING \\\"id\\\", \\\"name\\\", \\\"age\\\""),
-            "expected el INSERT con cols + placeholders + RETURNING quoted, fue: {rust}",
+            "expected INSERT with cols + placeholders + quoted RETURNING, was: {rust}",
         );
         // Marshalling: __FitzPgValue::Int for id/age, ::Text for name.
         assert!(
             rust.contains("__FitzPgValue::Int(__g.id)"),
-            "expected marshalling Int del field id, fue: {rust}",
+            "expected marshalling Int of field id, was: {rust}",
         );
         assert!(
             rust.contains("__FitzPgValue::Text(__g.name.clone())"),
-            "expected marshalling Text del field name (con clone), fue: {rust}",
+            "expected marshalling Text of field name (with clone), was: {rust}",
         );
         assert!(
             rust.contains("__FitzPgValue::Int(__g.age)"),
-            "expected marshalling Int del field age, fue: {rust}",
+            "expected marshalling Int of field age, was: {rust}",
         );
         // Deserialization with __FromFitzDbRow.
         assert!(
             rust.contains("<UserData as __FromFitzDbRow>::from_fitz_db_row"),
-            "expected deserialización del row de RETURNING via __FromFitzDbRow",
+            "expected deserialization of RETURNING row via __FromFitzDbRow",
         );
         // No-rows fallback with insert-specific message.
         assert!(
             rust.contains("INSERT ... RETURNING no devolvió rows"),
-            "expected fallback claro cuando RETURNING devuelve vacío",
+            "expected clear fallback when RETURNING returns empty",
         );
     }
 
@@ -41430,24 +41430,24 @@ mod tests {
         // Runtime branch present: checks __g.id == 0 to decide SQL.
         assert!(
             rust.contains("if __g.id == 0"),
-            "expected branch `if __g.id == 0` para sentinel skip, fue: {rust}",
+            "expected branch `if __g.id == 0` for sentinel skip, was: {rust}",
         );
         // SQL without PK (sentinel branch) — only (name) and placeholder $1.
         assert!(
             rust.contains("INSERT INTO \\\"users\\\" (\\\"name\\\") VALUES ($1) RETURNING"),
-            "expected SQL sin PK para rama sentinel, fue: {rust}",
+            "expected SQL without PK for sentinel branch, was: {rust}",
         );
         // SQL with PK (explicit branch) — (id, name) and placeholders $1, $2.
         assert!(
             rust.contains(
                 "INSERT INTO \\\"users\\\" (\\\"id\\\", \\\"name\\\") VALUES ($1, $2) RETURNING"
             ),
-            "expected SQL con PK para rama explícita, fue: {rust}",
+            "expected SQL with PK for explicit branch, was: {rust}",
         );
         // RETURNING always includes all fields (does not depend on the branch).
         assert!(
             rust.contains("RETURNING \\\"id\\\", \\\"name\\\""),
-            "expected RETURNING con id+name siempre, fue: {rust}",
+            "expected RETURNING with id+name always, was: {rust}",
         );
     }
 
@@ -41469,13 +41469,13 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             !rust.contains("if __g.key == 0"),
-            "NO esperaba branch sobre key Str — solo aplica a primary Int",
+            "did NOT expect branch on key Str — only applies to primary Int",
         );
         assert!(
             rust.contains(
                 "INSERT INTO \\\"slugs\\\" (\\\"key\\\", \\\"value\\\") VALUES ($1, $2) RETURNING"
             ),
-            "expected SQL único sin branch, fue: {rust}",
+            "expected single SQL without branch, was: {rust}",
         );
     }
 
@@ -41497,21 +41497,21 @@ mod tests {
         // Col list and RETURNING use the SQL name override.
         assert!(
             rust.contains("INSERT INTO \\\"events\\\" (\\\"id\\\", \\\"event_kind\\\")"),
-            "expected col list con `event_kind` override, fue: {rust}",
+            "expected col list with `event_kind` override, was: {rust}",
         );
         assert!(
             rust.contains("RETURNING \\\"id\\\", \\\"event_kind\\\""),
-            "expected RETURNING con `event_kind` override, fue: {rust}",
+            "expected RETURNING with `event_kind` override, was: {rust}",
         );
         // But the field accessor is still the Fitz name (`kind`),
         // not the SQL one (`event_kind`).
         assert!(
             rust.contains("__g.kind.clone()"),
-            "expected accessor `__g.kind.clone()` (nombre Fitz), fue: {rust}",
+            "expected accessor `__g.kind.clone()` (Fitz name), was: {rust}",
         );
         assert!(
             !rust.contains("__g.event_kind"),
-            "NO esperaba accessor por nombre SQL `__g.event_kind`",
+            "did NOT expect accessor by SQL name `__g.event_kind`",
         );
     }
 
@@ -41535,15 +41535,15 @@ mod tests {
         // The nullable field is emitted with a Some/None match.
         assert!(
             rust.contains("match __g.subtitle.clone()"),
-            "expected `match __g.subtitle.clone()` para field nullable, fue: {rust}",
+            "expected `match __g.subtitle.clone()` for nullable field, was: {rust}",
         );
         assert!(
             rust.contains("Some(__some_v) => __FitzPgValue::Text(__some_v)"),
-            "expected arm Some que envuelve el inner en Text, fue: {rust}",
+            "expected Some arm wrapping the inner in Text, was: {rust}",
         );
         assert!(
             rust.contains("None => __FitzPgValue::Null"),
-            "expected arm None mapeando a __FitzPgValue::Null, fue: {rust}",
+            "expected None arm mapping to __FitzPgValue::Null, was: {rust}",
         );
     }
 
@@ -41566,7 +41566,7 @@ mod tests {
         assert!(
             err_u.message.contains("requires a prior `.where(...)`")
                 && err_u.message.contains("User.update"),
-            "expected mención del guard de seguridad sobre `User.update`, fue: {}",
+            "expected mention of safety guard for `User.update`, was: {}",
             err_u.message
         );
         let src_delete = "@table(\"users\") type User {\n  \
@@ -41605,7 +41605,7 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("__FitzQueryBuilder::<UserData>::new"),
-            "expected constructor del QB, fue: {rust}",
+            "expected QB constructor, was: {rust}",
         );
         assert!(
             rust.contains(".with_where("),
@@ -41617,7 +41617,7 @@ mod tests {
         );
         assert!(
             rust.contains(".all(&db"),
-            "expected terminal .all(&db), fue: {rust}",
+            "expected terminal .all(&db), was: {rust}",
         );
     }
 
@@ -41650,7 +41650,7 @@ mod tests {
         // `__fitz_qb_renumber_placeholders`.
         assert!(
             rust.contains("(\\\"name\\\" = $1)"),
-            "expected `\"name\" = $1` en el segundo fragment (sin renumerar en codegen), fue: {rust}",
+            "expected `\"name\" = $1` in the second fragment (no renumber in codegen), was: {rust}",
         );
     }
 
@@ -41671,11 +41671,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains(".with_order_by(\"age\", true)"),
-            "expected `.with_order_by(\"age\", true)` (DESC), fue: {rust}",
+            "expected `.with_order_by(\"age\", true)` (DESC), was: {rust}",
         );
         assert!(
             rust.contains(".with_limit(5i64)"),
-            "expected `.with_limit(5i64)`, fue: {rust}",
+            "expected `.with_limit(5i64)`, was: {rust}",
         );
     }
 
@@ -41698,7 +41698,7 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains(".with_group_by(\"role\", \"role\")"),
-            "expected `.with_group_by(\"role\", \"role\")` en el chain, fue: {rust}",
+            "expected `.with_group_by(\"role\", \"role\")` in the chain, was: {rust}",
         );
         // Phase 10.b.14: count after group_by NO longer emits `.count(&db)`
         // (scalar path) — emits `.aggregate_groups(&db, "COUNT(*)",
@@ -41707,7 +41707,7 @@ mod tests {
         // directly (without prior group_by).
         assert!(
             rust.contains(".aggregate_groups(&db") && rust.contains("\"COUNT(*)\""),
-            "expected terminal `.aggregate_groups(&db, \"COUNT(*)\", \"count\")` post-10.b.14, fue: {rust}",
+            "expected terminal `.aggregate_groups(&db, \"COUNT(*)\", \"count\")` post-10.b.14, was: {rust}",
         );
     }
 
@@ -41729,15 +41729,15 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("__set_clauses: &str = \"\\\"name\\\" = $1\""),
-            "expected set_clauses literal `\"name\" = $1`, fue: {rust}",
+            "expected set_clauses literal `\"name\" = $1`, was: {rust}",
         );
         assert!(
             rust.contains("<_ as __IntoPgValue>::into_pg"),
-            "expected marshalling via __IntoPgValue::into_pg, fue: {rust}",
+            "expected marshalling via __IntoPgValue::into_pg, was: {rust}",
         );
         assert!(
             rust.contains(".update_with_set(&db"),
-            "expected terminal `.update_with_set(&db, ...)`, fue: {rust}",
+            "expected terminal `.update_with_set(&db, ...)`, was: {rust}",
         );
     }
 
@@ -41757,30 +41757,30 @@ mod tests {
                        let _n = User.where(fn(u) => u.id == 1).update(db, changes).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let rust = gen(src).expect("codegen OK con Map var en .update");
+        let rust = gen(src).expect("codegen OK with Map var in .update");
         // The IIFE dispatch returns Result<(String, Vec<__FitzPgValue>), String>.
         assert!(
             rust.contains("|| -> Result<(String, Vec<__FitzPgValue>), String>"),
-            "expected closure IIFE para dispatch dinámico, fue: {rust}",
+            "expected IIFE closure for dynamic dispatch, was: {rust}",
         );
         // Runtime match on key.as_str() with arms per field.
         assert!(
             rust.contains("\"name\" => (\"name\", \"\""),
-            "expected arm `\"name\" => (\"name\", \"\", ...)` para Str field, fue: {rust}",
+            "expected arm `\"name\" => (\"name\", \"\", ...)` for Str field, was: {rust}",
         );
         assert!(
             rust.contains("\"age\" => (\"age\", \"\""),
-            "expected arm `\"age\" => (\"age\", \"\", ...)` para Int field, fue: {rust}",
+            "expected arm `\"age\" => (\"age\", \"\", ...)` for Int field, was: {rust}",
         );
         // Fallback: unknown field returns Err.
         assert!(
             rust.contains("no existe en `users`"),
-            "expected mensaje de error sobre field desconocido, fue: {rust}",
+            "expected error message about unknown field, was: {rust}",
         );
         // The receiver is still update_with_set.
         assert!(
             rust.contains(".update_with_set(&db"),
-            "expected terminal .update_with_set, fue: {rust}",
+            "expected terminal .update_with_set, was: {rust}",
         );
     }
 
@@ -41801,11 +41801,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\"meta\" => (\"meta\", \"::jsonb\""),
-            "expected cast `::jsonb` en arm de field jsonb, fue: {rust}",
+            "expected cast `::jsonb` in arm of jsonb field, was: {rust}",
         );
         assert!(
             rust.contains("__fitz_fitz_value_to_jsonb"),
-            "expected helper de serialización JSONB, fue: {rust}",
+            "expected JSONB serialization helper, was: {rust}",
         );
     }
 
@@ -41824,7 +41824,7 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains(".delete_with_where(&db"),
-            "expected terminal `.delete_with_where(&db)`, fue: {rust}",
+            "expected terminal `.delete_with_where(&db)`, was: {rust}",
         );
     }
 
@@ -41846,15 +41846,15 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains(".aggregate_f64(&db"),
-            "expected terminal `.aggregate_f64(&db, ...)`, fue: {rust}",
+            "expected terminal `.aggregate_f64(&db, ...)`, was: {rust}",
         );
         assert!(
             rust.contains("\"SUM(\\\"price\\\")\""),
-            "expected agg_expr literal `SUM(\"price\")`, fue: {rust}",
+            "expected agg_expr literal `SUM(\"price\")`, was: {rust}",
         );
         assert!(
             rust.contains("\"sum\""),
-            "expected agg_name literal `sum`, fue: {rust}",
+            "expected agg_name literal `sum`, was: {rust}",
         );
     }
 
@@ -41872,7 +41872,7 @@ mod tests {
         let rust_min = gen(src_min).expect("codegen min OK");
         assert!(
             rust_min.contains("\"MIN(\\\"price\\\")\""),
-            "expected `MIN(\"price\")`, fue: {rust_min}",
+            "expected `MIN(\"price\")`, was: {rust_min}",
         );
 
         let src_max = "@table(\"orders\") type Order {\n  \
@@ -41887,7 +41887,7 @@ mod tests {
         let rust_max = gen(src_max).expect("codegen max OK");
         assert!(
             rust_max.contains("\"MAX(\\\"price\\\")\""),
-            "expected `MAX(\"price\")`, fue: {rust_max}",
+            "expected `MAX(\"price\")`, was: {rust_max}",
         );
     }
 
@@ -41908,11 +41908,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\"AVG(\\\"price\\\")::float8\""),
-            "expected `AVG(\"price\")::float8` con cast, fue: {rust}",
+            "expected `AVG(\"price\")::float8` with cast, was: {rust}",
         );
         assert!(
             rust.contains("\"avg\""),
-            "expected agg_name literal `avg`, fue: {rust}",
+            "expected agg_name literal `avg`, was: {rust}",
         );
     }
 
@@ -41932,11 +41932,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\"SUM(\\\"amount_cents\\\")\""),
-            "expected `SUM(\"amount_cents\")` (sql_name override), fue: {rust}",
+            "expected `SUM(\"amount_cents\")` (sql_name override), was: {rust}",
         );
         assert!(
             !rust.contains("\"SUM(\\\"price\\\")\""),
-            "no esperaba `SUM(\"price\")` (el nombre Fitz no debe filtrarse), fue: {rust}",
+            "did not expect `SUM(\"price\")` (the Fitz name must not leak), was: {rust}",
         );
     }
 
@@ -41951,10 +41951,10 @@ mod tests {
                        let _t = Order.sum(fn(o) => o.missing, db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de codegen por field inexistente");
+        let err = gen(src).expect_err("expected codegen error for non-existent field");
         assert!(
             err.message.contains("field `missing`") && err.message.contains("no existe"),
-            "expected mención de `missing` no existe, fue: {}",
+            "expected mention of `missing` does not exist, was: {}",
             err.message
         );
     }
@@ -42005,22 +42005,22 @@ mod tests {
         // The WHERE uses the TARGET primary key (User.id) = $1.
         assert!(
             rust.contains("\\\"id\\\" = $1"),
-            "expected WHERE sobre \"id\" = $1 (primary del target), fue: {rust}",
+            "expected WHERE on \"id\" = $1 (target's primary), was: {rust}",
         );
         // Marshalling of the LOCAL side FK (post.user_id): Int → PgValue::Int.
         assert!(
             rust.contains("__FitzPgValue::Int"),
-            "expected marshalling __FitzPgValue::Int del FK, fue: {rust}",
+            "expected marshalling __FitzPgValue::Int of FK, was: {rust}",
         );
         // Terminal .first for BelongsTo.
         assert!(
             rust.contains(".first(&db"),
-            "expected terminal .first(&db) para BelongsTo, fue: {rust}",
+            "expected terminal .first(&db) for BelongsTo, was: {rust}",
         );
         // QB built over UserData (target).
         assert!(
             rust.contains("__FitzQueryBuilder::<UserData>::new"),
-            "expected QB sobre UserData (target), fue: {rust}",
+            "expected QB on UserData (target), was: {rust}",
         );
     }
 
@@ -42045,15 +42045,15 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\\\"author_id\\\" = $1"),
-            "expected WHERE sobre \"author_id\" = $1, fue: {rust}",
+            "expected WHERE on \"author_id\" = $1, was: {rust}",
         );
         assert!(
             rust.contains(".all(&db"),
-            "expected terminal .all(&db) para HasMany, fue: {rust}",
+            "expected terminal .all(&db) for HasMany, was: {rust}",
         );
         assert!(
             rust.contains("__FitzQueryBuilder::<PostData>::new"),
-            "expected QB sobre PostData (target), fue: {rust}",
+            "expected QB on PostData (target), was: {rust}",
         );
     }
 
@@ -42078,15 +42078,15 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\\\"user_id\\\" = $1"),
-            "expected WHERE sobre \"user_id\" = $1 (FK default), fue: {rust}",
+            "expected WHERE on \"user_id\" = $1 (default FK), was: {rust}",
         );
         assert!(
             rust.contains(".first(&db"),
-            "expected terminal .first(&db) para HasOne, fue: {rust}",
+            "expected terminal .first(&db) for HasOne, was: {rust}",
         );
         assert!(
             rust.contains("__FitzQueryBuilder::<ProfileData>::new"),
-            "expected QB sobre ProfileData (target), fue: {rust}",
+            "expected QB on ProfileData (target), was: {rust}",
         );
     }
 
@@ -42109,11 +42109,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\\\"user_pk\\\" = $1"),
-            "expected WHERE sobre \"user_pk\" (sql_name override), fue: {rust}",
+            "expected WHERE on \"user_pk\" (sql_name override), was: {rust}",
         );
         assert!(
             !rust.contains("\\\"id\\\" = $1"),
-            "no esperaba `\"id\" = $1` (el Fitz name no debe filtrarse), fue: {rust}",
+            "did not expect `\"id\" = $1` (the Fitz name must not leak), was: {rust}",
         );
     }
 
@@ -42137,12 +42137,12 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("(async {"),
-            "expected async block envolvente, fue: {rust}",
+            "expected enclosing async block, was: {rust}",
         );
         // Specific navigation helper pattern: __nav_fk, __nav_pg, __nav_qb.
         assert!(
             rust.contains("__nav_fk") && rust.contains("__nav_pg") && rust.contains("__nav_qb"),
-            "expected bindings __nav_fk/__nav_pg/__nav_qb del helper, fue: {rust}",
+            "expected bindings __nav_fk/__nav_pg/__nav_qb of the helper, was: {rust}",
         );
     }
 
@@ -42163,13 +42163,13 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("(async {") && rust.contains(".aggregate_f64(&db"),
-            "expected `(async {{ ... .aggregate_f64(&db, ...) }})`, fue: {rust}",
+            "expected `(async {{ ... .aggregate_f64(&db, ...) }})`, was: {rust}",
         );
         // The previous where is preserved in the chain (the runtime helper
         // uses it to build `WHERE` before the aggregate).
         assert!(
             rust.contains(".with_where("),
-            "expected `.with_where(...)` en el chain antes del aggregate, fue: {rust}",
+            "expected `.with_where(...)` in the chain before aggregate, was: {rust}",
         );
     }
 
@@ -42195,17 +42195,17 @@ mod tests {
         // SQL cast in INSERT placeholders.
         assert!(
             rust.contains("::int8[]"),
-            "expected sufijo `::int8[]` en placeholder INSERT, fue: {rust}",
+            "expected `::int8[]` suffix in INSERT placeholder, was: {rust}",
         );
         // Array construction in marshal.
         assert!(
             rust.contains("__fitz_db_runtime::oid::INT8"),
-            "expected referencia a oid::INT8, fue: {rust}",
+            "expected reference to oid::INT8, was: {rust}",
         );
         // Deserialize iterator (in item's __FromFitzDbRow).
         assert!(
             rust.contains("__fitz_pg_to_i64"),
-            "expected uso de __fitz_pg_to_i64 para coercer items del array, fue: {rust}",
+            "expected use of __fitz_pg_to_i64 to coerce array items, was: {rust}",
         );
     }
 
@@ -42223,15 +42223,15 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("::text[]"),
-            "expected sufijo `::text[]` en placeholder, fue: {rust}",
+            "expected `::text[]` suffix in placeholder, was: {rust}",
         );
         assert!(
             rust.contains("__fitz_db_runtime::oid::TEXT"),
-            "expected referencia a oid::TEXT, fue: {rust}",
+            "expected reference to oid::TEXT, was: {rust}",
         );
         assert!(
             rust.contains("__fitz_pg_to_string"),
-            "expected uso de __fitz_pg_to_string al coercer items, fue: {rust}",
+            "expected use of __fitz_pg_to_string when coercing items, was: {rust}",
         );
     }
 
@@ -42250,11 +42250,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("::float8[]") && rust.contains("::bool[]"),
-            "expected ambos sufijos `::float8[]` y `::bool[]`, fue: {rust}",
+            "expected both suffixes `::float8[]` and `::bool[]`, was: {rust}",
         );
         assert!(
             rust.contains("__fitz_pg_to_f64") && rust.contains("__fitz_pg_to_bool"),
-            "expected ambos helpers de coerción, fue: {rust}",
+            "expected both coercion helpers, was: {rust}",
         );
     }
 
@@ -42271,12 +42271,12 @@ mod tests {
                        let g = Group { id: 0, members: [] }\n  \
                        return Group.insert(db, g).await\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por List<Nominal> no soportado");
+        let err = gen(src).expect_err("expected error for unsupported List<Nominal>");
         assert!(
             err.message.contains("10.b")
                 || err.message.contains("no soportado")
                 || err.message.contains("array"),
-            "expected mención de falta de soporte para List<Nominal>, fue: {}",
+            "expected mention of missing support for List<Nominal>, was: {}",
             err.message
         );
     }
@@ -42303,17 +42303,17 @@ mod tests {
         // JSON helpers in the db prelude.
         assert!(
             rust.contains("fn __fitz_jsonb_to_fitz_value") && rust.contains("fn __fitz_fitz_value_to_jsonb"),
-            "expected helpers __fitz_jsonb_to_fitz_value y __fitz_fitz_value_to_jsonb en preludio, fue: {rust}",
+            "expected helpers __fitz_jsonb_to_fitz_value and __fitz_fitz_value_to_jsonb in prelude, was: {rust}",
         );
         // SQL cast `::jsonb` in INSERT.
         assert!(
             rust.contains("::jsonb"),
-            "expected sufijo `::jsonb` en placeholder INSERT, fue: {rust}",
+            "expected `::jsonb` suffix in INSERT placeholder, was: {rust}",
         );
         // Marshal uses __FitzValue::Map.
         assert!(
             rust.contains("__FitzValue::Map(__map_g.clone())"),
-            "expected marshal vía __FitzValue::Map(__map_g.clone()), fue: {rust}",
+            "expected marshal via __FitzValue::Map(__map_g.clone()), was: {rust}",
         );
         // Cargo.toml adds serde_json.
         // (we don't test cargo_toml here; goes in another targeted test.)
@@ -42336,11 +42336,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("__fitz_jsonb_to_fitz_value(__s)"),
-            "expected uso del helper de parse JSON al deserializar, fue: {rust}",
+            "expected use of JSON parse helper when deserializing, was: {rust}",
         );
         assert!(
             rust.contains("__FitzValue::Map(__pairs)"),
-            "expected `__FitzValue::Map(__pairs)` para extraer el JSONB, fue: {rust}",
+            "expected `__FitzValue::Map(__pairs)` to extract the JSONB, was: {rust}",
         );
     }
 
@@ -42362,10 +42362,10 @@ mod tests {
                        let db = db.connect(\"postgres://x@h/d\").await?\n  \
                        return Counts.all(db).await\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de codegen por Map<Int, ...>");
+        let err = gen(src).expect_err("expected codegen error for Map<Int, ...>");
         assert!(
             err.message.contains("Map<Str, Any>") || err.message.contains("Map<Str,"),
-            "expected mención de `Map<Str, ...>` como workaround, fue: {}",
+            "expected mention of `Map<Str, ...>` as workaround, was: {}",
             err.message
         );
     }
@@ -42380,12 +42380,12 @@ mod tests {
         );
         assert!(
             toml.contains("serde_json"),
-            "expected serde_json en Cargo.toml cuando uses_db+uses_fitz_value, fue: {}",
+            "expected serde_json in Cargo.toml when uses_db+uses_fitz_value, was: {}",
             toml
         );
         assert!(
             toml.contains("preserve_order"),
-            "expected feature `preserve_order` para mantener orden JSONB, fue: {}",
+            "expected feature `preserve_order` to maintain JSONB order, was: {}",
             toml
         );
     }
@@ -42409,7 +42409,7 @@ mod tests {
         // recurses).
         assert!(
             rust.contains("::int8[]"),
-            "expected `::int8[]` para List<Int>? también, fue: {rust}",
+            "expected `::int8[]` for List<Int>? too, was: {rust}",
         );
     }
 
@@ -42450,25 +42450,25 @@ mod tests {
         let r = where_sql_fragment("u.age == 18");
         assert!(
             r.contains("(\\\"age\\\" = $1)"),
-            "expected `\"age\" = $1`, fue: {r}"
+            "expected `\"age\" = $1`, was: {r}"
         );
 
         let r = where_sql_fragment("u.age != 18");
         assert!(
             r.contains("(\\\"age\\\" <> $1)"),
-            "expected `\"age\" <> $1`, fue: {r}"
+            "expected `\"age\" <> $1`, was: {r}"
         );
 
         let r = where_sql_fragment("u.age >= 18");
         assert!(
             r.contains("(\\\"age\\\" >= $1)"),
-            "expected `\"age\" >= $1`, fue: {r}"
+            "expected `\"age\" >= $1`, was: {r}"
         );
 
         let r = where_sql_fragment("u.age < 18");
         assert!(
             r.contains("(\\\"age\\\" < $1)"),
-            "expected `\"age\" < $1`, fue: {r}"
+            "expected `\"age\" < $1`, was: {r}"
         );
     }
 
@@ -42476,9 +42476,9 @@ mod tests {
     fn codegen_where_binop_logical_and_or_emit_sql_keywords() {
         // Fitz uses keywords `and`/`or`/`not` (not symbols `&&`/`||`/`!`).
         let r = where_sql_fragment("u.age > 18 and u.active == true");
-        assert!(r.contains(" AND "), "expected keyword `AND` SQL, fue: {r}",);
+        assert!(r.contains(" AND "), "expected SQL keyword `AND`, was: {r}",);
         let r = where_sql_fragment("u.age > 65 or u.score < 0.5");
-        assert!(r.contains(" OR "), "expected keyword `OR` SQL, fue: {r}",);
+        assert!(r.contains(" OR "), "expected SQL keyword `OR`, was: {r}",);
     }
 
     #[test]
@@ -42486,7 +42486,7 @@ mod tests {
         let r = where_sql_fragment("not (u.age > 18)");
         assert!(
             r.contains("(NOT (\\\"age\\\" > $1))"),
-            "expected `(NOT (\"age\" > $1))`, fue: {r}",
+            "expected `(NOT (\"age\" > $1))`, was: {r}",
         );
     }
 
@@ -42496,7 +42496,7 @@ mod tests {
         let r = where_sql_fragment("u.age + 5 > 25");
         assert!(
             r.contains("(\\\"age\\\" + $1)"),
-            "expected `(\"age\" + $1)`, fue: {r}",
+            "expected `(\"age\" + $1)`, was: {r}",
         );
     }
 
@@ -42505,12 +42505,12 @@ mod tests {
         let r = where_sql_fragment("u.deleted_at.is_null()");
         assert!(
             r.contains("\\\"deleted_at\\\" IS NULL"),
-            "expected `\"deleted_at\" IS NULL`, fue: {r}",
+            "expected `\"deleted_at\" IS NULL`, was: {r}",
         );
         let r = where_sql_fragment("u.deleted_at.is_not_null()");
         assert!(
             r.contains("\\\"deleted_at\\\" IS NOT NULL"),
-            "expected `\"deleted_at\" IS NOT NULL`, fue: {r}",
+            "expected `\"deleted_at\" IS NOT NULL`, was: {r}",
         );
     }
 
@@ -42520,11 +42520,11 @@ mod tests {
         // Must emit IN ($1, $2, $3) — 3 bound placeholders.
         assert!(
             r.contains("\\\"age\\\" IN ($1, $2, $3)"),
-            "expected `\"age\" IN ($1, $2, $3)`, fue: {r}",
+            "expected `\"age\" IN ($1, $2, $3)`, was: {r}",
         );
         // Each item has its bound PgValue::Int.
         let n = r.matches("__FitzPgValue::Int").count();
-        assert!(n >= 3, "expected al menos 3 bindings Int, fueron {n}: {r}",);
+        assert!(n >= 3, "expected at least 3 Int bindings, were {n}: {r}",);
     }
 
     #[test]
@@ -42541,12 +42541,12 @@ mod tests {
         let r = where_sql_fragment("u.name.like(\"a%\")");
         assert!(
             r.contains("\\\"name\\\" LIKE $1"),
-            "expected `\"name\" LIKE $1`, fue: {r}",
+            "expected `\"name\" LIKE $1`, was: {r}",
         );
         let r = where_sql_fragment("u.name.ilike(\"A%\")");
         assert!(
             r.contains("\\\"name\\\" ILIKE $1"),
-            "expected `\"name\" ILIKE $1`, fue: {r}",
+            "expected `\"name\" ILIKE $1`, was: {r}",
         );
     }
 
@@ -42556,24 +42556,24 @@ mod tests {
         let r = where_sql_fragment("u.name.starts_with(\"ada\")");
         assert!(
             r.contains("\\\"name\\\" LIKE $1"),
-            "expected traducción a LIKE $1, fue: {r}",
+            "expected translation to LIKE $1, was: {r}",
         );
         // The bound pattern should be `ada%`.
         assert!(
             r.contains("\"ada%\".to_string()"),
-            "expected binding `\"ada%\"`, fue: {r}",
+            "expected binding `\"ada%\"`, was: {r}",
         );
         // ends_with("ada") → LIKE '%ada'
         let r = where_sql_fragment("u.name.ends_with(\"ada\")");
         assert!(
             r.contains("\"%ada\".to_string()"),
-            "expected binding `\"%ada\"`, fue: {r}",
+            "expected binding `\"%ada\"`, was: {r}",
         );
         // contains("ad") → LIKE '%ad%'
         let r = where_sql_fragment("u.name.contains(\"ad\")");
         assert!(
             r.contains("\"%ad%\".to_string()"),
-            "expected binding `\"%ad%\"`, fue: {r}",
+            "expected binding `\"%ad%\"`, was: {r}",
         );
     }
 
@@ -42594,17 +42594,17 @@ mod tests {
                        let db = db.connect(\"postgres://x@h/d\").await?\n  \
                        return Post.where(fn(p) => p.lang == body.lang).all(db).await\n\
                    }\n";
-        let rust = gen(src).expect("codegen OK con body.lang");
+        let rust = gen(src).expect("codegen OK with body.lang");
         // SQL emitted with `"lang" = $1` (the row field on the left,
         // the body.lang binding on the right).
         assert!(
             rust.contains("\\\"lang\\\" = $1"),
-            "expected SQL `\"lang\" = $1`, fue: {rust}",
+            "expected SQL `\"lang\" = $1`, was: {rust}",
         );
         // The binding comes from the __IntoPgValue path (external expr path).
         assert!(
             rust.contains("<_ as __IntoPgValue>::into_pg"),
-            "expected binding via __IntoPgValue::into_pg, fue: {rust}",
+            "expected binding via __IntoPgValue::into_pg, was: {rust}",
         );
     }
 
@@ -42622,10 +42622,10 @@ mod tests {
                        let db = db.connect(\"postgres://x@h/d\").await?\n  \
                        return User.where(fn(u) => u.email == req.inner.email).first(db).await\n\
                    }\n";
-        let rust = gen(src).expect("codegen OK con req.inner.email");
+        let rust = gen(src).expect("codegen OK with req.inner.email");
         assert!(
             rust.contains("<_ as __IntoPgValue>::into_pg"),
-            "expected binding via __IntoPgValue, fue: {rust}",
+            "expected binding via __IntoPgValue, was: {rust}",
         );
     }
 
@@ -42643,17 +42643,17 @@ mod tests {
                        let _u = User.where(fn(u) => u.name.starts_with(prefix)).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let rust = gen(src).expect("codegen OK con starts_with(var)");
+        let rust = gen(src).expect("codegen OK with starts_with(var)");
         // SQL emitted with `$N || '%'`.
         assert!(
             rust.contains("\\\"name\\\" LIKE $1 || '%'"),
-            "expected SQL `\"name\" LIKE $1 || '%'`, fue: {rust}",
+            "expected SQL `\"name\" LIKE $1 || '%'`, was: {rust}",
         );
         // The binding comes from the generic expr path (no hardcoded
         // .to_string() of the literal).
         assert!(
             !rust.contains("\"%\".to_string()"),
-            "no esperaba binding hardcoded del literal, fue: {rust}",
+            "did not expect hardcoded binding of the literal, was: {rust}",
         );
     }
 
@@ -42670,14 +42670,14 @@ mod tests {
                        let _b = User.where(fn(u) => u.name.contains(needle)).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let rust = gen(src).expect("codegen OK con ends_with/contains(var)");
+        let rust = gen(src).expect("codegen OK with ends_with/contains(var)");
         assert!(
             rust.contains("\\\"name\\\" LIKE '%' || $1"),
-            "expected SQL `\"name\" LIKE '%' || $1` para ends_with, fue: {rust}",
+            "expected SQL `\"name\" LIKE '%' || $1` for ends_with, was: {rust}",
         );
         assert!(
             rust.contains("\\\"name\\\" LIKE '%' || $1 || '%'"),
-            "expected SQL `\"name\" LIKE '%' || $1 || '%'` para contains, fue: {rust}",
+            "expected SQL `\"name\" LIKE '%' || $1 || '%'` for contains, was: {rust}",
         );
     }
 
@@ -42689,7 +42689,7 @@ mod tests {
         let r = where_sql_fragment("u.name.starts_with(\"a%b\")");
         assert!(
             r.contains(r#""a\\%b%""#) || r.contains(r"a\%b%"),
-            "expected escape `a\\%b%`, fue: {r}",
+            "expected escape `a\\%b%`, was: {r}",
         );
     }
 
@@ -42705,10 +42705,10 @@ mod tests {
                        let _ = User.where(fn(u) => u.bogus > 0).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de codegen");
+        let err = gen(src).expect_err("expected codegen error");
         assert!(
             err.message.contains("bogus") && err.message.contains("no existe"),
-            "expected mención del field inexistente, fue: {}",
+            "expected mention of non-existent field, was: {}",
             err.message
         );
     }
@@ -42727,10 +42727,10 @@ mod tests {
                        let _ = User.where(fn(u) => u.name.bogus()).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de codegen");
+        let err = gen(src).expect_err("expected codegen error");
         assert!(
             err.message.contains("bogus") && err.message.contains("Soportados"),
-            "expected lista de métodos soportados, fue: {}",
+            "expected list of supported methods, was: {}",
             err.message
         );
     }
@@ -42751,11 +42751,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("(\\\"full_name\\\" = $1)"),
-            "expected `\"full_name\" = $1` (sql_name override), fue: {rust}",
+            "expected `\"full_name\" = $1` (sql_name override), was: {rust}",
         );
         assert!(
             !rust.contains("(\\\"name\\\" = $1)"),
-            "no esperaba `\"name\" = $1` (el nombre Fitz no debe filtrarse), fue: {rust}",
+            "did not expect `\"name\" = $1` (the Fitz name must not leak), was: {rust}",
         );
     }
 
@@ -42766,7 +42766,7 @@ mod tests {
         let r = where_sql_fragment("u.age.between(18, 65)");
         assert!(
             r.contains("\\\"age\\\" BETWEEN $1 AND $2"),
-            "expected `\"age\" BETWEEN $1 AND $2`, fue: {r}",
+            "expected `\"age\" BETWEEN $1 AND $2`, was: {r}",
         );
         // Both bounds bound as Int.
         let n = r.matches("__FitzPgValue::Int").count();
@@ -42785,10 +42785,10 @@ mod tests {
                        let _ = User.where(fn(u) => u.age.between(18)).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de aridad");
+        let err = gen(src).expect_err("expected arity error");
         assert!(
             err.message.contains("between") && err.message.contains("2 args"),
-            "expected mención de `between` con `2 args`, fue: {}",
+            "expected mention of `between` with `2 args`, was: {}",
             err.message
         );
     }
@@ -42799,7 +42799,7 @@ mod tests {
         let r = where_sql_fragment("u.age % 2 == 0");
         assert!(
             r.contains("(\\\"age\\\" % $1)"),
-            "expected `(\"age\" % $1)`, fue: {r}",
+            "expected `(\"age\" % $1)`, was: {r}",
         );
     }
 
@@ -42820,7 +42820,7 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
-            "expected binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+            "expected binding via `__IntoPgValue::into_pg(...)` for external var, was: {rust}",
         );
     }
 
@@ -42849,7 +42849,7 @@ mod tests {
         let r = where_sql_fragment_with_jsonb("e.data.has_path([\"user\", \"id\"])");
         assert!(
             r.contains("\\\"data\\\" #> $1::text[] IS NOT NULL"),
-            "expected `\"data\" #> $1::text[] IS NOT NULL`, fue: {r}",
+            "expected `\"data\" #> $1::text[] IS NOT NULL`, was: {r}",
         );
         assert!(
             r.contains("elem_oid: __fitz_db_runtime::oid::TEXT"),
@@ -42867,7 +42867,7 @@ mod tests {
         let r = where_sql_fragment_with_jsonb("e.data.path_text([\"a\", \"b\"]) == \"x\"");
         assert!(
             r.contains("((\\\"data\\\" #>> $1::text[]) = $2)"),
-            "expected `(\"data\" #>> $1::text[]) = $2`, fue: {r}",
+            "expected `(\"data\" #>> $1::text[]) = $2`, was: {r}",
         );
     }
 
@@ -42876,11 +42876,11 @@ mod tests {
         let r = where_sql_fragment_with_jsonb("e.data.path_int([\"n\"]) == 42");
         assert!(
             r.contains("(((\\\"data\\\" #>> $1::text[])::bigint) = $2)"),
-            "expected cast `::bigint`, fue: {r}",
+            "expected cast `::bigint`, was: {r}",
         );
         assert!(
             r.contains("__FitzPgValue::Int(42i64)"),
-            "expected binding Int(42), fue: {r}",
+            "expected binding Int(42), was: {r}",
         );
     }
 
@@ -42889,7 +42889,7 @@ mod tests {
         let r = where_sql_fragment_with_jsonb("e.data.path_float([\"score\"]) > 0.5");
         assert!(
             r.contains("(((\\\"data\\\" #>> $1::text[])::float8) > $2)"),
-            "expected cast `::float8`, fue: {r}",
+            "expected cast `::float8`, was: {r}",
         );
     }
 
@@ -42898,7 +42898,7 @@ mod tests {
         let r = where_sql_fragment_with_jsonb("e.data.path_bool([\"flag\"])");
         assert!(
             r.contains("((\\\"data\\\" #>> $1::text[])::boolean)"),
-            "expected cast `::boolean`, fue: {r}",
+            "expected cast `::boolean`, was: {r}",
         );
     }
 
@@ -42927,11 +42927,11 @@ mod tests {
         let r = where_sql_fragment("u.name.matches(\"ada\")");
         assert!(
             r.contains("\\\"name\\\" @@ to_tsquery($1)"),
-            "expected `\"name\" @@ to_tsquery($1)`, fue: {r}",
+            "expected `\"name\" @@ to_tsquery($1)`, was: {r}",
         );
         assert!(
             r.contains("__FitzPgValue::Text(\"ada\".to_string())"),
-            "expected binding Text(\"ada\"), fue: {r}",
+            "expected binding Text(\"ada\"), was: {r}",
         );
     }
 
@@ -42940,7 +42940,7 @@ mod tests {
         let r = where_sql_fragment("u.name.plainto_matches(\"hola mundo\")");
         assert!(
             r.contains("\\\"name\\\" @@ plainto_tsquery($1)"),
-            "expected `\"name\" @@ plainto_tsquery($1)`, fue: {r}",
+            "expected `\"name\" @@ plainto_tsquery($1)`, was: {r}",
         );
     }
 
@@ -42955,10 +42955,10 @@ mod tests {
                        let _ = User.where(fn(u) => u.name.path_text([\"k\"])).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de tipo incompatible");
+        let err = gen(src).expect_err("expected incompatible type error");
         assert!(
             err.message.contains("Map<Str"),
-            "expected mención de `Map<Str`, fue: {}",
+            "expected mention of `Map<Str`, was: {}",
             err.message
         );
     }
@@ -42990,12 +42990,12 @@ mod tests {
         // The static dispatch must be present with the "posts" branch.
         assert!(
             rust.contains("\"posts\" =>") && rust.contains("__preloads.iter()"),
-            "expected el dispatch estático con branch para `posts`, fue: {rust}",
+            "expected static dispatch with branch for `posts`, was: {rust}",
         );
         // Target (Post) batch query with `WHERE \"user_id\" IN (...)`.
         assert!(
             rust.contains("FROM \\\"post\\\"") && rust.contains("\\\"user_id\\\" IN"),
-            "expected batch query con FROM post + WHERE user_id IN, fue: {rust}",
+            "expected batch query with FROM post + WHERE user_id IN, was: {rust}",
         );
     }
 
@@ -43012,10 +43012,10 @@ mod tests {
                        let _ = Post.preload(\"user_id\").all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por BelongsTo en preload");
+        let err = gen(src).expect_err("expected error for BelongsTo in preload");
         assert!(
             err.message.contains("@has_many"),
-            "expected mención de @has_many como restricción MVP, fue: {}",
+            "expected mention of @has_many as MVP restriction, was: {}",
             err.message
         );
     }
@@ -43032,10 +43032,10 @@ mod tests {
                        let _ = User.preload(\"bogus\").all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por relation inexistente");
+        let err = gen(src).expect_err("expected error for non-existent relation");
         assert!(
             err.message.contains("bogus") && err.message.contains("relation"),
-            "expected mención de relation no declarada, fue: {}",
+            "expected mention of undeclared relation, was: {}",
             err.message
         );
     }
@@ -43058,13 +43058,13 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains(".aggregate_groups(&db") && rust.contains("\"COUNT(*)\", \"count\""),
-            "expected uso del helper aggregate_groups con COUNT(*), fue: {rust}",
+            "expected use of aggregate_groups helper with COUNT(*), was: {rust}",
         );
         // The db prelude must emit the aggregate_groups helper
         // (which requires __FitzValue because it's under `if uses_fitz_value`).
         assert!(
             rust.contains("async fn aggregate_groups"),
-            "expected el helper aggregate_groups en el preludio, fue: {rust}",
+            "expected aggregate_groups helper in the prelude, was: {rust}",
         );
     }
 
@@ -43084,7 +43084,7 @@ mod tests {
         assert!(
             rust.contains(".aggregate_groups(&db")
                 && rust.contains("\"SUM(\\\"amount\\\")\", \"sum\""),
-            "expected aggregate_groups con SUM(\"amount\")/sum, fue: {rust}",
+            "expected aggregate_groups with SUM(\"amount\")/sum, was: {rust}",
         );
     }
 
@@ -43107,7 +43107,7 @@ mod tests {
         assert!(
             errors.iter().any(|e| e.message.contains("Aggregated")
                 && (e.message.contains(".all") || e.message.contains("no es válido"))),
-            "expected error del checker rechazando .all sobre Aggregated, fue: {:?}",
+            "expected checker error rejecting .all on Aggregated, was: {:?}",
             errors
         );
     }
@@ -43130,7 +43130,7 @@ mod tests {
             rust.contains(".with_where(")
                 && rust.contains(".with_group_by(")
                 && rust.contains(".aggregate_groups("),
-            "expected chain completo, fue: {rust}",
+            "expected complete chain, was: {rust}",
         );
     }
 
@@ -43160,7 +43160,7 @@ mod tests {
         // without async block or automatic terminal.
         assert!(
             rust.contains("__nav_fk") && rust.contains("__nav_pg") && rust.contains(".with_where("),
-            "expected helpers __nav_* + .with_where, fue: {rust}",
+            "expected helpers __nav_* + .with_where, was: {rust}",
         );
     }
 
@@ -43218,7 +43218,7 @@ mod tests {
         // With db: automatic `.all(&db)` terminal + async block.
         assert!(
             rust.contains("(async {") && rust.contains(".all(&db"),
-            "expected async block con terminal .all(&db) automático, fue: {rust}",
+            "expected async block with automatic terminal .all(&db), was: {rust}",
         );
     }
 
@@ -43249,7 +43249,7 @@ mod tests {
             errors
                 .iter()
                 .any(|e| e.message.contains("posts(db?)") && e.message.contains("received 2")),
-            "expected error del checker sobre aridad de navigation, errores: {:?}",
+            "expected checker error about navigation arity, errors: {:?}",
             errors
         );
     }
@@ -43277,12 +43277,12 @@ mod tests {
         // Struct field type.
         assert!(
             rust.contains("Vec<(String, i64)>") || rust.contains("Vec < (String , i64) >"),
-            "expected Vec<(String, i64)> para counts, fue: {rust}",
+            "expected Vec<(String, i64)> for counts, was: {rust}",
         );
         // Deserialize: serde_json parse + as_i64.
         assert!(
             rust.contains("serde_json::from_str") && rust.contains("as_i64()"),
-            "expected deserialize via serde_json + as_i64, fue: {rust}",
+            "expected deserialize via serde_json + as_i64, was: {rust}",
         );
     }
 
@@ -43301,7 +43301,7 @@ mod tests {
         // Marshal: construct with serde_json::Value::String.
         assert!(
             rust.contains("serde_json::Value::String"),
-            "expected construct String del marshal, fue: {rust}",
+            "expected construct String of marshal, was: {rust}",
         );
         // SQL cast ::jsonb also for concrete Map<Str, T>.
         assert!(
@@ -43324,7 +43324,7 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("as_bool()") && rust.contains("as_f64()"),
-            "expected ambos extractors (as_bool, as_f64), fue: {rust}",
+            "expected both extractors (as_bool, as_f64), was: {rust}",
         );
     }
 
@@ -43340,10 +43340,10 @@ mod tests {
                        let db = db.connect(\"postgres://x@h/d\").await?\n  \
                        return Doc.all(db).await\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por Map<Int, Int>");
+        let err = gen(src).expect_err("expected error for Map<Int, Int>");
         assert!(
             err.message.contains("Map<Str, Any>") || err.message.contains("Map<Str,"),
-            "expected mención de Map<Str, ...>, fue: {}",
+            "expected mention of Map<Str, ...>, was: {}",
             err.message
         );
     }
@@ -43366,13 +43366,13 @@ mod tests {
         // The struct field must type Vec<Option<i64>>.
         assert!(
             rust.contains("Vec<Option<i64>>") || rust.contains("Vec < Option < i64 > >"),
-            "expected Vec<Option<i64>> para tags: List<Int?>, fue: {rust}",
+            "expected Vec<Option<i64>> for tags: List<Int?>, was: {rust}",
         );
         // The deserialize must use matches!(__item, ::Null) → None / Some(...).
         assert!(
             rust.contains("matches!(__item, __FitzPgValue::Null)")
                 && rust.contains("Some(__fitz_pg_to_i64"),
-            "expected el branch nullable en deserialize, fue: {rust}",
+            "expected nullable branch in deserialize, was: {rust}",
         );
     }
 
@@ -43394,7 +43394,7 @@ mod tests {
             rust.contains("match __it { Some(__v) =>")
                 && rust.contains("__FitzPgValue::Text(__v.clone())")
                 && rust.contains("None => __FitzPgValue::Null"),
-            "expected marshal Some/None → Text/Null, fue: {rust}",
+            "expected marshal Some/None → Text/Null, was: {rust}",
         );
     }
 
@@ -43413,7 +43413,7 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("::int8[]"),
-            "expected cast ::int8[] también para nullable inner, fue: {rust}",
+            "expected cast ::int8[] also for nullable inner, was: {rust}",
         );
     }
 
@@ -43436,17 +43436,17 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\\\"tags\\\" = $1::int8[]"),
-            "expected SET con cast ::int8[], fue: {rust}",
+            "expected SET with cast ::int8[], was: {rust}",
         );
         assert!(
             rust.contains("__FitzPgValue::Array") && rust.contains("__fitz_db_runtime::oid::INT8"),
-            "expected binding directo a __FitzPgValue::Array INT8, fue: {rust}",
+            "expected direct binding to __FitzPgValue::Array INT8, was: {rust}",
         );
         // There must NOT be binding via __IntoPgValue::into_pg for the array.
         assert!(
             !rust.contains("__IntoPgValue>::into_pg(std :: sync :: Arc :: new")
                 && !rust.contains("__IntoPgValue>::into_pg(Arc :: new"),
-            "no debe pasar el List literal por __IntoPgValue (path roto), fue: {rust}",
+            "must not pass List literal through __IntoPgValue (broken path), was: {rust}",
         );
     }
 
@@ -43467,11 +43467,11 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("\\\"meta\\\" = $1::jsonb"),
-            "expected SET con cast ::jsonb, fue: {rust}",
+            "expected SET with cast ::jsonb, was: {rust}",
         );
         assert!(
             rust.contains("__fitz_fitz_value_to_jsonb") && rust.contains("__FitzValue::Map"),
-            "expected binding via __fitz_fitz_value_to_jsonb + __FitzValue::Map, fue: {rust}",
+            "expected binding via __fitz_fitz_value_to_jsonb + __FitzValue::Map, was: {rust}",
         );
     }
 
@@ -43488,10 +43488,10 @@ mod tests {
                        let n = Item.where(fn(i) => i.id == 1).update(db, {\"tags\": new_tags}).await?\n  \
                        return Ok(n)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por value no-List");
+        let err = gen(src).expect_err("expected error for non-List value");
         assert!(
             err.message.contains("List literal"),
-            "expected mención de `List literal`, fue: {}",
+            "expected mention of `List literal`, was: {}",
             err.message
         );
     }
@@ -43507,10 +43507,10 @@ mod tests {
                        let n = Doc.where(fn(d) => d.id == 1).update(db, {\"meta\": new_meta}).await?\n  \
                        return Ok(n)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por JSONB con var ext");
+        let err = gen(src).expect_err("expected error for JSONB with external var");
         assert!(
-            err.message.contains("JSONB literal MVP") || err.message.contains("literales puros"),
-            "expected mención de JSONB literal MVP, fue: {}",
+            err.message.contains("JSONB literal MVP") || err.message.contains("pure literals"),
+            "expected mention of JSONB literal MVP, was: {}",
             err.message
         );
     }
@@ -43532,7 +43532,7 @@ mod tests {
         let rust = gen(src).expect("codegen OK");
         assert!(
             rust.contains("__FitzValue::List") && rust.contains("__FitzValue::Map"),
-            "expected __FitzValue::List y __FitzValue::Map (recursión), fue: {rust}",
+            "expected __FitzValue::List and __FitzValue::Map (recursion), was: {rust}",
         );
     }
 
@@ -43562,11 +43562,11 @@ mod tests {
         let r = where_sql_fragment_with_array("i.tags.has(42)");
         assert!(
             r.contains("$1 = ANY(\\\"tags\\\")"),
-            "expected `$1 = ANY(\"tags\")`, fue: {r}",
+            "expected `$1 = ANY(\"tags\")`, was: {r}",
         );
         assert!(
             r.contains("__FitzPgValue::Int(42i64)"),
-            "expected binding Int(42), fue: {r}",
+            "expected binding Int(42), was: {r}",
         );
     }
 
@@ -43575,11 +43575,11 @@ mod tests {
         let r = where_sql_fragment_with_array("i.labels.has(\"rust\")");
         assert!(
             r.contains("$1 = ANY(\\\"labels\\\")"),
-            "expected ANY sobre labels, fue: {r}",
+            "expected ANY on labels, was: {r}",
         );
         assert!(
             r.contains("__FitzPgValue::Text"),
-            "expected binding Text, fue: {r}",
+            "expected binding Text, was: {r}",
         );
     }
 
@@ -43594,10 +43594,10 @@ mod tests {
                        let _ = Item.where(fn(i) => i.name.has(\"foo\")).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por field no-array");
+        let err = gen(src).expect_err("expected error for non-array field");
         assert!(
             err.message.contains("List<Int|Float|Str|Bool>"),
-            "expected mención del tipo requerido, fue: {}",
+            "expected mention of required type, was: {}",
             err.message
         );
     }
@@ -43608,11 +43608,11 @@ mod tests {
         let r = where_sql_fragment_with_array("i.tags.contains_all([1, 2])");
         assert!(
             r.contains("\\\"tags\\\" @> $1::int8[]"),
-            "expected `\"tags\" @> $1::int8[]`, fue: {r}",
+            "expected `\"tags\" @> $1::int8[]`, was: {r}",
         );
         assert!(
             r.contains("__FitzPgValue::Array") && r.contains("__fitz_db_runtime::oid::INT8"),
-            "expected binding Array con elem_oid INT8, fue: {r}",
+            "expected binding Array with elem_oid INT8, was: {r}",
         );
     }
 
@@ -43621,7 +43621,7 @@ mod tests {
         let r = where_sql_fragment_with_array("i.tags.contained_in([1, 2, 3])");
         assert!(
             r.contains("\\\"tags\\\" <@ $1::int8[]"),
-            "expected `\"tags\" <@ $1::int8[]`, fue: {r}",
+            "expected `\"tags\" <@ $1::int8[]`, was: {r}",
         );
     }
 
@@ -43636,10 +43636,10 @@ mod tests {
                        let _ = Item.where(fn(i) => i.tags.contains_all(42)).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error por arg no-List");
+        let err = gen(src).expect_err("expected error for non-List arg");
         assert!(
             err.message.contains("List literal"),
-            "expected mención de List literal, fue: {}",
+            "expected mention of List literal, was: {}",
             err.message
         );
     }
@@ -43653,16 +43653,16 @@ mod tests {
             "u.age >= 18 and (u.score > 50.0 or u.deleted_at.is_null()) and u.age.is_in([21, 30, 65])",
         );
         // The 4 pieces must appear.
-        assert!(r.contains("\\\"age\\\" >= $1"), "falta age >= $1: {r}");
-        assert!(r.contains("\\\"score\\\" > "), "falta score >: {r}");
+        assert!(r.contains("\\\"age\\\" >= $1"), "missing age >= $1: {r}");
+        assert!(r.contains("\\\"score\\\" > "), "missing score >: {r}");
         assert!(
             r.contains("\\\"deleted_at\\\" IS NULL"),
-            "falta IS NULL: {r}"
+            "missing IS NULL: {r}"
         );
-        assert!(r.contains("\\\"age\\\" IN ("), "falta IN: {r}");
+        assert!(r.contains("\\\"age\\\" IN ("), "missing IN: {r}");
         assert!(
             r.contains(" AND ") && r.contains(" OR "),
-            "faltan AND/OR: {r}"
+            "missing AND/OR: {r}"
         );
     }
 }
