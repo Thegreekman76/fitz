@@ -9127,8 +9127,8 @@ fn orm_update_and_delete_without_where_aborts_build_with_safety_guard() {
          print(\"never\")\n",
     );
     assert!(
-        stderr_update.contains("requiere un `.where(...)` previo"),
-        "esperaba mención del guard `.where(...)` previo en el stderr, fue: {}",
+        stderr_update.contains("requires a prior `.where(...)`"),
+        "expected mention of guard `.where(...)` requirement in stderr, was: {}",
         stderr_update,
     );
     let stderr_delete = build_expect_fail(
@@ -9145,8 +9145,8 @@ fn orm_update_and_delete_without_where_aborts_build_with_safety_guard() {
          print(\"never\")\n",
     );
     assert!(
-        stderr_delete.contains("requiere un `.where(...)` previo"),
-        "esperaba mención del guard `.where(...)` previo en el stderr, fue: {}",
+        stderr_delete.contains("requires a prior `.where(...)`"),
+        "expected mention of guard `.where(...)` requirement in stderr, was: {}",
         stderr_delete,
     );
 }

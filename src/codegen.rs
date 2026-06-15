@@ -8943,9 +8943,9 @@ impl<TData> __FitzQueryBuilder<TData> {
     ) -> Result<i64, String> {
         if self.where_sql.is_none() {
             return Err(
-                \"`.update(db, changes)` sin `.where(...)` previo no se permite \
-                 (afectaría toda la tabla); si querés update masivo, usá \
-                 `.where(fn(_) => true).update(...)` explícito\"
+                \"`.update(db, changes)` without prior `.where(...)` is not allowed \
+                 (would affect the whole table); for bulk update use \
+                 `.where(fn(_) => true).update(...)` explicitly\"
                     .to_string(),
             );
         }
@@ -8976,7 +8976,7 @@ impl<TData> __FitzQueryBuilder<TData> {
     ) -> Result<i64, String> {
         if self.where_sql.is_none() {
             return Err(
-                \"`.merge_jsonb(db, field, patch)` sin `.where(...)` previo no se permite\"
+                \"`.merge_jsonb(db, field, patch)` without prior `.where(...)` is not allowed (would affect the whole table)\"
                     .to_string(),
             );
         }
@@ -8999,9 +8999,9 @@ impl<TData> __FitzQueryBuilder<TData> {
     async fn delete_with_where(self, conn: &__FitzDbConn) -> Result<i64, String> {
         if self.where_sql.is_none() {
             return Err(
-                \"`.delete(db)` sin `.where(...)` previo no se permite \
-                 (borraría toda la tabla); si querés delete masivo, usá \
-                 `.where(fn(_) => true).delete(db)` explícito\"
+                \"`.delete(db)` without prior `.where(...)` is not allowed \
+                 (would erase the whole table); for bulk delete use \
+                 `.where(fn(_) => true).delete(db)` explicitly\"
                     .to_string(),
             );
         }
@@ -15252,8 +15252,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`{}` tiene un parámetro variádico; los argumentos nombrados \
-                     no son compatibles con varargs en esta versión",
+                        "`{}` has a variadic parameter; named arguments \
+                     are not compatible with varargs in this version",
                         callee_expr
                     ),
                 ));
@@ -16488,8 +16488,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             other => Err(self.err_at(
                 callee_span,
                 format!(
-                    "método `.{}(...)` no soportado sobre fields en `.where(...)`. \
-                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches.",
+                    "method `.{}(...)` not supported on fields in `.where(...)`. \
+                     Supported: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches.",
                     other
                 ),
             )),
@@ -16954,7 +16954,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             (recv, other) => Err(self.err_at(
                 field_span,
                 format!(
-                    "el módulo `{}` no tiene `{}` (soportados Date: today/tomorrow/yesterday/parse/from_ymd; \
+                    "module `{}` has no `{}` (supported Date: today/tomorrow/yesterday/parse/from_ymd; \
                      DateTime: now/epoch/parse/from_timestamp; Uuid: v4/v7/parse/nil)",
                     recv, other
                 ),
@@ -23800,7 +23800,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             _ => {
                 return Err(self.err_at(
                     inner_span,
-                    "operador `?` solo puede usarse adentro de una función que retorne \
+                    "operator `?` can only be used inside a function that returns \
                      `Result<...>`",
                 ));
             }
@@ -42696,7 +42696,7 @@ mod tests {
                    }\n";
         let err = gen(src).expect_err("expected codegen error");
         assert!(
-            err.message.contains("bogus") && err.message.contains("Soportados"),
+            err.message.contains("bogus") && err.message.contains("Supported"),
             "expected list of supported methods, was: {}",
             err.message
         );
