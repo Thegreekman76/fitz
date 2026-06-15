@@ -1,63 +1,63 @@
-# Arquitectura del compilador
+# Compiler architecture
 
-Este documento describe cómo está organizado el código en [src/](../src/) y
-qué le pasa a un programa Fitz desde que es texto en un archivo `.fitz`
-hasta que produce output (un `print`, una respuesta HTTP, un binario
-nativo, o un test reportado). Es la referencia para entender el
-compilador desde adentro; para aprender el lenguaje desde afuera, ver
-[docs/guide.md](guide.md).
+This document describes how the code in [src/](../src/) is laid out and
+what happens to a Fitz program from the moment it is text in a `.fitz`
+file to the moment it produces output (a `print`, an HTTP response, a
+native binary, or a reported test). It is the reference for understanding
+the compiler from the inside; to learn the language from the outside,
+see [docs/guide.md](guide.md).
 
-> **Estado**: este doc cubre hasta el cierre de **Fase 12 entera +
-> Fase 8.b/8.c + TaskHub** (v0.15.x, junio 2026). Refresh sincronizado
-> con el estado del repo. Incluye Fase 9.w MVP (auth + WS + cron) y
-> sus iteraciones 2 (RBAC + persistencia de jobs), Fase 10 entera
-> (driver Postgres puro + ORM + migrations), Fase 12 (healthz/readyz
-> + Secret + observability OTel + Docker + deploy + @trace/@metric/
-> @flag), Fase 8.b/8.c (CPython embebido + paquetes pip bundleados),
-> y el CLI builder (Fase 13). Cuando avancemos a Fase 13+ o más allá,
-> este doc se actualiza junto.
+> **Status**: this doc covers up to the close of **all of Phase 12 +
+> Phase 8.b/8.c + TaskHub** (v0.15.x, June 2026). Refresh synchronized
+> with the repo state. It includes the Phase 9.w MVP (auth + WS + cron)
+> and its iteration 2 (RBAC + jobs persistence), all of Phase 10
+> (pure Postgres driver + ORM + migrations), Phase 12 (healthz/readyz
+> + Secret + OTel observability + Docker + deploy + @trace/@metric/
+> @flag), Phase 8.b/8.c (embedded CPython + bundled pip packages),
+> and the CLI builder (Phase 13). When we advance to Phase 13+ or
+> further, this doc is updated alongside.
 
-## Pipeline en una imagen
+## Pipeline in one picture
 
 ```mermaid
 flowchart TD
-    Source["archivo .fitz<br/>(texto fuente)"] --> Lexer["<b>lexer.rs</b><br/>tokenizar"]
+    Source[".fitz file<br/>(source text)"] --> Lexer["<b>lexer.rs</b><br/>tokenize"]
     Lexer --> Tokens["Vec&lt;Token&gt;"]
-    Tokens --> Parser["<b>parser.rs</b><br/>parsear con precedencia<br/>(usa ast.rs)"]
+    Tokens --> Parser["<b>parser.rs</b><br/>parse with precedence<br/>(uses ast.rs)"]
     Parser --> AST["Program = Vec&lt;Stmt&gt;<br/>(ast.rs)"]
-    AST --> Checker["<b>types.rs</b><br/>check_program<br/>(resolver + chequear)"]
-    Checker -->|errores| Abort["✗ stderr + exit 1"]
-    Checker -->|OK + TypeEnv + TypeInfo + DefinitionInfo| Fork{"subcomando<br/>de fitz"}
+    AST --> Checker["<b>types.rs</b><br/>check_program<br/>(resolve + check)"]
+    Checker -->|errors| Abort["✗ stderr + exit 1"]
+    Checker -->|OK + TypeEnv + TypeInfo + DefinitionInfo| Fork{"fitz<br/>subcommand"}
 
-    Fork -->|fitz check| OK["✓ sin errores de tipo"]
+    Fork -->|fitz check| OK["✓ no type errors"]
 
-    Fork -->|fitz run<br/>fitz test<br/>fitz repl<br/>fitz dev| Eval["<b>evaluator.rs</b><br/>ejecutar AST<br/>(env.rs + value.rs<br/>+ cron_jobs.rs)"]
-    Eval -->|rutas HTTP registradas| Http["<b>http.rs</b><br/>axum + tokio<br/>multi-thread"]
-    Eval -->|rutas WS (@ws)| Ws["<b>http.rs + asyncapi.rs</b><br/>WsConn&lt;T&gt; + AsyncAPI 3.0"]
-    Eval -->|jobs @cron| Cron["<b>cron_jobs.rs</b><br/>scheduler tokio::spawn<br/>+ persistencia DB opt-in"]
-    Eval -->|sin rutas| StdOut["stdout / output / test report"]
-    Http -->|/openapi.json + /docs| Openapi["<b>openapi.rs</b><br/>schema OpenAPI 3.1"]
+    Fork -->|fitz run<br/>fitz test<br/>fitz repl<br/>fitz dev| Eval["<b>evaluator.rs</b><br/>execute AST<br/>(env.rs + value.rs<br/>+ cron_jobs.rs)"]
+    Eval -->|registered HTTP routes| Http["<b>http.rs</b><br/>axum + tokio<br/>multi-thread"]
+    Eval -->|WS routes (@ws)| Ws["<b>http.rs + asyncapi.rs</b><br/>WsConn&lt;T&gt; + AsyncAPI 3.0"]
+    Eval -->|@cron jobs| Cron["<b>cron_jobs.rs</b><br/>tokio::spawn scheduler<br/>+ opt-in DB persistence"]
+    Eval -->|no routes| StdOut["stdout / output / test report"]
+    Http -->|/openapi.json + /docs| Openapi["<b>openapi.rs</b><br/>OpenAPI 3.1 schema"]
     Http -->|/healthz + /readyz + /metrics| HealthMetrics["healthz/readyz<br/>+ Prometheus"]
-    Http -->|spans + logs + métricas| Otel["<b>observability.rs + logging.rs</b><br/>OTLP exporter + structured JSON"]
-    Http --> Server["servidor en host:port"]
+    Http -->|spans + logs + metrics| Otel["<b>observability.rs + logging.rs</b><br/>OTLP exporter + structured JSON"]
+    Http --> Server["server at host:port"]
 
     Fork -->|fitz build| Codegen["<b>codegen.rs</b><br/>AST + TypeEnv → Rust"]
-    Codegen --> Project["Cargo project en<br/>target/fitz-build/&lt;stem&gt;/"]
+    Codegen --> Project["Cargo project at<br/>target/fitz-build/&lt;stem&gt;/"]
     Project --> Cargo["cargo build --release"]
-    Cargo --> Bin["binario nativo<br/>(adyacente al .fitz<br/>o en target/release/)"]
-    Cargo -->|--bundle-python/--bundle-pip| Launcher["<b>launcher_template.rs<br/>+ pbs.rs</b><br/>CPython + pip embebidos"]
+    Cargo --> Bin["native binary<br/>(next to the .fitz<br/>or in target/release/)"]
+    Cargo -->|--bundle-python/--bundle-pip| Launcher["<b>launcher_template.rs<br/>+ pbs.rs</b><br/>embedded CPython + pip"]
 
     Fork -->|fitz openapi| OpenApiCmd["<b>openapi.rs</b><br/>standalone schema"]
     Fork -->|fitz fmt| Fmt["<b>fmt.rs</b><br/>pretty-printer"]
-    Fork -->|fitz lint| Lint["<b>lint.rs</b><br/>linter de patrones"]
-    Fork -->|fitz test| Test["<b>testing.rs</b><br/>registry de @test fns"]
+    Fork -->|fitz lint| Lint["<b>lint.rs</b><br/>pattern linter"]
+    Fork -->|fitz test| Test["<b>testing.rs</b><br/>@test fn registry"]
     Fork -->|fitz db &lt;sub&gt;| Db["<b>migrations.rs</b><br/>schema diff + introspect"]
-    Db -->|diff/migrate/inspect| Driver["<b>db.rs</b><br/>driver Postgres puro<br/>(wire v3.0 + TLS + pool)"]
-    Driver --> Postgres[("Postgres real")]
-    Db -->|new/squash/stamp| FileSystem["archivos .sql/.fitz<br/>en migrations/"]
-    Fork -->|fitz docker init/build| Docker["<b>docker.rs</b><br/>Dockerfile + compose<br/>autogenerados"]
-    Fork -->|fitz deploy| Deploy["<b>deploy.rs</b><br/>thin wrapper sobre<br/>docker/compose"]
-    Fork -->|fitz py-types<br/>fitz py-stubs| PyTools["<b>py_types.rs<br/>+ pyi_stub.rs</b><br/>SQLAlchemy → Fitz<br/>+ stubs .pyi"]
+    Db -->|diff/migrate/inspect| Driver["<b>db.rs</b><br/>pure Postgres driver<br/>(wire v3.0 + TLS + pool)"]
+    Driver --> Postgres[("real Postgres")]
+    Db -->|new/squash/stamp| FileSystem[".sql/.fitz files<br/>in migrations/"]
+    Fork -->|fitz docker init/build| Docker["<b>docker.rs</b><br/>auto-generated Dockerfile<br/>+ compose"]
+    Fork -->|fitz deploy| Deploy["<b>deploy.rs</b><br/>thin wrapper over<br/>docker/compose"]
+    Fork -->|fitz py-types<br/>fitz py-stubs| PyTools["<b>py_types.rs<br/>+ pyi_stub.rs</b><br/>SQLAlchemy → Fitz<br/>+ .pyi stubs"]
     Fork -->|fitz new<br/>fitz init<br/>fitz add/remove/update| Pm["<b>manifest.rs<br/>+ lockfile.rs<br/>+ git_dep.rs</b><br/>package manager"]
     Pm --> Toml["fitz.toml + fitz.lock"]
 
@@ -71,22 +71,22 @@ flowchart TD
     class Postgres external
 ```
 
-ASCII fallback (mismo diagrama, sin colores, para terminales y editores
-que no rendericen mermaid):
+ASCII fallback (same diagram, no colors, for terminals and editors
+that do not render mermaid):
 
 ```
-                              archivo .fitz
+                                .fitz file
                                     │
                                     ▼
                               ┌──────────┐
-                              │ lexer.rs │   tokenizar
+                              │ lexer.rs │   tokenize
                               └────┬─────┘
                                    ▼
                               Vec<Token>
                                    │
                                    ▼
                               ┌───────────┐
-                              │ parser.rs │  precedencia + estructura
+                              │ parser.rs │  precedence + structure
                               │  (ast.rs) │  (Program = Vec<Stmt>)
                               └────┬──────┘
                                    ▼
@@ -94,7 +94,7 @@ que no rendericen mermaid):
                                    │
                                    ▼
                               ┌──────────┐
-                              │ types.rs │  resolver + check
+                              │ types.rs │  resolve + check
                               └────┬─────┘
                                    │ (TypeEnv + TypeInfo + DefinitionInfo)
                                    │
@@ -114,867 +114,904 @@ que no rendericen mermaid):
         │             │
    ┌────┴───────────┐ ▼
    ▼    ▼   ▼      ┌──────────┐
-  CLI  http  cron  │ binario  │ (+ launcher_template + pbs si
- stdout axum sched │ standalone│  --bundle-python/--bundle-pip)
+  CLI  http  cron  │  native  │ (+ launcher_template + pbs if
+ stdout axum sched │ binary   │  --bundle-python/--bundle-pip)
        tokio  │   └──────────┘
        multi  │
        thread │
        │     │
        ▼     ▼
-   servidor  jobs
+    server   jobs
    + /healthz/readyz/metrics
    + /openapi.json + /docs
-   + /asyncapi.json (si hay @ws)
-   + logs estructurados (logging.rs)
-   + spans OTel (observability.rs)
+   + /asyncapi.json (if @ws is present)
+   + structured logs (logging.rs)
+   + OTel spans (observability.rs)
        │
        ▼
-   Postgres (db.rs driver puro: wire v3.0 + TLS + pool)
+   Postgres (db.rs pure driver: wire v3.0 + TLS + pool)
 ```
 
-## Los flujos del CLI
+## The CLI flows
 
-El CLI ([main.rs](../src/main.rs)) tiene **33 sub-comandos**
-(19 top-level + 10 sub-comandos `db ...` + 2 `docker ...` + 2
-`deploy ...`) agrupados en **8 familias**. Todos comparten el
-front-end (lexer → parser → checker) cuando trabajan con código
-Fitz; después se bifurcan:
+The CLI ([main.rs](../src/main.rs)) has **33 sub-commands**
+(19 top-level + 10 `db ...` sub-commands + 2 `docker ...` + 2
+`deploy ...`) grouped into **8 families**. They all share the
+front-end (lexer → parser → checker) when they work with Fitz
+code; they fork after that:
 
-**Familia 1 — Pipeline core del lenguaje**:
-- **`fitz run [archivo]`** — Chequea tipos en modo strict (flag
-  `--no-typecheck` lo baja a warning) y ejecuta el AST con el
-  evaluator. Sin args, busca `fitz.toml` y corre `[bin].main`.
-  Si el programa registró rutas HTTP / WS / `@cron`, arranca el
-  servidor / scheduler.
-- **`fitz build [archivo]`** — Chequea strict (sin escape), genera
-  Cargo project, invoca `cargo build --release`, copia binario.
-  Sin args, manifest mode + output a `target/release/<pkg-name>`.
-  Flags Fase 8.b/8.c: `--bundle-python` + `--bundle-pip <PACKAGE>`
-  (repetible) + `--bundle-pip-requirements <FILE>` (repetible)
-  para embeber CPython 3.14.x via python-build-standalone y
-  paquetes pip preinstalados (binarios standalone que NO requieren
-  Python en el destino).
-- **`fitz check [archivo]`** — Lexea + parsea + chequea tipos.
-  Reporta errores y termina (útil para editores / CI).
-- **`fitz openapi <archivo>`** — Emite schema OpenAPI 3.1 a stdout
-  (handlers HTTP descubiertos en el AST).
+**Family 1 — Language core pipeline**:
+- **`fitz run [file]`** — Type-checks in strict mode (flag
+  `--no-typecheck` downgrades it to a warning) and executes the
+  AST with the evaluator. Without args, it looks for `fitz.toml`
+  and runs `[bin].main`. If the program registered HTTP / WS /
+  `@cron` routes, it starts the server / scheduler.
+- **`fitz build [file]`** — Strict check (no escape), generates a
+  Cargo project, invokes `cargo build --release`, copies the
+  binary. Without args, manifest mode + output to
+  `target/release/<pkg-name>`. Phase 8.b/8.c flags:
+  `--bundle-python` + `--bundle-pip <PACKAGE>` (repeatable) +
+  `--bundle-pip-requirements <FILE>` (repeatable) to embed
+  CPython 3.14.x via python-build-standalone and preinstalled pip
+  packages (standalone binaries that do NOT require Python at the
+  destination).
+- **`fitz check [file]`** — Lex + parse + type-check. Reports
+  errors and exits (useful for editors / CI).
+- **`fitz openapi <file>`** — Emits an OpenAPI 3.1 schema to
+  stdout (HTTP handlers discovered in the AST).
 
-**Familia 2 — Package manager (Fase 9.y)**:
-- **`fitz new <nombre>`** — Crea proyecto nuevo (`<nombre>/fitz.toml`
+**Family 2 — Package manager (Phase 9.y)**:
+- **`fitz new <name>`** — Creates a new project (`<name>/fitz.toml`
   + `src/main.fitz` + `git init`).
-- **`fitz init`** — Convierte el cwd actual en un proyecto.
-- **`fitz add <name> --path/--git`** — Suma dep al `fitz.toml` +
-  sincroniza `fitz.lock`.
-- **`fitz remove <name>`** — Quita dep + sincroniza lockfile.
-- **`fitz update [name]`** — Re-resuelve deps (re-clone git deps).
+- **`fitz init`** — Turns the current cwd into a project.
+- **`fitz add <name> --path/--git`** — Adds a dep to `fitz.toml`
+  + syncs `fitz.lock`.
+- **`fitz remove <name>`** — Removes a dep + syncs the lockfile.
+- **`fitz update [name]`** — Re-resolves deps (re-clones git deps).
 
-**Familia 3 — DX (Fase 9.z)**:
-- **`fitz fmt [archivos] [--check]`** — Pretty-printer cero config
-  (preserva comments + blank lines del usuario).
-- **`fitz test [filter] [--file]`** — Test runner built-in (descubre
-  `@test` fns, output estilo cargo).
-- **`fitz dev [--file]`** — Hot reload con file watcher (kill+respawn
-  del child al cambio).
-- **`fitz repl`** — REPL interactivo con env compartido entre líneas.
-- **`fitz lint [archivos] [--deny <name>]`** — Linter de patrones
+**Family 3 — DX (Phase 9.z)**:
+- **`fitz fmt [files] [--check]`** — Zero-config pretty-printer
+  (preserves the user's comments + blank lines).
+- **`fitz test [filter] [--file]`** — Built-in test runner
+  (discovers `@test` fns, cargo-style output).
+- **`fitz dev [--file]`** — Hot reload with a file watcher
+  (kill+respawn of the child on change).
+- **`fitz repl`** — Interactive REPL with a shared env between
+  lines.
+- **`fitz lint [files] [--deny <name>]`** — Pattern linter
   (4 lints: unused_variable, unused_import, useless_match,
   string_concat).
 
-**Familia 4 — Interop Python (Fase 8, feature `python`)**:
-- **`fitz py-types <archivo.py>`** — Genera `type` Fitz desde modelos
-  SQLAlchemy (introspección via duck typing sobre `__table__.columns`).
-- **`fitz py-stubs <archivo.py>`** — Genera stubs `.pyi` desde Fitz.
-- **Auto-pickup de stubs** (Fase 8-pyi.B, no es sub-comando): cuando
-  el programa tiene `from python import foo`, el loader busca
-  `<base_dir>/foo.pyi` adyacente y registra nominales declarados al
-  `TypeEnv` antes del checker — el user puede escribir
-  `let u: User = requests.fetch(...)?` con `User` declarado en
-  `requests.pyi` y el checker lo resuelve.
+**Family 4 — Python interop (Phase 8, feature `python`)**:
+- **`fitz py-types <file.py>`** — Generates Fitz `type` from
+  SQLAlchemy models (introspection via duck typing on
+  `__table__.columns`).
+- **`fitz py-stubs <file.py>`** — Generates `.pyi` stubs from Fitz.
+- **Stub auto-pickup** (Phase 8-pyi.B, not a sub-command): when
+  the program has `from python import foo`, the loader looks for
+  an adjacent `<base_dir>/foo.pyi` and registers nominals declared
+  there in the `TypeEnv` before the checker — the user can write
+  `let u: User = requests.fetch(...)?` with `User` declared in
+  `requests.pyi` and the checker resolves it.
 
-**Familia 5 — DB / migrations / ORM (Fase 10 + Tier S v0.10.28-29)**:
+**Family 5 — DB / migrations / ORM (Phase 10 + Tier S v0.10.28-29)**:
 - **`fitz db diff [--file] [--out] [--check-destructive] [--allow-destructive]`**
-  — Compara schema declarado vs DB real y emite DDL. Clasifica cada
-  change como Safe/Risky/Destructive (v0.10.31 Tier A.1).
-- **`fitz db migrate [--dry-run] [--sql]`** — Aplica migrations
-  pendientes contra la DB. Tracking idempotente via tabla
-  `_fitz_migrations`.
-- **`fitz db status`** — Lista migrations applied vs pending.
-- **`fitz db new <name>`** — Crea archivo `.sql`/`.fitz` nuevo con
-  timestamp prefix.
-- **`fitz db rollback [--count N]`** — Revierte las últimas N
-  migrations (usa el bloque `-- DOWN`).
-- **`fitz db check [--file]`** — Valida consistencia schema +
-  migrations sin tocar DB.
-- **`fitz db history`** — Lista migrations applied con timestamps.
-- **`fitz db squash <from> <to>`** — Combina migrations en una.
-- **`fitz db stamp <version> | --all`** — Marca migration(s) como
-  applied SIN ejecutar SQL (adopt legacy DB).
+  — Compares the declared schema to the real DB and emits DDL.
+  Classifies each change as Safe/Risky/Destructive
+  (v0.10.31 Tier A.1).
+- **`fitz db migrate [--dry-run] [--sql]`** — Applies pending
+  migrations to the DB. Idempotent tracking via the
+  `_fitz_migrations` table.
+- **`fitz db status`** — Lists applied vs pending migrations.
+- **`fitz db new <name>`** — Creates a new `.sql`/`.fitz` file
+  with a timestamp prefix.
+- **`fitz db rollback [--count N]`** — Reverts the last N
+  migrations (uses the `-- DOWN` block).
+- **`fitz db check [--file]`** — Validates schema + migrations
+  consistency without touching the DB.
+- **`fitz db history`** — Lists applied migrations with timestamps.
+- **`fitz db squash <from> <to>`** — Combines migrations into one.
+- **`fitz db stamp <version> | --all`** — Marks migration(s) as
+  applied WITHOUT executing SQL (adopt a legacy DB).
 - **`fitz db inspect [--schema | --all-schemas | --table | --json]`**
-  — Introspect del schema **real** con vista texto + JSON
-  machine-readable.
+  — Introspects the **real** schema with a text view +
+  machine-readable JSON.
 
-**Familia 6 — Editor support (Fase 9.x, feature `lsp`)**:
-- **`fitz-lsp`** (bin separado en `src/bin/fitz-lsp.rs`, no
-  sub-comando) — Language server sobre tower-lsp. Consumido por la
-  extensión VSCode (`editors/vscode/`).
+**Family 6 — Editor support (Phase 9.x, feature `lsp`)**:
+- **`fitz-lsp`** (separate bin at `src/bin/fitz-lsp.rs`, not a
+  sub-command) — Language server over tower-lsp. Consumed by the
+  VSCode extension (`editors/vscode/`).
 
-**Familia 7 — Docker stack (Fase 12.4)**:
-- **`fitz docker init [--force]`** — Genera `Dockerfile` multi-stage
-  + `.dockerignore` + `docker-compose.yml` smart en el directorio
-  del manifest. Detección AST-only del entry point para decidir
-  `EXPOSE <port>` (si hay `@server(N)`) + service `postgres:16-alpine`
-  con healthcheck (si hay `db.connect(...)`). Sub-paso 12.4.b suma
-  fallback `python:3.12-slim-bookworm` cuando hay interop Python +
-  `restart: unless-stopped` cuando hay `@cron`.
-- **`fitz docker build [--tag <X>]`** — Thin wrapper sobre
-  `docker build` que usa el Dockerfile del manifest_dir y tag-ea con
-  `<package.name>:latest` (override con `--tag`).
+**Family 7 — Docker stack (Phase 12.4)**:
+- **`fitz docker init [--force]`** — Generates a multi-stage
+  `Dockerfile` + `.dockerignore` + smart `docker-compose.yml` in
+  the manifest directory. AST-only detection of the entry point
+  to decide `EXPOSE <port>` (if there is `@server(N)`) +
+  `postgres:16-alpine` service with healthcheck (if there is
+  `db.connect(...)`). Sub-step 12.4.b adds the
+  `python:3.12-slim-bookworm` fallback when there is Python
+  interop + `restart: unless-stopped` when there is `@cron`.
+- **`fitz docker build [--tag <X>]`** — Thin wrapper over
+  `docker build` that uses the Dockerfile from manifest_dir and
+  tags with `<package.name>:latest` (override with `--tag`).
 
-**Familia 8 — Deploy orchestrator (Fase 12.6)**:
+**Family 8 — Deploy orchestrator (Phase 12.6)**:
 - **`fitz deploy docker [--tag <X>] [--no-push]`** — `docker build`
-  + `docker push` con tag derivado del manifest. Targets MVP solo
-  docker y compose; `fly`/`railway`/`k8s` quedan como deuda visible.
-- **`fitz deploy compose [--no-detach] [--no-build]`** — Thin wrapper
-  sobre `docker compose up -d --build`.
+  + `docker push` with the tag derived from the manifest. MVP
+  targets are only docker and compose; `fly`/`railway`/`k8s`
+  remain as visible debt.
+- **`fitz deploy compose [--no-detach] [--no-build]`** — Thin
+  wrapper over `docker compose up -d --build`.
 
-## Módulos en src/
+## Modules in src/
 
-### main.rs — entry point y CLI
+### main.rs — entry point and CLI
 
-Parsea argumentos con [clap](https://docs.rs/clap), enruta al
-subcomando correspondiente, orquesta los pasos del pipeline. Cada
-error termina con `exit(1)` y mensaje a `stderr`. Deliberadamente
-delgado: no contiene lógica del lenguaje, solo coordinación. Los
-sub-comandos `dev`, `repl`, `lint`, `fmt`, `test`, `add`, `remove`,
-`update`, `new`, `init` tienen sus `*_cmd` adentro.
+Parses arguments with [clap](https://docs.rs/clap), routes to the
+right subcommand, orchestrates the pipeline steps. Each error ends
+with `exit(1)` and a message to `stderr`. Deliberately thin: it
+contains no language logic, only coordination. The `dev`, `repl`,
+`lint`, `fmt`, `test`, `add`, `remove`, `update`, `new`, `init`
+sub-commands have their `*_cmd` functions inside it.
 
 ### lib.rs — crate library
 
-Expone los módulos como `pub mod` para que los bins (`fitz` en
-`src/main.rs`, `fitz-lsp` en `src/bin/fitz-lsp.rs`) los consuman vía
-`use fitz::...`. Refactor introducido en Fase 9.x.1.b cuando aterrizó
-el LSP — antes Fitz era bin-only. La lib también facilita tests
-unitarios y futura integración con otras herramientas (por ejemplo,
-un linter o formatter externo que reuse `parser` y `types`).
+Exposes the modules as `pub mod` so the bins (`fitz` at
+`src/main.rs`, `fitz-lsp` at `src/bin/fitz-lsp.rs`) consume them
+via `use fitz::...`. Refactor introduced in Phase 9.x.1.b when the
+LSP landed — before then Fitz was bin-only. The lib also makes
+unit testing easier and supports future integration with other
+tools (for instance, an external linter or formatter that reuses
+`parser` and `types`).
 
-### lexer.rs — tokenización
+### lexer.rs — tokenization
 
-Convierte el texto fuente en un `Vec<Token>`. Reconoce literales (Int,
-Float, Str, Bool, Null), identificadores, palabras clave (`fn`, `if`,
-`while`, `for`, `type`, `match`, `return`, `import`, `async`, `await`,
-`as`, etc.), operadores, delimitadores, y decoradores (`@nombre`).
-Maneja strings con interpolación a nivel léxico (detecta `{` adentro
-del string); el ensamblado del `Expr::StrInterp` se completa en el
-parser. Anota cada token con su posición (línea, columna).
+Converts source text into a `Vec<Token>`. Recognizes literals (Int,
+Float, Str, Bool, Null), identifiers, keywords (`fn`, `if`,
+`while`, `for`, `type`, `match`, `return`, `import`, `async`,
+`await`, `as`, etc.), operators, delimiters, and decorators
+(`@name`). Handles interpolated strings at the lexical level
+(detects `{` inside the string); the `Expr::StrInterp` assembly is
+finished by the parser. Annotates each token with its position
+(line, column).
 
-Fase 9.z.1.b sumó **`Trivia` side-stream**: una segunda salida del
-lexer con `Vec<Comment>` (line + block) y `Vec<usize>` (líneas blank).
-La función `tokenize_with_trivia` la expone para el formatter; el
-`tokenize` normal (parser/checker/eval) la ignora — overhead cero
-para el resto.
+Phase 9.z.1.b added a **`Trivia` side-stream**: a second output
+from the lexer with `Vec<Comment>` (line + block) and `Vec<usize>`
+(blank lines). The `tokenize_with_trivia` function exposes it for
+the formatter; the regular `tokenize` (parser/checker/eval)
+ignores it — zero overhead for the rest.
 
-### ast.rs — definición del AST
+### ast.rs — AST definition
 
-Tipos puros, sin lógica. Define `Program = Vec<Stmt>`, donde `Stmt`
-cubre `FnDef`, `TypeDef`, `Assign`, `If`, `While`, `For`, `Loop`,
-`Return`, `ReturnStatus` (HTTP status custom), `Import`, `FromImport`,
-`Expr` (statement-expression), `Break`, `Continue`, `Error`
-(recovery, Fase 9.0). `Expr` cubre literales, `Ident`, `BinOp`,
-`UnaryOp`, `Call`, `FnExpr`, `Field`, `Index`, `Match`, `Try`
-(`expr?`), `Await`, `Range`, `List`, `Map`, `StructLit`, `Ok`,
-`Err`, `StrInterp`, `Error`. Aparte: `TypeExpr` (`Named`, `Generic`,
-`Nullable`, `Function`) para anotaciones, `Pattern` para `match`, y
-`Decorator` (`@get`/`@server`/`@middleware`/`@header`/`@test`) con
-`args` + `kwargs`. `Expr` y `Stmt` llevan `span` para errores
-posicionados (S1.2 + S1.codegen, post-5b).
+Pure types, no logic. Defines `Program = Vec<Stmt>`, where `Stmt`
+covers `FnDef`, `TypeDef`, `Assign`, `If`, `While`, `For`, `Loop`,
+`Return`, `ReturnStatus` (custom HTTP status), `Import`,
+`FromImport`, `Expr` (statement-expression), `Break`, `Continue`,
+`Error` (recovery, Phase 9.0). `Expr` covers literals, `Ident`,
+`BinOp`, `UnaryOp`, `Call`, `FnExpr`, `Field`, `Index`, `Match`,
+`Try` (`expr?`), `Await`, `Range`, `List`, `Map`, `StructLit`,
+`Ok`, `Err`, `StrInterp`, `Error`. Aside: `TypeExpr` (`Named`,
+`Generic`, `Nullable`, `Function`) for annotations, `Pattern` for
+`match`, and `Decorator`
+(`@get`/`@server`/`@middleware`/`@header`/`@test`) with `args` +
+`kwargs`. `Expr` and `Stmt` carry `span` for positioned errors
+(S1.2 + S1.codegen, post-5b).
 
-### parser.rs — construcción del AST
+### parser.rs — AST construction
 
-Recursive descent con escalera de precedencia. Toma `Vec<Token>` y
-devuelve `Result<Program, FitzError>`. Maneja todas las construcciones
-del lenguaje, incluyendo anotaciones de tipo con generics anidados
-(`Map<Str, List<Int>>`), sufijo nullable (`Str?`), tipo función
-(`Fn(Int) -> Int`), patrones de `match`, paréntesis opcionales en
-decoradores (post-9.z.2.a, necesario para `@test fn ...`), método
-chain multi-línea (post-PreF8.2), aliases en imports (`from foo
-import bar as b`).
+Recursive descent with a precedence climbing ladder. Takes
+`Vec<Token>` and returns `Result<Program, FitzError>`. Handles
+every language construct, including type annotations with nested
+generics (`Map<Str, List<Int>>`), nullable suffix (`Str?`),
+function type (`Fn(Int) -> Int`), `match` patterns, optional
+parentheses on decorators (post-9.z.2.a, required for
+`@test fn ...`), multi-line method chains (post-PreF8.2), aliases
+in imports (`from foo import bar as b`).
 
-Tiene también `parse_with_recovery` (Fase 9.0 / F15): variante
-tolerante a errores que produce `(Program, Vec<FitzError>)` —
-sintetiza nodos `Stmt::Error` / `Expr::Error` donde el parse falló y
-sigue con el siguiente stmt. Usada por el LSP para que `did_change`
-emita diagnostics sobre buffers en construcción.
+It also has `parse_with_recovery` (Phase 9.0 / F15): an
+error-tolerant variant that returns `(Program, Vec<FitzError>)` —
+it synthesizes `Stmt::Error` / `Expr::Error` nodes where the parse
+failed and continues with the next stmt. Used by the LSP so
+`did_change` emits diagnostics over buffers under construction.
 
-### value.rs — valores en runtime
+### value.rs — runtime values
 
-El enum `Value` que vive durante `fitz run`/`test`/`dev`/`repl`:
+The `Value` enum that lives during `fitz run`/`test`/`dev`/`repl`:
 `Int`, `Float`, `Str`, `Bool`, `Null`, `List`, `Map`, `Instance`,
-`Result`, `Function` (built-in o user), `Module`, `Type`, `Future`
-(post-Fase 6), `HttpResponse`, `CorsConfig`, `PyObject` (feature
+`Result`, `Function` (built-in or user), `Module`, `Type`, `Future`
+(post-Phase 6), `HttpResponse`, `CorsConfig`, `PyObject` (feature
 `python`).
 
-`List`, `Map` e `Instance` están envueltos en
-`Arc<parking_lot::Mutex<...>>` (alias `Shared<T>`) para modelar
-semántica de referencia compartida y para que `Value` sea `Send` —
-lo que destrabó F17.5 (eliminación del bridge HTTP) y el runtime
-tokio multi-thread del server. Incluye `impl Display` que produce
-el formato canónico (strings con comillas dobles adentro de
-colecciones, `Float` con `.0`, etc.) que el codegen replica
-bit-a-bit.
+`List`, `Map`, and `Instance` are wrapped in
+`Arc<parking_lot::Mutex<...>>` (alias `Shared<T>`) to model
+shared-reference semantics and to make `Value` `Send` — that
+unlocked F17.5 (removal of the HTTP bridge) and the multi-thread
+tokio runtime for the server. Includes an `impl Display` that
+produces the canonical format (strings with double quotes inside
+collections, `Float` with `.0`, etc.) that the codegen replicates
+bit-for-bit.
 
-### env.rs — entornos / scopes
+### env.rs — environments / scopes
 
-`Environment` con stack de scopes (`Arc<Mutex<...>>` después de F17).
-Métodos `define`, `get` (busca recursivo subiendo a padres),
-`assign` (sobreescribe en el scope donde fue definida), `has`,
-`local_names` (para `:env` del REPL, sin recursar). Las closures
-(`Value::Function { closure }`) capturan un handle del env de
-definición; el evaluator agrega un child para los params al
-invocar.
+`Environment` with a stack of scopes (`Arc<Mutex<...>>` after F17).
+Methods `define`, `get` (recursive lookup walking up to parents),
+`assign` (overwrites in the scope where it was defined), `has`,
+`local_names` (for the REPL's `:env`, no recursion). Closures
+(`Value::Function { closure }`) capture a handle of the
+definition's env; the evaluator adds a child for the params at
+invocation time.
 
-### types.rs — sistema de tipos y checker estático
+### types.rs — type system and static checker
 
-Dos responsabilidades:
+Two responsibilities:
 
-1. **Resolución**: convierte `TypeExpr` (sintáctico) a `Type`
-   (resuelto, con identidad nominal). `Type` cubre primitivos,
-   generics built-in (`List<T>`, `Map<K,V>`, `Result<T>`,
-   `Nullable<T>`, `Future<T>`), `Nominal(TypeId)` para tipos custom,
-   `Function { params, ret }`, `PyAny` (Fase 8.4) y `Any` como
-   escape gradual.
-2. **Checker**: `check_program(&Program)` recorre el AST con un
-   `CheckCtx` (scopes, `return_stack` para `?` y `return`,
-   `inferred_returns` para `FnExpr.ret`, `def_info` para `go-to-def`
-   del LSP). Sintetiza tipos, valida llamadas (aridad + tipos),
-   chequea exhaustividad de `match` sobre `Result`, valida métodos
-   built-in con templates paramétricos. Devuelve `(TypeEnv,
-   TypeInfo, DefinitionInfo, Vec<FitzError>)`.
+1. **Resolution**: converts `TypeExpr` (syntactic) into `Type`
+   (resolved, with nominal identity). `Type` covers primitives,
+   built-in generics (`List<T>`, `Map<K,V>`, `Result<T>`,
+   `Nullable<T>`, `Future<T>`), `Nominal(TypeId)` for custom
+   types, `Function { params, ret }`, `PyAny` (Phase 8.4), and
+   `Any` as the gradual-typing escape hatch.
+2. **Checker**: `check_program(&Program)` walks the AST with a
+   `CheckCtx` (scopes, `return_stack` for `?` and `return`,
+   `inferred_returns` for `FnExpr.ret`, `def_info` for the LSP's
+   go-to-def). It synthesizes types, validates calls (arity +
+   types), checks exhaustiveness of `match` over `Result`, and
+   validates built-in methods with parametric templates. Returns
+   `(TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>)`.
 
-`TypeInfo` (F16) registra el tipo sintetizado de cada `Expr`
-indexado por span — consumido por el LSP `textDocument/hover` y
-por `:type` del REPL. `DefinitionInfo` registra `(use_span,
-def_span)` para `textDocument/definition`.
+`TypeInfo` (F16) records the synthesized type of each `Expr`
+indexed by span — consumed by the LSP `textDocument/hover` and by
+the REPL's `:type`. `DefinitionInfo` records
+`(use_span, def_span)` for `textDocument/definition`.
 
-### evaluator.rs — ejecución del AST
+### evaluator.rs — AST execution
 
-El intérprete. Toma `Program` + `Environment` y produce efectos.
-Maneja control flow (`return`, `break`, `continue`) con señales
-internas. Resuelve `import` cargando archivo canonicalizado,
-parseándolo recursivamente, con cache por path y detección de
-ciclos por stack. Despacha métodos built-in (`xs.map`, `m.get`,
-`s.upper`, etc.) por tipo del receptor. Decoradores HTTP
-(`@get`/`@post`/etc.) registran rutas en el `HttpRegistry` activo;
-`@test` registra en el `TestRegistry` activo (Fase 9.z.2);
-`@server` configura `ServerConfig`.
+The interpreter. Takes `Program` + `Environment` and produces
+effects. Handles control flow (`return`, `break`, `continue`) via
+internal signals. Resolves `import` by loading the canonicalized
+file, parsing it recursively, with a per-path cache and cycle
+detection via stack. Dispatches built-in methods (`xs.map`,
+`m.get`, `s.upper`, etc.) by receiver type. HTTP decorators
+(`@get`/`@post`/etc.) register routes in the active
+`HttpRegistry`; `@test` registers in the active `TestRegistry`
+(Phase 9.z.2); `@server` configures `ServerConfig`.
 
-Post-Fase 6.4 (Async nativo) las funciones del evaluator son
-`async fn` y usan `#[async_recursion]` para que `eval_expr`/
-`eval_stmt`/`eval_call` puedan recursarse a través del `.await`.
-Post-F17 todas las firmas son `Send` — un solo runtime tokio
-maneja tanto el evaluator como axum, los handlers HTTP corren
-en paralelo entre workers.
+After Phase 6.4 (native async) the evaluator functions are
+`async fn` and use `#[async_recursion]` so `eval_expr`/
+`eval_stmt`/`eval_call` can recurse through `.await`. After F17
+all signatures are `Send` — a single tokio runtime handles both
+the evaluator and axum, and HTTP handlers run in parallel across
+workers.
 
-APIs públicas que consumen los sub-comandos:
-- `eval_with_base_and_deps` para `fitz run` y `fitz test`.
-- `eval_program_with_env` (Fase 9.z.4) para el REPL: env
-  compartido entre invocaciones + devuelve el `Value` del último
-  stmt para pretty-print Python-style.
-- `run_test_handler` (Fase 9.z.2) para invocar un `@test fn`
-  (sync o async) y traducir el resultado a ok/FAILED.
-- `build_runtime` para construir el tokio current_thread runtime
-  compartido por todos los sub-comandos async.
+Public APIs consumed by the sub-commands:
+- `eval_with_base_and_deps` for `fitz run` and `fitz test`.
+- `eval_program_with_env` (Phase 9.z.4) for the REPL: shared env
+  across invocations + returns the `Value` of the last stmt for
+  Python-style pretty-print.
+- `run_test_handler` (Phase 9.z.2) to invoke a `@test fn` (sync
+  or async) and translate the result into ok/FAILED.
+- `build_runtime` to build the tokio current_thread runtime
+  shared by every async sub-command.
 
-### http.rs — runtime HTTP + WebSockets + healthz/metrics
+### http.rs — HTTP runtime + WebSockets + healthz/metrics
 
-Activa la capa HTTP nativa. Post-F17.5 ya no hay bridge
-`mpsc/oneshot` ni `std::thread` separado para tokio — un solo
-runtime tokio `rt-multi-thread` corre tanto el evaluator como
-axum, y los handlers axum invocan al evaluator directamente sobre
-`Arc<HttpRegistry>` compartido. Paralelismo real entre requests.
+Powers the native HTTP layer. After F17.5 there is no more
+`mpsc/oneshot` bridge or separate `std::thread` for tokio — a
+single tokio `rt-multi-thread` runtime runs both the evaluator
+and axum, and the axum handlers invoke the evaluator directly
+over a shared `Arc<HttpRegistry>`. Real parallelism across
+requests.
 
-Componentes:
-- `HttpRegistry`: tabla de rutas (`method`, `path_template`,
+Components:
+- `HttpRegistry`: route table (`method`, `path_template`,
   `handler`, `RouteMeta`, `middlewares`, `cors`, `required_roles`,
   `is_ws`, `ws_msg_type`). Thread-local + `parking_lot::Mutex`
-  para registry activo. Incluye `ws_broadcaster: Arc<WsBroadcaster>`
-  para fan-out de WebSockets y `cron_registry: Arc<CronRegistry>`
-  para que el lifecycle compartido entre HTTP server y scheduler
-  cron reuse el mismo runtime tokio.
-- `serve(registry, program, addr)`: construye `Arc<HttpRegistry>`
-  + `axum::Router` + `TcpListener`, llama `axum::serve` con
-  graceful shutdown (SIGTERM drain con 30s + readyz → 503).
-  Precomputa el schema OpenAPI + AsyncAPI eager y los sirve en
-  `/openapi.json` + Scalar UI en `/docs` + `/asyncapi.json`.
-- `build_router(metas, registry, openapi_schema)`: arma el
-  `Router` con un closure por ruta + CORS preflight + middleware
-  chain. Auto-mount de `/healthz` + `/readyz` (Fase 12.1) y
-  `/metrics` Prometheus (Fase 12.3.iter2.Tier3) con override si
-  el user declara handlers homónimos.
-- **WebSockets** (Fase 9.w.2): `build_ws_method_router` con
-  `WebSocketUpgrade` extractor + auth pre-upgrade (401/403 sin
-  abrir el socket) + heartbeat ping/pong opcional via
-  `@server(ws_heartbeat_secs=N)`. `WsConn<T>` con métodos
-  `recv`/`send`/`broadcast`/`close` marshaling JSON automático
-  contra el `type T` declarado.
-- **Auth nativa** (Fase 9.w.1): `dispatch_request` ejecuta
-  `@auth_provider` antes de body parsing si la ruta tiene
-  `@authenticated`/`@admin`/`@requires("role")`. Provider devuelve
-  `Result<User>` → 401 si Err, 403 si admin/role no matchea.
-- `MiddlewareKind::{Pre, Post}` + `MiddlewareSpec.kind`: mini-tanda
-  Mw.next clasifica middlewares por aridad. Pre (1 arg) corre antes
-  del handler con semántica gate-only; Post (2 args
-  `(Request, Response)`) corre después del handler en reverse order.
-- `parse_urlencoded_body`: parsea `application/x-www-form-urlencoded`
-  body como `Value::Map<Str, Str>`. Content-Type 415 estricto.
+  for the active registry. Includes
+  `ws_broadcaster: Arc<WsBroadcaster>` for the WebSocket fan-out
+  and `cron_registry: Arc<CronRegistry>` so that the lifecycle
+  shared between the HTTP server and the cron scheduler reuses
+  the same tokio runtime.
+- `serve(registry, program, addr)`: builds `Arc<HttpRegistry>` +
+  `axum::Router` + `TcpListener`, calls `axum::serve` with
+  graceful shutdown (SIGTERM drain with 30s + readyz → 503).
+  Pre-computes the OpenAPI + AsyncAPI schema eagerly and serves
+  them at `/openapi.json` + Scalar UI at `/docs` +
+  `/asyncapi.json`.
+- `build_router(metas, registry, openapi_schema)`: assembles the
+  `Router` with one closure per route + CORS preflight + middleware
+  chain. Auto-mounts `/healthz` + `/readyz` (Phase 12.1) and
+  `/metrics` Prometheus (Phase 12.3.iter2.Tier3) with override
+  if the user declares handlers with the same names.
+- **WebSockets** (Phase 9.w.2): `build_ws_method_router` with the
+  `WebSocketUpgrade` extractor + pre-upgrade auth (401/403
+  without opening the socket) + optional heartbeat ping/pong via
+  `@server(ws_heartbeat_secs=N)`. `WsConn<T>` with
+  `recv`/`send`/`broadcast`/`close` methods doing automatic JSON
+  marshaling against the declared `type T`.
+- **Native auth** (Phase 9.w.1): `dispatch_request` runs
+  `@auth_provider` before body parsing if the route has
+  `@authenticated`/`@admin`/`@requires("role")`. The provider
+  returns `Result<User>` → 401 if Err, 403 if admin/role does not
+  match.
+- `MiddlewareKind::{Pre, Post}` + `MiddlewareSpec.kind`: mini-batch
+  Mw.next classifies middlewares by arity. Pre (1 arg) runs before
+  the handler with gate-only semantics; Post (2 args
+  `(Request, Response)`) runs after the handler in reverse order.
+- `parse_urlencoded_body`: parses an
+  `application/x-www-form-urlencoded` body into a
+  `Value::Map<Str, Str>`. Strict Content-Type 415.
 - `value_to_json` / `json_to_value` / `json_to_instance`:
-  traducen entre `Value` y `serde_json::Value`. Con schema (`type`
-  declarado), `json_to_instance` valida campos / aplica defaults /
-  rechaza extras (→ 400). `Value::Secret` se redacta a `"***"`.
-- `parse_path_template` / `coerce_path_param`: extraen path params
-  + query params (post-F7) tipados.
+  translate between `Value` and `serde_json::Value`. With a
+  schema (declared `type`), `json_to_instance` validates fields,
+  applies defaults, rejects extras (→ 400). `Value::Secret` is
+  redacted to `"***"`.
+- `parse_path_template` / `coerce_path_param`: extract typed path
+  params + query params (post-F7).
 - `ServerConfig`: `@server(port, host, docs=Bool, api_version="X",
   observability=Bool, prometheus=Bool, ws_heartbeat_secs=N)`.
   Default `127.0.0.1:3000`.
 
-### asyncapi.rs — generador AsyncAPI 3.0 (Fase 9.w.2.d)
+### asyncapi.rs — AsyncAPI 3.0 generator (Phase 9.w.2.d)
 
-Paralelo a `openapi.rs` pero para handlers `@ws("/path")`. Emite
-channels + operations receive/send + securitySchemes.bearerAuth
-cuando hay auth. `channels_from_registry` (runtime, consumido por
-`serve`) y `pseudo_channels_from_ast` (build-time, consumido por
-`codegen.rs` para embeber el schema bit-a-bit en el binario).
-`BTreeMap` para orden determinístico. Sirve en `/asyncapi.json`
-cuando hay handlers `@ws`.
+Parallel to `openapi.rs` but for `@ws("/path")` handlers. Emits
+channels + receive/send operations + securitySchemes.bearerAuth
+when there is auth. `channels_from_registry` (runtime, consumed
+by `serve`) and `pseudo_channels_from_ast` (build-time, consumed
+by `codegen.rs` to embed the schema bit-for-bit in the binary).
+`BTreeMap` for deterministic order. Served at `/asyncapi.json`
+when there are `@ws` handlers.
 
-### cron_jobs.rs — scheduler de jobs `@cron` + `@background` (Fase 9.w.3)
+### cron_jobs.rs — `@cron` + `@background` job scheduler (Phase 9.w.3)
 
-`CronJob` (handler + Schedule parseado + tz + retry + catch_up +
-store opcional para persistencia) + `CronRegistry` (paralelo a
-`HttpRegistry`, vive como `cron_registry: Arc<CronRegistry>`
-adentro). `spawn_cron_scheduler` arranca un `tokio::spawn` por
-job con loop `sleep_until(next_tick) → invoke_with_retry`.
+`CronJob` (handler + parsed Schedule + tz + retry + catch_up +
+optional store for persistence) + `CronRegistry` (parallel to
+`HttpRegistry`, lives as `cron_registry: Arc<CronRegistry>`
+inside). `spawn_cron_scheduler` starts one `tokio::spawn` per
+job with a loop `sleep_until(next_tick) → invoke_with_retry`.
 
-Persistencia (Fase 9.w.3.iter2): cuando el job declara
-`store=<db_binding>`, crea tablas `fitz_cron_jobs` + `fitz_cron_runs`
-auto via `CREATE TABLE IF NOT EXISTS` al boot del scheduler;
-persiste cada attempt con status `running`/`ok`/`retrying`/`failed`;
-opt-in `catch_up=true` ejecuta UN run inmediato al boot si hubo
-missed runs (no N — evita spam). Race condition de CREATE TABLE
-serializada con `tokio::sync::OnceCell` global (`v0.15.13` fix +
-paralelo en codegen v0.15.14).
+Persistence (Phase 9.w.3.iter2): when the job declares
+`store=<db_binding>`, it creates the `fitz_cron_jobs` +
+`fitz_cron_runs` tables automatically via
+`CREATE TABLE IF NOT EXISTS` at scheduler boot; persists every
+attempt with status `running`/`ok`/`retrying`/`failed`; opt-in
+`catch_up=true` runs ONE immediate run at boot if there were
+missed runs (not N — avoids spam). CREATE TABLE race condition
+serialized via a global `tokio::sync::OnceCell` (`v0.15.13` fix
++ parallel in codegen v0.15.14).
 
-`spawn(fn_call)` fire-and-forget integrado con el mismo modelo:
-`tokio::spawn(invoke)` envuelve el JoinHandle en `Value::Future`,
-permite `await` o discard.
+`spawn(fn_call)` fire-and-forget integrated with the same model:
+`tokio::spawn(invoke)` wraps the JoinHandle in `Value::Future`,
+allows `await` or discard.
 
-### codegen.rs — transpile a Rust
+### codegen.rs — transpile to Rust
 
-Genera un Cargo project completo a partir del AST + `TypeEnv` +
-`TypeInfo` (mini-tanda Hpx.2 — el codegen consulta el side-table
-para inferir return types de fns sin anotar).
+Generates a complete Cargo project from the AST + `TypeEnv` +
+`TypeInfo` (mini-batch Hpx.2 — the codegen consults the side-table
+to infer return types of unannotated fns).
 `generate_project(path, program, type_env, type_info, dep_registry)`
-devuelve `Cargo.toml` + `src/main.rs` + módulos auxiliares.
+returns `Cargo.toml` + `src/main.rs` + helper modules.
 
-**Helpers para inferencia** (mini-tandas Hpx.2 + 5b.1 + P2):
-- `infer_return_type_from_body(body, type_info)`: walkea
-  `Stmt::Return(e)` en el body, consulta `e.span()` en `TypeInfo`,
-  unifica con `lub`.
+**Helpers for inference** (mini-batches Hpx.2 + 5b.1 + P2):
+- `infer_return_type_from_body(body, type_info)`: walks
+  `Stmt::Return(e)` in the body, looks up `e.span()` in `TypeInfo`,
+  unifies with `lub`.
 - `infer_param_type_from_call_sites(program, fn_name, idx, type_info)`:
-  scanea el programa por calls a `fn_name`, extrae el tipo del arg
-  `idx`-ésimo.
-- `has_unannotated_fn_params(program)` + `fill_inferred_param_types(program, type_info)`:
-  el `build_file` usa estos para mutar el AST in-place tras la
-  primera pasada del checker, llenando params inferidos. Se re-corre
-  el checker para refinar `TypeInfo` y soportar la cadena 5b.1+Hpx.2
-  (ambos param y return inferidos cuando el return depende del param).
+  scans the program for calls to `fn_name`, extracts the type of
+  the `idx`-th arg.
+- `has_unannotated_fn_params(program)` +
+  `fill_inferred_param_types(program, type_info)`: `build_file`
+  uses these to mutate the AST in place after the first checker
+  pass, filling inferred params. The checker is re-run to refine
+  `TypeInfo` and support the 5b.1+Hpx.2 chain (both param and
+  return inferred when the return depends on the param).
 
-**Mw.next codegen** (mini-tanda P1 + RP): `HandlerSig.mw_user_fns_post`
-guarda nombres de post mws. `CodegenCtx.middleware_post_fn_names`
-tracks fns marcadas como Post (clasificadas por aridad en post-scan
-de `pre_register_fns`). `gen_top_fn` emite Post mws con return
-`__FitzResponse` (no Option). `emit_handler_dispatch_and_response`
-construye un `__FitzResponse` intermedio, corre la chain de Post mws
-en reverse, y convierte a axum Response al final. Cubre handlers
-con return plain T, returns_response (ReturnStatus), y Result<T>.
+**Mw.next codegen** (mini-batches P1 + RP):
+`HandlerSig.mw_user_fns_post` stores the names of post mws.
+`CodegenCtx.middleware_post_fn_names` tracks fns marked as Post
+(classified by arity in the post-scan of `pre_register_fns`).
+`gen_top_fn` emits Post mws with return `__FitzResponse` (not
+Option). `emit_handler_dispatch_and_response` builds an
+intermediate `__FitzResponse`, runs the Post mws chain in
+reverse, and converts it to an axum Response at the end. Covers
+handlers with return plain T, returns_response (ReturnStatus),
+and Result<T>.
 
-Mapping de tipos (post-F17.4b):
+Type mapping (post-F17.4b):
 - `Int → i64`, `Float → f64`, `Str → String`, `Bool → bool`,
   `Null → ()`.
-- `List<T> → Arc<Mutex<Vec<T>>>` (`std::sync::Mutex`, sin deps
-  extras en el `Cargo.toml` generado).
+- `List<T> → Arc<Mutex<Vec<T>>>` (`std::sync::Mutex`, no extra
+  deps in the generated `Cargo.toml`).
 - `Map<K,V> → Arc<Mutex<Vec<(K,V)>>>`.
-- `Result<T> → Result<T, String>` (Err pinned a String).
+- `Result<T> → Result<T, String>` (Err pinned to String).
 - `type Foo { ... } → struct FooData { ... } + type Foo =
-  Arc<Mutex<FooData>>`. `PartialEq` emitido manual (Mutex no impl
-  PartialEq) con helper recursivo `field_eq_expr`.
+  Arc<Mutex<FooData>>`. `PartialEq` emitted manually (Mutex does
+  not impl PartialEq) with a recursive `field_eq_expr` helper.
 
-State HTTP compartido pasa de `thread_local!` (pre-F17) a
-`static X: LazyLock<Arc<Mutex<T>>>` + materialización
-`(*X).clone()` en cada handler. Field access se emite como bloque
-acotado `{ let __obj = ...; let __g = __obj.lock().unwrap();
-__g.<f>.clone() }` para evitar deadlock por re-lock.
+Shared HTTP state goes from `thread_local!` (pre-F17) to
+`static X: LazyLock<Arc<Mutex<T>>>` + `(*X).clone()`
+materialization in each handler. Field access is emitted as a
+scoped block `{ let __obj = ...; let __g = __obj.lock().unwrap();
+__g.<f>.clone() }` to avoid deadlock by re-locking.
 
-`fitz build` con HTTP emite `#[tokio::main]` default multi-thread
-+ `axum::Router` + handler wrappers async. Cargo.toml condicional:
-`axum`/`tokio`/`serde` solo si hay decoradores HTTP, `pyo3` solo
-con feature `python`. La regla de oro: output del binario bit-a-bit
-idéntico a `fitz run` para programas en el subset soportado.
+`fitz build` with HTTP emits `#[tokio::main]` default multi-thread
++ `axum::Router` + async handler wrappers. Conditional
+Cargo.toml: `axum`/`tokio`/`serde` only if there are HTTP
+decorators, `pyo3` only with feature `python`. Rule of thumb:
+binary output is bit-for-bit identical to `fitz run` for programs
+in the supported subset.
 
-Tiene su propio `ModuleLoader` que replica el del evaluator pero
-AOT, y un guard `check_no_python_imports` que aborta builds con
-`from python import` salvo que la feature `python` esté activa
-(Fase 8.7 = deuda F19 cerrada — el binario lincado con PyO3 ahora
-sí soporta interop).
+It has its own `ModuleLoader` that mirrors the evaluator's but
+AOT, and a `check_no_python_imports` guard that aborts builds
+with `from python import` unless the `python` feature is active
+(Phase 8.7 = debt F19 closed — the binary linked with PyO3 now
+supports interop).
 
-### openapi.rs — generador OpenAPI 3.1
+### openapi.rs — OpenAPI 3.1 generator
 
-`generate_openapi(routes, program)` produce un `Value::Map` con la
-estructura OpenAPI 3.1 (`openapi`, `info`, `paths`, `components`).
-Recibe rutas de dos fuentes:
-- `routes_from_registry`: rutas resueltas en runtime (consumido por
+`generate_openapi(routes, program)` produces a `Value::Map` with
+the OpenAPI 3.1 structure (`openapi`, `info`, `paths`,
+`components`). It receives routes from two sources:
+- `routes_from_registry`: routes resolved at runtime (consumed by
   `fitz run`).
-- `pseudo_routes_from_ast`: rutas inferidas del AST sin evaluar
-  (consumido por `fitz openapi` standalone + por el codegen para
-  embeber el schema bit-a-bit en el binario).
+- `pseudo_routes_from_ast`: routes inferred from the AST without
+  evaluation (consumed by standalone `fitz openapi` + by the
+  codegen to embed the schema bit-for-bit in the binary).
 
-Soporta status codes custom (post-F7), query params, headers via
-`@header(name="X")`, opt-out con `@server(docs=false)`,
-`api_version` configurable. Renderiza la UI Scalar via
-`templates/scalar.html` cuando se sirve `/docs`.
+Supports custom status codes (post-F7), query params, headers via
+`@header(name="X")`, opt-out with `@server(docs=false)`,
+configurable `api_version`. Renders the Scalar UI via
+`templates/scalar.html` when serving `/docs`.
 
-### manifest.rs — `fitz.toml` del package manager (Fase 9.y.1)
+### manifest.rs — `fitz.toml` of the package manager (Phase 9.y.1)
 
-Define `Manifest { package, bin, lib, dependencies }` + `Package`
-+ `Bin` + `Lib` + `Dependency` (Detailed con `path`/`git`/`tag`/
-`rev`) + `DepRegistry = HashMap<String, PathBuf>`. APIs:
-- `find_manifest(start)`: walk-up cargo-style.
-- `Manifest::parse(text)`: TOML → struct con `serde`.
-- `resolve_dependencies(manifest, base_dir)`: resuelve cada dep a
-  un `ResolvedDep` (path absoluto al `lib.entry`). Path deps
-  resuelven inmediato; git deps delegan a `git_dep.rs`.
-- `build_dep_registry(resolved)`: del `Vec<ResolvedDep>` al
-  `DepRegistry` que consume el loader del evaluator.
-- `write_manifest_with_edit` (Fase 9.y.4): preserva comments via
-  `toml_edit` cuando `fitz add`/`remove` modifica el archivo.
+Defines `Manifest { package, bin, lib, dependencies }` + `Package`
++ `Bin` + `Lib` + `Dependency` (Detailed with
+`path`/`git`/`tag`/`rev`) + `DepRegistry = HashMap<String, PathBuf>`.
+APIs:
+- `find_manifest(start)`: cargo-style walk-up.
+- `Manifest::parse(text)`: TOML → struct via `serde`.
+- `resolve_dependencies(manifest, base_dir)`: resolves each dep
+  to a `ResolvedDep` (absolute path to `lib.entry`). Path deps
+  resolve immediately; git deps delegate to `git_dep.rs`.
+- `build_dep_registry(resolved)`: from `Vec<ResolvedDep>` to the
+  `DepRegistry` that the evaluator's loader consumes.
+- `write_manifest_with_edit` (Phase 9.y.4): preserves comments
+  via `toml_edit` when `fitz add`/`remove` edits the file.
 
-Validación de nombre: `^[a-z][a-z0-9_-]{0,63}$` (crates.io style).
+Name validation: `^[a-z][a-z0-9_-]{0,63}$` (crates.io style).
 
-### lockfile.rs — `fitz.lock` (Fase 9.y.3.a)
+### lockfile.rs — `fitz.lock` (Phase 9.y.3.a)
 
-`Lockfile { version: 1, packages: Vec<LockedPackage> }`. Cada
-`LockedPackage` lleva `name`, `version`, y `source` opcional (para
-git deps: `git+<url>#<commit>`). Path deps no llevan source.
+`Lockfile { version: 1, packages: Vec<LockedPackage> }`. Each
+`LockedPackage` carries `name`, `version`, and an optional
+`source` (for git deps: `git+<url>#<commit>`). Path deps have no
+source.
 
-`from_resolved(resolved)` construye el lockfile desde el resultado
-de la resolución; `write_lockfile_if_changed(path, lock)` hace
-short-circuit byte-a-byte para evitar tocar mtime cuando el
-contenido no cambió. `fitz run`/`build`/`check` lo sincronizan
-automático en cada invocación.
+`from_resolved(resolved)` builds the lockfile from the resolution
+result; `write_lockfile_if_changed(path, lock)` short-circuits
+byte-for-byte to avoid touching mtime when content has not
+changed. `fitz run`/`build`/`check` sync it automatically on each
+invocation.
 
-### git_dep.rs — git deps + cache (Fase 9.y.3.c)
+### git_dep.rs — git deps + cache (Phase 9.y.3.c)
 
-Maneja `[dependencies] foo = { git = "<url>", tag = "v1" }`. Clona
-a `<cache_dir>/git/<sanitized-url>@<ref>/` (default
-`~/.fitz/cache/`, override con `FITZ_CACHE_DIR`). Estrategia split:
-`--depth 1 --branch <tag>` para tags, full clone + checkout para
-revs. Detección de commit hash exacto para el lockfile via
-`git rev-parse HEAD`. Cache reuse sin re-clone automático;
-`fitz update <name>` invalida el cache.
+Handles `[dependencies] foo = { git = "<url>", tag = "v1" }`.
+Clones to `<cache_dir>/git/<sanitized-url>@<ref>/` (default
+`~/.fitz/cache/`, override via `FITZ_CACHE_DIR`). Split strategy:
+`--depth 1 --branch <tag>` for tags, full clone + checkout for
+revs. Detects the exact commit hash for the lockfile via
+`git rev-parse HEAD`. Cache reuse with no automatic re-clone;
+`fitz update <name>` invalidates the cache.
 
-### db.rs — driver Postgres puro + ORM (Fase 10, ~3000+ LoC)
+### db.rs — pure Postgres driver + ORM (Phase 10, ~3000+ LoC)
 
-El módulo más grande del proyecto en LoC. Implementa **driver
-Postgres completo en Fitz/Rust puro** (sin `tokio-postgres` /
-`sqlx` / `diesel` / `libpq`):
+The largest module in the project by LoC. Implements a
+**complete Postgres driver in pure Fitz/Rust** (no
+`tokio-postgres` / `sqlx` / `diesel` / `libpq`):
 
-- **Wire protocol v3.0**: `Connection::connect` hace handshake +
-  SCRAM-SHA-256 auth (RFC 7677) + PBKDF2-HMAC-SHA-256 +
-  StartupMessage. Simple Query y Extended Query con
-  Parse/Bind/Describe/Execute/Sync. ErrorResponse parseado
-  estructurado a `DbError::Server { severity, code, message }`
-  con SQLSTATE codes nativos.
-- **TLS strict** (v0.10.23): `sslmode=require` / `verify-ca` /
-  `verify-full` via `rustls` (CA bundle del sistema o
-  `sslrootcert=<path>` PEM custom). `disable` también soportado
-  para dev local.
-- **Pool de conexiones**: `DbPool` con `idle: Mutex<Vec<Connection>>`
+- **Wire protocol v3.0**: `Connection::connect` performs the
+  handshake + SCRAM-SHA-256 auth (RFC 7677) + PBKDF2-HMAC-SHA-256
+  + StartupMessage. Simple Query and Extended Query with
+  Parse/Bind/Describe/Execute/Sync. ErrorResponse parsed
+  structurally into `DbError::Server { severity, code, message }`
+  with native SQLSTATE codes.
+- **Strict TLS** (v0.10.23): `sslmode=require` / `verify-ca` /
+  `verify-full` via `rustls` (system CA bundle or custom
+  `sslrootcert=<path>` PEM). `disable` also supported for local
+  dev.
+- **Connection pool**: `DbPool` with `idle: Mutex<Vec<Connection>>`
   + `permits: Semaphore` (default 10, override
-  `FITZ_DB_MAX_CONNS` v0.10.29 con clamp `[1, 200]`). Cache
-  global `OnceLock<HashMap<URL, Arc<DbConnHandle>>>` — múltiples
-  `db.connect(url)` con la misma URL devuelven el MISMO handle
-  (evita el "connection pool leak" donde cada call creaba pool
-  nuevo). Health check task background con `tokio::spawn` que
-  cierra conns idle stale cada 30s.
-- **Tipos PgValue**: 11 OIDs core (BOOL/INT/FLOAT/TEXT/BYTEA/
+  `FITZ_DB_MAX_CONNS` v0.10.29 with clamp `[1, 200]`). Global
+  cache `OnceLock<HashMap<URL, Arc<DbConnHandle>>>` — multiple
+  `db.connect(url)` with the same URL return the SAME handle
+  (avoids the "connection pool leak" where each call created a
+  fresh pool). Background health-check task with `tokio::spawn`
+  that closes stale idle conns every 30s.
+- **PgValue types**: 11 core OIDs (BOOL/INT/FLOAT/TEXT/BYTEA/
   DATE/TIME/UUID/JSON/JSONB/VOID) + 12 array OIDs (`int4[]`,
-  `text[]`, `jsonb[]`, etc.). Marshaling bidireccional Fitz
-  `Value` ↔ `PgValue` con respeto de NULL adentro de arrays
-  (`List<Int?>` ↔ `int8[]` con `{a,NULL,c}` format).
-- **Observabilidad** (v0.10.28-29): `FITZ_DB_LOG=1|verbose` env
-  var opt-in. Mode `verbose` aplica **redaction de secrets**
-  (v0.10.29) sobre params via heurística contextual sobre el
-  SQL (`password`/`secret`/`token`/`api_key`/etc. → `<redacted>`).
-- **Errores enriquecidos** (v0.10.29): `DbError::Server` Display
-  ahora muestra `<severity> [<SQLSTATE>]: <msg>`. Las queries
-  fallidas pasan por `enrich_db_error_with_context` que suma
-  `[sql: <one-line truncado> params=[...]]` (con redaction).
+  `text[]`, `jsonb[]`, etc.). Bidirectional marshaling Fitz
+  `Value` ↔ `PgValue` respecting NULL inside arrays
+  (`List<Int?>` ↔ `int8[]` with `{a,NULL,c}` format).
+- **Observability** (v0.10.28-29): `FITZ_DB_LOG=1|verbose` env
+  var opt-in. Mode `verbose` applies **secret redaction**
+  (v0.10.29) on params via a contextual heuristic over the SQL
+  (`password`/`secret`/`token`/`api_key`/etc. → `<redacted>`).
+- **Enriched errors** (v0.10.29): `DbError::Server` Display now
+  shows `<severity> [<SQLSTATE>]: <msg>`. Failed queries go
+  through `enrich_db_error_with_context` which appends
+  `[sql: <one-line truncated> params=[...]]` (with redaction).
 
-El ORM (decoradores `@table`/`@primary`/`@column`/`@belongs_to`/
+The ORM (decorators `@table`/`@primary`/`@column`/`@belongs_to`/
 `@has_many`/`@has_one`/`@unique`/`@check_constraint`/`@index`)
-NO vive en `db.rs` — los decoradores se procesan en `types.rs`
-y poblan `TableMetadata`. El SQL builder de los read/write
-methods vive en `evaluator.rs` (`translate_method_call_to_sql`
-para `.where(...)` closures + métodos relacionados) y `codegen.rs`
-(paridad para `fitz build`).
+does NOT live in `db.rs` — the decorators are processed in
+`types.rs` and populate `TableMetadata`. The SQL builder for the
+read/write methods lives in `evaluator.rs`
+(`translate_method_call_to_sql` for `.where(...)` closures +
+related methods) and `codegen.rs` (parity for `fitz build`).
 
-### migrations.rs — schema diff + introspect + DDL emit (Fase 10.6+)
+### migrations.rs — schema diff + introspect + DDL emit (Phase 10.6+)
 
-Sistema de migrations automático paralelo a Alembic / Flyway /
-TypeORM CLI, pero sin deps externas — todo Rust + el wire protocol
-del driver.
+Automatic migrations system parallel to Alembic / Flyway /
+TypeORM CLI, but with no external deps — all Rust + the driver's
+wire protocol.
 
 - **`Schema`** = `Vec<Table>`; **`Table`** = `(name, columns,
   indexes, foreign_keys, composite_pk, check_constraints,
   schema, renamed_from)`. **`Index.using/where_clause`**
-  + **`ForeignKey.references_schema`** (v0.10.29 — cross-schema
-  FK transparente).
-- **`schema_from_program(program, type_env)`** — Construye el
-  "target" schema desde los `@table` types del AST. Resuelve
-  TypeMetadata → Table con auto-naming (constraints
+  + **`ForeignKey.references_schema`** (v0.10.29 — transparent
+  cross-schema FK).
+- **`schema_from_program(program, type_env)`** — Builds the
+  "target" schema from the AST's `@table` types. Resolves
+  TypeMetadata → Table with auto-naming (constraints
   `<table>_<col>_fkey`/`idx_<table>_<col>`/`chk_<table>_<idx>`),
-  composite PK como `PRIMARY KEY (a, b)` table-level, FK
-  qualified cross-schema.
-- **`introspect_schema(conn)`** — Lee el "current" schema de la
-  DB con queries contra `pg_catalog` (`pg_class`, `pg_attribute`,
-  `pg_index`, `pg_constraint`, `pg_am`). Cubre columns +
-  tipos + defaults + NOT NULL, indexes con WHERE clauses y
-  method (gin/gist/etc.), FKs con ON DELETE.
-- **`diff_schemas(current, target)`** — Devuelve `Vec<Change>`
-  determinístico:
+  composite PK as a table-level `PRIMARY KEY (a, b)`,
+  qualified cross-schema FK.
+- **`introspect_schema(conn)`** — Reads the "current" schema from
+  the DB with queries against `pg_catalog` (`pg_class`,
+  `pg_attribute`, `pg_index`, `pg_constraint`, `pg_am`). Covers
+  columns + types + defaults + NOT NULL, indexes with WHERE
+  clauses and method (gin/gist/etc.), FKs with ON DELETE.
+- **`diff_schemas(current, target)`** — Returns a deterministic
+  `Vec<Change>`:
   - `CreateTable` / `DropTable` / `RenameTable`.
-  - `AddColumn` / `DropColumn` / `RenameColumn` / `AlterColumnType`
-    / `AlterColumnNullable` / `AlterColumnDefault`.
-  - `CreateIndex` / `DropIndex` (v0.10.29: detecta cambios en
-    `using`/`where_clause`/`unique`/`columns` cuando nombres
-    matchean → `DROP + CREATE` para regenerar).
-  - `AddForeignKey` / `DropForeignKey` (con schema qualifier
-    cross-schema).
-- **`changes_to_sql(changes)`** — Emit DDL ejecutable directo
-  via `psql -f` o `db.exec`.
-- **`format_inspection_text` / `format_inspection_json`** (v0.10.28)
-  + **`format_inspection_*_all_schemas`** (v0.10.29) — Pretty-
-  print del schema para `fitz db inspect`.
-- **Tracking via tabla `_fitz_migrations`**: `applied_versions`,
-  `record_applied`, `apply_pending_migrations`. Idempotente —
-  re-correr `fitz db migrate` salta las ya aplicadas.
+  - `AddColumn` / `DropColumn` / `RenameColumn` /
+    `AlterColumnType` / `AlterColumnNullable` /
+    `AlterColumnDefault`.
+  - `CreateIndex` / `DropIndex` (v0.10.29: detects changes in
+    `using`/`where_clause`/`unique`/`columns` when names match →
+    `DROP + CREATE` to regenerate).
+  - `AddForeignKey` / `DropForeignKey` (with the cross-schema
+    qualifier).
+- **`changes_to_sql(changes)`** — Emits DDL directly executable
+  via `psql -f` or `db.exec`.
+- **`format_inspection_text` / `format_inspection_json`**
+  (v0.10.28) + **`format_inspection_*_all_schemas`** (v0.10.29) —
+  Pretty-print of the schema for `fitz db inspect`.
+- **Tracking via the `_fitz_migrations` table**:
+  `applied_versions`, `record_applied`,
+  `apply_pending_migrations`. Idempotent — re-running
+  `fitz db migrate` skips the already-applied ones.
 
-### testing.rs — testing built-in (Fase 9.z.2.a)
+### testing.rs — built-in testing (Phase 9.z.2.a)
 
-`TestRegistry { tests: Vec<TestSpec> }` con `TestSpec { name,
-handler, is_async, span, source_file }`. Thread-local activo
-seteado por `with_active_test_registry` (sync/async) durante el
-discovery del runner.
+`TestRegistry { tests: Vec<TestSpec> }` with `TestSpec { name,
+handler, is_async, span, source_file }`. Thread-local activated
+by `with_active_test_registry` (sync/async) during discovery for
+the runner.
 
-`with_test_source` agrega un nivel: el loader de módulos lo setea
-con el filename del módulo importado antes de eval, así los `@test`
-declarados en módulos quedan etiquetados con su archivo real (no
-con el del importer). `current_test_source` lo lee el branch
-`@test` de `process_decorator` al construir el `TestSpec`.
+`with_test_source` adds another level: the module loader sets it
+with the filename of the imported module before evaluation, so
+`@test`s declared in modules are labelled with their actual file
+(not with the importer's). `current_test_source` is read by the
+`@test` branch of `process_decorator` when building the
+`TestSpec`.
 
-### fmt.rs — formatter (Fase 9.z.1)
+### fmt.rs — formatter (Phase 9.z.1)
 
-Pretty-printer cero config sobre el AST. `format_source(text)`
-tokeniza con `tokenize_with_trivia` (Fase 9.z.1.b), parsea, recorre
-el AST emitiendo cada nodo en su forma canónica (4 espacios indent,
-comillas dobles, paréntesis obligatorios en condiciones, type defs
-multi-línea, etc.), y intercala los comments del `Trivia` stream
-en su posición original.
+Zero-config pretty-printer over the AST. `format_source(text)`
+tokenizes with `tokenize_with_trivia` (Phase 9.z.1.b), parses,
+walks the AST emitting each node in its canonical form (4-space
+indent, double quotes, mandatory parentheses on conditions,
+multi-line type defs, etc.), and interleaves the comments from
+the `Trivia` stream at their original position.
 
-Reglas de blank lines: máximo 1 consecutiva (las múltiples se
-colapsan), obligatoria entre `fn`/`type` top-level. Comments
-normalizados (`//foo` → `// foo`); trailing comments con 2 espacios
-de separación. Ver [docs/fmt-style.md](fmt-style.md) para la
-referencia completa.
+Blank-line rules: max 1 consecutive (multiple collapse), mandatory
+between top-level `fn`/`type`. Comments are normalized
+(`//foo` → `// foo`); trailing comments use 2 spaces of
+separation. See [docs/fmt-style.md](fmt-style.md) for the full
+reference.
 
-Deuda residual: bug conocido cuando un body de fn termina con
-trailing comment seguido de otro bloque — inserta blank spurious
-adentro del segundo body. Variante del caso edge ya documentado en
-`fmt-style.md`. Tracked en `docs/deudas-post-5b.md`.
+Residual debt: known bug when a fn body ends with a trailing
+comment followed by another block — it inserts a spurious blank
+inside the second body. Variant of the edge case documented in
+`fmt-style.md`. Tracked in `docs/deudas-post-5b.md`.
 
-### lint.rs — linter (Fase 9.z.5)
+### lint.rs — linter (Phase 9.z.5)
 
-Linter de patrones más allá de tipos. `lint_source(source,
-program) -> Vec<LintFinding>` walkea el AST recolectando findings
-+ aplica supresiones leyendo el source raw (busca
-`// @allow(<lint>)` en la línea inmediatamente anterior).
+Pattern linter beyond types. `lint_source(source, program) ->
+Vec<LintFinding>` walks the AST collecting findings + applies
+suppressions by reading the raw source (looks for
+`// @allow(<lint>)` on the line immediately above).
 
-4 lints implementados:
-- `unused_variable`: `let x = ...` cuyo nombre no aparece en uses,
-  skipea prefijo `_`.
-- `unused_import`: `import X` / `from X import Y` con binding no
-  referenciado.
-- `useless_match`: `match expr { _ => body }` con un solo arm
-  catch-all.
-- `string_concat`: `BinOp Add` con ambos operandos `Str` literales.
+4 implemented lints:
+- `unused_variable`: `let x = ...` whose name does not appear in
+  uses, skips the `_` prefix.
+- `unused_import`: `import X` / `from X import Y` with an
+  unreferenced binding.
+- `useless_match`: `match expr { _ => body }` with a single
+  catch-all arm.
+- `string_concat`: `BinOp Add` with both operands as `Str`
+  literals.
 
-Walkers `collect_uses_in_*` y `walk_exprs_in_stmt` recorren stmts
-y exprs recursivos. Catálogo cerrado (sin plugins en el MVP).
+Walkers `collect_uses_in_*` and `walk_exprs_in_stmt` recurse
+through stmts and exprs. Closed catalog (no plugins in the MVP).
 
-### lsp.rs — Language Server (Fase 9.x, feature `lsp`)
+### lsp.rs — Language Server (Phase 9.x, feature `lsp`)
 
-Feature-gated detrás de `cargo build --features lsp`. Implementa
-los handlers de tower-lsp:
-- `textDocument/didOpen`/`didChange`/`didClose`: parsea con
-  `parse_with_recovery`, corre `check_program`, emite
+Feature-gated behind `cargo build --features lsp`. Implements the
+tower-lsp handlers:
+- `textDocument/didOpen`/`didChange`/`didClose`: parses with
+  `parse_with_recovery`, runs `check_program`, emits
   `Diagnostic`s.
-- `textDocument/hover`: lee el tipo del nodo bajo el cursor del
-  `TypeInfo` (F16) y lo renderiza como markdown `fitz` block.
-- `textDocument/definition`: lee `DefinitionInfo` y devuelve la
-  `Location` del use → def_span.
-- `textDocument/completion`: enumera símbolos del scope-level +
-  fields/métodos after-dot.
+- `textDocument/hover`: reads the type of the node under the
+  cursor from `TypeInfo` (F16) and renders it as a markdown
+  `fitz` block.
+- `textDocument/definition`: reads `DefinitionInfo` and returns
+  the `Location` of the use → def_span.
+- `textDocument/completion`: enumerates scope-level symbols +
+  fields/methods after-dot.
 
-Pipeline pure-function en `check_source_with_types(text) ->
-(TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>)`. El bin vive
-en `src/bin/fitz-lsp.rs` (también feature-gated). El cliente VSCode
-en `editors/vscode/` lo invoca como subprocess.
+Pure-function pipeline in `check_source_with_types(text) ->
+(TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>)`. The bin
+lives at `src/bin/fitz-lsp.rs` (also feature-gated). The VSCode
+client at `editors/vscode/` invokes it as a subprocess.
 
-### py_interop.rs / py_types.rs / pyi_loader.rs / pyi_stub.rs — Interop Python (Fase 8, feature `python`)
+### py_interop.rs / py_types.rs / pyi_loader.rs / pyi_stub.rs — Python interop (Phase 8, feature `python`)
 
-Feature-gated detrás de `cargo build --features python`. Linkea
-contra CPython 3.10+ via [PyO3](https://pyo3.rs) (`abi3-py310`,
+Feature-gated behind `cargo build --features python`. Links
+against CPython 3.10+ via [PyO3](https://pyo3.rs) (`abi3-py310`,
 `auto-initialize`).
 
-`py_interop.rs` (Fase 8.1-8.6) expone `import_module`,
-`get_attr`, `call`, `value_to_py`/`py_to_value` (Fase 8.2 marshaling
-bidireccional de tipos compuestos). Las excepciones Python se
-envuelven en `Value::Result(Err)` con formato
-`"<ClassName>: <message>"` (Fase 8.3). Detección automática de
-corutinas + bridge tokio↔asyncio via `tokio::spawn_blocking` +
-`asyncio.run_until_complete` (Fase 8.6).
+`py_interop.rs` (Phase 8.1-8.6) exposes `import_module`,
+`get_attr`, `call`, `value_to_py`/`py_to_value` (Phase 8.2
+bidirectional marshaling of composite types). Python exceptions
+are wrapped in `Value::Result(Err)` with format
+`"<ClassName>: <message>"` (Phase 8.3). Automatic coroutine
+detection + tokio↔asyncio bridge via `tokio::spawn_blocking` +
+`asyncio.run_until_complete` (Phase 8.6).
 
-`py_types.rs` (Fase 8.5) implementa `fitz py-types`:
-introspección de modelos SQLAlchemy via duck typing sobre
-`__table__.columns`, emite `type` Fitz correspondientes.
+`py_types.rs` (Phase 8.5) implements `fitz py-types`:
+introspection of SQLAlchemy models via duck typing over
+`__table__.columns`, emits the corresponding Fitz `type`.
 
-`pyi_stub.rs` (v0.9.39) — Parser de stubs `.pyi` Python (PEP 484/561).
-Scope MVP: top-level `def`/`class`/vars con anotaciones, type
-expressions `int|str|float|bool|list[T]|dict[K,V]|Optional[T]`,
+`pyi_stub.rs` (v0.9.39) — Parser for Python `.pyi` stubs
+(PEP 484/561). MVP scope: top-level `def`/`class`/vars with
+annotations, type expressions
+`int|str|float|bool|list[T]|dict[K,V]|Optional[T]`,
 `Union[T, None]`, etc.
 
-`pyi_loader.rs` (Fase 8-pyi.B, v0.9.57) — Auto-pickup de stubs
-`.pyi` adyacentes al `.fitz` raíz. Cuando el programa contiene
-`from python import foo`, el loader busca `<base_dir>/foo.pyi` y, si
-existe, parsea con `pyi_stub::parse_stub` y registra los nominales
-declarados en el `TypeEnv` ANTES del checker. Silent fallback: si
-no existe, el binding sigue como `Type::PyAny` opaco.
+`pyi_loader.rs` (Phase 8-pyi.B, v0.9.57) — Auto-pickup of `.pyi`
+stubs adjacent to the root `.fitz`. When the program contains
+`from python import foo`, the loader looks for
+`<base_dir>/foo.pyi` and, if it exists, parses it with
+`pyi_stub::parse_stub` and registers the declared nominals in
+the `TypeEnv` BEFORE the checker. Silent fallback: if it does
+not exist, the binding remains opaque as `Type::PyAny`.
 
-### logging.rs — Structured logging built-in (Fase 12.3.a)
+### logging.rs — Structured logging built-in (Phase 12.3.a)
 
-Implementa `log.info`/`log.warn`/`log.error`/`log.debug` con kwargs
-heterogéneos (Int/Float/Str/Bool/Null/Secret/List/Map). Output JSON
-flat a stderr (containers/CI/redirección) o pretty con ANSI colors
-(TTY). Override explícito via `FITZ_LOG_FORMAT=json|pretty`. Filter
-via `RUST_LOG` (default `info`). Redacción recursiva de
-`Value::Secret` en List/Map. `SpanContext` (trace_id 32 hex /
-span_id 16 hex) atravesando `tokio::task_local!` para correlación
-multi-thread; los logs adentro de un handler HTTP heredan
-automático el trace_id del request.
+Implements `log.info`/`log.warn`/`log.error`/`log.debug` with
+heterogeneous kwargs (Int/Float/Str/Bool/Null/Secret/List/Map).
+Output is flat JSON to stderr (containers/CI/redirection) or
+pretty with ANSI colors (TTY). Explicit override via
+`FITZ_LOG_FORMAT=json|pretty`. Filtering via `RUST_LOG` (default
+`info`). Recursive redaction of `Value::Secret` in List/Map.
+`SpanContext` (trace_id 32 hex / span_id 16 hex) flowing through
+`tokio::task_local!` for multi-thread correlation; logs inside
+an HTTP handler automatically inherit the request's trace_id.
 
-### observability.rs — OTLP exporter para spans HTTP (Fase 12.3.c)
+### observability.rs — OTLP exporter for HTTP spans (Phase 12.3.c)
 
-Cuando `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada, conecta los
-spans que abre `dispatch_request` (12.3.b) a un backend OTel real
-(Jaeger, Tempo, Honeycomb, Datadog). Sin esa var, `init_otel()` es
-no-op silencioso — zero overhead. Env vars OTel-standard:
-`OTEL_SERVICE_NAME` (default `fitz-app`),
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, it connects the spans
+that `dispatch_request` (12.3.b) opens to a real OTel backend
+(Jaeger, Tempo, Honeycomb, Datadog). Without that var,
+`init_otel()` is a silent no-op — zero overhead. OTel-standard
+env vars: `OTEL_SERVICE_NAME` (default `fitz-app`),
 `OTEL_TRACES_SAMPLER_ARG` (ratio `0.0..1.0`, default `1.0`).
-Iter2.a (v0.12.1) derivó `trace_id`/`span_id` del span OTel
-cuando está activo para correlación bit-a-bit Fitz↔OTel: el
-mismo trace_id aparece en logs stderr y en el backend OTel.
-Iter2.Tier3 (v0.12.2) sumó endpoint `/metrics` Prometheus via
-`metrics-exporter-prometheus` con dual gate
-`@server(prometheus=true)` (compile-time) o `FITZ_PROMETHEUS=1`
-(runtime). Iter2.Tier2 (bridge métricas OTel) **bloqueado** por
-release del crate `metrics-exporter-opentelemetry` compatible con
-`opentelemetry_sdk 0.32` — Prometheus pull cubre el caso 90%
-mientras tanto.
+Iter2.a (v0.12.1) derived `trace_id`/`span_id` from the OTel span
+when active for bit-for-bit Fitz↔OTel correlation: the same
+trace_id appears in stderr logs and in the OTel backend.
+Iter2.Tier3 (v0.12.2) added a `/metrics` Prometheus endpoint via
+`metrics-exporter-prometheus` with dual gate
+`@server(prometheus=true)` (compile-time) or `FITZ_PROMETHEUS=1`
+(runtime). Iter2.Tier2 (OTel metrics bridge) is **blocked** by
+the release of the `metrics-exporter-opentelemetry` crate
+compatible with `opentelemetry_sdk 0.32` — Prometheus pull
+covers the 90% case in the meantime.
 
-### docker.rs — `fitz docker init` + `fitz docker build` (Fase 12.4)
+### docker.rs — `fitz docker init` + `fitz docker build` (Phase 12.4)
 
-Sub-comando `fitz docker init` que genera 3 archivos en el
-directorio del manifest: `Dockerfile` multi-stage (builder con
-imagen oficial `ghcr.io/thegreekman76/fitz:<tag>` que invoca
-`fitz build`, runtime `gcr.io/distroless/cc-debian12` o
-`python:3.12-slim-bookworm` si hay interop Python),
-`.dockerignore`, y `docker-compose.yml` smart. Detección AST-only
-del entry point (`@server(N)` → `EXPOSE` + `ports:`,
+The `fitz docker init` sub-command generates 3 files in the
+manifest directory: multi-stage `Dockerfile` (builder with the
+official image `ghcr.io/thegreekman76/fitz:<tag>` that runs
+`fitz build`, runtime `gcr.io/distroless/cc-debian12` or
+`python:3.12-slim-bookworm` if there is Python interop),
+`.dockerignore`, and a smart `docker-compose.yml`. AST-only
+detection of the entry point (`@server(N)` → `EXPOSE` + `ports:`,
 `db.connect(...)` → service `postgres:16-alpine` + healthcheck,
 `@cron` → `restart: unless-stopped`, `from python import` →
-runtime swap). Política skip-por-default + `--force`. Bonus
-`fitz docker build [--tag X]` thin wrapper sobre
+runtime swap). Skip-by-default + `--force` policy. Bonus
+`fitz docker build [--tag X]` thin wrapper over
 `docker build -t <tag> .`.
 
-### deploy.rs — `fitz deploy <target>` orchestrator (Fase 12.6)
+### deploy.rs — `fitz deploy <target>` orchestrator (Phase 12.6)
 
-Thin wrapper sobre `docker build/push` y `docker compose up`
-según target. Targets MVP: `docker` (build + push con `--no-push`
-opcional) y `compose` (up local con `--no-detach`/`--no-build`).
-Aborta si falta Dockerfile/compose.yml (sugiere
-`fitz docker init`). Targets `fly`/`railway`/`k8s` quedan como
-deuda visible — para esos, correr los CLIs directo. Detección
-AST-only del entry point para validar que el proyecto está listo.
-NO toca codegen (no emite código Rust).
+Thin wrapper over `docker build/push` and `docker compose up`
+depending on the target. MVP targets: `docker` (build + push with
+optional `--no-push`) and `compose` (local up with
+`--no-detach`/`--no-build`). Aborts if Dockerfile/compose.yml is
+missing (suggests `fitz docker init`). Targets
+`fly`/`railway`/`k8s` remain as visible debt — for those, run
+the CLIs directly. AST-only detection of the entry point to
+validate that the project is ready. Does NOT touch codegen
+(emits no Rust code).
 
-### launcher_template.rs — Launcher para `--bundle-python` (Fase 8.b)
+### launcher_template.rs — Launcher for `--bundle-python` (Phase 8.b)
 
-Cuando `fitz build --bundle-python` está activo, el output NO es
-el binario "real" directo, sino un **launcher** Rust standalone
-que lleva embebidos:
-1. El tarball PBS (CPython 3.14.x install_only_stripped) via
+When `fitz build --bundle-python` is active, the output is NOT
+the "real" binary directly, but a standalone Rust **launcher**
+that embeds:
+1. The PBS tarball (CPython 3.14.x install_only_stripped) via
    `include_bytes!`.
-2. El "real binary" (transpile estándar con feature `python`,
-   linkea libpython).
+2. The "real binary" (standard transpile with feature `python`,
+   links libpython).
 
-En primer run, el launcher extrae todo a `$TMPDIR/fitz-py-<hash>/`,
-setea `PYTHONHOME` + `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/
-`PATH`, y `exec`/spawn-and-wait del real binary. Sentinel
-`.extracted` marca completitud; runs subsecuentes reusan el dir.
-Timing observado Windows 11 SSD: cold ~5 s, warm ~50 ms.
+On the first run, the launcher extracts everything to
+`$TMPDIR/fitz-py-<hash>/`, sets `PYTHONHOME` +
+`LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/`PATH`, and
+`exec`s/spawn-and-waits the real binary. A `.extracted` sentinel
+marks completion; subsequent runs reuse the dir. Observed timing
+Windows 11 SSD: cold ~5 s, warm ~50 ms.
 
-Sub-paso 8.c suma `--bundle-pip <PACKAGE>` (repetible) +
-`--bundle-pip-requirements <FILE>`: pip packages se preinstalan
-en venv temporal y se empaquetan en tarball secundario también
-embebido. Cache key (FNV-1a hash sobre bundle_pip args +
-requirements file contents) con sidecar `inputs_hash` para reuso.
+Sub-step 8.c adds `--bundle-pip <PACKAGE>` (repeatable) +
+`--bundle-pip-requirements <FILE>`: pip packages are
+preinstalled into a temporary venv and packed into a secondary
+tarball, also embedded. Cache key (FNV-1a hash over the
+`bundle_pip` args + requirements file contents) with an
+`inputs_hash` sidecar for reuse.
 
-### pbs.rs — python-build-standalone downloader (Fase 8.b)
+### pbs.rs — python-build-standalone downloader (Phase 8.b)
 
-Descarga el tarball `install_only_stripped` de la release pinned
-(constante `PBS_RELEASE`, bump manual c/3-6 meses) para el triple
-destino y lo guarda en `<cache>/pbs/<tarball-name>` (cache global
-compartido entre builds, default `~/.fitz/cache/`, override con
-`FITZ_CACHE_DIR`). Builds reproducibles (misma política que
-`Cargo.lock`). CPython 3.14.x dentro del rango `abi3-py310`.
+Downloads the `install_only_stripped` tarball from the pinned
+release (constant `PBS_RELEASE`, manual bump every 3-6 months)
+for the destination triple and saves it at
+`<cache>/pbs/<tarball-name>` (global cache shared across builds,
+default `~/.fitz/cache/`, override via `FITZ_CACHE_DIR`).
+Reproducible builds (same policy as `Cargo.lock`). CPython 3.14.x
+within the `abi3-py310` range.
 
-### cli.rs — CLI builder nativo (Fase 13)
+### cli.rs — Native CLI builder (Phase 13)
 
-`@command("name", desc="...")` sobre una fn declara un comando
-CLI. El binario producido por `fitz build` parsea `std::env::args()`
-y dispatcha al comando matcheante. Convención de params:
-sin default → positional arg requerido (`mybin <name>`); con
-default → flag opcional (`--name <value>`); Bool con default
-`false` → flag bool (`--loud`). Help autogenerado con
-`mybin --help` + `mybin <cmd> --help`. El intérprete `fitz run`
-también puede correr CLI programs.
+`@command("name", desc="...")` on a fn declares a CLI command.
+The binary produced by `fitz build` parses `std::env::args()`
+and dispatches to the matching command. Param convention: no
+default → required positional arg (`mybin <name>`); with default
+→ optional flag (`--name <value>`); Bool with default `false` →
+bool flag (`--loud`). Auto-generated help with `mybin --help` +
+`mybin <cmd> --help`. The `fitz run` interpreter can also run
+CLI programs.
 
-### format.rs — `FormatSpec` aplicado a un `Value` (mini-tanda Fm)
+### format.rs — `FormatSpec` applied to a `Value` (mini-batch Fm)
 
-Implementa la semántica completa de format spec estilo Python
-sobre `Value`: width, alignment, fill, sign, alternate form,
-grouping (`,`/`_`), precision, type chars (`b`/`c`/`d`/`e`/`E`/
-`f`/`F`/`g`/`G`/`o`/`s`/`x`/`X`/`%`). Entry point
-`format_value_with_spec(value, spec) -> Result<String, String>`
-con mensaje legible si tipo y spec son incompatibles. Consumido
-por la sintaxis `"{x:>10.2f}"` en strings interpolados.
+Implements the full Python-style format-spec semantics over
+`Value`: width, alignment, fill, sign, alternate form, grouping
+(`,`/`_`), precision, type chars
+(`b`/`c`/`d`/`e`/`E`/`f`/`F`/`g`/`G`/`o`/`s`/`x`/`X`/`%`). Entry
+point `format_value_with_spec(value, spec) -> Result<String, String>`
+with a readable message if the type and spec are incompatible.
+Consumed by the `"{x:>10.2f}"` syntax in interpolated strings.
 
-### error.rs — manejo de errores
+### error.rs — error handling
 
-`FitzError` común a todas las fases, con `kind`, `line`, `column`,
-`message`, `hint` opcional. `ErrorKind` enum cubre errores de
-lexer/parser/evaluator/checker. `impl Display` formatea con la
-posición cuando es distinta de `0:0`. Cada fase del compilador
-devuelve `Result<T, FitzError>` y `main.rs` decide cómo mostrarlos
-según el sub-comando.
+`FitzError` common to every phase, with `kind`, `line`, `column`,
+`message`, optional `hint`. The `ErrorKind` enum covers
+lexer/parser/evaluator/checker errors. `impl Display` formats
+with the position when it is not `0:0`. Each compiler phase
+returns `Result<T, FitzError>` and `main.rs` decides how to
+display them based on the sub-command.
 
-## Por qué este orden y no otro
+## Why this order and not another
 
-**Separar lexer / parser / AST / checker / eval / codegen** es la
-estructura clásica de un compilador, pero hay decisiones específicas
-del proyecto que vale aclarar:
+**Separating lexer / parser / AST / checker / eval / codegen** is
+the classic structure of a compiler, but there are project-specific
+decisions worth pointing out:
 
-- **El checker corre antes del eval y antes del codegen, no como una
-  capa opcional.** Modo strict por default en `fitz run` (y siempre en
-  `fitz build`) atrapa errores temprano. La flag `--no-typecheck` está
-  para diagnosticar bugs del checker, no para usuarios finales.
+- **The checker runs before eval and before codegen, not as an
+  optional layer.** Strict mode by default in `fitz run` (and
+  always in `fitz build`) catches errors early. The
+  `--no-typecheck` flag exists to diagnose checker bugs, not for
+  end users.
 
-- **El evaluator usa el AST directamente, sin IR tipado.** Es más
-  simple y suficientemente rápido para el caso de uso (servidor de
-  desarrollo, scripts). El codegen también consume el AST + TypeEnv
-  directamente. Cuando hizo falta info tipada por nodo (LSP hover,
-  REPL `:type`), se sumó como **side-table indexado por span**
-  (`TypeInfo`/`DefinitionInfo` de F16) en lugar de un IR formal —
-  más barato.
+- **The evaluator uses the AST directly, without a typed IR.** It
+  is simpler and fast enough for the use case (development
+  server, scripts). The codegen also consumes the AST + TypeEnv
+  directly. When typed info per node was needed (LSP hover, REPL
+  `:type`), it was added as a **span-indexed side-table**
+  (`TypeInfo`/`DefinitionInfo` from F16) instead of a formal IR —
+  cheaper.
 
-- **`http.rs` está separado del evaluator** porque la interacción
-  tokio/axum es lo suficientemente compleja para vivir aparte y
-  porque permite que el evaluator no dependa de `tokio` para sus
-  paths sync. Post-F17 ya no hay bridge entre intérprete y server;
-  todo corre en un solo runtime tokio multi-thread. WebSockets
-  (Fase 9.w.2) y cron jobs (Fase 9.w.3) viven en el MISMO registry
-  + runtime, compartiendo el `Arc<HttpRegistry>` — un programa
-  con HTTP + WS + cron arranca un único proceso con todos los
-  subsistemas coordinados.
+- **`http.rs` is separate from the evaluator** because the
+  tokio/axum interaction is complex enough to live apart and so
+  the evaluator does not depend on `tokio` for its sync paths.
+  After F17 there is no longer a bridge between the interpreter
+  and the server; everything runs in a single multi-thread tokio
+  runtime. WebSockets (Phase 9.w.2) and cron jobs (Phase 9.w.3)
+  live in the SAME registry + runtime, sharing the
+  `Arc<HttpRegistry>` — a program with HTTP + WS + cron starts a
+  single process with all the subsystems coordinated.
 
-- **El codegen produce un Cargo project, no un solo `.rs` + invocación
-  de `rustc`.** Los imports cross-archivo necesitan `mod`, los
-  decoradores HTTP necesitan dependencias externas, y cargo cachea
-  builds incrementales. Trade-off conocido: la primera compilación
-  cuesta ~1-2 s extra vs `rustc` directo.
+- **The codegen produces a Cargo project, not a single `.rs` +
+  `rustc` invocation.** Cross-file imports need `mod`, HTTP
+  decorators need external dependencies, and cargo caches
+  incremental builds. Known trade-off: the first compilation
+  costs ~1-2 s extra vs direct `rustc`.
 
-- **Paridad bit-a-bit `fitz run` ↔ `fitz build` es contrato del
-  lenguaje, no implementación.** Cada feature (HTTP, WS, auth, ORM,
-  cron, interop Python, observability) tiene su path tanto en
-  `evaluator.rs` como en `codegen.rs`, y los tests E2E
-  (`compile_e2e`) validan que el output coincide carácter por
-  carácter. Las divergencias (ej. `fitz build` no soporta state
-  compartido pre-F11) son errores de codegen explícitos con mensaje
-  citando el sub-paso futuro, no silent fallbacks.
+- **Bit-for-bit parity `fitz run` ↔ `fitz build` is a language
+  contract, not implementation detail.** Every feature (HTTP, WS,
+  auth, ORM, cron, Python interop, observability) has a path in
+  both `evaluator.rs` and `codegen.rs`, and the E2E tests
+  (`compile_e2e`) validate that the output matches character by
+  character. Divergences (e.g., `fitz build` does not support
+  shared state pre-F11) are explicit codegen errors with a message
+  citing the future sub-step, not silent fallbacks.
 
-- **Features opcionales (`python`, `lsp`) son cargo features**, no
-  binarios separados ni crates aparte. La razón: el cuerpo del
-  evaluator y el codegen mantienen branches `#[cfg(feature =
-  "python")]` para registrar/serializar `Value::PyObject`. Splitting
-  a crates separadas implicaría re-exponer demasiada API interna. Sí
-  hay un bin separado para `fitz-lsp` (`required-features = ["lsp"]`)
-  para que `cargo build` default sin features no arrastre tower-lsp.
+- **Optional features (`python`, `lsp`) are cargo features**, not
+  separate binaries or separate crates. Reason: the body of the
+  evaluator and codegen keep `#[cfg(feature = "python")]`
+  branches to register/serialize `Value::PyObject`. Splitting
+  into separate crates would mean re-exposing too much internal
+  API. There IS a separate bin for `fitz-lsp`
+  (`required-features = ["lsp"]`) so the default `cargo build`
+  without features does not drag tower-lsp in.
 
-- **`--bundle-python` produce un launcher, no el binario directo**
-  ([launcher_template.rs](../src/launcher_template.rs)). Embeber
-  CPython en un binario standalone que no requiere Python en el
-  destino exige extraer el runtime a un dir cache + setear env vars
-  antes del exec — eso vive en un thin Rust binary aparte que
-  envuelve el binario "real" emitido por el codegen estándar. El
-  pattern es el mismo que Datasette usa para distribuir aplicaciones
-  Python como CLIs portables.
+- **`--bundle-python` produces a launcher, not the binary
+  directly** ([launcher_template.rs](../src/launcher_template.rs)).
+  Embedding CPython in a standalone binary that does not require
+  Python at the destination forces extracting the runtime to a
+  cache dir + setting env vars before `exec` — that lives in a
+  separate thin Rust binary that wraps the "real" binary emitted
+  by the standard codegen. The pattern is the same one Datasette
+  uses to distribute Python applications as portable CLIs.
 
-- **Observability es opt-in por env vars, no por flag del lenguaje.**
-  `OTEL_EXPORTER_OTLP_ENDPOINT` ausente → `init_otel()` es no-op
-  silencioso. `RUST_LOG` ausente → logs solo a nivel `info`+.
-  `FITZ_PROMETHEUS=1` o `@server(prometheus=true)` activan
-  `/metrics`. Trade-off: opt-out de access logs HTTP automático
-  requiere `@server(observability=false)` explícito (deuda residual
-  ABIERTA: gating de deps OTel emitidas cuando el programa no las
-  usa — hoy se linkean siempre que hay handlers HTTP).
+- **Observability is opt-in via env vars, not a language flag.**
+  `OTEL_EXPORTER_OTLP_ENDPOINT` absent → `init_otel()` is a
+  silent no-op. `RUST_LOG` absent → logs only at `info`+ level.
+  `FITZ_PROMETHEUS=1` or `@server(prometheus=true)` enables
+  `/metrics`. Trade-off: opting out of automatic HTTP access
+  logs requires an explicit `@server(observability=false)`
+  (OPEN residual debt: gating of emitted OTel deps when the
+  program does not use them — today they are linked whenever
+  there are HTTP handlers).
 
-- **Package manager, DX, Docker stack, deploy y CLI builder son
-  módulos hermanos, no capas del compilador**. `manifest.rs`,
+- **Package manager, DX, Docker stack, deploy, and CLI builder
+  are sibling modules, not compiler layers**. `manifest.rs`,
   `lockfile.rs`, `git_dep.rs`, `fmt.rs`, `testing.rs`, `lint.rs`,
-  `docker.rs`, `deploy.rs`, `cli.rs` operan sobre el filesystem y
-  el AST, pero no son parte del pipeline core lexer→parser→checker→
-  eval/codegen. `main.rs` los invoca según sub-comando; no hay
-  acoplamiento profundo entre ellos.
+  `docker.rs`, `deploy.rs`, `cli.rs` operate on the filesystem
+  and the AST, but they are not part of the core
+  lexer→parser→checker→eval/codegen pipeline. `main.rs` invokes
+  them by sub-command; there is no deep coupling between them.
 
-- **El driver Postgres es puro Rust, sin libpq.** [db.rs](../src/db.rs)
-  implementa el wire protocol v3.0 + SCRAM-SHA-256 + TLS (rustls) +
-  pool de conexiones desde cero, sin `tokio-postgres`/`sqlx`/`diesel`.
-  Razón: control completo del marshaling Fitz `Value` ↔ `PgValue`
-  (incluyendo arrays con NULL adentro, JSONB libre vs `Map<Str, T>`
-  concreto, Date/DateTime/Uuid como tipos nativos), y promesa "cero
-  deps externas para features intrínsecas". El ORM declarativo
-  (`@table`/`@primary`/`@column`/`@belongs_to`/`@has_many`) vive
-  encima — los decoradores se procesan en `types.rs` poblando
-  `TableMetadata`, el SQL builder en `evaluator.rs` (`.where`
-  closures translateadas a SQL parametrizado) + `codegen.rs`
-  (paridad). [migrations.rs](../src/migrations.rs) consume el
-  driver para introspect/diff/migrate.
+- **The Postgres driver is pure Rust, without libpq.**
+  [db.rs](../src/db.rs) implements wire protocol v3.0 +
+  SCRAM-SHA-256 + TLS (rustls) + connection pool from scratch,
+  without `tokio-postgres`/`sqlx`/`diesel`. Reason: full control
+  over the Fitz `Value` ↔ `PgValue` marshaling (including arrays
+  with NULLs inside, free-form JSONB vs concrete `Map<Str, T>`,
+  Date/DateTime/Uuid as native types), and the promise of "zero
+  external deps for intrinsic features". The declarative ORM
+  (`@table`/`@primary`/`@column`/`@belongs_to`/`@has_many`) lives
+  on top — decorators are processed in `types.rs` populating
+  `TableMetadata`, the SQL builder in `evaluator.rs`
+  (`.where` closures translated to parametrized SQL) +
+  `codegen.rs` (parity). [migrations.rs](../src/migrations.rs)
+  consumes the driver for introspect/diff/migrate.
