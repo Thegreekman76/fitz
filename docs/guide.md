@@ -10195,16 +10195,20 @@ async fn check(headers: Map<Str, Str>) -> Result<User> {
     return resolve_user_from_db(user_id).await
 }
 
+// El payload del JWT en `fitz build` MVP es `Map<Str, Str>` strict, así
+// que numéricos van serializados a string. En `fitz run` la heterogeneidad
+// pasa, pero usamos el shape estricto para mantener paridad bit-a-bit.
+
 @post("/auth/login")
 async fn login(body: LoginRequest) -> Result<LoginResponse> {
     let user = verify_credentials(body.email, body.password).await?
-    let jti = uuid.v4()   // único por token
-    let exp = now_unix() + 3600 * 24   // 24h validity
+    let jti = Uuid.v4().to_str()  // UUID → Str para el payload
+    let exp = DateTime.now().timestamp() + 3600 * 24  // 24h validity
     let token = jwt.encode({
-        "sub": user.id,
+        "sub": "{user.id}",
         "jti": jti,
-        "exp": exp,
-        "role": user.role
+        "exp": "{exp}",
+        "role": user.role,
     }, secret())
     return Ok(LoginResponse { token: token })
 }
@@ -10215,8 +10219,12 @@ async fn logout(user: User, headers: Map<Str, Str>) -> Result<Null> {
     let token = extract_bearer(headers)?
     let claims = jwt.decode(token, secret())?
     let jti = claims.get("jti")?
-    let exp = claims.get("exp").parse_int()?
-    auth.blacklist(db, jti, exp).await?
+    // Bloqueamos el jti con una TTL fresca de 24h. Cuando el JWT expira,
+    // `jwt.decode` ya lo rechaza por expirado; la blacklist solo previene
+    // reuse del mismo jti antes de exp. `auth.blacklist` exige Int para
+    // `expires_at`, así que NO leemos exp del JWT (vendría como Str).
+    let ttl = DateTime.now().timestamp() + 3600 * 24
+    auth.blacklist(db, jti, ttl).await?
     return Ok(null)
 }
 
@@ -10226,15 +10234,16 @@ async fn refresh(user: User, headers: Map<Str, Str>) -> Result<LoginResponse> {
     // Estrategia simple: revocar el token actual y emitir uno nuevo.
     let token = extract_bearer(headers)?
     let old_claims = jwt.decode(token, secret())?
-    auth.blacklist(db, old_claims.get("jti")?, old_claims.get("exp").parse_int()?).await?
+    let ttl = DateTime.now().timestamp() + 3600 * 24
+    auth.blacklist(db, old_claims.get("jti")?, ttl).await?
 
-    let new_jti = uuid.v4()
-    let new_exp = now_unix() + 3600 * 24
+    let new_jti = Uuid.v4().to_str()
+    let new_exp = DateTime.now().timestamp() + 3600 * 24
     let new_token = jwt.encode({
-        "sub": user.id,
+        "sub": "{user.id}",
         "jti": new_jti,
-        "exp": new_exp,
-        "role": user.role
+        "exp": "{new_exp}",
+        "role": user.role,
     }, secret())
     return Ok(LoginResponse { token: new_token })
 }

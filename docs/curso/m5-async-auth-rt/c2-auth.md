@@ -582,10 +582,11 @@ todo el flow: tipos custom + decoradores + body deserialization
 | `hash.password` / `hash.verify` (Argon2id) | ✅ | ✅ |
 | OpenAPI `bearerAuth` + 401/403 entries | ✅ | ✅ |
 | `return <status> { ... }` para 401 en login | ✅ | ✅ |
-| Payload heterogéneo en `jwt.encode/decode` | ❌ | ❌ |
-| RBAC con roles custom (`@requires("editor")`) | ❌ | ❌ |
+| Payload heterogéneo en `jwt.encode/decode` (`fitz run`) | ✅ | ❌ |
+| RBAC con roles custom (`@requires("editor")`) — v0.12.4 | ✅ | ✅ |
+| Token revocación con `auth.blacklist`/`is_blacklisted` — v0.12.6 | ✅ | ✅ |
 | Sessions cookie-based | ❌ | ❌ |
-| Token refresh / revocación | ❌ | ❌ |
+| Refresh tokens dedicados (OAuth2 dual-token) | ❌ | ❌ |
 | Asimétricos (RS256/ES256) | ❌ | ❌ |
 
 El binario nativo embebe `jsonwebtoken` + `argon2` + `rand_core`

@@ -3904,7 +3904,7 @@ patrón vive en el cap 28), boilerplates sin cambios.
    MVP usa un solo token largo. Refresh tokens dedicados queda como
    pattern futuro si entra demanda.
 4. **`jwt.encode` con `jti` automático**: el user pone
-   `"jti": uuid.v4()` a mano. Refinamiento futuro: kwarg `jti=true`
+   `"jti": Uuid.v4()` a mano. Refinamiento futuro: kwarg `jti=true`
    que auto-genera y devuelve `(token, jti)`.
 5. **Logging del blacklist hit**: el flow actual no loguea por
    default cuando un token se rechaza por blacklist. El user puede
