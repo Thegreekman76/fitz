@@ -568,6 +568,30 @@ fn sslmode_str(m: SslMode) -> &'static str {
     }
 }
 
+/// v0.16.x — Wraps TCP connect errors with the requested sslmode so
+/// the user-facing message always mentions whether TLS was expected.
+/// Before this, a TCP connect refused (e.g. Postgres down) on a
+/// `sslmode=require` URL produced `"I/O: connection refused"` —
+/// indistinguishable from `sslmode=disable` and unhelpful for
+/// diagnosing managed-Postgres setup. Now it produces `"I/O: failed
+/// to connect (sslmode=require, TLS upgrade did not start):
+/// connection refused"`. Backward compatible for `sslmode=disable`
+/// (unchanged path, raw `io::Error` preserved).
+fn connect_error_with_sslmode_context(io_err: io::Error, sslmode: SslMode) -> DbError {
+    if sslmode == SslMode::Disable {
+        DbError::Io(io_err)
+    } else {
+        let kind = io_err.kind();
+        DbError::Io(io::Error::new(
+            kind,
+            format!(
+                "failed to connect (sslmode={}, TLS upgrade did not start): {io_err}",
+                sslmode_str(sslmode)
+            ),
+        ))
+    }
+}
+
 /// Builds the rustls `ClientConfig` based on sslmode + sslrootcert:
 ///   - `require`     → NoVerifier (accepts any cert)
 ///   - `verify-ca`   → chain validated, hostname IGNORED (wrapper
@@ -2206,10 +2230,19 @@ impl Connection {
     /// `Box<dyn DbReadWrite>`.
     pub async fn connect(config: &ConnectionConfig) -> DbResult<Self> {
         let addr = format!("{}:{}", config.host, config.port);
-        let tcp_stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
-            .await
-            .map_err(|_| DbError::Io(io::Error::new(io::ErrorKind::TimedOut, "connect timeout")))?
-            .map_err(DbError::Io)?;
+        let tcp_stream =
+            match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr)).await {
+                Err(_) => {
+                    return Err(connect_error_with_sslmode_context(
+                        io::Error::new(io::ErrorKind::TimedOut, "connect timeout"),
+                        config.sslmode,
+                    ));
+                }
+                Ok(Err(e)) => {
+                    return Err(connect_error_with_sslmode_context(e, config.sslmode));
+                }
+                Ok(Ok(s)) => s,
+            };
 
         // v0.10.13 (B-1 fix) — TCP_NODELAY disables Nagle's
         // algorithm. CRITICAL for the Extended Query Protocol: we
@@ -4924,6 +4957,54 @@ mod tests {
         assert!(
             !line.contains("sk-very-secret"),
             "el secret NO debe aparecer en el log: {line}"
+        );
+    }
+
+    // ----- connect_error_with_sslmode_context (v0.16.x — Phase 10.1.b polish) -----
+
+    #[test]
+    fn connect_error_sslmode_disable_preserves_raw_io() {
+        let io_err = io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused");
+        let err = connect_error_with_sslmode_context(io_err, SslMode::Disable);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("connection refused"),
+            "expected raw io message, was: {msg}"
+        );
+        assert!(
+            !msg.contains("sslmode"),
+            "disable path should NOT mention sslmode, was: {msg}"
+        );
+    }
+
+    #[test]
+    fn connect_error_sslmode_require_mentions_sslmode_and_tls() {
+        let io_err = io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused");
+        let err = connect_error_with_sslmode_context(io_err, SslMode::Require);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("sslmode=require"),
+            "expected sslmode=require in message, was: {msg}"
+        );
+        assert!(msg.contains("TLS"), "expected TLS in message, was: {msg}");
+        assert!(
+            msg.contains("connection refused"),
+            "expected original io message preserved, was: {msg}"
+        );
+    }
+
+    #[test]
+    fn connect_error_sslmode_verify_full_mentions_sslmode() {
+        let io_err = io::Error::new(io::ErrorKind::TimedOut, "connect timeout");
+        let err = connect_error_with_sslmode_context(io_err, SslMode::VerifyFull);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("sslmode=verify-full"),
+            "expected sslmode=verify-full in message, was: {msg}"
+        );
+        assert!(
+            msg.contains("connect timeout"),
+            "expected original io message preserved, was: {msg}"
         );
     }
 }
