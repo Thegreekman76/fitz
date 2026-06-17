@@ -1,0 +1,18 @@
+// Tipos de I/O del API HTTP. Separados de los modelos DB
+// (`types/user.fitz`, `types/post.fitz`) para que el cliente HTTP
+// no pueda pasar `id` / `created_at` — esos los asigna Postgres.
+
+type NewUser {
+    name: Str = "",
+    email: Str = "",
+}
+
+type NewPost {
+    title: Str = "",
+    body: Str = "",
+}
+
+type UpdateUser {
+    name: Str = "",
+    email: Str = "",
+}

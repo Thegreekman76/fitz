@@ -1,0 +1,68 @@
+// main.fitz — entry point del benchmark app Python (apps/python/).
+//
+// Stack: Fitz + interop Python via `from python import` + SQLAlchemy
+// 2.x + psycopg2. Misma firma HTTP que apps/fitz/ y apps/node/ —
+// la comparación es legítima.
+
+from types.user import User
+from types.post import Post
+from types.api import NewUser, NewPost, UpdateUser
+from data.users import create as user_create, find as user_find, list_all as user_list, update as user_update, init_schema
+from data.posts import create as post_create, list_for_user as posts_of_user
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+match init_schema() {
+    Ok(_)  => print("[boot] DB conectada y schema inicializado"),
+    Err(e) => print("[boot] ERROR conectando a la DB — {e}"),
+}
+
+// GET /users?limit=N — lista paginada. `Int?` opcional con default 20.
+@get("/users?limit={limit}")
+fn list_users(limit: Int?) -> Result<List<User>> {
+    let n = match limit {
+        null => 20,
+        x    => x,
+    }
+    return user_list(n)
+}
+
+// GET /users/{id} — single read.
+@get("/users/{id}")
+fn get_user(id: Int) -> Result<User> {
+    return user_find(id)
+}
+
+// GET /users/{id}/posts — posts de un user.
+@get("/users/{id}/posts")
+fn list_user_posts(id: Int) -> Result<List<Post>> {
+    return posts_of_user(id)
+}
+
+// POST /users — crear user.
+@post("/users")
+fn create_user(body: NewUser) -> Result<User> {
+    return user_create(body.name, body.email)
+}
+
+// POST /users/{id}/posts — crear post asociado.
+@post("/users/{id}/posts")
+fn create_post(id: Int, body: NewPost) -> Result<Post> {
+    return post_create(id, body.title, body.body)
+}
+
+// PUT /users/{id} — update name/email.
+@put("/users/{id}")
+fn update_user(id: Int, body: UpdateUser) -> Result<User> {
+    return user_update(id, body.name, body.email)
+}
+
+print("[ready] Server arrancando en :3000")
+print("[ready] Endpoints (mixed-workload bench):")
+print("[ready]   GET  /users?limit=N           — lista paginada")
+print("[ready]   GET  /users/<id>              — single read")
+print("[ready]   GET  /users/<id>/posts        — posts del user")
+print("[ready]   POST /users                   — crear user")
+print("[ready]   POST /users/<id>/posts        — crear post")
+print("[ready]   PUT  /users/<id>              — update")

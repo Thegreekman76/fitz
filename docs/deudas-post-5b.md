@@ -2825,19 +2825,36 @@ Descubiertas al hacer dogfood del bench:
   run.sh** v0.10.12 — container names correctos.
 - **POST x 500 sequential** en Git Bash Windows toma ~10 min por el
   overhead del subshell (~1s por iter del for loop). **Fix aplicado
-  en run.sh** — bajado a x 100. Posible mejora futura: usar `oha`
-  con body fijo para POST (ganamos throughput real ~100x, perdemos
-  email único por request — fair si POST hace UPSERT o si solo
-  medimos latencia bind/exec).
+  en run.sh** — bajado a x 100. ~~Posible mejora futura: usar `oha`
+  con body fijo para POST~~ **CERRADO (2026-06-17)** — el bench
+  nuevo `benchmarks/mixed-workload/` usa `k6` con body unique
+  per VU per iter (template `vu${vu}-it${iter}-r${random}@...`)
+  sosteniendo 50 VUs concurrentes 1 min en `writes-only.js`. Mide
+  POST throughput **real** sin perder email único: **Fitz 847 RPS
+  vs Python 170 RPS** sobre el mismo POST `/users` — 5x ganancia
+  invisible en el bench v0.10.13. Detalle en
+  [`benchmarks/mixed-workload/README.md`](../benchmarks/mixed-workload/README.md).
 - **Hardware info NO se auto-detecta** en el summary.md. Hay
   placeholders `TODO`. Posible mejora: el script intenta detectar
   CPU/RAM/OS automáticamente (cmd `wmic` Windows / `lscpu` Linux /
   `sysctl -a` macOS) y los pinea al final.
-- **Bench unidimensional**: 3 endpoints aislados. Faltan escenarios
+- ~~**Bench unidimensional**: 3 endpoints aislados. Faltan escenarios
   "extendidos" del roadmap original (mixed workload realista, bulk
-  inserts, escritura concurrente saturada). Quedan como mini-fase
-  futura cuando aparezca demanda real para publicar comparativa
-  más amplia.
+  inserts, escritura concurrente saturada).~~ **CERRADO PARCIAL
+  (2026-06-17)** — ver `benchmarks/mixed-workload/` (bench nuevo
+  con [`k6`](https://k6.io/) en lugar de `oha` para scripted
+  scenarios). Cubre: mixed workload realista (60% reads + 40%
+  writes intercalados), escritura concurrente saturada (50 VUs
+  sostenidos writes-only — cierra **"POST mide el cliente, no el
+  server"**), VU ramping para detectar saturation point, p99.9 +
+  error rate sobre el peak, comparativa **3 stacks** (Fitz vs
+  Python+SQLAlchemy **vs Node+Prisma**) sobre dominio `users +
+  posts` con FK. **Headline**: Fitz **31x mejor p95 que Python +
+  5.5x mejor p95 que Node** en writes-only sostenido; **45x mejor
+  p95 que Python** bajo mixed peak (Python satura a 503 ms p95,
+  Fitz mantiene 11 ms). Pendiente: bulk inserts (1k+ rows en una
+  transaction), queries con JOINs profundos sobre `api-orm-full`
+  como base — quedan como mini-fase futura si aparece demanda.
 
 ### Mini-fase v0.10.10 (2026-05-28) — Fix deadlock `__to_fitz_json` has_many virtual
 

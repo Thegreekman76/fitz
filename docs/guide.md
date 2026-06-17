@@ -11773,6 +11773,26 @@ pero requiere derives + runs Rust crudo. SQLAlchemy/ActiveRecord
 cubren ORM ergonómico pero pagan reflection runtime. Prisma
 genera schemas separados que viven aparte del lenguaje.
 
+### Performance vs los stacks vecinos
+
+Las decisiones de arriba (SQL constante codegen-time + driver
+puro + paridad intérprete↔binario) tienen efecto medible. Dos
+benchmarks reproducibles en el repo:
+
+- [**`benchmarks/orm-vs-sqlalchemy/`**](https://github.com/Thegreekman76/fitz/tree/main/benchmarks/orm-vs-sqlalchemy)
+  — Fitz vs Python+SQLAlchemy en endpoints aislados con `oha`
+  sustained c=10. **Fitz 7-9x más rápido en reads**, **5.5x más
+  eficiente en memoria**.
+- [**`benchmarks/mixed-workload/`**](https://github.com/Thegreekman76/fitz/tree/main/benchmarks/mixed-workload)
+  — Fitz vs Python+SQLAlchemy **vs Node+Prisma** bajo mixed
+  workload (60/40 reads/writes, 100 VUs peak ramping) sobre un
+  dominio `users + posts` con FK. Bajo el peak, Fitz mantiene
+  p95 de 11 ms; Python satura a 503 ms p95; Node queda en el
+  medio con 11.7x más memoria que Fitz.
+
+Detalle completo, tablas headline y "cómo reproducir" en
+[Benchmarks](benchmarks.md).
+
 ### Qué no está en el MVP
 
 Items comprometidos como deuda explícita:

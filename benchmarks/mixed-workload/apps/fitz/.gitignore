@@ -1,0 +1,10 @@
+# Build artifacts del codegen
+target/
+*.exe
+*.pdb
+
+# Local env
+.env
+
+# Logs locales
+*.log

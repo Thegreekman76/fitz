@@ -1,0 +1,8 @@
+[package]
+name = "fitz-bench-mixed-workload"
+version = "0.1.0"
+edition = "2026"
+description = "App Fitz para el benchmark mixed-workload — ORM nativo, users+posts"
+
+[bin]
+main = "src/main.fitz"

@@ -1,0 +1,182 @@
+// main.fitz — app Fitz purpose-built para el benchmark mixed-workload.
+//
+// Dominio: users + posts (1:N) con FK. Mismo shape que apps/python/
+// y apps/node/ para comparación cabeza-a-cabeza.
+//
+// Endpoints expuestos (los 3 stacks deben coincidir bit-a-bit en
+// path, body shape y JSON response):
+//
+//   GET  /users?limit=N           — lista paginada
+//   GET  /users/{id}              — single read por PK
+//   GET  /users/{id}/posts        — posts de un user (JOIN/preload)
+//   POST /users                   — crear user
+//   POST /users/{id}/posts        — crear post asociado
+//   PUT  /users/{id}              — update name/email
+//
+// Stack: driver Postgres v3.0 puro + ORM nativo Fitz (cap 31 guía).
+// Sin libpq, sin SQLAlchemy, sin ORMs externos — SQL constante en
+// codegen-time direct contra wire protocol Postgres.
+
+// ---- Modelo --------------------------------------------------------
+//
+// Orden de declaración: Post antes que User porque User declara
+// `@has_many("Post", ...)`. Forward refs entre @table types no
+// funcionan en el codegen hoy (deuda W17 del v0.10.7) — el target
+// del decorator debe estar declarado antes que el referrer.
+
+@table("posts") type Post {
+    @primary id: Int = 0
+    @belongs_to("User") user_id: Int = 0
+    title: Str = ""
+    body: Str = ""
+    @db_default created_at: Str = ""
+}
+
+@table("users") type User {
+    @primary id: Int = 0
+    name: Str = ""
+    email: Str = ""
+    @db_default created_at: Str = ""
+    @has_many("Post", via="user_id") posts: List<Post>
+}
+
+// Body types separados de los rows DB. El cliente HTTP no debería
+// poder pasar `id`/`created_at` — esos los asigna Postgres.
+
+type NewUser {
+    name: Str
+    email: Str
+}
+
+type NewPost {
+    title: Str
+    body: Str
+}
+
+type UpdateUser {
+    name: Str = ""
+    email: Str = ""
+}
+
+// ---- Setup ---------------------------------------------------------
+
+let DB_URL = env_or("DATABASE_URL", "postgres://fitz:fitz@localhost:5432/fitz?sslmode=disable")
+
+async fn init_schema() -> Result<Null> {
+    let conn = db.connect(DB_URL).await?
+
+    let users_sql = """
+        CREATE TABLE IF NOT EXISTS users (
+            id          bigserial PRIMARY KEY,
+            name        text NOT NULL,
+            email       text NOT NULL UNIQUE,
+            created_at  timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(users_sql, []).await?
+
+    let posts_sql = """
+        CREATE TABLE IF NOT EXISTS posts (
+            id          bigserial PRIMARY KEY,
+            user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title       text NOT NULL,
+            body        text NOT NULL DEFAULT '',
+            created_at  timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(posts_sql, []).await?
+
+    // Índice sobre posts.user_id — el bench corre `GET /users/{id}/posts`
+    // y sin índice cada query escanea la tabla completa.
+    let idx_sql = "CREATE INDEX IF NOT EXISTS posts_user_id_idx ON posts(user_id)"
+    let _ = conn.exec(idx_sql, []).await?
+
+    return Ok(null)
+}
+
+// ---- Handlers HTTP -------------------------------------------------
+
+// GET /users?limit=N — lista paginada. `limit: Int?` lo hace
+// opcional (null si falta del query string). Default 20.
+//
+// El `match` sobre Nullable usa la refinement de Pattern::Null +
+// Pattern::Ident que aterrizó en v0.10.6 (W2): `null => ...`
+// matchea solo null; `n => ...` matchea no-null y bindea `n: Int`.
+@get("/users?limit={limit}")
+async fn list_users(limit: Int?) -> Result<List<User>> {
+    let conn = db.connect(DB_URL).await?
+    let n = match limit {
+        null => 20,
+        x    => x,
+    }
+    return User.order_by(fn(u) => u.id).limit(n).all(conn).await
+}
+
+// GET /users/{id} — single read por PK.
+@get("/users/{id}")
+async fn get_user(id: Int) -> Result<User> {
+    let conn = db.connect(DB_URL).await?
+    return User.where(fn(u) => u.id == id).first(conn).await
+}
+
+// GET /users/{id}/posts — posts de un user. Query inline sobre
+// `posts` con WHERE user_id = id ordenado por id.
+@get("/users/{id}/posts")
+async fn list_user_posts(id: Int) -> Result<List<Post>> {
+    let conn = db.connect(DB_URL).await?
+    return Post.where(fn(p) => p.user_id == id).order_by(fn(p) => p.id).all(conn).await
+}
+
+// POST /users — crear user. `id: 0` sentinel deja a Postgres
+// asignar el bigserial. RETURNING * trae el row completo con id
+// y created_at reales. El virtual field `posts` se inicializa
+// vacío al insertar — el ORM lo skipea del INSERT (W17 v0.10.7).
+@post("/users")
+async fn create_user(body: NewUser) -> Result<User> {
+    let conn = db.connect(DB_URL).await?
+    return User.insert(conn, User {
+        id: 0,
+        name: body.name,
+        email: body.email,
+        created_at: "",
+        posts: [],
+    }).await
+}
+
+// POST /users/{id}/posts — crear post asociado.
+@post("/users/{id}/posts")
+async fn create_post(id: Int, body: NewPost) -> Result<Post> {
+    let conn = db.connect(DB_URL).await?
+    return Post.insert(conn, Post { id: 0, user_id: id, title: body.title, body: body.body, created_at: "" }).await
+}
+
+// PUT /users/{id} — update name/email. Después del UPDATE,
+// re-fetch para devolver el row actualizado completo.
+@put("/users/{id}")
+async fn update_user(id: Int, body: UpdateUser) -> Result<User> {
+    let conn = db.connect(DB_URL).await?
+    let _ = User.where(fn(u) => u.id == id).update(conn, {
+        "name":  body.name,
+        "email": body.email,
+    }).await?
+    return User.where(fn(u) => u.id == id).first(conn).await
+}
+
+// ---- Boot ----------------------------------------------------------
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+match init_schema().await {
+    Ok(_)  => print("[boot] DB conectada y schema inicializado"),
+    Err(e) => print("[boot] ERROR conectando a la DB — {e}"),
+}
+
+print("[ready] Server arrancando en :3000")
+print("[ready] Endpoints (mixed-workload bench):")
+print("[ready]   GET  /users?limit=N           — lista paginada")
+print("[ready]   GET  /users/<id>              — single read")
+print("[ready]   GET  /users/<id>/posts        — posts del user")
+print("[ready]   POST /users                   — crear user")
+print("[ready]   POST /users/<id>/posts        — crear post")
+print("[ready]   PUT  /users/<id>              — update")

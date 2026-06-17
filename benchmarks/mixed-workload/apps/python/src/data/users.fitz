@@ -1,0 +1,40 @@
+// Wrapper Fitz sobre los helpers de `python/db.py` para users.
+// Encapsula la coerción `dict (Python) → User (Fitz)` adentro del
+// data layer, así main.fitz solo recibe tipos Fitz limpios.
+//
+// El round-trip por JSON dispara la coerción recursiva
+// `Map<Str, Any> → Instance` (R.missing-recursive-instance-coercion,
+// CERRADO 2026-05-22).
+
+from python import json
+from python import db
+from types.user import User
+
+fn create(name: Str, email: Str) -> Result<User> {
+    let raw = db.add_user(name, email)?
+    let u: User = json.loads(json.dumps(raw)?)?
+    return Ok(u)
+}
+
+fn find(id: Int) -> Result<User> {
+    let raw = db.get_user(id)?
+    let u: User = json.loads(json.dumps(raw)?)?
+    return Ok(u)
+}
+
+fn list_all(limit: Int) -> Result<List<User>> {
+    let raw = db.list_users(limit)?
+    let users: List<User> = json.loads(json.dumps(raw)?)?
+    return Ok(users)
+}
+
+fn update(id: Int, name: Str, email: Str) -> Result<User> {
+    let raw = db.update_user(id, name, email)?
+    let u: User = json.loads(json.dumps(raw)?)?
+    return Ok(u)
+}
+
+fn init_schema() -> Result<Null> {
+    let _ = db.init_db()?
+    return Ok(null)
+}

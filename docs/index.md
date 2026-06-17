@@ -95,6 +95,26 @@ en v0.10.13** (Intel Core Ultra 7 155H, Docker 29.2.1, sustained
 Detalle, metodología y "cómo reproducir" en
 [Benchmarks](benchmarks.md).
 
+### Bench complementario — Mixed workload (3 stacks)
+
+Cuando aparece carga peak con writes concurrentes intercalados
+con reads (el patrón real de un servicio web), el bench
+[`mixed-workload`](https://github.com/Thegreekman76/fitz/tree/main/benchmarks/mixed-workload)
+compara Fitz vs Python+SQLAlchemy vs **Node+Prisma** sobre
+`users + posts` con FK, 100 VUs ramping via [`k6`](https://k6.io/):
+
+| Métrica (peak, mixed) | Fitz | Python+SQLAlchemy | Node+Prisma |
+|---|---:|---:|---:|
+| Memory peak | **14 MB** | 61 MB | 163 MB |
+| p50 latency | **4.58 ms** | 165 ms | 14.7 ms |
+| p95 latency | **11.07 ms** | 502 ms | 69.3 ms |
+| p99.9 latency | **45.22 ms** | 839 ms | 173 ms |
+| Throughput (RPS) | **463.1** | 164.0 | 392.6 |
+
+Fitz mantiene **<50 ms hasta el p99.9** mientras Python+SQLAlchemy
+satura a 503 ms p95 y Node carga **11.7x más memoria**. Detalle
+y reproducible en [Benchmarks](benchmarks.md#mixed-workload-fitz-vs-pythonsqlalchemy-vs-nodeprisma).
+
 ---
 
 ## Por dónde arrancar

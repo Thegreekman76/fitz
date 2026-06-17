@@ -1,0 +1,35 @@
+// Schema Prisma para apps/node/ del benchmark mixed-workload.
+//
+// Modelo paralelo bit-a-bit a apps/fitz/ y apps/python/:
+// `users` 1:N `posts` con FK + ON DELETE CASCADE + índice en posts.user_id.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(120)
+  email     String   @unique @db.VarChar(180)
+  createdAt DateTime @default(now()) @map("created_at")
+  posts     Post[]
+
+  @@map("users")
+}
+
+model Post {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String   @db.VarChar(200)
+  body      String   @default("") @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("posts")
+}

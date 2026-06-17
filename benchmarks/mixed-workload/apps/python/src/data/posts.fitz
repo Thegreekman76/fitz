@@ -1,0 +1,17 @@
+// Wrapper Fitz sobre los helpers de `python/db.py` para posts.
+
+from python import json
+from python import db
+from types.post import Post
+
+fn create(user_id: Int, title: Str, body: Str) -> Result<Post> {
+    let raw = db.add_post(user_id, title, body)?
+    let p: Post = json.loads(json.dumps(raw)?)?
+    return Ok(p)
+}
+
+fn list_for_user(user_id: Int) -> Result<List<Post>> {
+    let raw = db.list_user_posts(user_id)?
+    let posts: List<Post> = json.loads(json.dumps(raw)?)?
+    return Ok(posts)
+}

@@ -1,0 +1,23 @@
+{
+  "name": "fitz-bench-mixed-workload-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "App Node 20 + Express 5 + Prisma 5 para el benchmark mixed-workload (comparativa cabeza-a-cabeza vs Fitz ORM y Python+SQLAlchemy)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push --skip-generate"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "express": "^5.0.1"
+  },
+  "devDependencies": {
+    "prisma": "^5.22.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

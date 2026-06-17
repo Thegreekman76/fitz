@@ -1,0 +1,8 @@
+[package]
+name = "fitz-bench-mixed-workload-python"
+version = "0.1.0"
+edition = "2026"
+description = "App Python/SQLAlchemy para el benchmark mixed-workload"
+
+[bin]
+main = "src/main.fitz"

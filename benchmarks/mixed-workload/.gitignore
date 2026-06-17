@@ -1,0 +1,11 @@
+# Results de cada run quedan en results/<timestamp>/ — los más
+# valiosos se promueven al final del README. El resto es ruido.
+results/*/
+!results/.gitkeep
+
+# Docker volumes locales si el user corre los compose desde adentro.
+*/target/
+**/target/
+
+# Logs de smoke.
+*.log

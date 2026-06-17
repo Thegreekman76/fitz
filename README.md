@@ -110,6 +110,31 @@ Postgres, mismos endpoints, misma firma. **Headline numbers en v0.10.13**
 publicables y detalle técnico en
 [`benchmarks/orm-vs-sqlalchemy/README.md`](benchmarks/orm-vs-sqlalchemy/README.md).
 
+#### Bench complementario — Mixed workload (Fitz vs Python+SQLAlchemy vs Node+Prisma)
+
+Bajo carga peak realista (60% reads + 40% writes, VUs rampeando
+10→100→50 sobre 3 min via [`k6`](https://k6.io/) con dominio
+`users + posts` con FK), comparando los tres stacks side-by-side:
+
+| Métrica | Fitz | Python+SQLAlchemy | Node+Prisma | Fitz vs Python | Fitz vs Node |
+|---|---:|---:|---:|---:|---:|
+| Memory peak | **14 MB** | 61 MB | 163 MB | **4.4x** | **11.7x** |
+| Mixed p50 | **4.58 ms** | 165 ms | 14.7 ms | **36.2x** | **3.2x** |
+| Mixed p95 | **11.07 ms** | 502 ms | 69.3 ms | **45.4x** | **6.3x** |
+| Mixed p99.9 | **45.22 ms** | 839 ms | 173 ms | **18.6x** | **3.8x** |
+| Mixed RPS | **463.1** | 164.0 | 392.6 | **2.82x** | 1.18x |
+| Writes-only p95 | **12.5 ms** | 392 ms | 69.2 ms | **31.3x** | **5.5x** |
+| Writes-only RPS | **846.9** | 169.6 | 577.4 | **4.99x** | 1.47x |
+| Cold start | **0.15 s** | 0.81 s | 2.22 s | 5.4x | **14.8x** |
+
+Bajo el peak de 100 VUs, **Python+SQLAlchemy satura** (p95 = 503 ms,
+cola de medio segundo por requests CRUD triviales — sin timeouts
+pero con cola). **Fitz mantiene <50 ms hasta el p99.9** y **Node+Prisma
+queda en el medio** con 11.7x más memoria. **Reproducí** con
+[`bash benchmarks/mixed-workload/run.sh`](benchmarks/mixed-workload/)
+(~25-35 min; requiere `k6` + `jq`). Detalle reproducible en
+[`benchmarks/mixed-workload/README.md`](benchmarks/mixed-workload/README.md).
+
 § **Interop Python via PyO3**. Marshaling bidireccional `List`/`Map`/`Instance` ↔ `list`/`dict`, excepciones Python → `Result<T>`, bridge async tokio ↔ asyncio, `fitz py-types` auto-mapeo SQLAlchemy. Opt-in con feature `python`. **`fitz build --bundle-python` produce un binario standalone con CPython 3.14.5 embebido** (~22-35 MB según OS) — corre en cualquier máquina del triple destino sin Python instalado, sin `pip install`, sin runtime externo. **Con `--bundle-pip <paquete>` repetible** (Fase 8.c) o **`--bundle-pip-requirements <FILE>`** (cosecha 8.c v0.9.42 — lee del `requirements.txt` estándar), también empaqueta paquetes pip adentro: `fitz build --bundle-pip-requirements requirements.txt mi_app.fitz` produce un binario único de ~50 MB que incluye CPython + las deps + tu código. **Desde v0.9.46 el launcher usa crates `tar`+`flate2` inline (sin subprocess `tar`)**, habilitando runtimes minimalistas tipo `gcr.io/distroless/cc-debian12` (~22 MB base). **Smoke real Docker validado end-to-end con Postgres** (v0.9.50/52) en los boilerplates 5/6 — imagen final ~136 MB con sqlalchemy + psycopg2-binary embebidos. **En el destino: cero Python, cero pip, cero venv**. (Para el dev que buildea sí hace falta Python local — cualquier 3.10+ en Windows, 3.14.x en Linux/macOS hasta cerrar `R.bug-pyo3-abi3-portable-link`. Tabla completa de matices en el cap 21.12 de la guía.) **El único lenguaje del cuadro que hace esto** (Python necesita Python + venv + `pip install`, FastAPI necesita uvicorn + venv, Spring necesita JVM, Express necesita Node + npm install, Go no tiene interop Python). PyOxidizer hizo algo parecido para Python puro pero está ralentizado desde 2023; Fitz reimplementa el patrón sobre [python-build-standalone de Astral](https://github.com/astral-sh/python-build-standalone). → [cap 21](https://thegreekman76.github.io/fitz/guide/#21-interop-python).
 
 ## Estabilidad

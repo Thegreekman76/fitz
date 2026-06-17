@@ -1,0 +1,12 @@
+// Post type — refleja `python/models.py::Post` (1:N con User via
+// `user_id` FK). Sin relación virtual del lado Fitz: SQLAlchemy
+// maneja la FK al insertar/selectear, los `to_dict()` del modelo
+// devuelven los datos de la tabla `posts` directos.
+
+type Post {
+    id: Int = 0,
+    user_id: Int = 0,
+    title: Str = "",
+    body: Str = "",
+    created_at: Str = "",
+}

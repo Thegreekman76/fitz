@@ -1,0 +1,9 @@
+// User type — refleja `python/models.py::User`. En proyectos reales
+// se genera con `fitz py-types python/models.py`.
+
+type User {
+    id: Int = 0,
+    name: Str = "",
+    email: Str = "",
+    created_at: Str = "",
+}
