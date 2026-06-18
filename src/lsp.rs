@@ -1456,6 +1456,47 @@ fn after_dot_completions(
                 ("list", "fn() -> List<Str>".into()),
             ]);
         }
+        // Mini-fase HTTP client (2026-06-18) — built-in module `http`
+        // (outbound HTTP client). Same bypass as jwt/hash/log/auth/db:
+        // types as `Any` in the checker (MVP, refinable post-mini-fase),
+        // so the by-type dispatch does not identify it. The 6 builtins
+        // are async + return Result<HttpClientResponse>. Body for post/
+        // put accepts Str | Map<Str,Any> | Bytes (helper dispatches
+        // at runtime + sets Content-Type: application/json for Map).
+        "http" => {
+            return method_items(&[
+                (
+                    "get",
+                    "fn(url: Str) -> Future<Result<HttpClientResponse>>  // GET request"
+                        .into(),
+                ),
+                (
+                    "head",
+                    "fn(url: Str) -> Future<Result<HttpClientResponse>>  // HEAD (no body, useful for health checks)"
+                        .into(),
+                ),
+                (
+                    "post",
+                    "fn(url: Str, body: Str|Map|Bytes) -> Future<Result<HttpClientResponse>>  // POST"
+                        .into(),
+                ),
+                (
+                    "put",
+                    "fn(url: Str, body: Str|Map|Bytes) -> Future<Result<HttpClientResponse>>  // PUT"
+                        .into(),
+                ),
+                (
+                    "delete",
+                    "fn(url: Str) -> Future<Result<HttpClientResponse>>  // DELETE"
+                        .into(),
+                ),
+                (
+                    "request",
+                    "fn(opts: Map) -> Future<Result<HttpClientResponse>>  // low-level: method/url/timeout_ms/headers/body/follow_redirects"
+                        .into(),
+                ),
+            ]);
+        }
         _ => {}
     }
 
@@ -2868,6 +2909,13 @@ fn scope_level_completions(
             "flags",
             "module: is_enabled, list (feature flags with manifest [flags] + env var override)",
         ),
+        // Mini-fase HTTP client (2026-06-18) — outbound HTTP client.
+        // All methods async returning Future<Result<HttpClientResponse>>.
+        // Body for post/put accepts Str | Map<Str,Any> (auto-JSON) | Bytes.
+        (
+            "http",
+            "module: get, head, post, put, delete, request (HTTP client outbound)",
+        ),
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -2892,10 +2940,32 @@ fn scope_level_completions(
 
     // Built-in types: visible as names in annotation position.
     for name in [
-        "Int", "Float", "Str", "Bool", "Null", "Bytes", "Range", "Any", "List", "Map", "Result",
-        "Future", "Request", "Response", "File", "PyAny", "WsConn", "DbConn", "DbRow",
+        "Int",
+        "Float",
+        "Str",
+        "Bool",
+        "Null",
+        "Bytes",
+        "Range",
+        "Any",
+        "List",
+        "Map",
+        "Result",
+        "Future",
+        "Request",
+        "Response",
+        "File",
+        "PyAny",
+        "WsConn",
+        "DbConn",
+        "DbRow",
         // v0.10.24 — native temporal types and UUID.
-        "Date", "DateTime", "Uuid",
+        "Date",
+        "DateTime",
+        "Uuid",
+        // Mini-fase HTTP client (2026-06-18) — response struct returned
+        // by all http.* methods once `.await`-ed.
+        "HttpClientResponse",
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -5443,5 +5513,121 @@ mod tests {
             !labels.contains(&"where"),
             "Plain without @table should not have `where`: {labels:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Mini-fase HTTP client (2026-06-18, Bloque 4 — LSP).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn http_module_appears_in_scope_level_completions() {
+        // The `http` module is pre-registered as MODULE in
+        // scope_level_completions (parallel to jwt/hash/auth/db/log/
+        // flags). HttpClientResponse is pre-registered as a built-in
+        // CLASS in TypeEnv (Bloque 2), so it also appears.
+        let src = "let a = 1\n\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        let http_item = items
+            .iter()
+            .find(|i| i.label == "http")
+            .expect("missing module `http`");
+        assert_eq!(http_item.kind, Some(CompletionItemKind::MODULE));
+        let detail = http_item.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("HTTP client outbound"),
+            "expected `HTTP client outbound` in detail of http, was: {detail}",
+        );
+        // HttpClientResponse pre-registered as built-in nominal — appears
+        // as CLASS in scope-level completions.
+        assert!(
+            labels.contains(&"HttpClientResponse"),
+            "missing built-in type `HttpClientResponse`: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn after_dot_on_http_lists_six_methods_with_signatures() {
+        // Parallel to `after_dot_on_db_lists_connect`: the dispatch
+        // by receiver name fires before touching TypeInfo (the module
+        // types as `Any` in the checker, MVP).
+        let src = "let x = http.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor right after the dot: line 0, col 13.
+        let items = completion_at_position(src, &program, &type_info, &env, 0, 13);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["get", "head", "post", "put", "delete", "request"] {
+            assert!(
+                labels.contains(&expected),
+                "missing http method `{expected}`: {labels:?}"
+            );
+        }
+        // METHOD kind on all 6 (method_items factory).
+        let get_item = items.iter().find(|i| i.label == "get").unwrap();
+        assert_eq!(get_item.kind, Some(CompletionItemKind::METHOD));
+        // Detail must include the signature hint with the return type.
+        let get_detail = get_item.detail.as_deref().unwrap_or("");
+        assert!(
+            get_detail.contains("Future<Result<HttpClientResponse>>"),
+            "expected `Future<Result<HttpClientResponse>>` in detail of get, was: {get_detail}",
+        );
+        // post mentions the body shape (Str|Map|Bytes).
+        let post_detail = items
+            .iter()
+            .find(|i| i.label == "post")
+            .unwrap()
+            .detail
+            .as_deref()
+            .unwrap_or("");
+        assert!(
+            post_detail.contains("body: Str|Map|Bytes"),
+            "expected `body: Str|Map|Bytes` in detail of post, was: {post_detail}",
+        );
+        // request takes opts: Map.
+        let request_detail = items
+            .iter()
+            .find(|i| i.label == "request")
+            .unwrap()
+            .detail
+            .as_deref()
+            .unwrap_or("");
+        assert!(
+            request_detail.contains("opts: Map"),
+            "expected `opts: Map` in detail of request, was: {request_detail}",
+        );
+        // Does not include neighboring modules' methods (proves the
+        // dispatch by receiver name is exact).
+        assert!(
+            !labels.contains(&"encode"),
+            "should not include jwt.encode: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"connect"),
+            "should not include db.connect: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn after_dot_on_http_client_response_lists_four_fields() {
+        // `HttpClientResponse` is pre-registered as Nominal in TypeEnv
+        // (Bloque 2, types.rs::register_builtin_nominals). With an
+        // annotated param `r: HttpClientResponse`, after-dot on `r.`
+        // falls through the Nominal dispatch and lists fields. Pattern
+        // analogous to `after_dot_on_nominal_lists_fields_of_type`.
+        let src = "fn show(r: HttpClientResponse) -> Int {\n  return r.status\n}\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor right after `r.` at line 1, col 11 (1-based: line 2,
+        // col 11). The completion engine reads 0-based LSP coords.
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 11);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["status", "body", "headers", "duration_ms"] {
+            assert!(
+                labels.contains(&expected),
+                "missing HttpClientResponse field `{expected}`: {labels:?}"
+            );
+        }
+        let status_item = items.iter().find(|i| i.label == "status").unwrap();
+        assert_eq!(status_item.kind, Some(CompletionItemKind::FIELD));
     }
 }
