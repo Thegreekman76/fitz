@@ -62,6 +62,7 @@ $ ./server
 | **Jobs sin Celery** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Postgres + ORM nativo** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Observability OTel** | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **HTTP client built-in** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | Interop Python | ✅ | ❌ | ❌ | ✅ |
 
 **Multiplataforma**: cada [release](https://github.com/Thegreekman76/fitz/releases/latest)

@@ -27,6 +27,112 @@
 
 ---
 
+## 🟢 Mini-tanda HTTP client builtin — Bloques 1-5 CERRADOS (2026-06-18, vX.Y.Z al cerrar Bloque 9)
+
+**Hito**: módulo built-in nuevo `http` con cliente HTTP outbound async ciudadano de primera clase del lenguaje. Cierra una de las dos brechas chicas que quedaban en el stack web (Fitz ya tenía HTTP server-side, WS, auth, OpenAPI, async, jobs, ORM nativos; faltaba el lado cliente). Detectada como deuda explícita el 2026-06-18 al pausar el desarrollo de **fitzwatch** (status page open-source en Fitz puro) — necesitaba `http.head` para chequear si las URLs monitoreadas responden 200.
+
+**API**: 6 builtins async (`http.get`/`http.head`/`http.post`/`http.put`/`http.delete`/`http.request`) que devuelven `Future<Result<HttpClientResponse>>`. Body shapes `Str` / `Map<Str, Any>` (auto-JSON + `Content-Type: application/json`) / `Bytes`. Tipo built-in nuevo `HttpClientResponse { status: Int, body: Str, headers: Map<Str, Str>, duration_ms: Int }` paralelo a `Request`/`Response` del HTTP server-side. Backend `reqwest = "0.12"` con `["json", "rustls-tls"]` no condicional (linkeado estático, sin openssl en el host).
+
+**Bloques cerrados** (un commit por bloque):
+- **B1 evaluator** (commit `3cefd2e`) — `Value::Module { name: "http" }` registrado en `register_builtins` paralelo a `jwt`/`hash`/`log`/`db`/`auth`/`flags`, los 6 builtins async, pre-registro de `HttpClientResponse` como nominal en `TypeEnv`, helper privado `body_to_reqwest_body(value)` con dispatch por tipo del Value, medición `duration_ms` con `Instant::now()`, errores como `Result::Err(Value::Str)` con prefijo identificable.
+- **B2 checker** (commit `d1aaf70`) — pre-registro de `http` y `HttpClientResponse` en `CheckCtx::new`, fields tipados (`status: Int`, `body: Str`, `headers: Map<Str, Str>`, `duration_ms: Int`), llamadas devuelven `Result<Any>` paralelo a 8.4 con regla de exhaustividad sobre Result + regla del operador `?`.
+- **B3 codegen** (commit `9e214e3`) — detector `program_uses_http_client(program)` walka AST buscando calls `http.X(...)`, `cargo_toml_for` suma `reqwest = "0.12"` condicional, preludio `HTTP_CLIENT_PRELUDE` con `struct __FitzHttpClientResponse` + impls + `static __FITZ_HTTP_CLIENT: LazyLock<reqwest::Client>` (timeout=30s, follow_redirects=true) + helpers async `__fitz_http_get`/etc + helper `__fitz_http_body_apply` paralelo bit-a-bit al intérprete, dispatch en `gen_call`, importación cross-module con `use crate::{__fitz_http_*}`.
+- **B4 LSP** (commit `29bc041`) — `scope_level_completions` suma `http` con descripción `"module: get/post/put/delete/head/request (HTTP client async)"`, `after_dot_completions` (recv_name == "http") tira los 6 métodos con signatures completas + ejemplos en el hint, paralelo a dispatch por recv_name de `jwt`/`hash`/`log`/`db`/`auth`/`flags`.
+- **B5 guía + ejemplos runnable** (commit `03cd71e`) — sub-sección nueva en cap 17 de `docs/guide.md` "HTTP client outbound" entre "Middleware y CORS" y el cierre del cap, con panorama vecino (`requests`/`axios`/`reqwest`/`OkHttp`) + 5 diferenciales + API completo + body shapes con tabla + modelo de errores + integración + limitaciones MVP. 4 ejemplos runnable nuevos en `examples/guide/`: `17e-http-client-basico.fitz` (los 5 métodos comunes), `17f-http-client-errores.fitz` (timeout/DNS/4xx/5xx + helper + `?`), `17g-http-client-webhook.fitz` (dispatcher canónico con `@background`+`spawn`), `17h-http-client-health-checker.fitz` (cron+http.head fitzwatch-style). Los 4 sumados al smoke `GUIDE_EXAMPLES_COMPILE` en `tests/compile_e2e.rs`. Smoke verde 363 ejemplos en 251.89s + fmt + clippy (default + lsp) limpios + validación bit-a-bit `fitz run` ↔ binario nativo sobre 17e contra `httpbin.org` real.
+
+**Detalle por bloque**: [`docs/http-client-roadmap.md`](http-client-roadmap.md).
+
+**Bloques pendientes**: B6 barrida cross-docs (esta entrada cierra parte) + B7 (curso M3 — decisión + ejecución si va) + B8 (boilerplates — decisión + ejecución si va) + B9 (cierre formal: CHANGELOG vX.Y.Z + tag + dev.to draft).
+
+**Diferencial del feature**: ningún lenguaje moderno del cuadro (Python `requests`, JS `axios`/`fetch`, Java `OkHttp`/`HttpClient`, Rust `reqwest`, Go `net/http`) provee HTTP client outbound como builtin del lenguaje con paridad bit-a-bit intérprete↔binario y zero deps externas para activarlo.
+
+---
+
+## 🟡 Hallazgos del codegen del Bloque 5 HTTP client — 3 deudas residuales NO bloqueantes (2026-06-18)
+
+Descubiertas al validar bit-a-bit `fitz run` ↔ `fitz build` sobre los 4 ejemplos runnable `17e/f/g/h`. Documentadas con workaround idiomático conocido para cada caso; el ejemplo respectivo aplica el workaround en línea con comentario explicativo. Ninguna bloquea la mini-tanda HTTP client.
+
+### 1. `?` top-level rechazado por el codegen (esperado por la regla del checker 5.3.3)
+
+**Comportamiento**: `let r = http.get("https://...").await?` directo a nivel top-level es rechazado tanto por el checker como por el codegen, porque la regla 5.3.3 exige que `?` viva adentro de una fn que retorna `Result<T>`.
+
+**Workaround idiomático** (documentado en `17e`/`17f`):
+
+```fitz
+async fn run() -> Result<Null> {
+    let r = http.get("https://...").await?
+    print("status: {r.status}")
+    return Ok(null)
+}
+
+// Top-level
+match run().await {
+    Ok(_) => print("listo"),
+    Err(e) => print("falló: {e}"),
+}
+```
+
+**Conclusión**: NO es bug — la regla 5.3.3 es deliberada (el `?` huérfano sería runtime error inevitable). El workaround es el patrón canónico para tooling HTTP client desde un script CLI. Documentado en el cap 17.X de la guía.
+
+### 2. `for x in <List<Str>>` con `.await` adentro de `@cron` rompe Send
+
+**Síntoma**: el codegen del binario nativo rompe con error de tipos del estilo "future is not Send" cuando un body de `@cron` itera una lista y hace `.await` por iteración:
+
+```fitz
+@cron("*/30 * * * * *")
+async fn check_all_endpoints() -> Result<Null> {
+    let urls = ["https://a.com", "https://b.com"]
+    for url in urls {
+        let r = http.head(url).await?  // ← rompe Send acá
+        log.info("status", url: url, status: r.status)
+    }
+    return Ok(null)
+}
+```
+
+**Causa**: el codegen del `for in` sobre `List<T>` toma `MutexGuard` del `Arc<Mutex<Vec<T>>>` y lo mantiene activo durante todo el body del loop. Cuando hay `.await` adentro, el `MutexGuard` cross-await rompe el bound `Send + 'static` que axum/tokio exigen para tasks spawneadas.
+
+**Workaround idiomático** (documentado en `17h`):
+
+```fitz
+// En lugar del loop, calls explícitas (la lista es estática del MVP):
+let r1 = http.head("https://a.com").await?
+log.info("status", url: "https://a.com", status: r1.status)
+let r2 = http.head("https://b.com").await?
+log.info("status", url: "https://b.com", status: r2.status)
+```
+
+**Fix futuro** (refinable post-MVP): el codegen del `for in <List<T>>` con detección de `.await` adentro podría hacer snapshot via `borrow().clone().into_iter()` (paralelo a lo que YA hace para listas no-await), liberando el `MutexGuard` antes del loop body. ~30 LoC en `gen_for_in`.
+
+### 3. Map literal heterogéneo (Bool + Str) en `return <status> { ... }` rompe el codegen
+
+**Síntoma**: handler HTTP que retorna un status custom con Map literal mezclando Bool y Str rompe el codegen:
+
+```fitz
+@post("/webhook")
+async fn webhook() -> Result<Map<Str, Any>> {
+    if invalid_payload() {
+        return 400 { "ok": false, "error": "missing field" }  // ← rompe codegen
+    }
+    return Ok({"ok": true, "id": "abc"})
+}
+```
+
+Error del codegen: typo "could not find type `__FitzValue` in this scope" — el trait `__FitzValue` que el preludio HTTP usa para serializar `Map<Str, Any>` heterogéneo NO está activo porque ningún otro camino del programa lo dispara.
+
+**Causa probable** (sub-case del fix de v0.10.4): v0.10.4 cerró Map<Str, Any> en HTTP returns vía `DB_HTTP_INTEGRATION_PRELUDE` + `impl __MapKey for __FitzValue` emitido "cuando `__FitzValue` activo". El caso del Bloque 5 es que **UNA sola aparición de Map heterogéneo adentro de `return <status> { ... }` no activa `__FitzValue`** porque el detector busca el tipo en field declarations y type sigs, no en literals de body de handlers con status custom.
+
+**Workaround idiomático** (documentado en `17g`):
+
+```fitz
+// Homogeneizar a Map<Str, Str>:
+return 400 { "ok": "false", "error": "missing field" }
+```
+
+**Fix futuro** (refinable post-MVP, paralelo a v0.13.1 que gateó `metrics-exporter-prometheus`): extender el detector de `__FitzValue` para que walke literals Map heterogéneos en posiciones de `Stmt::ReturnStatus` con shape Map. ~20 LoC en el detector.
+
+---
+
 ## 🟢 NO es deuda — trade-off documentado del ORM JSON serializer (analizado 2026-06-09, no requiere fix del lenguaje)
 
 **Contexto**: durante el smoke E2E del TaskHub post-v0.15.14, el
