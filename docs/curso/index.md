@@ -40,19 +40,21 @@ asume VSCode para los screenshots ASCII.
 | M2 — Tipos y funciones | 7 | ✅ cerrado (C1-C7) |
 | M3 — Módulos y organización | 5 | ✅ cerrado (C1-C5) |
 | M4 — HTTP first-class | 5 | ✅ cerrado (C1-C5) |
-| M5 — Async, auth, real-time | 4 | ✅ cerrado (C1-C4) |
+| M5 — Async, auth, real-time | 5 | ✅ cerrado (C1-C5) |
 | M6 — Capstone Postgres + ORM nativo | 7 | ✅ cerrado (C1-C7) |
 | M7 — Interop Python | 3 | ✅ cerrado (C1-C3) |
 | M8 — Producción y deployment | 5 | ✅ cerrado (C1-C5) |
 
-Total: **8 módulos, 42 capítulos**. Cada módulo es **unidad releasable
+Total: **8 módulos, 43 capítulos**. Cada módulo es **unidad releasable
 independiente** — no hace falta esperar que esté todo para empezar.
 M6 creció a 7 caps al sumar **M6.C6 — Migraciones con `fitz db`**
 (v0.13.3) que cierra el gap del workflow versionado que antes
 quedaba como "out of scope del curso". M7 (Interop Python) se sumó
 después de cerrar el plan original M1-M7 para cubrir el ecosistema
 Python como puente; el M8 anterior (Producción y deployment) se
-renumeró.
+renumeró. M5 creció a 5 caps al sumar **M5.C5 — HTTP client
+outbound** (v0.17.0) tras cerrar la mini-fase del módulo `http`
+builtin del lenguaje.
 
 ## M1 — Setup y primer programa
 
@@ -126,15 +128,19 @@ Requisito explícito: M4 completo.
 - **[C2 — Auth nativa con `@auth_provider` + JWT + Argon2id](m5-async-auth-rt/c2-auth.md)**
 - **[C3 — WebSockets tipados con `@ws` + AsyncAPI auto](m5-async-auth-rt/c3-websockets.md)**
 - **[C4 — Jobs sin Celery (`@cron` + `@background` + `spawn`) + persistencia](m5-async-auth-rt/c4-jobs.md)**
+- **[C5 — HTTP client outbound (módulo `http` built-in)](m5-async-auth-rt/c5-http-client.md)**
 
 **Entregable del módulo**: tenés todas las features modernas de
 producción **integradas en el lenguaje**. Concurrencia real con
 N workers tokio multi-thread, login + JWT + Argon2id sin
 dependencias externas, canales WebSocket tipados con AsyncAPI 3.0
 auto-generado y heartbeat built-in, tareas programadas con tz
-IANA + retry con backoff + persistencia opcional sobre Postgres
-— todo built-in. **Sin Celery, sin Redis para infra básica, sin
-passport.js, sin socket.io**. Un binario standalone deployable.
+IANA + retry con backoff + persistencia opcional sobre Postgres,
+y requests HTTP outbound con el módulo `http` builtin integrado
+con `@background + spawn` y `@cron` — todo built-in. **Sin
+Celery, sin Redis para infra básica, sin passport.js, sin
+socket.io, sin `pip install requests` ni `npm install axios`**.
+Un binario standalone deployable.
 
 ## M6 — Capstone Postgres + ORM nativo
 

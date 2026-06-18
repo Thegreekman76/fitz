@@ -547,7 +547,7 @@ y arreglo después" — esa es la regla del proyecto.
 | 4. LSP | ✅ | `29bc041` | + R1-R4, **R8 obligatorio** |
 | 5. Guía + ejemplos runnable | ✅ | `03cd71e` | + R1, R7, R8 (smoke manual con `.vsix`); smoke verde 363 ejemplos en 251.89s |
 | 6. Barrida cross-docs | ✅ | `931fd18` | docs only — CLAUDE / README / docs/index.md / docs/deudas-post-5b.md / este roadmap actualizados; mkdocs build verde 18.06s sin warnings nuevos |
-| 7. Curso (decisión + ejecución si va) | ⏳ Pendiente | — | docs/ejemplos |
+| 7. Curso (decisión + ejecución si va) | ✅ | _pendiente commit_ | Opción 1: cap nuevo M5.C5 dedicado HTTP client outbound + ejemplo capstone integrador del módulo M5 entero (auth + jobs + client) en `examples/curso/m5-async-auth-rt/c5-http-client/`. Cierre del módulo trasladado de C4 a C5. M5 4→5 caps, curso 42→43. mkdocs verde 17.33s sin warnings nuevos. |
 | 8. Boilerplates (decisión + ejecución si va) | ⏳ Pendiente | — | + R1-R5 |
 | 9. Cierre formal + release | ⏳ Pendiente | — | Verificación pre-bump completa + `.vsix` bump final |
 

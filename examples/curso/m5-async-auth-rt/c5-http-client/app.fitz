@@ -1,0 +1,190 @@
+// examples/curso/m5-async-auth-rt/c5-http-client/app.fitz
+//
+// Capstone integrador del módulo M5 — combina TODO lo visto:
+//
+//   - C1 async fn + .await + Future<T>     → handlers async + cliente HTTP
+//   - C2 @auth_provider + @admin + jwt     → endpoint protegido
+//   - C4 @cron + @background + spawn       → health check periódico + webhook
+//   - C5 http.head + http.post + Result    → cliente HTTP outbound
+//
+// El programa simula una "API de notificaciones admin":
+//
+//   - POST /notify       protegido con Bearer token; dispatcha un
+//                        webhook a un endpoint externo en background.
+//                        Responde 202 inmediato.
+//
+//   - GET  /healthz      público; trivial keep-alive del runtime.
+//
+//   - @cron cada 30s     hace HEAD a UPSTREAM_HEALTH_URL y loguea
+//                        el resultado (status + duration_ms).
+//
+// Cómo correr:
+//
+//   fitz run examples/curso/m5-async-auth-rt/c5-http-client/app.fitz
+//
+//   # En otra terminal:
+//   curl http://localhost:43955/healthz
+//   # → ok
+//
+//   curl http://localhost:43955/notify
+//   # → 401 (sin Bearer)
+//
+//   curl -X POST http://localhost:43955/notify \
+//        -H "Authorization: Bearer <TOKEN>" \
+//        -H "Content-Type: application/json" \
+//        -d '{"event":"signup","user":"ada"}'
+//   # → 202 con el ack
+//
+// Para sacar el TOKEN, ver el print del boot:
+//   "🔑 TOKEN admin de prueba: ..."
+//
+// Cero deps externas. Cero pip install. Cero npm install.
+// Compilable a binario con `fitz build` (paridad bit-a-bit).
+
+let WEBHOOK_URL: Str = "https://httpbin.org/post"
+let UPSTREAM_HEALTH_URL: Str = "https://httpbin.org/status/200"
+let JWT_SECRET: Str = "demo-secret-cambialo-en-prod"
+
+type User {
+    id: Int,
+    name: Str,
+    role: Str,
+}
+
+type NotifyInput {
+    event: Str,
+    user: Str,
+}
+
+// === Auth provider: valida Bearer y devuelve el User. ===
+
+@auth_provider
+async fn provider(headers: Map<Str, Str>) -> Result<User> {
+    match headers.get("authorization") {
+        Ok(raw) => {
+            // "Bearer <token>" → arrancamos en pos 7.
+            if (len(raw) < 8) {
+                return Err("authorization mal formado")
+            }
+            let token = raw[7..]
+            match jwt.decode(token, JWT_SECRET) {
+                Ok(claims) => {
+                    let name = claims.get("name")
+                    let role = claims.get("role")
+                    match name {
+                        Ok(n) => match role {
+                            Ok(r) => return Ok(User { id: 1, name: n, role: r }),
+                            Err(e) => return Err("claim role ausente: {e}"),
+                        },
+                        Err(e) => return Err("claim name ausente: {e}"),
+                    }
+                }
+                Err(e) => return Err("jwt inválido: {e}"),
+            }
+        }
+        Err(_) => return Err("falta header Authorization"),
+    }
+}
+
+// === Background: webhook dispatcher (fire-and-forget). ===
+
+@background
+async fn dispatch_webhook(event: Str, user: Str) -> Null {
+    let payload: Map<Str, Str> = {
+        "event": event,
+        "user": user,
+        "source": "fitz-m5-capstone",
+    }
+    log.info("dispatching webhook", event: event, user: user)
+
+    let r = http.post(WEBHOOK_URL, payload).await
+    match r {
+        Ok(resp) => {
+            if (resp.status >= 200 and resp.status < 300) {
+                log.info(
+                    "webhook dispatched",
+                    event: event,
+                    status: resp.status,
+                    duration_ms: resp.duration_ms,
+                )
+            } else {
+                log.warn(
+                    "webhook rejected by upstream",
+                    event: event,
+                    status: resp.status,
+                )
+            }
+        }
+        Err(e) => {
+            log.error("webhook transport error", event: event, error: e)
+        }
+    }
+    return null
+}
+
+// === Cron: health check periódico del upstream. ===
+
+@cron("*/30 * * * * *")
+async fn check_upstream() -> Null {
+    let r = http.request({
+        "method": "HEAD",
+        "url": UPSTREAM_HEALTH_URL,
+        "timeout_ms": 5000,
+    }).await
+    match r {
+        Ok(resp) => {
+            if (resp.status >= 200 and resp.status < 400) {
+                log.info(
+                    "upstream health OK",
+                    url: UPSTREAM_HEALTH_URL,
+                    status: resp.status,
+                    duration_ms: resp.duration_ms,
+                )
+            } else {
+                log.warn(
+                    "upstream health no-OK",
+                    url: UPSTREAM_HEALTH_URL,
+                    status: resp.status,
+                )
+            }
+        }
+        Err(e) => {
+            log.error("upstream unreachable", url: UPSTREAM_HEALTH_URL, error: e)
+        }
+    }
+    return null
+}
+
+// === Handlers HTTP. ===
+
+@get("/healthz")
+fn healthz() -> Str {
+    return "ok"
+}
+
+@admin
+@post("/notify")
+fn notify(input: NotifyInput, user: User) {
+    log.info("notify recibido", by: user.name, event: input.event)
+    let _ = spawn(dispatch_webhook(input.event, input.user))
+    return 202 {
+        "status": "accepted",
+        "event": input.event,
+        "by": user.name,
+    }
+}
+
+@server(43955)
+fn main() => 0
+
+// === Boot: imprimimos un token de prueba para que el smoke sea fácil. ===
+
+let TEST_CLAIMS: Map<Str, Str> = {
+    "name": "ada",
+    "role": "admin",
+}
+
+match jwt.encode(TEST_CLAIMS, JWT_SECRET) {
+    Ok(token) => print("🔑 TOKEN admin de prueba: {token}"),
+    Err(e) => print("error generando token: {e}"),
+}

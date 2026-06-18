@@ -162,6 +162,7 @@ nav:
           - 'C2 — Auth nativa (JWT + Argon2id)': curso/m5-async-auth-rt/c2-auth.md
           - 'C3 — WebSockets tipados + AsyncAPI': curso/m5-async-auth-rt/c3-websockets.md
           - 'C4 — Jobs sin Celery + persistencia': curso/m5-async-auth-rt/c4-jobs.md
+          - 'C5 — HTTP client outbound': curso/m5-async-auth-rt/c5-http-client.md
       - 'M6 — Capstone Postgres + ORM nativo':
           - 'C1 — Setup Postgres + driver crudo': curso/m6-postgres-orm/c1-setup-driver-crudo.md
           - 'C2 — @table + @primary + reads': curso/m6-postgres-orm/c2-table-decoradores-reads.md

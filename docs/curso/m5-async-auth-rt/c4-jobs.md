@@ -731,75 +731,25 @@ temporalmente.
 
 ---
 
-## Cerraste el módulo M5
+## Qué viene en M5.C5 — HTTP client outbound
 
-**Felicidades** — completaste el módulo de async + auth +
-real-time. Sabés:
+Te falta una pieza del stack web entero antes de cerrar M5: hacer
+**requests salientes** desde Fitz a APIs externas. Webhooks
+salientes, health checks de servicios externos, proxying a
+upstream APIs, scraping. Todo eso necesita un cliente HTTP — y
+Fitz lo trae **built-in del lenguaje** (módulo `http`), paralelo
+a cómo `db`/`jwt`/`hash`/`log` son builtins.
 
-- ✅ Declarar `async fn` + `.await` + `Future<T>` y entender
-  por qué Fitz da **paralelismo HTTP real** post-F17, no event
-  loop simulado (**C1**).
-- ✅ Proteger handlers con `@auth_provider` + `@authenticated`
-  + `@admin`, firmar JWT con `jwt.encode` (HS256/384/512) y
-  hashear passwords con Argon2id via `hash.password`/`verify`
-  — **sin dependencias externas** y validado estáticamente por
-  el checker (**C2**).
-- ✅ Abrir canales WebSocket con `@ws("/path")` + `WsConn<T>`
-  para text JSON con marshaling automático, `WsConn<In, Out>`
-  asimétrico, `WsConn<Bytes>` binario raw, heartbeat built-in
-  con `@server(ws_heartbeat_secs=N)`, auth pre-upgrade, subprotocol
-  `bearer.<token>` para browsers, y **AsyncAPI 3.0** auto en
-  `/asyncapi.json` + UI en `/asyncapi` (**C3**).
-- ✅ Tareas programadas con `@cron("expr")` + tz IANA + retry
-  con backoff + catch_up + persistencia opt-in sobre Postgres
-  con `store=db`, fire-and-forget con `@background` + `spawn`
-  tipado, todo **sin Celery, sin Redis, sin systemd timers**
-  (**C4**) ← acá.
+El próximo cap cubre:
 
-**Entregable del módulo**: tenés todas las features modernas de
-producción **integradas en el lenguaje**. La diferencia con
-FastAPI/Spring/Express es que en esos stacks necesitás 5-10
-dependencias externas + configuración manual + Redis/RabbitMQ
-+ Celery worker + uvicorn workers + nginx WS proxy. En Fitz:
-`fitz new`, escribir el código, `fitz build`, deploy de un
-binario. **Cero pip install, cero npm install, cero docker
-compose para infrastructure básica**.
+- Los 6 builtins (`http.get/head/post/put/delete/request`) con
+  paridad bit-a-bit `fitz run` ↔ `fitz build`.
+- 3 body shapes nativos (`Str` raw / `Map<Str,Any>` auto-JSON /
+  `Bytes` octetos).
+- Modelo de errores: transporte → `Result::Err`, 4xx/5xx → `Ok`
+  con `r.status`.
+- Integración con todo lo visto en M5: webhook dispatcher con
+  `@background + spawn(...)`, health checker con `@cron`, y un
+  capstone integrador.
 
-### Comparativa final: lo que ganaste con M5 vs alternativas
-
-| Feature | FastAPI + Celery | Express + Bull + passport | Spring + Quartz + Security | **Fitz M5** |
-|---|---|---|---|---|
-| Async/await ergonómico | ✅ asyncio | ✅ promises | ⚠ CompletableFuture | ✅ **built-in** |
-| Multi-thread real | ⚠ uvicorn workers | ❌ event loop | ✅ | ✅ **post-F17** |
-| JWT + bcrypt/Argon2 | 3 deps mínimo | 4 deps mínimo | Spring Security XML | ✅ **0 deps** |
-| WebSocket tipado | ❌ json manual | ❌ events sin schema | ❌ STOMP setup | ✅ **`WsConn<T>`** |
-| AsyncAPI auto | ❌ | ❌ | ⚠ plugin | ✅ **`/asyncapi.json`** |
-| Cron + retry + tz | Celery beat + Redis | Bull + node-schedule | Quartz config | ✅ **kwargs nativos** |
-| Job persistence + visibility | Flower + Redis Sentinel | Bull UI + Redis | Quartz JDBC store | ✅ **`store=db`** |
-| Compila a binario | ❌ | ⚠ pkg hack | ✅ jar | ✅ **standalone** |
-| Deploy = un binario | ❌ Python+Redis+Worker+nginx | ❌ Node+Redis+nginx | ⚠ jar + JVM | ✅ **un binario** |
-
-## Qué viene en M6 — Capstone Postgres + ORM nativo
-
-A partir del próximo módulo entramos al **stack persistente** de
-verdad. Postgres con un **driver puro Fitz** (sin libpq, sin
-tokio-postgres), **ORM declarativo** sobre `type` con relations
-(`@belongs_to`/`@has_many`/`@has_one`), QueryBuilder chain,
-agregados, eager loading, y todas las features de DB que vienen
-con esto: `Map<Str, Any>` ↔ jsonb, arrays nativos `List<T>` ↔
-`T[]`, JSON operators directos sobre `.where(...)`, navigation
-methods generados, etc.
-
-M6 cubre 7 capítulos:
-
-- **[C1 — Setup Postgres + `db.connect` + driver crudo](../m6-postgres-orm/c1-setup-driver-crudo.md)**
-- **[C2 — `@table`, `@primary` y lecturas tipadas](../m6-postgres-orm/c2-table-decoradores-reads.md)**
-- **[C3 — Writes + QueryBuilder chain + agregados](../m6-postgres-orm/c3-writes-querybuilder-agregados.md)**
-- **[C4 — Relations + navigation + eager loading](../m6-postgres-orm/c4-relations-navigation-preload.md)**
-- **[C5 — Tipos avanzados: jsonb, arrays, Date/DateTime/Uuid](../m6-postgres-orm/c5-tipos-avanzados.md)**
-- **[C6 — Migraciones con `fitz db`](../m6-postgres-orm/c6-migraciones-fitz-db.md)**
-- **[C7 — Capstone: app CRUD completa con auth + ORM + WS + cron + Docker](../m6-postgres-orm/c7-capstone-crud-completo.md)**
-
-Es el bloque más ambicioso del curso porque integra **TODO lo
-visto** en una app production-ready end-to-end. Arrancá con
-[M6.C1](../m6-postgres-orm/c1-setup-driver-crudo.md).
+Arrancá con [M5.C5 — HTTP client outbound](c5-http-client.md).

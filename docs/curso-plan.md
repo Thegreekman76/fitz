@@ -62,6 +62,26 @@ interop. **Total: 8 módulos / 42 capítulos**. El contenido vive en
 > de 6 a 7 caps, curso de 41 a 42. Sin cambios de código del
 > lenguaje (release v0.15.1 patch 100% docs/curso).
 
+> **Actualización 2026-06-18 (M5.C5 — HTTP client outbound)**:
+> al cerrar la mini-fase HTTP client builtin (Bloques 1-7 del
+> [roadmap dedicado](http-client-roadmap.md)) decidimos sumar un
+> cap al módulo M5 para no dejar el feature solo en la guía y los
+> ejemplos de la guía. El feature es ciudadano de primera (módulo
+> `http` builtin con 6 builtins async + paridad bit-a-bit
+> `fitz run` ↔ `fitz build` + integración nativa con
+> `@background`/`@cron`/`spawn`), comparable a `db`/`auth`/`jwt`
+> en peso pedagógico. Cap nuevo **M5.C5 — HTTP client outbound**
+> que cierra el módulo M5 (antes cerraba en C4), reusando el
+> patrón "Cerraste el módulo" + "Qué viene en M6" trasladado del
+> cierre anterior de C4. Sumamos ejemplo capstone
+> `examples/curso/m5-async-auth-rt/c5-http-client/app.fitz`
+> (<120 LoC) que combina todo el stack del módulo (`@auth_provider`
+> + `@admin` + `jwt.decode` + `@background + spawn` + `@cron` +
+> `http.head` + `http.post`). M5 crece de 4 a 5 caps, curso de
+> 42 a 43. Release `v0.17.0` (próximo norte tras cerrar Bloques
+> 8-9 del HTTP client) cubre tanto el feature de código como esta
+> adición pedagógica.
+
 ---
 
 ## Qué es
@@ -207,7 +227,7 @@ auto en `/docs`, middleware de logging, CORS configurado.
 
 ---
 
-### M5 — Async, auth, real-time (4 capítulos)
+### M5 — Async, auth, real-time (5 capítulos)
 
 | Cap | Título | Cubre |
 |---|---|---|
@@ -215,9 +235,12 @@ auto en `/docs`, middleware de logging, CORS configurado.
 | C24 | Auth nativa | `@auth_provider` con JWT + `hash.password`/`verify` (Argon2), `@authenticated`/`@admin`, 401/403 en OpenAPI auto |
 | C25 | WebSockets tipados | `@ws("/chat") @authenticated` + `WsConn<Message>` + broadcast + heartbeat, AsyncAPI en `/asyncapi.json` |
 | C26 | Jobs sin Celery | `@cron("0 */5 * * * *")` + `@background` + `spawn(track_metric)` |
+| C26b | HTTP client outbound | Módulo `http` builtin (`get/head/post/put/delete/request`), 3 body shapes (Str/Map/Bytes), `Result<HttpClientResponse>` automático, integración con `@background + spawn` (webhook dispatcher) y `@cron` (health checker), capstone del módulo |
 
 **Entregable**: chat WebSocket con login (JWT), broadcast, job
-cron de limpieza, todo en el mismo binario.
+cron de limpieza, y un capstone que combina TODO el stack
+(`@admin` + `@background + spawn` + `@cron` + `http.head/post`)
+en una API de notificaciones — todo en el mismo binario.
 
 ---
 
@@ -307,6 +330,7 @@ Mapping completo al estado actual de la guía (post-v0.11.1):
 | C24 Auth | `@auth_provider`/`@authenticated`/JWT/Argon2 | §28 |
 | C25 WS | `@ws`/`WsConn<T>`/broadcast/AsyncAPI | §29 |
 | C26 Cron | `@cron`/`@background`/`spawn` | §30 |
+| **M5.C5 HTTP client outbound** (nuevo 2026-06-18) | módulo `http` builtin (`get/head/post/put/delete/request`), 3 body shapes, `Result<HttpClientResponse>`, integración con `@background+spawn` y `@cron` | §17 — sub-sec "HTTP client outbound" |
 | C27-C31 ORM nativo (setup, @table, writes, relations, tipos avanzados) | Postgres + `@table` + CRUD + jsonb/arrays/Date | §31 Postgres + ORM + [DB y ORM exhaustivo](db-orm.md) |
 | **M6.C6 Migraciones con `fitz db`** (nuevo 2026-06-07) | `new`/`diff`/`migrate`/`rollback`/`status`/`history`/`check`/`stamp`/`inspect`/`squash` + `.fitz` data migrations | [DB y ORM § 26.c](db-orm.md#26c-migraciones-automaticas-v01016) |
 | M6.C7 Capstone | Notas con tiempo real (auth + ORM + WS + cron + Docker) | §31 + ejemplo `examples/guide/31b-orm-crud-http.fitz` |
