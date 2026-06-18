@@ -273,6 +273,17 @@ pub fn generate_project(
     // runtime.
     let uses_prometheus_export = program_uses_prometheus_export(program);
 
+    // Mini-fase HTTP client (2026-06-18) — `http.X(...)` calls in
+    // main OR any loaded module. Transitive parallel to uses_db:
+    // typical case is a `webhooks.fitz` module declaring
+    // `async fn dispatch(url, payload) { http.post(url, payload).await? }`
+    // and the main only orchestrating with `spawn(dispatch(...))`.
+    // The main needs the prelude (struct `HttpClientResponse` + helpers
+    // `__fitz_http_*`) in scope so the module's `use crate::__fitz_http_*`
+    // resolves.
+    let uses_http_client =
+        program_uses_http_client(program) || loader.modules.iter().any(|m| m.uses_http_client);
+
     // Phase 12.8 — feature flags: detects `@flag(...)` or builtins
     // `flag(...)`/`flags.X(...)`. The program can always use the
     // builtin even with no defaults declared, so we also turn on
@@ -311,6 +322,7 @@ pub fn generate_project(
             uses_fitz_value,
             uses_date_or_uuid,
             uses_prometheus_export,
+            uses_http_client,
         ),
         main_rs,
         mod_files: {
@@ -1608,6 +1620,130 @@ fn program_uses_db(program: &Program) -> bool {
     program.iter().any(stmt_uses_db)
 }
 
+/// Mini-fase HTTP client (2026-06-18) — `true` if the program calls
+/// one of the 6 builtins of the `http` module (`http.get/head/post/
+/// put/delete/request`). Triggers emission of `HTTP_CLIENT_PRELUDE`
+/// (struct `HttpClientResponse`, shared `reqwest::Client`, async
+/// helpers) and adds `reqwest = "0.12"` with features
+/// `["json", "rustls-tls"]` to the generated Cargo.toml.
+///
+/// Pattern: recursive walk parallel to `program_uses_db` /
+/// `program_uses_ws_broadcast`, matching `Expr::Call` whose callee is
+/// `Expr::Field { object: Ident("http"), field: <one of 6 names>, .. }`.
+/// Hits on `http.X(...)` regardless of nesting level inside fn bodies,
+/// `if`/`while`/`match`/closures/etc. The walk loses user-defined
+/// `http` shadowing — the callsite's codegen handles that case at
+/// dispatch time (parallel to how `gen_db_conn_method_call` validates).
+fn program_uses_http_client(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_http(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
+                    if let Expr::Ident(recv, _) = object.as_ref() {
+                        if recv == "http"
+                            && matches!(
+                                field.as_str(),
+                                "get" | "head" | "post" | "put" | "delete" | "request"
+                            )
+                        {
+                            return true;
+                        }
+                    }
+                }
+                expr_uses_http(callee) || args.iter().any(expr_uses_http)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_http(left) || expr_uses_http(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_http(operand),
+            Expr::Field { object, .. } => expr_uses_http(object),
+            Expr::Index { object, index, .. } => expr_uses_http(object) || expr_uses_http(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_http(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_http(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_http(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_http(start) || expr_uses_http(end),
+            Expr::List(items, _) | Expr::Tuple(items, _) => items.iter().any(expr_uses_http),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_http(expr)
+                    || expr_uses_http(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_http(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_http(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_http(key)
+                    || expr_uses_http(value)
+                    || expr_uses_http(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_http(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_http(f))
+            }
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_http(k) || expr_uses_http(v)),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_http(v)),
+            Expr::TupleField { tuple, .. } => expr_uses_http(tuple),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_http(condition)
+                    || then.iter().any(stmt_uses_http)
+                    || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses_http))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_http(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_http))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_http),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Lit(_) => false,
+                StrPart::Expr(inner, _) => expr_uses_http(inner),
+            }),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_http),
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_http(inner),
+            Expr::NamedArg { value, .. } => expr_uses_http(value),
+            _ => false,
+        }
+    }
+    fn stmt_uses_http(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_http),
+            Stmt::Assign { value, .. } => expr_uses_http(value),
+            Stmt::Expr(e, _) => expr_uses_http(e),
+            Stmt::Return(e, _) => expr_uses_http(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_http(status) || body.as_ref().is_some_and(expr_uses_http)
+            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_http(condition) || body.iter().any(stmt_uses_http),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_http),
+            Stmt::For { iter, body, .. } => expr_uses_http(iter) || body.iter().any(stmt_uses_http),
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_http)
+}
+
 /// Phase 6.6: True if the program uses async — any user-declared
 /// `async fn`, any `Expr::Await` somewhere, or a call to the `sleep`
 /// builtin. Codegen consults this flag to decide three things:
@@ -2862,6 +2998,7 @@ fn cargo_toml_for(
     uses_fitz_value: bool,
     uses_date_or_uuid: bool,
     uses_prometheus_export: bool,
+    uses_http_client: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -2882,7 +3019,12 @@ fn cargo_toml_for(
     // Phase 10.1.c — `uses_db` also needs tokio (TCP + async-mutex
     // for the connection). The driver doesn't use cron/signal, so
     // the specific features don't change.
-    let needs_tokio = has_http || uses_async || uses_jobs || uses_db;
+    // Mini-fase HTTP client (2026-06-18) — `reqwest` requires a tokio
+    // runtime. Even CLI programs that only do `http.X(...)` need
+    // tokio's macros + rt-multi-thread to compile the emitted
+    // `#[tokio::main]` shim (we already enable async for HTTP client
+    // callsites — they always come via `.await`).
+    let needs_tokio = has_http || uses_async || uses_jobs || uses_db || uses_http_client;
     // Phase 10.b fix: `uses_db` also needs `time` because the
     // driver (the embedded `src/db.rs`) uses `tokio::time::timeout`
     // for the pool's health check + lazy reconnect. Without feature
@@ -2955,7 +3097,8 @@ fn cargo_toml_for(
         || uses_logging
         || uses_trace_metric
         || uses_db
-        || uses_date_or_uuid;
+        || uses_date_or_uuid
+        || uses_http_client;
     if !needs_deps_section {
         return header;
     }
@@ -3197,8 +3340,21 @@ fn cargo_toml_for(
     } else {
         String::new()
     };
+    // Mini-fase HTTP client (2026-06-18) — `reqwest = "0.12"` with
+    // `default-features = false` skips the reqwest default features
+    // (cookies, h2 push, etc.) we don't ship in MVP. Features:
+    // `json` (`response.json()` path is nice-to-have for refinement;
+    // we use `text()` today but enable it cheaply) + `rustls-tls`
+    // (pure-Rust TLS, no openssl on host — matches Phase 10.1.b's
+    // db driver). Non-optional dep: if the program calls `http.X`,
+    // the binary always links reqwest.
+    let http_client_lines = if uses_http_client {
+        "reqwest = { version = \"0.12\", default-features = false, features = [\"json\", \"rustls-tls\"] }\n"
+    } else {
+        ""
+    };
     format!(
-        "{}\n[dependencies]\n{}{}{}{}{}{}{}{}",
+        "{}\n[dependencies]\n{}{}{}{}{}{}{}{}{}",
         header,
         http_lines,
         tokio_line,
@@ -3207,7 +3363,8 @@ fn cargo_toml_for(
         jobs_lines,
         db_lines,
         date_uuid_lines,
-        logging_lines
+        logging_lines,
+        http_client_lines
     )
 }
 
@@ -3350,6 +3507,15 @@ struct LoadedModule {
     /// axum::routing::any(crate::<mod>::__ws_handler_<name>))` and
     /// to feed the cross-module AsyncAPI schema.
     ws_fn_stmts: Vec<Stmt>,
+    /// Mini-fase HTTP client (2026-06-18) —
+    /// `program_uses_http_client(module_program)`. The main ORs it
+    /// with its own flag so the `__fitz_http_*` prelude lives in the
+    /// crate root when a module's body invokes the HTTP client (typical
+    /// case: `webhooks.fitz` declares
+    /// `async fn dispatch(url, payload) { http.post(url, payload).await? }`
+    /// and main only orchestrates). The module's emitted code references
+    /// `use crate::{__fitz_http_*}`.
+    uses_http_client: bool,
 }
 
 /// Binding visible in the importer file. Produced by the loader
@@ -3731,6 +3897,11 @@ impl ModuleLoader {
         let module_uses_db = program_uses_db(&module_program);
         let module_uses_date_or_uuid = program_uses_date_or_uuid(&module_program);
         let module_has_http = has_http_routes(&module_program);
+        // Mini-fase HTTP client (2026-06-18) — paralelo a
+        // module_uses_db: detect whether the module calls `http.X(...)`
+        // so the main ORs the flag and emits the prelude when at least
+        // one module references the HTTP client.
+        let module_uses_http_client = program_uses_http_client(&module_program);
         // W12 (v0.10.8) — detect `@auth_provider` declared IN this
         // module. If the module has it, we expose
         // `(fn_name, is_async, user_type_name)` to the main so
@@ -3810,6 +3981,7 @@ impl ModuleLoader {
             auth_provider_fn: module_auth_provider_fn,
             http_fn_stmts: module_http_fn_stmts,
             ws_fn_stmts: module_ws_fn_stmts,
+            uses_http_client: module_uses_http_client,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -4288,6 +4460,27 @@ fn generate_module_rs_with_bindings(
             );
         }
     }
+    // Mini-fase HTTP client (2026-06-18) — if the module calls
+    // `http.X(...)`, import the prelude helpers + the
+    // `HttpClientResponse` nominal from the crate root. Parallel to
+    // the `__fitz_db_*` / `__fitz_jwt_*` block above. The
+    // `__FitzHttpRequestOpts` struct is also imported because
+    // `gen_http_request_opts` emits its constructor inline.
+    let module_uses_http_client_local = program_uses_http_client(program);
+    if module_uses_http_client_local {
+        ctx.uses_http_client = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{HttpClientResponse, HttpClientResponseData};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_http_get, __fitz_http_head, __fitz_http_delete, __fitz_http_post, __fitz_http_put, __fitz_http_request_full};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_http_body_from_str, __fitz_http_body_from_bytes, __fitz_http_body_from_map_str_str};\n\
+             #[allow(unused_imports)]\n\
+             use crate::__FitzHttpRequestOpts;\n\n",
+        );
+    }
+
     // W11 (v0.10.7) — when the module emits HTTP handlers (returning
     // language types + `@get`/`@post`/etc decorators + `return
     // <status> { ... }`), it needs `__FitzResponse` and the traits
@@ -4969,6 +5162,11 @@ fn generate_main_rs(
     let uses_date_or_uuid =
         program_uses_date_or_uuid(program) || loader.modules.iter().any(|m| m.uses_date_or_uuid);
 
+    // Mini-fase HTTP client (2026-06-18) — `http.X(...)` calls in
+    // main OR any loaded module. Transitive parallel to uses_db.
+    let uses_http_client =
+        program_uses_http_client(program) || loader.modules.iter().any(|m| m.uses_http_client);
+
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
     ctx.uses_python = uses_python;
@@ -4992,6 +5190,7 @@ fn generate_main_rs(
     ctx.flag_defaults = flag_defaults.clone();
     ctx.uses_db = uses_db;
     ctx.uses_date_or_uuid = uses_date_or_uuid;
+    ctx.uses_http_client = uses_http_client;
     // 10.8.7 (v0.10.8) — pre-scan of the `ws_broadcast(endpoint, msg)`
     // builtin in main. Set BEFORE emit_prelude so that
     // `emit_http_runtime_prelude` emits the `__fitz_ws_broadcast`
@@ -5539,6 +5738,13 @@ fn emit_main_rs_body(
     // dual gate (compile-time `@server(prometheus=true)` + env var
     // `FITZ_PROMETHEUS=1`) lives inside the init helper.
     ctx.emit_prometheus_prelude();
+    // Mini-fase HTTP client (2026-06-18) — emit `HttpClientResponse`
+    // struct + shared `reqwest::Client` (LazyLock) + 6 async helpers
+    // `__fitz_http_*`. Only when the program calls `http.X(...)`.
+    // When `has_http` is also active, additionally emit the
+    // `__ToFitzJson`/`__FromFitzJson` impls so the response can be
+    // returned from handlers.
+    ctx.emit_http_client_prelude();
     // Phase 10.1.c — `db` module prelude: opaque types
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + async helpers for connect/query/exec/close.
@@ -6655,6 +6861,16 @@ struct CodegenCtx<'a> {
     /// `__IntoPgValue`/`__FromFitzDbRow` branches. Cargo.toml adds
     /// chrono+uuid when true.
     uses_date_or_uuid: bool,
+    /// Mini-fase HTTP client (2026-06-18): `true` if the program
+    /// calls any of the 6 builtins of the `http` module
+    /// (`http.get/head/post/put/delete/request`). Enables emission of
+    /// `HTTP_CLIENT_PRELUDE` (struct `HttpClientResponse` +
+    /// `__FITZ_HTTP_CLIENT` static + async `__fitz_http_*` helpers)
+    /// and adds `reqwest = "0.12"` with features
+    /// `["json", "rustls-tls"]` to the generated Cargo.toml. Programs
+    /// without `http.X` calls pay nothing (no reqwest in deps, no
+    /// prelude in main).
+    uses_http_client: bool,
     /// Phase 9.w.3.c: info of each cron job, pre-collected. Each
     /// entry has the Rust name of the target fn, the cron-expression
     /// Str, and an `is_async` flag. `gen_main`/`gen_http_main` use
@@ -6893,6 +7109,7 @@ impl<'a> CodegenCtx<'a> {
             flag_defaults: std::collections::BTreeMap::new(),
             uses_db: false,
             uses_date_or_uuid: false,
+            uses_http_client: false,
             cron_jobs_info: Vec::new(),
             ws_heartbeat_secs: 30,
             observability_enabled: true,
@@ -8530,6 +8747,25 @@ impl __FitzRetryConfig {
         }
         self.emit(PROMETHEUS_PRELUDE);
         self.emit("\n");
+    }
+
+    /// Mini-fase HTTP client (2026-06-18) — emit the core HTTP client
+    /// prelude (struct `HttpClientResponse`, shared client, 6 async
+    /// helpers, body marshalling). Only when the program references
+    /// the `http` module. When `has_http` is also true (HTTP server-
+    /// side AND HTTP client in the same program), additionally emit
+    /// the `__ToFitzJson` / `__FromFitzJson` impls for
+    /// `HttpClientResponseData` so handlers can return it as JSON.
+    fn emit_http_client_prelude(&mut self) {
+        if !self.uses_http_client {
+            return;
+        }
+        self.emit(HTTP_CLIENT_PRELUDE);
+        self.emit("\n");
+        if self.has_http {
+            self.emit(HTTP_CLIENT_HTTP_INTEGRATION_PRELUDE);
+            self.emit("\n");
+        }
     }
 
     /// `__fitz_db_runtime` (declared as `mod ... ;`) + aliases
@@ -10723,7 +10959,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // entries in `type_sigs`/`fields_by_id` so that
         // `rust_type_for(Nominal(<Request>))` emits `Request` and
         // the HTTP prelude emits them as legitimate Rust structs.
-        for builtin in &["Request", "Response"] {
+        // Mini-fase HTTP client (2026-06-18): also include
+        // `HttpClientResponse` when the program uses the `http`
+        // module. Without this, `let r = http.get(...).await?` +
+        // `r.status` would fail with "type HttpClientResponse without
+        // resolved fields in fields_by_id" because the field access
+        // codegen looks up the fields by TypeId from there.
+        let builtin_types: &[&str] = if self.uses_http_client {
+            &["Request", "Response", "HttpClientResponse"]
+        } else {
+            &["Request", "Response"]
+        };
+        for builtin in builtin_types {
             if let Some(id) = self.env.lookup(builtin) {
                 let resolved: Vec<ResolvedField> =
                     self.env.info(id).fields.clone().unwrap_or_default();
@@ -14403,6 +14650,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 {
                     return self.gen_temporal_module_call(recv, field, args, *field_span);
                 }
+                // Mini-fase HTTP client (2026-06-18) — `http.X(...)`.
+                // Same shadowing semantics as `db.X(...)`: the local
+                // var wins over the built-in module binding. The
+                // dispatch emits `__fitz_http_<method>(...)` and
+                // returns `Future<Result<HttpClientResponse>>`.
+                if recv == "http" && self.lookup_var(recv).is_none() {
+                    return self.gen_http_client_call(field, args, *field_span);
+                }
             }
 
             // Phase 10.1.c — method over a `DbConn` (opaque handle).
@@ -16728,6 +16983,318 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     /// any other field. The `field_span` is used for error messages
     /// with position. The user does `.await?` at the Fitz callsite
     /// to unwrap.
+    /// Mini-fase HTTP client (2026-06-18) — dispatch of the 6
+    /// `http.X(...)` builtins. Validates arity, types the URL as Str,
+    /// marshalls the body (Str/Bytes/Map<Str,Str> strict — MVP
+    /// parallel to `jwt.encode`), and emits the `__fitz_http_<method>`
+    /// helper call. The ret type is `Future<Result<HttpClientResponse,
+    /// Str>>` — paralleling the interpreter and forcing the user to
+    /// handle the transport-level error path with `?` or `match`.
+    fn gen_http_client_call(
+        &mut self,
+        field: &str,
+        args: &[Expr],
+        field_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let resp_id = self
+            .env
+            .lookup("HttpClientResponse")
+            .expect("HttpClientResponse pre-registered en TypeEnv (types.rs)");
+        let ret_type = Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::Nominal(resp_id)),
+            err: Box::new(Type::Str),
+        }));
+
+        match field {
+            "get" | "head" | "delete" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        field_span,
+                        format!(
+                            "`http.{}` expects 1 argument (url: Str), got {}",
+                            field,
+                            args.len()
+                        ),
+                    ));
+                }
+                let (url_code, url_ty) = self.gen_expr(&args[0])?;
+                let url_c = coerce(&url_code, &url_ty, &Type::Str, self.env);
+                Ok((format!("__fitz_http_{}({})", field, url_c), ret_type))
+            }
+            "post" | "put" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(
+                        field_span,
+                        format!(
+                            "`http.{}` expects 2 arguments (url: Str, body: Str|Map<Str,Str>|Bytes), got {}",
+                            field,
+                            args.len()
+                        ),
+                    ));
+                }
+                let (url_code, url_ty) = self.gen_expr(&args[0])?;
+                let url_c = coerce(&url_code, &url_ty, &Type::Str, self.env);
+                let (body_payload, _body_ty) = self.gen_http_body_marshal(field, &args[1])?;
+                // Wrap in an `async {}` block so the call site keeps
+                // the `Future<Result<...>>` shape that `gen_call`'s
+                // caller expects (`http.post(...).await?`). The inner
+                // `__fitz_http_post(...)` is itself async, so we await
+                // it inside the block.
+                let code = format!(
+                    "(async {{ let (__b, __ct) = {}; __fitz_http_{}({}, __b, __ct).await }})",
+                    body_payload, field, url_c
+                );
+                Ok((code, ret_type))
+            }
+            "request" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        field_span,
+                        format!(
+                            "`http.request` expects 1 argument (opts: Map), got {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let opts_code = self.gen_http_request_opts(&args[0], field_span)?;
+                Ok((
+                    format!(
+                        "(async {{ __fitz_http_request_full({}).await }})",
+                        opts_code
+                    ),
+                    ret_type,
+                ))
+            }
+            other => Err(self.err_at(
+                field_span,
+                format!(
+                    "module `http` has no `{}` (supported: get, head, post, put, delete, request)",
+                    other
+                ),
+            )),
+        }
+    }
+
+    /// Mini-fase HTTP client (2026-06-18) — marshall a body Expr to a
+    /// `(Option<Vec<u8>>, Option<&'static str>)` Rust expression.
+    /// Returns the code + the Fitz body type for diagnostics.
+    ///
+    /// MVP shapes (parallel to interpreter `body_to_payload`):
+    /// - `Str` → `__fitz_http_body_from_str(s)`. No auto Content-Type.
+    /// - `Bytes` → `__fitz_http_body_from_bytes(b.lock().unwrap().clone())`.
+    /// - `Map<Str, Str>` strict → `__fitz_http_body_from_map_str_str(m)`
+    ///   with auto Content-Type `application/json`. Heterogeneous Map
+    ///   variants and Instance shapes are post-MVP debt (parallel to
+    ///   `jwt.encode`).
+    fn gen_http_body_marshal(
+        &mut self,
+        field: &str,
+        body_expr: &Expr,
+    ) -> Result<(String, Type), FitzError> {
+        let (body_code, body_ty) = self.gen_expr(body_expr)?;
+        match &body_ty {
+            Type::Str => Ok((format!("__fitz_http_body_from_str({})", body_code), body_ty)),
+            Type::Bytes => Ok((
+                // `Type::Bytes` codegen representation is plain
+                // `Vec<u8>` (see `rust_type_for(Bytes) -> Vec<u8>` +
+                // `gen_method_call` for the Bytes methods), not
+                // `Arc<Mutex<...>>`. We clone to avoid moving the
+                // user's binding (typical: `let payload = bytes(...);
+                // http.post(url, payload).await?`).
+                format!("__fitz_http_body_from_bytes(({}).clone())", body_code),
+                body_ty,
+            )),
+            Type::Map(k, v)
+                if matches!(k.as_ref(), Type::Str) && matches!(v.as_ref(), Type::Str) =>
+            {
+                Ok((
+                    format!("__fitz_http_body_from_map_str_str({})", body_code),
+                    body_ty,
+                ))
+            }
+            // Any (gradual escape) — runtime panic if wrong shape.
+            // Pragmatic: covers `http.post(url, body)` where `body`
+            // is the param of an outer fn typed Any (typical case
+            // before MVP-strict typing is enforced). Trade-off
+            // documented in roadmap sec. 4 — refinable with
+            // `__FitzValue` integration.
+            Type::Any => Ok((
+                format!(
+                    "__fitz_http_body_from_str(format!(\"{{}}\", {}))",
+                    body_code
+                ),
+                body_ty,
+            )),
+            other => Err(self.err_at(
+                body_expr.span(),
+                format!(
+                    "`http.{}` body must be Str, Map<Str, Str> strict, or Bytes (MVP); \
+                     received `{}`. Heterogeneous Map<Str, Any> + Instance shapes \
+                     require `__FitzValue` integration (post-MVP debt parallel to \
+                     `jwt.encode`).",
+                    field,
+                    other.display(self.env)
+                ),
+            )),
+        }
+    }
+
+    /// Mini-fase HTTP client (2026-06-18) — converts the `opts: Map`
+    /// arg of `http.request(opts)` into the Rust expression that
+    /// constructs `__FitzHttpRequestOpts`. We parse the Map LITERAL
+    /// at codegen time (paralleling `jwt.encode`'s Map shape strict)
+    /// so we can validate required keys + shapes statically and
+    /// avoid runtime panics on missing fields.
+    ///
+    /// Required keys: `method` (Str), `url` (Str).
+    /// Optional keys: `timeout_ms` (Int), `headers` (Map<Str, Str>),
+    /// `body` (Str/Bytes/Map<Str, Str>), `follow_redirects` (Bool).
+    fn gen_http_request_opts(
+        &mut self,
+        opts_expr: &Expr,
+        field_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        let pairs = match opts_expr {
+            Expr::Map(pairs, _) => pairs,
+            _ => {
+                return Err(self.err_at(
+                    opts_expr.span(),
+                    "`http.request(opts)` requires a Map literal at the callsite for the MVP \
+                     (so the codegen can validate the shape statically). \
+                     Workaround: inline the Map keys instead of passing a variable.",
+                ));
+            }
+        };
+
+        // Recolectamos cada key con su Expr.
+        let mut method_expr: Option<&Expr> = None;
+        let mut url_expr: Option<&Expr> = None;
+        let mut timeout_expr: Option<&Expr> = None;
+        let mut headers_expr: Option<&Expr> = None;
+        let mut body_expr: Option<&Expr> = None;
+        let mut follow_expr: Option<&Expr> = None;
+
+        for (k, v) in pairs {
+            let key_name = match k {
+                Expr::Str(s, _) => s.clone(),
+                _ => {
+                    return Err(self.err_at(
+                        k.span(),
+                        "`http.request(opts)` Map keys must be Str literals",
+                    ));
+                }
+            };
+            match key_name.as_str() {
+                "method" => method_expr = Some(v),
+                "url" => url_expr = Some(v),
+                "timeout_ms" => timeout_expr = Some(v),
+                "headers" => headers_expr = Some(v),
+                "body" => body_expr = Some(v),
+                "follow_redirects" => follow_expr = Some(v),
+                other => {
+                    return Err(self.err_at(
+                        k.span(),
+                        format!(
+                            "`http.request(opts)` unknown key `{}` — supported: method, url, \
+                             timeout_ms, headers, body, follow_redirects",
+                            other
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let method = method_expr.ok_or_else(|| {
+            self.err_at(
+                field_span,
+                "`http.request(opts)` requires the key `method` (Str)",
+            )
+        })?;
+        let url = url_expr.ok_or_else(|| {
+            self.err_at(
+                field_span,
+                "`http.request(opts)` requires the key `url` (Str)",
+            )
+        })?;
+
+        let (method_code, method_ty) = self.gen_expr(method)?;
+        let method_c = coerce(&method_code, &method_ty, &Type::Str, self.env);
+        let (url_code, url_ty) = self.gen_expr(url)?;
+        let url_c = coerce(&url_code, &url_ty, &Type::Str, self.env);
+
+        let timeout_c = match timeout_expr {
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                let c = coerce(&c, &t, &Type::Int, self.env);
+                format!("({}) as u64", c)
+            }
+            None => "30_000u64".to_string(),
+        };
+
+        let headers_c = match headers_expr {
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                let ok = matches!(
+                    &t,
+                    Type::Map(k, v)
+                        if matches!(k.as_ref(), Type::Str) && matches!(v.as_ref(), Type::Str)
+                );
+                if !ok {
+                    return Err(self.err_at(
+                        e.span(),
+                        format!(
+                            "`http.request(opts)` `headers` must be Map<Str, Str>, got `{}`",
+                            t.display(self.env)
+                        ),
+                    ));
+                }
+                format!("(({}).lock().unwrap().clone())", c)
+            }
+            None => "Vec::new()".to_string(),
+        };
+
+        let (body_bytes_c, body_ct_c) = match body_expr {
+            Some(e) => {
+                let (body_payload, _) = self.gen_http_body_marshal("request", e)?;
+                (
+                    format!("{{ let (__b, __ct) = {}; __b }}", body_payload),
+                    format!("{{ let (__b2, __ct2) = {}; __ct2 }}", body_payload),
+                )
+            }
+            None => ("None".to_string(), "None".to_string()),
+        };
+
+        let follow_c = match follow_expr {
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                if !matches!(&t, Type::Bool) {
+                    return Err(self.err_at(
+                        e.span(),
+                        format!(
+                            "`http.request(opts)` `follow_redirects` must be Bool, got `{}`",
+                            t.display(self.env)
+                        ),
+                    ));
+                }
+                c
+            }
+            None => "true".to_string(),
+        };
+
+        Ok(format!(
+            "__FitzHttpRequestOpts {{ method: {method}, url: {url}, timeout_ms: {timeout}, \
+             headers: {headers}, body_bytes: {body_bytes}, body_auto_content_type: {body_ct}, \
+             follow_redirects: {follow} }}",
+            method = method_c,
+            url = url_c,
+            timeout = timeout_c,
+            headers = headers_c,
+            body_bytes = body_bytes_c,
+            body_ct = body_ct_c,
+            follow = follow_c,
+        ))
+    }
+
     fn gen_db_module_call(
         &mut self,
         field: &str,
@@ -33972,6 +34539,459 @@ fn __fitz_prometheus_route() -> axum::Router {
 }
 "##;
 
+/// Mini-fase HTTP client (2026-06-18) — emitted in the crate root
+/// when `program_uses_http_client` fires. Provides:
+///
+/// - Built-in nominal `HttpClientResponse` (struct
+///   `HttpClientResponseData` + alias `Arc<Mutex<...>>` + Display +
+///   PartialEq) returned by all the HTTP client helpers.
+/// - Shared `reqwest::Client` via `LazyLock` (cheap clone — `reqwest`
+///   internally is an `Arc`). Default `follow_redirects=true` and
+///   `timeout=30s` (overridden per-request).
+/// - 6 async helpers `__fitz_http_<method>` paralelos bit-a-bit a
+///   `builtin_http_<method>` of the interpreter.
+/// - Helper `__fitz_http_body_from_*` to construct `(Option<Vec<u8>>,
+///   Option<&'static str>)` body payloads from typed Fitz values.
+/// - Internal struct `__FitzHttpRequestOpts` for the low-level
+///   `http.request(opts)` path.
+///
+/// Mirrors the contract of `src/http_client.rs` (interpreter):
+/// status 4xx/5xx → `Ok` with `r.status`; transport errors / timeout
+/// / DNS / TLS / URL inválida → `Err(String)` with `"http: ..."`
+/// prefix. The `__ToFitzJson`/`__FromFitzJson` impls live in
+/// `HTTP_CLIENT_HTTP_INTEGRATION_PRELUDE` (only when `has_http`),
+/// because they reference `serde_json` (which the http_client path
+/// does NOT pull in by itself).
+const HTTP_CLIENT_PRELUDE: &str = r##"
+// --- mini-fase HTTP client (2026-06-18): built-in `http` module ---
+
+/// Built-in nominal `HttpClientResponse`. Convention parallel to
+/// every user `type`: `struct Data` + alias
+/// `Arc<Mutex<Data>>` so the codegen for `r.status` (field access
+/// pattern) consults the data through `.lock().unwrap().status.clone()`.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct HttpClientResponseData {
+    status: i64,
+    body: String,
+    headers: Arc<Mutex<Vec<(String, String)>>>,
+    duration_ms: i64,
+}
+#[allow(dead_code)]
+type HttpClientResponse = Arc<Mutex<HttpClientResponseData>>;
+
+impl PartialEq for HttpClientResponseData {
+    fn eq(&self, other: &Self) -> bool {
+        // The headers field carries Arc<Mutex<...>>; compare by content
+        // (ptr_eq shortcut + lock+deref) parallel to nominal types
+        // emitted by `gen_type_def`.
+        self.status == other.status
+            && self.body == other.body
+            && self.duration_ms == other.duration_ms
+            && (Arc::ptr_eq(&self.headers, &other.headers)
+                || *self.headers.lock().unwrap() == *other.headers.lock().unwrap())
+    }
+}
+
+impl std::fmt::Display for HttpClientResponseData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Bit-for-bit parallel to the interpreter:
+        // `HttpClientResponse { status: 200, body: "...", headers: <map>, duration_ms: 42 }`
+        write!(
+            f,
+            "HttpClientResponse {{ status: {}, body: \"{}\", headers: <map>, duration_ms: {} }}",
+            self.status, self.body, self.duration_ms,
+        )
+    }
+}
+
+/// Shared `reqwest::Client`. `LazyLock` defers init to first usage.
+/// Default timeout 30s + follow_redirects=true (reqwest default).
+/// Per-request overrides apply on top.
+static __FITZ_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(30_000))
+        .build()
+        .expect("could not build reqwest::Client — broken TLS / rustls config")
+});
+
+/// Internal: parsed options for the low-level `http.request(opts)`.
+/// Constructed by the dispatch in `gen_call` from the Map literal
+/// arg.
+#[allow(dead_code)]
+struct __FitzHttpRequestOpts {
+    method: String,
+    url: String,
+    timeout_ms: u64,
+    headers: Vec<(String, String)>,
+    body_bytes: Option<Vec<u8>>,
+    body_auto_content_type: Option<&'static str>,
+    follow_redirects: bool,
+}
+
+/// Builds the `HttpClientResponse` instance returned to the user.
+/// Order of fields mirrors `types::register_http_builtin_types`.
+#[allow(dead_code)]
+fn __fitz_http_build_response(
+    status: i64,
+    body: String,
+    headers: Vec<(String, String)>,
+    duration_ms: i64,
+) -> HttpClientResponse {
+    Arc::new(Mutex::new(HttpClientResponseData {
+        status,
+        body,
+        headers: Arc::new(Mutex::new(headers)),
+        duration_ms,
+    }))
+}
+
+/// Maps `reqwest::Error` to a user-facing message with identifiable
+/// prefix. Parallel to `http_client::format_reqwest_error` of the
+/// interpreter — same prefixes, same shape, so user code that does
+/// `e.starts_with("http: timeout")` continues working bit-for-bit.
+#[allow(dead_code)]
+fn __fitz_http_format_reqwest_error(e: &reqwest::Error, url: &str) -> String {
+    if e.is_timeout() {
+        return format!("http: timeout calling `{}`: {}", url, e);
+    }
+    if e.is_connect() {
+        return format!("http: could not connect to `{}`: {}", url, e);
+    }
+    if e.is_builder() {
+        return format!("http: invalid request to `{}`: {}", url, e);
+    }
+    if e.is_request() {
+        return format!("http: request failed to `{}`: {}", url, e);
+    }
+    format!("http: error calling `{}`: {}", url, e)
+}
+
+/// Core async dispatch shared by all 6 helpers. Constructs the
+/// request, applies headers + body, awaits the response, measures
+/// `duration_ms` and packs the `HttpClientResponse`.
+#[allow(dead_code)]
+async fn __fitz_http_dispatch(opts: __FitzHttpRequestOpts) -> Result<HttpClientResponse, String> {
+    let started = std::time::Instant::now();
+
+    // Method parsing — for the simple helpers (get/head/...) we know
+    // it's a known verb; for the low-level request we accept any
+    // case-insensitive standard verb (the dispatch validated earlier).
+    let method = match reqwest::Method::from_bytes(opts.method.to_uppercase().as_bytes()) {
+        Ok(m) => m,
+        Err(_) => {
+            return Err(format!(
+                "http: invalid HTTP method `{}` — must be GET/POST/PUT/DELETE/HEAD/PATCH/OPTIONS/...",
+                opts.method
+            ));
+        }
+    };
+
+    // Client selection: shared for follow_redirects=true (case 90%),
+    // one-shot ad-hoc for follow_redirects=false (no cache — rare case).
+    let client = if opts.follow_redirects {
+        __FITZ_HTTP_CLIENT.clone()
+    } else {
+        match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(30_000))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(format!(
+                    "http: could not build one-shot client: {}",
+                    e
+                ));
+            }
+        }
+    };
+
+    let mut req = client
+        .request(method, &opts.url)
+        .timeout(std::time::Duration::from_millis(opts.timeout_ms));
+
+    // User-provided headers BEFORE auto Content-Type — so the user's
+    // explicit Content-Type wins.
+    for (name, value) in &opts.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+
+    if let Some(bytes) = opts.body_bytes {
+        req = req.body(bytes);
+        if let Some(ct) = opts.body_auto_content_type {
+            let user_set_ct = opts
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+            if !user_set_ct {
+                req = req.header("content-type", ct);
+            }
+        }
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return Err(__fitz_http_format_reqwest_error(&e, &opts.url)),
+    };
+
+    let status = resp.status().as_u16() as i64;
+    // Headers → Vec<(String, String)>, preserving insertion order. If
+    // a header is multi-valued, the last one wins (MVP decision —
+    // parallel to the interpreter).
+    let mut header_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut header_order: Vec<String> = Vec::new();
+    for (name, value) in resp.headers().iter() {
+        let n = name.as_str().to_string();
+        let v = value.to_str().unwrap_or("<binary>").to_string();
+        if header_map.insert(n.clone(), v).is_none() {
+            header_order.push(n);
+        } else if let Some(idx) = header_order.iter().position(|x| x == &n) {
+            header_order.remove(idx);
+            header_order.push(n);
+        }
+    }
+    let resp_headers: Vec<(String, String)> = header_order
+        .into_iter()
+        .map(|k| {
+            let v = header_map.remove(&k).unwrap_or_default();
+            (k, v)
+        })
+        .collect();
+
+    let body_text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => return Err(format!("http: reading response body: {}", e)),
+    };
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    Ok(__fitz_http_build_response(
+        status,
+        body_text,
+        resp_headers,
+        duration_ms,
+    ))
+}
+
+/// `http.get(url)` codegen helper.
+#[allow(dead_code)]
+async fn __fitz_http_get(url: String) -> Result<HttpClientResponse, String> {
+    __fitz_http_dispatch(__FitzHttpRequestOpts {
+        method: "GET".to_string(),
+        url,
+        timeout_ms: 30_000,
+        headers: Vec::new(),
+        body_bytes: None,
+        body_auto_content_type: None,
+        follow_redirects: true,
+    })
+    .await
+}
+
+/// `http.head(url)` codegen helper.
+#[allow(dead_code)]
+async fn __fitz_http_head(url: String) -> Result<HttpClientResponse, String> {
+    __fitz_http_dispatch(__FitzHttpRequestOpts {
+        method: "HEAD".to_string(),
+        url,
+        timeout_ms: 30_000,
+        headers: Vec::new(),
+        body_bytes: None,
+        body_auto_content_type: None,
+        follow_redirects: true,
+    })
+    .await
+}
+
+/// `http.delete(url)` codegen helper.
+#[allow(dead_code)]
+async fn __fitz_http_delete(url: String) -> Result<HttpClientResponse, String> {
+    __fitz_http_dispatch(__FitzHttpRequestOpts {
+        method: "DELETE".to_string(),
+        url,
+        timeout_ms: 30_000,
+        headers: Vec::new(),
+        body_bytes: None,
+        body_auto_content_type: None,
+        follow_redirects: true,
+    })
+    .await
+}
+
+/// `http.post(url, body)` codegen helper. `body_bytes` already
+/// marshalled at the callsite (see `__fitz_http_body_from_*` below).
+#[allow(dead_code)]
+async fn __fitz_http_post(
+    url: String,
+    body_bytes: Option<Vec<u8>>,
+    auto_content_type: Option<&'static str>,
+) -> Result<HttpClientResponse, String> {
+    __fitz_http_dispatch(__FitzHttpRequestOpts {
+        method: "POST".to_string(),
+        url,
+        timeout_ms: 30_000,
+        headers: Vec::new(),
+        body_bytes,
+        body_auto_content_type: auto_content_type,
+        follow_redirects: true,
+    })
+    .await
+}
+
+/// `http.put(url, body)` codegen helper.
+#[allow(dead_code)]
+async fn __fitz_http_put(
+    url: String,
+    body_bytes: Option<Vec<u8>>,
+    auto_content_type: Option<&'static str>,
+) -> Result<HttpClientResponse, String> {
+    __fitz_http_dispatch(__FitzHttpRequestOpts {
+        method: "PUT".to_string(),
+        url,
+        timeout_ms: 30_000,
+        headers: Vec::new(),
+        body_bytes,
+        body_auto_content_type: auto_content_type,
+        follow_redirects: true,
+    })
+    .await
+}
+
+/// `http.request(opts)` codegen helper. The callsite constructs the
+/// opts struct directly from the Map literal (the dispatch in
+/// `gen_call` validates the shape eagerly).
+#[allow(dead_code)]
+async fn __fitz_http_request_full(
+    opts: __FitzHttpRequestOpts,
+) -> Result<HttpClientResponse, String> {
+    __fitz_http_dispatch(opts).await
+}
+
+/// Body marshalling — `Str` body. Returns the UTF-8 bytes with no
+/// auto Content-Type.
+#[allow(dead_code)]
+fn __fitz_http_body_from_str(s: String) -> (Option<Vec<u8>>, Option<&'static str>) {
+    (Some(s.into_bytes()), None)
+}
+
+/// Body marshalling — `Bytes` body. Returns the bytes as-is with no
+/// auto Content-Type.
+#[allow(dead_code)]
+fn __fitz_http_body_from_bytes(b: Vec<u8>) -> (Option<Vec<u8>>, Option<&'static str>) {
+    (Some(b), None)
+}
+
+/// Body marshalling — `Map<Str, Str>` body. Serializes to a JSON
+/// object preserving insertion order (matches the interpreter's
+/// `value_to_json` which uses `serde_json` with `preserve_order`).
+/// Auto Content-Type: `application/json`. MVP restriction parallel
+/// to `jwt.encode`: strict `Map<Str, Str>` — heterogeneous payloads
+/// require `__FitzValue` integration and are post-MVP.
+#[allow(dead_code)]
+fn __fitz_http_body_from_map_str_str(
+    pairs: Arc<Mutex<Vec<(String, String)>>>,
+) -> (Option<Vec<u8>>, Option<&'static str>) {
+    // Hand-rolled JSON encoder so we don't pull in serde_json just
+    // for this. `application/json` content-type set automatically.
+    let guard = pairs.lock().unwrap();
+    let mut json = String::from("{");
+    for (i, (k, v)) in guard.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&__fitz_http_json_escape_str(k));
+        json.push(':');
+        json.push_str(&__fitz_http_json_escape_str(v));
+    }
+    json.push('}');
+    (Some(json.into_bytes()), Some("application/json"))
+}
+
+/// Minimal JSON string escape — only what is needed for the keys/
+/// values of a Map<Str, Str> body. Escapes `"`, `\`, control chars
+/// `\b`, `\f`, `\n`, `\r`, `\t` and other control bytes as `\u00XX`.
+#[allow(dead_code)]
+fn __fitz_http_json_escape_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+"##;
+
+/// Mini-fase HTTP client (2026-06-18) — `__ToFitzJson`/`__FromFitzJson`
+/// impls for `HttpClientResponseData`. Only emitted when ALSO
+/// `has_http = true` (we need `serde_json::Value` in scope, which is
+/// pulled in by `HTTP_RUNTIME_PRELUDE`). Without HTTP, the response
+/// type still exists but cannot be serialized into a handler response
+/// — acceptable: pure-CLI programs that only use `http.X` do not need
+/// JSON serialization of the response.
+const HTTP_CLIENT_HTTP_INTEGRATION_PRELUDE: &str = r##"
+// --- mini-fase HTTP client (2026-06-18): HttpClientResponse + JSON ---
+
+impl __ToFitzJson for HttpClientResponseData {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("status".to_string(), serde_json::Value::Number((self.status).into()));
+        obj.insert("body".to_string(), serde_json::Value::String(self.body.clone()));
+        obj.insert("headers".to_string(), self.headers.__to_fitz_json());
+        obj.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::Number((self.duration_ms).into()),
+        );
+        serde_json::Value::Object(obj)
+    }
+}
+
+impl __FromFitzJson for HttpClientResponseData {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let obj = match json {
+            serde_json::Value::Object(o) => o,
+            _ => return Err("expected JSON object for HttpClientResponse".to_string()),
+        };
+        let status = obj
+            .get("status")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| "HttpClientResponse: missing or invalid `status`".to_string())?;
+        let body = obj
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "HttpClientResponse: missing or invalid `body`".to_string())?;
+        let headers_val = obj
+            .get("headers")
+            .ok_or_else(|| "HttpClientResponse: missing `headers`".to_string())?;
+        let headers = <Arc<Mutex<Vec<(String, String)>>> as __FromFitzJson>::__from_fitz_json(headers_val)?;
+        let duration_ms = obj
+            .get("duration_ms")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| "HttpClientResponse: missing or invalid `duration_ms`".to_string())?;
+        Ok(HttpClientResponseData {
+            status,
+            body,
+            headers,
+            duration_ms,
+        })
+    }
+}
+"##;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -34135,7 +35155,7 @@ mod tests {
         // feature `time` (no axum).
         let toml = cargo_toml_for(
             "foo", false, true, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(toml.contains("tokio"), "expected tokio in deps");
         assert!(toml.contains("\"time\""), "expected feature `time`");
@@ -34145,7 +35165,8 @@ mod tests {
     #[test]
     fn cargo_toml_async_with_http_includes_tokio_time_and_axum() {
         let toml = cargo_toml_for(
-            "foo", true, true, false, false, false, false, false, false, false, false, false, false,
+            "foo", true, true, false, false, false, false, false, false, false, false, false,
+            false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
@@ -34156,7 +35177,7 @@ mod tests {
     fn cargo_toml_without_async_without_http_is_minimal() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
@@ -34176,7 +35197,7 @@ mod tests {
         // tracing + tracing-subscriber + chrono + serde_json.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, true, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -34210,7 +35231,8 @@ mod tests {
         // uses_logging + uses_jobs both true → chrono is only emitted
         // once (jobs_lines emits it; logging_lines skips it).
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, true, true, false, false, false, false, false,
+            "foo", false, false, false, false, false, true, true, false, false, false, false,
+            false, false,
         );
         let count_chrono = toml.matches("chrono = ").count();
         assert!(
@@ -34225,7 +35247,7 @@ mod tests {
     fn cargo_toml_without_logging_does_not_include_tracing() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(
             !toml.contains("tracing"),
@@ -34238,7 +35260,8 @@ mod tests {
     fn cargo_toml_logging_with_http_does_not_duplicate_serde_json() {
         // HTTP already brings serde_json; logging_lines must NOT duplicate.
         let toml = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false,
+            false, false,
         );
         let count = toml.matches("serde_json = ").count();
         assert!(
@@ -34260,7 +35283,7 @@ mod tests {
         // if `uses_logging`).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, true, false, false, false,
-            false,
+            false, false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -34283,7 +35306,7 @@ mod tests {
     fn cargo_toml_without_trace_metric_does_not_include_tracing_or_metrics() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(!toml.contains("tracing"), "should not include tracing");
         assert!(!toml.contains("metrics"), "should not include metrics");
@@ -34540,7 +35563,8 @@ mod tests {
         // uses_db, uses_fitz_value, uses_date_or_uuid,
         // uses_prometheus_export).
         let cargo = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false,
+            false, false,
         );
         assert!(
             !cargo.contains("metrics-exporter-prometheus"),
@@ -34588,6 +35612,7 @@ mod tests {
         // uses_prometheus_export).
         let cargo = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false, true,
+            false,
         );
         assert!(
             cargo.contains("metrics-exporter-prometheus"),
@@ -34633,6 +35658,341 @@ mod tests {
                 src
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Mini-fase HTTP client (2026-06-18) — Bloque 3 codegen tests.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn http_client_program_uses_http_client_detects_get() {
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        let src = "async fn fetch(u: Str) -> Result<Int> {\n\
+                       let r = http.get(u).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let tokens = tokenize(src).expect("tokenize ok");
+        let program = parse(tokens).expect("parse ok");
+        assert!(
+            program_uses_http_client(&program),
+            "expected true for `http.get(...)`"
+        );
+    }
+
+    #[test]
+    fn http_client_program_uses_http_client_detects_all_6_methods() {
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        for method in &["get", "head", "delete", "post", "put", "request"] {
+            // Each method gets a minimal callsite; `post`/`put`/`request`
+            // need extra args, but the detector only looks at the field
+            // name so we can pass `null`/`{}` as a sentinel that parses.
+            let src = match *method {
+                "request" => format!(
+                    "async fn f() -> Result<Int> {{\n\
+                        let r = http.{}({{\"method\": \"GET\", \"url\": \"u\"}}).await?\n\
+                        return Ok(r.status)\n\
+                    }}\n",
+                    method
+                ),
+                "post" | "put" => format!(
+                    "async fn f() -> Result<Int> {{\n\
+                        let r = http.{}(\"u\", \"b\").await?\n\
+                        return Ok(r.status)\n\
+                    }}\n",
+                    method
+                ),
+                _ => format!(
+                    "async fn f() -> Result<Int> {{\n\
+                        let r = http.{}(\"u\").await?\n\
+                        return Ok(r.status)\n\
+                    }}\n",
+                    method
+                ),
+            };
+            let tokens = tokenize(&src).expect("tokenize ok");
+            let program = parse(tokens).expect("parse ok");
+            assert!(
+                program_uses_http_client(&program),
+                "expected true for http.{}",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn http_client_program_uses_http_client_does_not_trigger_without_call() {
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        for src in [
+            // Pure CLI without HTTP client.
+            "fn double(n: Int) -> Int => n * 2",
+            // HTTP server-side without client.
+            "@get(\"/x\")\nfn h() -> Str => \"ok\"\n",
+            // Local var named `http` calling a method — NOT the module.
+            // The detector still flags it (heuristic over field name),
+            // but the dispatch in gen_call respects shadowing. This case
+            // is conservative — accepted false positive parallel to
+            // `program_uses_db`.
+            "fn unrelated(x: Int) => x",
+        ] {
+            let tokens = tokenize(src).expect("tokenize ok");
+            let program = parse(tokens).expect("parse ok");
+            assert!(
+                !program_uses_http_client(&program),
+                "should NOT trigger on: {}",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn http_client_cargo_toml_emits_reqwest_when_uses_http_client_true() {
+        // 14th positional arg (uses_http_client) = true → reqwest in deps.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false, true,
+        );
+        assert!(
+            toml.contains("reqwest = "),
+            "expected reqwest in deps with uses_http_client=true, was: {}",
+            toml
+        );
+        assert!(
+            toml.contains("rustls-tls"),
+            "expected rustls-tls feature, was: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn http_client_cargo_toml_does_not_emit_reqwest_without_flag() {
+        // 14th positional arg = false → no reqwest.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false, false,
+        );
+        assert!(
+            !toml.contains("reqwest"),
+            "should NOT include reqwest without uses_http_client=true, was: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn http_client_cargo_toml_uses_http_client_pulls_tokio() {
+        // CLI program with only `http.X` — no HTTP server, no async fn
+        // declared by the user, but the helpers are async so we need
+        // tokio macros + rt-multi-thread for the user's `.await`. The
+        // emitted `[dependencies]` section must include tokio.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false, true,
+        );
+        assert!(
+            toml.contains("tokio = "),
+            "expected tokio entry with uses_http_client=true: {}",
+            toml
+        );
+        assert!(
+            toml.contains("\"macros\""),
+            "expected tokio feature `macros`: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_get_emits_helper_prelude_and_call() {
+        // `http.get(url)` in an async fn must produce the prelude
+        // (struct HttpClientResponseData + `__fitz_http_get`) and the
+        // callsite `__fitz_http_get(url)` returning `Result<...>`.
+        let src = "async fn fetch(u: Str) -> Result<Int> {\n\
+                       let r = http.get(u).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            code.contains("struct HttpClientResponseData"),
+            "expected HttpClientResponseData struct in prelude"
+        );
+        assert!(
+            code.contains("type HttpClientResponse = Arc<Mutex<HttpClientResponseData>>"),
+            "expected alias type HttpClientResponse"
+        );
+        assert!(
+            code.contains("async fn __fitz_http_get"),
+            "expected helper __fitz_http_get in prelude"
+        );
+        assert!(
+            code.contains("__fitz_http_get(") && code.contains("__fitz_http_get(url"),
+            "expected the call to __fitz_http_get from fetch()"
+        );
+        assert!(
+            code.contains("static __FITZ_HTTP_CLIENT"),
+            "expected the shared LazyLock client static"
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_post_with_str_body_emits_body_from_str() {
+        let src = "async fn ping(u: Str) -> Result<Int> {\n\
+                       let r = http.post(u, \"hello\").await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            code.contains("__fitz_http_body_from_str("),
+            "expected __fitz_http_body_from_str invocation for Str body"
+        );
+        assert!(
+            code.contains("__fitz_http_post("),
+            "expected __fitz_http_post call"
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_post_with_map_str_str_emits_json_marshaller() {
+        let src = "async fn ping(u: Str) -> Result<Int> {\n\
+                       let body: Map<Str, Str> = {\"k\": \"v\"}\n\
+                       let r = http.post(u, body).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            code.contains("__fitz_http_body_from_map_str_str("),
+            "expected __fitz_http_body_from_map_str_str invocation for Map<Str, Str> body"
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_post_with_invalid_body_type_aborts_with_clear_msg() {
+        // Int body must be rejected at codegen with mention of the
+        // supported shapes + the `__FitzValue` debt note.
+        let src = "async fn bad(u: Str) -> Result<Int> {\n\
+                       let r = http.post(u, 42).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let err = gen(src).expect_err("expected codegen error on Int body");
+        assert!(
+            err.message.contains("Str, Map<Str, Str> strict, or Bytes"),
+            "expected MVP body-shape error message, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("__FitzValue"),
+            "expected mention of __FitzValue debt: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_request_emits_low_level_helper() {
+        let src = "async fn custom(u: Str) -> Result<Int> {\n\
+                       let r = http.request({\"method\": \"GET\", \"url\": u, \"timeout_ms\": 5000}).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            code.contains("__fitz_http_request_full("),
+            "expected __fitz_http_request_full invocation for http.request"
+        );
+        assert!(
+            code.contains("__FitzHttpRequestOpts {"),
+            "expected struct literal __FitzHttpRequestOpts in the callsite"
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_unknown_method_errors_with_supported_list() {
+        let src = "async fn bad(u: Str) -> Result<Int> {\n\
+                       let r = http.fetch(u).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let err = gen(src).expect_err("expected codegen error on http.fetch");
+        assert!(
+            err.message
+                .contains("get, head, post, put, delete, request"),
+            "expected supported-methods list, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_get_wrong_arity_errors() {
+        let src = "async fn bad() -> Result<Int> {\n\
+                       let r = http.get(\"a\", \"b\").await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let err = gen(src).expect_err("expected codegen error on wrong arity");
+        assert!(
+            err.message.contains("1 argument"),
+            "expected arity-1 message, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_no_calls_does_not_emit_prelude() {
+        // Sanity: pure CLI program without `http.X` should NOT emit the
+        // HTTP client prelude (no reqwest reference in main.rs).
+        let src = "fn double(n: Int) -> Int => n * 2\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            !code.contains("HttpClientResponse"),
+            "should not emit HttpClientResponse in a program without http.X"
+        );
+        assert!(
+            !code.contains("__FITZ_HTTP_CLIENT"),
+            "should not emit the LazyLock client without http.X"
+        );
+        assert!(
+            !code.contains("__fitz_http_get"),
+            "should not emit any __fitz_http_* helper without http.X"
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_emits_to_fitz_json_when_has_http() {
+        // When the program has BOTH http.X(...) and HTTP handlers,
+        // the integration prelude emits `__ToFitzJson`/`__FromFitzJson`
+        // impls for HttpClientResponseData so handlers can return the
+        // response.
+        let src = "async fn fetch(u: Str) -> Result<Int> {\n\
+                       let r = http.get(u).await?\n\
+                       return Ok(r.status)\n\
+                   }\n\
+                   @get(\"/ping\")\n\
+                   async fn ping() -> Result<Int> => fetch(\"http://x\").await\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            code.contains("impl __ToFitzJson for HttpClientResponseData"),
+            "expected __ToFitzJson impl when has_http && uses_http_client"
+        );
+        assert!(
+            code.contains("impl __FromFitzJson for HttpClientResponseData"),
+            "expected __FromFitzJson impl when has_http && uses_http_client"
+        );
+    }
+
+    #[test]
+    fn http_client_codegen_skips_json_impls_for_pure_cli() {
+        // Pure CLI without HTTP server: only the HTTP client prelude
+        // is emitted, not the JSON integration impls (which depend on
+        // serde_json in scope, only present when has_http).
+        let src = "async fn fetch(u: Str) -> Result<Int> {\n\
+                       let r = http.get(u).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            code.contains("struct HttpClientResponseData"),
+            "expected HTTP client prelude in pure-CLI program with http.X"
+        );
+        assert!(
+            !code.contains("impl __ToFitzJson for HttpClientResponseData"),
+            "should NOT emit __ToFitzJson without HTTP server (no serde_json in scope)"
+        );
     }
 
     #[test]
@@ -34704,7 +36064,8 @@ mod tests {
         // uses_date_or_uuid). HTTP + logging active trigger the block
         // that emits the OTel + metrics + uuid + chrono + tracing deps.
         let cargo = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false,
+            false, false,
         );
         assert!(
             cargo.contains("opentelemetry-otlp"),
@@ -34770,7 +36131,7 @@ mod tests {
         // with `abi3-py310` + `auto-initialize`.
         let toml = cargo_toml_for(
             "foo", false, false, true, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(toml.contains("[dependencies]"), "expected deps section");
         assert!(toml.contains("pyo3"), "expected pyo3 in deps");
@@ -34789,7 +36150,8 @@ mod tests {
     #[test]
     fn cargo_toml_python_and_http_include_both() {
         let toml = cargo_toml_for(
-            "foo", true, false, true, false, false, false, false, false, false, false, false, false,
+            "foo", true, false, true, false, false, false, false, false, false, false, false,
+            false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
@@ -34800,7 +36162,7 @@ mod tests {
     fn cargo_toml_without_python_does_not_include_pyo3() {
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
@@ -40103,7 +41465,7 @@ mod tests {
     fn cargo_toml_with_jobs_includes_cron_and_chrono() {
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
@@ -40117,7 +41479,7 @@ mod tests {
         // Cron-only mode needs `signal` for ctrl_c.
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(
             toml.contains("\"signal\""),
@@ -40134,7 +41496,8 @@ mod tests {
         // own `tokio::signal::ctrl_c()` inside
         // `__fitz_shutdown_signal`, so it needs the `signal` feature.
         let toml = cargo_toml_for(
-            "app", true, false, false, false, false, true, false, false, false, false, false, false,
+            "app", true, false, false, false, false, true, false, false, false, false, false,
+            false, false,
         );
         assert!(toml.contains("cron"));
         assert!(
@@ -41081,7 +42444,7 @@ mod tests {
         // We use `cargo_toml_for` directly (parallel to existing tests).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, true, false, false,
-            false,
+            false, false,
         );
         assert!(
             toml.contains("sha2 = \"0.10\""),
@@ -41136,7 +42499,7 @@ mod tests {
     fn codegen_db_cargo_toml_without_db_does_not_add_deps() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false,
+            false, false,
         );
         assert!(
             !toml.contains("sha2"),
@@ -42343,7 +43706,8 @@ mod tests {
         // both uses_db and uses_fitz_value. Cargo.toml must include
         // serde_json with preserve_order.
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, false, false, false, true, true, false, false,
+            "app", false, false, false, false, false, false, false, false, true, true, false,
+            false, false,
         );
         assert!(
             toml.contains("serde_json"),

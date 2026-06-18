@@ -11766,3 +11766,215 @@ print(\"a={a} b={b} c={c}\")
     assert_eq!(code, 0, "exit no fue 0; stdout: {}", stdout);
     assert_eq!(stdout.trim(), "a=42 b=15 c=hola");
 }
+
+// ---------------------------------------------------------------------------
+// Mini-fase HTTP client (2026-06-18) — Bloque 3 codegen paridad bit-a-bit.
+// ---------------------------------------------------------------------------
+
+/// Mini-fase HTTP client (2026-06-18) — E2E del codegen contra un
+/// servidor axum local. Verifica el path completo: el detector
+/// dispara, el preludio se emite, el dispatch genera la llamada
+/// `__fitz_http_get`, el binario standalone enlaza `reqwest` con
+/// `rustls-tls`, y el `.await?` propaga el `Result<HttpClientResponse>`
+/// correctamente para que el user lea `r.status` / `r.body`.
+///
+/// Patrón: spawneamos un servidor axum minimal en un thread con su
+/// propio runtime tokio, capturamos el puerto asignado por el OS
+/// (bind en `127.0.0.1:0`), inyectamos el puerto al programa fitz, y
+/// corremos `fitz build` + el binario standalone para checkear stdout.
+#[test]
+fn mini_fase_http_client_codegen_get_200_against_local_axum_server() {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Arc;
+
+    // Atomic para compartir el puerto del listener entre el thread del
+    // server y el main del test.
+    let port_share = Arc::new(AtomicU16::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let port_share_for_server = Arc::clone(&port_share);
+    let server_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime para test server");
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind a 127.0.0.1:0");
+            let addr = listener.local_addr().expect("local_addr");
+            port_share_for_server.store(addr.port(), Ordering::SeqCst);
+            started_tx.send(()).expect("notificar arranque del server");
+
+            let app = axum::Router::new()
+                .route("/hello", axum::routing::get(|| async { "hello fitz" }))
+                .route(
+                    "/echo-method",
+                    axum::routing::any(
+                        |method: axum::http::Method| async move { method.to_string() },
+                    ),
+                );
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("axum::serve");
+        });
+    });
+
+    started_rx.recv().expect("server thread sent start signal");
+    let port = port_share.load(Ordering::SeqCst);
+    assert!(port > 0, "puerto sin asignar");
+
+    let src = format!(
+        r#"async fn fetch_status(u: Str) -> Result<Int> {{
+    let r = http.get(u).await?
+    return Ok(r.status)
+}}
+
+async fn fetch_body(u: Str) -> Result<Str> {{
+    let r = http.get(u).await?
+    return Ok(r.body)
+}}
+
+let s = fetch_status("http://127.0.0.1:{port}/hello").await
+match s {{
+    Ok(code) => print("status={{code}}"),
+    Err(e) => print("err={{e}}"),
+}}
+
+let b = fetch_body("http://127.0.0.1:{port}/hello").await
+match b {{
+    Ok(body) => print("body={{body}}"),
+    Err(e) => print("err={{e}}"),
+}}
+"#,
+    );
+
+    let (stdout, code) = build_and_run(
+        "mini_fase_http_client_codegen_get_200_against_local_axum_server",
+        &src,
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = server_thread.join();
+
+    assert_eq!(code, 0, "exit code != 0; stdout: {}", stdout);
+    assert!(
+        stdout.contains("status=200"),
+        "expected `status=200` in stdout, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("body=hello fitz"),
+        "expected `body=hello fitz` in stdout, got: {}",
+        stdout
+    );
+}
+
+/// Mini-fase HTTP client (2026-06-18) — paridad bit-a-bit `fitz run` ↔
+/// `fitz build` para `http.post(url, body)` con body Str + verifica que
+/// el server recibe el body. `4xx`/`5xx` siguen siendo `Ok` (sólo
+/// transport errors son `Err`).
+#[test]
+fn mini_fase_http_client_codegen_post_with_str_body_echoes_back() {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Arc;
+
+    let port_share = Arc::new(AtomicU16::new(0));
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let port_share_for_server = Arc::clone(&port_share);
+    let server_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("local_addr");
+            port_share_for_server.store(addr.port(), Ordering::SeqCst);
+            started_tx.send(()).expect("notify start");
+
+            let app = axum::Router::new().route(
+                "/echo",
+                axum::routing::post(|body: String| async move { body }),
+            );
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("axum::serve");
+        });
+    });
+
+    started_rx.recv().expect("server start");
+    let port = port_share.load(Ordering::SeqCst);
+
+    let src = format!(
+        r#"async fn ping(u: Str, payload: Str) -> Result<Str> {{
+    let r = http.post(u, payload).await?
+    return Ok(r.body)
+}}
+
+let result = ping("http://127.0.0.1:{port}/echo", "hola fitz").await
+match result {{
+    Ok(echoed) => print("echo={{echoed}}"),
+    Err(e) => print("err={{e}}"),
+}}
+"#,
+    );
+
+    let (stdout, code) = build_and_run(
+        "mini_fase_http_client_codegen_post_with_str_body_echoes_back",
+        &src,
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = server_thread.join();
+
+    assert_eq!(code, 0, "exit != 0; stdout: {}", stdout);
+    assert!(
+        stdout.contains("echo=hola fitz"),
+        "expected `echo=hola fitz` in stdout, got: {}",
+        stdout
+    );
+}
+
+/// Mini-fase HTTP client (2026-06-18) — verifica que un error de
+/// transporte (host no resoluble) se propaga como `Result::Err(Str)`
+/// con prefijo `http:`. El binario no rebota — el user maneja el
+/// error con `match`.
+#[test]
+fn mini_fase_http_client_codegen_transport_error_propagates_as_err() {
+    // Hostname con puerto 1 — typically connection refused o DNS fail,
+    // según el sistema. Lo importante: NO debe ser Ok.
+    let src = r#"async fn fetch(u: Str) -> Result<Int> {
+    let r = http.get(u).await?
+    return Ok(r.status)
+}
+
+let result = fetch("http://127.0.0.1:1").await
+match result {
+    Ok(code) => print("status={code}"),
+    Err(e) => print("transport_error"),
+}
+"#;
+    let (stdout, code) = build_and_run(
+        "mini_fase_http_client_codegen_transport_error_propagates_as_err",
+        src,
+    );
+
+    assert_eq!(code, 0, "exit != 0; stdout: {}", stdout);
+    assert!(
+        stdout.contains("transport_error"),
+        "expected `transport_error` in stdout (Err branch), got: {}",
+        stdout
+    );
+}
