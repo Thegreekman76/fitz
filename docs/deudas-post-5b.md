@@ -27,7 +27,7 @@
 
 ---
 
-## 🟢 Mini-tanda HTTP client builtin — Bloques 1-5 CERRADOS (2026-06-18, vX.Y.Z al cerrar Bloque 9)
+## 🟢 Mini-tanda HTTP client builtin — CERRADA ENTERA (2026-06-18, v0.17.0)
 
 **Hito**: módulo built-in nuevo `http` con cliente HTTP outbound async ciudadano de primera clase del lenguaje. Cierra una de las dos brechas chicas que quedaban en el stack web (Fitz ya tenía HTTP server-side, WS, auth, OpenAPI, async, jobs, ORM nativos; faltaba el lado cliente). Detectada como deuda explícita el 2026-06-18 al pausar el desarrollo de **fitzwatch** (status page open-source en Fitz puro) — necesitaba `http.head` para chequear si las URLs monitoreadas responden 200.
 
@@ -42,13 +42,18 @@
 
 **Detalle por bloque**: [`docs/http-client-roadmap.md`](http-client-roadmap.md).
 
-**Bloques pendientes**: B6 barrida cross-docs (esta entrada cierra parte) + B7 (curso M3 — decisión + ejecución si va) + B8 (boilerplates — decisión + ejecución si va) + B9 (cierre formal: CHANGELOG vX.Y.Z + tag + dev.to draft).
+**Bloques pendientes**: ninguno — la mini-tanda cerró entera con v0.17.0.
+- **B6 barrida cross-docs** (commit `931fd18`): CLAUDE + README + index.md + deudas + roadmap actualizados; mkdocs verde sin warnings nuevos.
+- **B7 curso M5.C5** (`b499c36` + chore `3c6f264`): cap nuevo M5.C5 dedicado HTTP client outbound + ejemplo capstone integrador del módulo M5 entero (auth + jobs + client). Curso 42→43.
+- **B8 boilerplate api-orm-full** (`1468e0d` + chore `a01da2d`): update chico sumando webhook outbound al publicar post; `@background async fn notify_post_published(...)` + `spawn(...)`. Validación end-to-end vía smoke alternativo `17g-http-client-webhook.exe` (202 en 207ms + webhook delivered status=200 duration_ms=724ms).
+- **W18** (commit `63b3d3f`): fix codegen cross-module observability (cierra deuda crítica descubierta al validar B8 sobre api-orm-full multi-archivo — entry dedicada arriba).
+- **B9 cierre formal** (v0.17.0, 2026-06-18): CHANGELOG + roadmap + deudas + CLAUDE refresh + bump Cargo.toml + extensión VSCode 0.17.0 + `.vsix` regenerado + blog drafts ES/EN.
 
 **Diferencial del feature**: ningún lenguaje moderno del cuadro (Python `requests`, JS `axios`/`fetch`, Java `OkHttp`/`HttpClient`, Rust `reqwest`, Go `net/http`) provee HTTP client outbound como builtin del lenguaje con paridad bit-a-bit intérprete↔binario y zero deps externas para activarlo.
 
 ---
 
-## 🟢 W18 (post-B8) — Codegen cross-module observability CERRADA (2026-06-18, vX.Y.Z al cerrar Bloque 9)
+## 🟢 W18 (post-B8) — Codegen cross-module observability CERRADA (2026-06-18, v0.17.0, commit `63b3d3f`)
 
 **Hito**: cierra el gap más visible del codegen cross-module heredado de Fase 12.3.b y la dieta de los bloques W11/W16: cuando un módulo importado declaraba un handler HTTP (`@get`/`@post`/`@put`/`@delete`) y/o llamaba `log.{info,warn,error,debug}(...)`, el `__handler_<name>` wrapper emitido en el módulo invocaba 6 símbolos del preludio LOGGING + SPAN_CONTEXT + OTEL pero faltaban los `use crate::{...}` correspondientes. Resultado: `fitz build` rompía con 12-134+ errores E0425/E0433 según el tamaño del proyecto. Bloqueaba la primera versión del boilerplate `boilerplates/api-orm-full` end-to-end (la deuda pre-existente que B8 dejó documentada).
 
@@ -96,7 +101,7 @@ Pre-fix: 12 errores rustc, 6 símbolos faltantes (`__fitz_otel_is_enabled`, `__f
 - El detector `extract_main_observability_enabled` solo mira top-level del main — no walkea módulos importados. Coherente con la convención actual (`@server` solo en main).
 - Modules sin HTTP que importan tipos `@table` con campos `Date`/`Time`/`Uuid` siguen el patrón W11/uses_db (no afectados por W18).
 
-**Commits asociados**: el fix completo entrará en el commit del Bloque 8.5 (post-B8 cleanup de la mini-tanda HTTP client) o como commit dedicado pre-B9 según preferencia del autor. SHA específico se suma a esta entrada al cerrar Bloque 9.
+**Commit asociado**: fix dedicado pre-B9 en commit **`63b3d3f`** (2026-06-18) — `fix(codegen): W18 — cross-module observability + log helpers + observability=false propagation`. Cierre formal del Bloque 9 + bump v0.17.0 entra en el commit subsiguiente del release.
 
 ---
 

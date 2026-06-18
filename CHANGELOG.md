@@ -11,6 +11,90 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.17.0] — 2026-06-18 — Mini-tanda HTTP client builtin CERRADA + W18 fix codegen cross-module observability
+
+Cierre formal de la **mini-tanda HTTP client builtin** (9 bloques + W18 fix coordinado). Habilita HTTP client outbound como **ciudadano de primera clase del lenguaje** — paralelo al HTTP server-side cerrado en Fase 4. Cierra la deuda crítica del codegen cross-module observability detectada al validar B8 sobre `boilerplates/api-orm-full` multi-archivo.
+
+### Nuevo: módulo `http` built-in (6 builtins async)
+
+API completa día 1, devuelve `Future<Result<HttpClientResponse>>` en los 6:
+
+- `http.get(url)` / `http.head(url)` / `http.delete(url)` — sin body.
+- `http.post(url, body)` / `http.put(url, body)` — body acepta `Str` / `Map<Str, Any>` (auto-JSON + `Content-Type: application/json`) / `Bytes`.
+- `http.request(opts: Map)` — low-level con `method`/`url`/`timeout_ms`/`headers`/`body`/`follow_redirects`.
+
+Tipo built-in nuevo `HttpClientResponse { status: Int, body: Str, headers: Map<Str, Str>, duration_ms: Int }` paralelo a `Request`/`Response` del HTTP server-side.
+
+**Modelo de errores**: `Result::Err(Str)` con mensajes claros (`"timeout después de Nms"`, `"DNS no resuelve: <host>"`). Status 4xx/5xx **NO son Err** (el user mira `r.status`); solo errores de transporte van a Err.
+
+**Backend**: `reqwest = "0.12"` con features `["json", "rustls-tls"]` linkeado estático — sin openssl en el host.
+
+### 5 diferenciales
+
+1. **Built-in del lenguaje** — no `pip install requests` / `npm install axios` / `cargo add reqwest` / import del std.
+2. **Paridad bit-a-bit `fitz run` ↔ `fitz build`** — el binario standalone tiene el cliente HTTP linkeado.
+3. **Async ciudadano de primera** — se integra natural con `@cron`/`@background`/handlers HTTP/`spawn(...)`.
+4. **`Result<T>` automático** — errores como valores, `?` propaga, checker exige manejo (regla 5.3.3).
+5. **Sin deps externas en el host** — `rustls-tls` no exige openssl.
+
+Ningún lenguaje moderno del cuadro (Python `requests`, JS `axios`/`fetch`, Java `OkHttp`/`HttpClient`, Rust `reqwest`, Go `net/http`) provee HTTP client outbound como builtin del lenguaje con esta combinación.
+
+### Sub-pasos por bloque
+
+| Bloque | Commit | Resumen |
+|---|---|---|
+| **B1** evaluator | `3cefd2e` | `Value::Module { name: "http" }` + 6 builtins async + `body_to_reqwest_body` dispatch + tipo `HttpClientResponse` pre-registrado |
+| **B2** checker | `d1aaf70` | Pre-registro `http`/`HttpClientResponse` en `CheckCtx::new` + calls tipan `Result<Any>` + regla `?` |
+| **B3** codegen | `9e214e3` | `program_uses_http_client` walker + Cargo.toml condicional + `HTTP_CLIENT_PRELUDE` + dispatch en `gen_call` |
+| **B4** LSP | `29bc041` | `scope_level_completions` + `after_dot_completions` con 6 métodos + signatures + hints |
+| **B5** guía + ejemplos | `03cd71e` | Sub-sección "HTTP client outbound" en cap 17 + 4 ejemplos runnable `17e`/`17f`/`17g`/`17h` |
+| **B6** docs cross-cutting | `931fd18` | CLAUDE + README + index.md + deudas + roadmap actualizados |
+| **B7** curso M5.C5 | `b499c36` + chore `3c6f264` | Cap nuevo M5.C5 dedicado HTTP client outbound + capstone integrador M5 entero |
+| **B8** boilerplate api-orm-full | `1468e0d` + chore `a01da2d` | Update chico sumando webhook outbound al publicar post (`@background async fn notify_post_published(...)` + `spawn(...)`) |
+| **W18** fix codegen | `63b3d3f` | Cross-module observability imports + log helpers + `observability=false` propagation (cierra deuda crítica detectada al validar B8) |
+
+### W18 — Fix codegen cross-module observability
+
+Cierra la deuda más grande heredada de Fase 12.3.b + W11/W16. **Sin W18**, programas multi-archivo donde un módulo importado declaraba `@get`/`@post`/etc y/o llamaba `log.{info,warn,error,debug}(...)` rompían `fitz build` con 12-134+ errores rustc (símbolos `__fitz_otel_*`/`__FitzSpanContext`/`__fitz_log_*` faltantes en los módulos). Bloqueaba el primer intento de validar `boilerplates/api-orm-full` end-to-end.
+
+3 sub-cambios coordinados en `src/codegen.rs`:
+
+1. **Imports observability del wrapper HTTP**: extendido `module_has_http` con 3 grupos paralelos a W11/W16 (gateados por `module_has_http && main_observability_enabled`).
+2. **Imports de los 4 log helpers** (independientes del wrapper): nuevo flag `module_uses_logging = program_uses_logging(program)`; cubre `log.X(...)` user code en módulos con o sin HTTP.
+3. **Propagación de `@server(observability=false)` main → módulos**: nuevo helper `extract_main_observability_enabled(program)` walka top-level del main + threading via `ModuleLoader.main_observability_enabled` + arg nuevo en `generate_module_rs_with_bindings`. Cierra inconsistencia que existía desde Fase 12.3.b.5 (main bare-metal, módulos instrumentados).
+
+9 unit tests nuevos en `codegen::tests::w18_*` (helper extract + happy paths + propagación + regresión negativa). Detalle completo en `docs/deudas-post-5b.md` → "🟢 W18 (post-B8) — Codegen cross-module observability CERRADA".
+
+### Decisión de versión
+
+- **v0.16.0 → v0.17.0** (minor). Justificación: builtin nuevo `http` del lenguaje + tipo built-in nuevo `HttpClientResponse` (user-visible) + cierra deuda crítica del codegen (refactor coordinado de 3 sub-cambios). No breaking de sintaxis del lenguaje.
+- Extensión VSCode: **0.16.0 → 0.17.0** + `.vsix` regenerado (LSP completions de B4 ya estaban; bump por alineación con el binario).
+
+### Tests al cierre (verificación pre-bump completa)
+
+- `cargo test --lib` → **3116/3116** ✓ (default mode, +9 tests W18)
+- `cargo test --test compile_e2e smoke_ejemplos_guia_compilables_compilan` → **1/1** ✓ (363 ejemplos guía+curso+TaskHub compilan limpios)
+- `cargo fmt --all --check` → limpio
+- `cargo clippy --all-targets -- -D warnings` (default) → limpio
+- `cargo clippy --all-targets --features lsp -- -D warnings` → limpio
+- `boilerplates/api-orm-full` con webhook outbound compila a binario nativo end-to-end (134 errores rustc pre-W18 → 0 post-W18) + arranca + `/healthz` y `/readyz` responden `200`
+- Smoke alternativo: `17g-http-client-webhook.exe` responde 202 en 207ms + webhook delivered status=200 duration_ms=724ms contra `httpbin.org`
+- Validación bit-a-bit `fitz run` ↔ binario nativo sobre `17e` contra `httpbin.org` (paridad estructural perfecta)
+
+### Hallazgos del codegen del Bloque 5 — 3 deudas residuales NO bloqueantes
+
+Documentadas en `docs/deudas-post-5b.md` con workarounds idiomáticos:
+
+1. **`?` top-level rechazado**: regla esperada del checker 5.3.3. Workaround `async fn run() -> Result<Null>` + `match run().await`.
+2. **`for x in <List<Str>>` con `.await` adentro de `@cron`**: el codegen mantiene MutexGuard cross-await al iterar. Workaround calls explícitas sin loop.
+3. **Map literal heterogéneo en `return <status> { ... }` de handler**: sub-case del fix v0.10.4. Workaround homogeneizar a `Map<Str, Str>`.
+
+### Próximo norte
+
+**Retomar fitzwatch** (status page open-source en Fitz puro, pausado el 2026-06-18 por falta de `http.head` builtin). El blocker `http.head(monitor.target).await?` ya está disponible. Detalle del plan en `d:\fitzwatch\NEXT-SESSION.md`.
+
+Detalle técnico completo de la mini-tanda en [`docs/http-client-roadmap.md`](docs/http-client-roadmap.md) (9 bloques + R1-R8 regresiones + tabla de estado con SHAs).
+
 ## [v0.16.0] — 2026-06-15 — Hito: compilador 100% inglés (cierre F1-F6 + F5.d)
 
 Cierre formal de la mini-tanda de traducción del código del compilador

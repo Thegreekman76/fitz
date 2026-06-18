@@ -2,6 +2,36 @@
 
 ---
 
+## Mini-tanda — HTTP client builtin ✅ CERRADA v0.17.0 (2026-06-18)
+
+**Hito**: el módulo `http` builtin (cliente HTTP outbound) entra al lenguaje como ciudadano de primera clase, paralelo al HTTP server-side cerrado en Fase 4. 9 bloques cerrados en una sesión + fix coordinado W18 para destrabar el codegen cross-module observability descubierto al validar B8 sobre `boilerplates/api-orm-full` multi-archivo.
+
+**API completa día 1**:
+- `http.get/head/post/put/delete/request` — los 6 builtins async devuelven `Future<Result<HttpClientResponse>>`.
+- Body shapes: `Str` (as-is) / `Map<Str, Any>` (auto-JSON + `Content-Type: application/json`) / `Bytes` (as-is octetos).
+- Tipo built-in nuevo `HttpClientResponse { status, body, headers, duration_ms }` paralelo a `Request`/`Response` del HTTP server-side.
+- Errores: `Result::Err(Str)` con mensajes claros; status 4xx/5xx NO son Err (mirar `r.status`).
+- Backend: `reqwest = "0.12"` features `["json", "rustls-tls"]` linkeado estático.
+
+**5 diferenciales** (ver CHANGELOG v0.17.0 + cap 17 de la guía):
+1. Built-in del lenguaje — no `pip install requests` / `npm install axios` / `cargo add reqwest`.
+2. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+3. Async ciudadano de primera (`@cron`/`@background`/handlers HTTP/`spawn(...)`).
+4. `Result<T>` automático — `?` propaga, checker exige manejo.
+5. Sin deps externas en el host — `rustls-tls` no exige openssl.
+
+**Bloques cerrados** (un commit por bloque): B1 evaluator (`3cefd2e`) + B2 checker (`d1aaf70`) + B3 codegen (`9e214e3`) + B4 LSP (`29bc041`) + B5 guía+ejemplos (`03cd71e`) + B6 cross-docs (`931fd18`) + B7 curso M5.C5 (`b499c36`) + B8 boilerplate api-orm-full webhook (`1468e0d`) + W18 codegen cross-module observability fix (`63b3d3f`) + B9 cierre formal v0.17.0.
+
+**W18 — Fix codegen cross-module observability**: cierra la deuda más visible del codegen heredada de Fase 12.3.b. Sin W18, programas multi-archivo donde un módulo importado declaraba `@get`/`@post`/etc y/o llamaba `log.X(...)` rompían `fitz build` con 12-134+ errores rustc. 3 sub-cambios coordinados en `src/codegen.rs`: imports observability del wrapper HTTP en módulos + imports de log helpers paralelo a uses_logging + propagación de `@server(observability=false)` main → módulos via nuevo helper `extract_main_observability_enabled` + threading via `ModuleLoader.main_observability_enabled`. 9 unit tests nuevos. Detalle completo en `docs/deudas-post-5b.md` → "🟢 W18".
+
+**Verificación pre-bump completa**: 3116 unit lib + smoke 363 ejemplos verde + fmt + clippy (default + lsp) limpios + `boilerplates/api-orm-full` con webhook outbound compila a binario nativo end-to-end (134 errores rustc pre-W18 → 0 post-W18) + arranca + `/healthz` y `/readyz` responden 200 + validación bit-a-bit `fitz run` ↔ binario sobre `17e` contra `httpbin.org`. Extensión VSCode bumpeada a 0.17.0 con `.vsix` regenerado.
+
+**Próximo norte**: **retomar fitzwatch** (status page open-source en Fitz puro, pausado el 2026-06-18 por falta de `http.head` builtin). El blocker está cerrado.
+
+Plan completo + tabla de estado con SHAs por bloque en [`docs/http-client-roadmap.md`](http-client-roadmap.md). Detalle release-style en [`CHANGELOG.md`](../CHANGELOG.md) → v0.17.0.
+
+---
+
 ## Mini-tanda — Traducción ES→EN del código del compilador ✅ CERRADA v0.16.0 (2026-06-15)
 
 **Hito de internacionalización**: tras 47 commits coordinados en 7 sub-fases (F1-F6 + F5.d), el surface user-facing del compilador (CLI, LSP, errors), los test assertions internas y los comentarios del grammar TextMate quedaron 100% en inglés. `grep "esperaba|esperaban" src/` → 0 ocurrencias post-cierre.
