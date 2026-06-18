@@ -36,6 +36,7 @@ binario `fitz` mismo, paridad bit-a-bit `fitz run` ↔ `fitz build`.
 | **Auth nativa (JWT + Argon2id)**     | `@auth_provider`/`@authenticated` cross-module          |
 | **WebSockets tipados + AsyncAPI 3.0**| `@ws("/feed")` + broadcast + heartbeat + `/asyncapi.json` |
 | **Cron jobs sin broker**             | `@cron("0 0 * * *")` scheduler embebido en el binario   |
+| **HTTP client outbound built-in**    | `http.post(WEBHOOK_URL, payload)` + `@background + spawn` |
 | **ORM declarativo sobre `type`**     | `@table`/`@primary`/`@belongs_to`/`@has_many`/`@has_one`|
 | **Driver Postgres puro Fitz/Rust**   | Wire protocol v3.0 directo, sin libpq                   |
 | **Relations + eager loading**        | `.preload("author")` + `.preload("comments")`           |
@@ -54,21 +55,26 @@ lenguaje** con un solo binario standalone sin dependencias externas:
 
 - **Python + FastAPI**: HTTP + auth + OpenAPI con muchas libs
   (`fastapi-jwt`, `passlib`, `SQLAlchemy`, `celery`, `redis`,
-  `psycopg2`). Múltiples procesos (api + worker + broker), imagen
-  Docker ~250 MB+, Python en runtime.
+  `psycopg2`, `requests`/`httpx` para webhooks outbound).
+  Múltiples procesos (api + worker + broker), imagen Docker
+  ~250 MB+, Python en runtime.
 - **Node + NestJS**: similar, con `passport`, `bull`,
-  `typeorm`/`prisma`. JS runtime + node_modules en producción.
-- **Go**: stdlib excelente, pero auth + WS + cron + ORM son libs
-  separadas (gin/echo + jwt-go + gorilla/websocket + cron/v3 +
-  gorm/ent). Más boilerplate manual entre ellas.
+  `typeorm`/`prisma`, `axios` o `fetch`. JS runtime + node_modules
+  en producción.
+- **Go**: stdlib excelente, pero auth + WS + cron + ORM + cliente
+  HTTP son libs separadas (gin/echo + jwt-go + gorilla/websocket
+  + cron/v3 + gorm/ent + net/http). Más boilerplate manual entre
+  ellas.
 - **Rust + actix/axum**: idem Go, todo es lib (tokio + axum +
-  jsonwebtoken + tokio-tungstenite + sqlx). Compile times largos,
-  setup denso.
+  jsonwebtoken + tokio-tungstenite + sqlx + reqwest). Compile
+  times largos, setup denso.
 
 Fitz combina todos como **decoradores y módulos built-in del
 compilador**. El checker estático valida el stack entero en
 compile-time. El binario producido por `fitz build` no necesita
-nada en el sistema destino — solo Postgres reachable por TCP.
+nada en el sistema destino — solo Postgres reachable por TCP
+(el módulo `http` builtin tiene `reqwest + rustls` linkeado
+estático, no necesita `openssl` en el host destino).
 
 ## Estructura
 
@@ -87,7 +93,7 @@ api-orm-full/
     ├── models.fitz          # 4 @table types (User/Profile/Post/Comment)
     ├── schema.fitz          # CREATE TABLE IF NOT EXISTS (idempotente)
     ├── auth.fitz            # @auth_provider + /auth/register + /auth/login + /me
-    ├── posts.fitz           # CRUD /posts + filtros + eager loading + aggregate
+    ├── posts.fitz           # CRUD /posts + filtros + eager loading + aggregate + webhook outbound al publicar
     ├── comments.fitz        # /posts/{id}/comments (lista + crear)
     ├── realtime.fitz        # @ws /feed (broadcast simétrico autenticado)
     └── jobs.fitz            # @cron cleanup_old_drafts
@@ -219,6 +225,56 @@ posts en status `"draft"` con `created_at` más viejo que
 
 Para testear sin esperar 24h, cambiar el schedule
 temporalmente a `"*/1 * * * *"` (cada minuto) y rebuild.
+
+## Webhook outbound al publicar un post
+
+Cuando un `PUT /posts/{id}` cambia el `status` a `"published"`,
+el handler dispara un webhook outbound fire-and-forget a la URL
+configurada en `WEBHOOK_URL` (env var). Si la var está vacía
+(default), el dispatch se skipea silencioso — sin overhead para
+dev local.
+
+**El handler responde 200 inmediato al cliente**; el webhook a
+upstream (Slack/Discord/cualquier endpoint que escuche eventos
+de tu CMS) corre en otro task tokio vía `@background + spawn(...)`.
+Si el upstream tarda 2 segundos, no le importa al cliente — ya
+le respondiste hace 2 segundos.
+
+Para probar end-to-end contra un echo server público:
+
+```bash
+# Setear WEBHOOK_URL al echo de httpbin para ver el payload.
+export WEBHOOK_URL=https://httpbin.org/post
+fitz run src/main.fitz
+
+# En otra terminal:
+TOKEN="<el token del login>"
+
+# 1. Crear un post como draft.
+curl -s -X POST http://localhost:3000/posts \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"title":"Hola","slug":"hola","status":"draft"}'
+
+# 2. Publicarlo — dispara el webhook outbound.
+curl -s -X PUT http://localhost:3000/posts/1 \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"status":"published"}'
+# → 200 con affected rows. El cliente NO espera al webhook.
+
+# En stderr del server vas a ver:
+# {"level":"info","msg":"webhook dispatching","event":"post.published","post_id":1}
+# {"level":"info","msg":"webhook delivered","post_id":1,"status":200,"duration_ms":287}
+```
+
+**Implementación**: ver `notify_post_published` en
+`src/posts.fitz`. Showcase del **módulo `http` builtin del
+lenguaje** (no `pip install requests`, no `npm install axios`,
+no `cargo add reqwest` — todo built-in del compilador). Detalle
+exhaustivo en el [cap M5.C5 del curso](../../docs/curso/m5-async-auth-rt/c5-http-client.md)
+y la sub-sección "HTTP client outbound" del cap 17 de la
+[guía](../../docs/guide.md).
 
 ## Imagen distroless
 

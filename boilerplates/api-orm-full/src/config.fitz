@@ -21,3 +21,16 @@ fn jwt_secret() -> Str => env_or("JWT_SECRET", "demo-orm-full-secret-cambiame-en
 // max_drafts_age_days — drafts viejos que el cron borra al correr.
 // Default 30 días. Configurable vía env var `MAX_DRAFTS_AGE_DAYS`.
 fn max_drafts_age_days() -> Str => env_or("MAX_DRAFTS_AGE_DAYS", "30")
+
+// webhook_url — URL externa a notificar cuando un post pasa a
+// "published" (PUT /posts/{id} con status="published"). Caso típico
+// CMS: notificar a Slack/Discord/Sentry/cualquier endpoint que
+// escuche eventos del blog.
+//
+// **Opt-in via env var**: si `WEBHOOK_URL` no está seteada o es
+// "", el dispatch se skipea silenciosamente. Sin overhead para el
+// caso 90% (dev local). En producción, setear a la URL real.
+//
+// Showcase del módulo `http` builtin del lenguaje (cap M5.C5 del
+// curso, cap 17 sub-sec "HTTP client outbound" de la guía).
+fn webhook_url() -> Str => env_or("WEBHOOK_URL", "")

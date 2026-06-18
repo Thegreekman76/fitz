@@ -548,7 +548,7 @@ y arreglo después" — esa es la regla del proyecto.
 | 5. Guía + ejemplos runnable | ✅ | `03cd71e` | + R1, R7, R8 (smoke manual con `.vsix`); smoke verde 363 ejemplos en 251.89s |
 | 6. Barrida cross-docs | ✅ | `931fd18` | docs only — CLAUDE / README / docs/index.md / docs/deudas-post-5b.md / este roadmap actualizados; mkdocs build verde 18.06s sin warnings nuevos |
 | 7. Curso (decisión + ejecución si va) | ✅ | `b499c36` | Opción 1: cap nuevo M5.C5 dedicado HTTP client outbound + ejemplo capstone integrador del módulo M5 entero (auth + jobs + client) en `examples/curso/m5-async-auth-rt/c5-http-client/`. Cierre del módulo trasladado de C4 a C5. M5 4→5 caps, curso 42→43. mkdocs verde 17.33s sin warnings nuevos. |
-| 8. Boilerplates (decisión + ejecución si va) | ⏳ Pendiente | — | + R1-R5 |
+| 8. Boilerplates (decisión + ejecución si va) | ✅ | _pendiente commit_ | Opción 2: update chico de `api-orm-full` sumando webhook outbound al publicar post. `webhook_url()` en `config.fitz` + `WEBHOOK_URL` opt-in en `.env.example`; `@background async fn notify_post_published(...)` en `posts.fitz` con `http.post(url, payload)` + manejo de errores `Result<HttpClientResponse>` + log estructurado; `update_post` lanza `spawn(notify_post_published(...))` cuando body.status="published". README: fila nueva en tabla features + comparativa actualizada + sección dedicada al webhook con curl end-to-end + cross-links a M5.C5 y guía cap 17. `fitz check` verde sobre `main.fitz`. Cero deuda residual nueva. |
 | 9. Cierre formal + release | ⏳ Pendiente | — | Verificación pre-bump completa + `.vsix` bump final |
 
 Actualizar a ✅ + commit SHA a medida que cierren.

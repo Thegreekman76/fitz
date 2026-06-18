@@ -28,7 +28,7 @@
 //   - Anotar `let x: Str = match Result { ... }` cuando hay
 //     early-return en el Err arm (bug del checker, deuda menor).
 
-from config import db_url
+from config import db_url, webhook_url
 // Importar TODOS los @table types — el codegen valida las
 // relations de cada type referenciado (W17 + deuda residual).
 from models import User, Profile, Post, Comment
@@ -169,10 +169,70 @@ async fn create_post(user: User, body: PostInput) -> Result<Post> {
     return Ok(new_post)
 }
 
+// --- @background notify_post_published — webhook outbound -------
+//
+// **Showcase del módulo `http` builtin del lenguaje** (cap M5.C5
+// del curso, cap 17 sub-sec "HTTP client outbound" de la guía).
+//
+// Fire-and-forget: el handler `update_post` lo lanza con
+// `spawn(...)` y vuelve inmediato al cliente. Si el upstream
+// (Slack/Discord/cualquier webhook) tarda 1-2 segundos, no le
+// importa al cliente — ya respondió hace 1-2 segundos.
+//
+// **Política**: si `WEBHOOK_URL` no está seteada (default "")
+// → skip silencioso. Sin overhead para el caso 90% dev local.
+// Cero excepciones, cero panic — los errores de transporte
+// quedan en stderr como `log.error(...)` estructurado y no
+// se propagan al caller (es fire-and-forget por diseño).
+@background
+async fn notify_post_published(post_id: Int, slug: Str, title: Str) -> Null {
+    let url = webhook_url()
+    if (url == "") {
+        return null
+    }
+    let payload: Map<Str, Str> = {
+        "event": "post.published",
+        "post_id": "{post_id}",
+        "slug": slug,
+        "title": title,
+        "source": "api-orm-full",
+    }
+    log.info("webhook dispatching", event: "post.published", post_id: post_id)
+    let r = http.post(url, payload).await
+    match r {
+        Ok(resp) => {
+            if (resp.status >= 200 and resp.status < 300) {
+                log.info(
+                    "webhook delivered",
+                    post_id: post_id,
+                    status: resp.status,
+                    duration_ms: resp.duration_ms,
+                )
+            } else {
+                log.warn(
+                    "webhook upstream non-2xx",
+                    post_id: post_id,
+                    status: resp.status,
+                )
+            }
+        }
+        Err(e) => {
+            log.error("webhook transport error", post_id: post_id, error: e)
+        }
+    }
+    return null
+}
+
 // --- PUT /posts/{id} — actualizar (auth + owner check) -----------
 //
 // Verifica que el `user.id` autenticado sea el `author_id` del
 // post antes de updatear — sino devuelve 403 implícito vía `Err`.
+//
+// **Side-effect outbound**: si el body cambia `status` a
+// `"published"`, dispara el webhook outbound (ver
+// `notify_post_published`). El dispatch es fire-and-forget vía
+// `spawn(...)` — la response al cliente sale inmediato, sin
+// esperar al upstream.
 @authenticated
 @put("/posts/{id}")
 async fn update_post(user: User, id: Int, body: PostUpdate) -> Result<Int> {
@@ -192,7 +252,20 @@ async fn update_post(user: User, id: Int, body: PostUpdate) -> Result<Int> {
     if (body.content != "") { updates["content"] = body.content }
     if (body.status != "") { updates["status"] = body.status }
 
-    return Post.where(fn(p) => p.id == id).update(conn, updates).await
+    let affected = Post.where(fn(p) => p.id == id).update(conn, updates).await?
+
+    // Webhook outbound: dispara solo si este PUT cambia status a
+    // "published" (no en cada update). Datos del post para el
+    // payload los tomamos del `body` actualizado o del `existing`
+    // si el body no los pisó. Slug/title NO se renombran a menudo,
+    // pero por consistencia usamos los efectivos.
+    if (body.status == "published") {
+        let effective_slug = if (body.slug == "") { existing.slug } else { body.slug }
+        let effective_title = if (body.title == "") { existing.title } else { body.title }
+        let _ = spawn(notify_post_published(id, effective_slug, effective_title))
+    }
+
+    return Ok(affected)
 }
 
 // --- DELETE /posts/{id} — borrar (auth + owner check) ------------
