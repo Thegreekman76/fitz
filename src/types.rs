@@ -3310,6 +3310,27 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Mini-fase HTTP client (2026-06-18) — `http` module always
+        // available. Same `Type::Any` pattern as jwt/hash/auth/db/log:
+        // the exact signature of `http.get(url) -> Future<Result<HttpClientResponse>>`
+        // has Future + Result + opaque heterogeneous body (Str/Map/Bytes
+        // for post/put/request) which the current `Type::Function` does
+        // not model. Field access falls to gradual, calls validated by
+        // the runtime builtins with clear messages. The nominal
+        // `HttpClientResponse` IS pre-registered (see
+        // `register_http_builtin_types`) so that `let r = http.get(...).await?`
+        // followed by `r.status: Int`, `r.body: Str`, etc. type-checks
+        // statically once the user lands on the nominal.
+        self.scopes[0].insert(
+            "http".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // v0.10.24 — Date/DateTime/Uuid global namespace with their
         // static constructors as Value::Module. Typed as `Any`
         // (same pattern as db/jwt/hash) — field access resolves to
@@ -11623,6 +11644,128 @@ mod tests {
         let errors = errors_of(
             "fn auth(req: Request) -> Response? {\n\
                  return null\n\
+             }",
+        );
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
+    }
+
+    // ---- Mini-fase HTTP client (2026-06-18): Bloque 2 — checker ----
+
+    #[test]
+    fn http_client_module_is_pre_registered_as_any() {
+        // Mini-fase HTTP client. `http` is registered in
+        // `CheckCtx::new()` as `Type::Any`, so calling
+        // `http.get(...)` does not error (field access + call fall
+        // to gradual). Pre-condition for the rest of the checker
+        // tests in this section.
+        let errors = errors_of(
+            "async fn fetch() -> Result<Int> {\n\
+                 let r = http.get(\"https://example.com\").await?\n\
+                 return Ok(r.status)\n\
+             }",
+        );
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
+    }
+
+    #[test]
+    fn http_client_response_is_referenceable_builtin() {
+        // `HttpClientResponse` is pre-registered as a built-in nominal
+        // (`register_http_builtin_types`). The user can annotate
+        // a fn arg / return type with it without declaring it locally
+        // — parallel to `Request` / `Response` / `File`.
+        let errors = errors_of(
+            "fn check(r: HttpClientResponse) -> Bool {\n\
+                 return r.status == 200\n\
+             }",
+        );
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
+    }
+
+    #[test]
+    fn http_client_response_field_status_is_int() {
+        // `HttpClientResponse.status` is `Int` per
+        // `register_http_builtin_types`. Field access via TypeInfo
+        // (F16) on a binding annotated `: HttpClientResponse`
+        // must persist `Int`.
+        let info = types_of("fn get_status(r: HttpClientResponse) -> Int => r.status\n");
+        let int_on_line1 = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 1 && matches!(t, Type::Int));
+        assert!(
+            int_on_line1,
+            "line 1 must persist Int for r.status: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn http_client_response_field_body_is_str() {
+        // `HttpClientResponse.body` is `Str`.
+        let info = types_of("fn get_body(r: HttpClientResponse) -> Str => r.body\n");
+        let str_on_line1 = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 1 && matches!(t, Type::Str));
+        assert!(
+            str_on_line1,
+            "line 1 must persist Str for r.body: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn http_client_response_field_headers_is_map_str_str() {
+        // `HttpClientResponse.headers` is `Map<Str, Str>`.
+        let info =
+            types_of("fn get_headers(r: HttpClientResponse) -> Map<Str, Str> => r.headers\n");
+        let map_str_str_on_line1 = info.inner.iter().any(|(k, t)| {
+            k.0 == 1
+                && matches!(
+                    t,
+                    Type::Map(k_ty, v_ty)
+                        if matches!(k_ty.as_ref(), Type::Str)
+                        && matches!(v_ty.as_ref(), Type::Str)
+                )
+        });
+        assert!(
+            map_str_str_on_line1,
+            "line 1 must persist Map<Str, Str> for r.headers: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn http_client_response_field_duration_ms_is_int() {
+        // `HttpClientResponse.duration_ms` is `Int`.
+        let info = types_of("fn get_duration(r: HttpClientResponse) -> Int => r.duration_ms\n");
+        let int_on_line1 = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 1 && matches!(t, Type::Int));
+        assert!(
+            int_on_line1,
+            "line 1 must persist Int for r.duration_ms: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn http_client_full_pipeline_with_match_passes_checker() {
+        // The canonical pattern: an async fn returning `Result<Int>` that
+        // does `http.get(...).await?` then `match r.status { ... }`.
+        // Combines: gradual call over `http` (Any), `.await` of the
+        // returned Future, `?` propagating the inner Result, field access
+        // on the resulting `HttpClientResponse` nominal, and match over Int.
+        let errors = errors_of(
+            "async fn check_status(url: Str) -> Result<Bool> {\n\
+                 let r = http.get(url).await?\n\
+                 if (r.status >= 200) {\n\
+                     if (r.status < 300) {\n\
+                         return Ok(true)\n\
+                     }\n\
+                 }\n\
+                 return Ok(false)\n\
              }",
         );
         assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
