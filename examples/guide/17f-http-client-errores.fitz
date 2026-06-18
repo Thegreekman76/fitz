@@ -1,0 +1,109 @@
+// 17f-http-client-errores.fitz — Ejemplo de la sub-sección
+// "17.X — HTTP client outbound" del capítulo 17.
+//
+// Cómo manejar errores del cliente HTTP. Hay DOS categorías distintas
+// que se mezclan seguido en otros lenguajes — Fitz las separa con
+// claridad:
+//
+//   1. Errores de transporte (timeout, DNS fail, conexión rechazada,
+//      TLS handshake fallido, URL inválida) → `Result::Err(Str)` con
+//      un mensaje prefijado con `"http: "`. El `?` los propaga; el
+//      `match` te deja decidir caso por caso.
+//
+//   2. Status 4xx/5xx (404 Not Found, 500 Internal Server Error,
+//      etc.) → `Result::Ok` con `r.status` reflejando el código.
+//      NO son errores de transporte; el servidor respondió bien.
+//      Quien decide si "404 es un error" es tu lógica de aplicación.
+//
+//   fitz run examples/guide/17f-http-client-errores.fitz
+//
+// (No requiere red real durante el smoke porque solo compila; para
+// correrlo a mano hace falta conectividad outbound.)
+
+// -------------------------------------------------------------
+// 1. Timeout: forzamos timeout_ms muy chico para que dispare.
+//    El mensaje empieza con "http: timeout calling `<url>`: ...".
+//    Match sin `?` — el Err NO propaga, lo manejamos in-situ.
+// -------------------------------------------------------------
+let resp = http.request({
+    "method": "GET",
+    "url": "https://httpbin.org/delay/2",
+    "timeout_ms": 100,
+}).await
+match resp {
+    Ok(r) => print("✗ se esperaba timeout, llegó status={r.status}"),
+    Err(e) => print("✓ timeout esperado → {e}"),
+}
+
+// -------------------------------------------------------------
+// 2. Host inexistente: DNS no resuelve.
+//    El mensaje empieza con "http: could not connect to ...".
+// -------------------------------------------------------------
+let resp2 = http.get("https://no-existe-este-host-fitz.invalid").await
+match resp2 {
+    Ok(r) => print("✗ se esperaba DNS fail, llegó status={r.status}"),
+    Err(e) => print("✓ DNS fail esperado → {e}"),
+}
+
+// -------------------------------------------------------------
+// 3. URL inválida (esquema desconocido): error de builder.
+// -------------------------------------------------------------
+let resp3 = http.get("ftp://no-soportado").await
+match resp3 {
+    Ok(r) => print("✗ se esperaba URL inválida, llegó status={r.status}"),
+    Err(e) => print("✓ URL inválida esperada → {e}"),
+}
+
+// -------------------------------------------------------------
+// 4. Status 404: el SERVIDOR responde bien, pero con 4xx.
+//    Es `Result::Ok` — chequeamos `r.status` para decidir.
+//    Patrón canónico: tratar 4xx/5xx como "error de aplicación"
+//    separado del error de transporte.
+// -------------------------------------------------------------
+match http.get("https://httpbin.org/status/404").await {
+    Ok(resp4) => {
+        if (resp4.status >= 400) {
+            print("✓ 4xx esperado: status={resp4.status} (NO es Err, es Ok+chequeo manual)")
+        } else {
+            print("✗ esperaba 4xx, llegó status={resp4.status}")
+        }
+    }
+    Err(e) => print("error de transporte: {e}"),
+}
+
+// -------------------------------------------------------------
+// 5. Status 500: idem 404, mismo patrón.
+// -------------------------------------------------------------
+match http.get("https://httpbin.org/status/500").await {
+    Ok(resp5) => {
+        if (resp5.status >= 500) {
+            print("✓ 5xx esperado: status={resp5.status}")
+        }
+    }
+    Err(e) => print("error de transporte: {e}"),
+}
+
+// -------------------------------------------------------------
+// 6. Helper canónico con `?`: encapsula el flow happy-path y
+//    devuelve `Result<Str>`. Dentro del helper podemos usar `?`
+//    libremente; afuera matcheamos el Result.
+//
+//    - Ok("...")  si la URL respondió con 2xx/3xx.
+//    - Err("...") si fue 4xx/5xx O si hubo un error de transporte.
+// -------------------------------------------------------------
+async fn probe(url: Str) -> Result<Str> {
+    let r = http.get(url).await?
+    if (r.status >= 400) {
+        return Err("status {r.status}")
+    }
+    return Ok("status {r.status} ({r.duration_ms}ms)")
+}
+
+match probe("https://httpbin.org/get").await {
+    Ok(msg) => print("probe OK    → {msg}"),
+    Err(msg) => print("probe FALLA → {msg}"),
+}
+match probe("https://no-existe-este-host-fitz.invalid").await {
+    Ok(msg) => print("probe OK    → {msg}"),
+    Err(msg) => print("probe FALLA → {msg}"),
+}

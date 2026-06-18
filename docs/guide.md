@@ -7469,17 +7469,277 @@ Cuando aplicás `cors(...)`:
 
 **Ejemplo completo**: `examples/guide/17b-middleware.fitz`.
 
+### HTTP client outbound
+
+Hasta acá vimos el lado **server** del HTTP nativo: handlers que
+reciben requests, devuelven JSON, validan body, propagan errores
+con `?`. Para cerrar el círculo, Fitz trae un módulo **`http`**
+built-in para hacer requests **outbound** — el "lado cliente",
+todo en el mismo binario, sin libs externas.
+
+Casos típicos:
+
+- Webhook dispatcher: tu API recibe un evento y lo despacha a
+  Slack / Discord / Sentry.
+- Integración con APIs externas (Stripe, GitHub, OpenAI).
+- Health checks que monitorean servicios externos.
+- Proxy / aggregation de múltiples upstreams.
+
+**Panorama vecino**:
+
+| Lenguaje | Cliente HTTP típico | Async-first | Built-in |
+|---|---|---|---|
+| Python | `requests` o `httpx` (pip install) | `httpx` sí, `requests` no | no |
+| JavaScript | `axios` o `fetch` polyfill | Promise (Node ≥18 trae `fetch`) | parcial (`fetch`) |
+| Rust | `reqwest` (`cargo add`) | sí (con tokio) | no |
+| Java | `OkHttp` o `HttpClient` (Java 11+) | mixto | parcial (Java 11+) |
+| Go | `net/http` (stdlib) | sí | sí |
+| **Fitz** | **`http` (built-in)** | **sí** | **sí** |
+
+**Por qué Fitz hace esto distinto** — cinco diferenciales que se
+componen entre sí:
+
+1. **Built-in del lenguaje, no lib externa**: `http` es módulo
+   pre-registrado igual que `log`, `auth`, `jwt`, `db`. No hay
+   `pip install`, no hay `npm install`, no hay `cargo add`.
+2. **Paridad bit-a-bit `fitz run` ↔ `fitz build`**: el binario
+   standalone tiene el cliente HTTP linkeado estático con TLS
+   (rustls), sin openssl en el host de runtime. El mismo programa
+   produce el mismo wire request en intérprete y compilado.
+3. **Async ciudadano de primera**: cada método devuelve
+   `Future<Result<HttpClientResponse>>` y se integra natural con
+   `@cron`, `@background`, `spawn(...)`, y handlers HTTP server-side.
+4. **`Result<T>` automático**: los errores de transporte (timeout,
+   DNS fail, TLS handshake) son **valores**, no excepciones. El
+   `?` los propaga; el `match` te deja decidir caso por caso;
+   el checker estático exige manejarlos (regla 5.3.3 de exhaustividad
+   sobre `Result`).
+5. **Sin deps externas en el binario final**: el binario `fitz`
+   ya trae `reqwest` con `rustls-tls`. Compilás con `fitz build`
+   y obtenés un `.exe` standalone — no hace falta OpenSSL en la
+   máquina del cliente.
+
+#### API completo
+
+Los 5 métodos comunes:
+
+```fitz
+let g = http.get("https://api.example.com/data").await?
+let h = http.head("https://example.com").await?
+let p = http.post(url, body).await?
+let u = http.put(url, body).await?
+let d = http.delete(url).await?
+```
+
+Y la variante low-level `http.request(opts: Map)` para configurar
+timeout, headers, `follow_redirects`, etc:
+
+```fitz
+let r = http.request({
+    "method": "GET",                    // obligatorio
+    "url": "https://api.example.com",   // obligatorio
+    "timeout_ms": 5000,                 // opcional, default 30000
+    "headers": {"X-Token": "abc"},      // opcional
+    "body": "...",                      // opcional (Str|Map|Bytes)
+    "follow_redirects": true,           // opcional, default true
+}).await?
+```
+
+#### El tipo `HttpClientResponse`
+
+Cada call exitoso devuelve un `Result::Ok(HttpClientResponse)` con
+cuatro fields:
+
+```fitz
+type HttpClientResponse {
+    status: Int                // ej. 200, 404, 500
+    body: Str                  // texto plano del body
+    headers: Map<Str, Str>     // headers de la response
+    duration_ms: Int           // tiempo total medido en cliente
+}
+```
+
+`HttpClientResponse` es **built-in**: no lo importás, está
+disponible en cualquier programa. El LSP lo conoce, el checker
+verifica los fields, el codegen lo emite como struct Rust nativo.
+
+#### Body shapes — Str, Map, Bytes
+
+Los métodos que llevan body (`post` / `put` / `request`) aceptan
+**tres shapes** del lado de Fitz, con la convención que sigue:
+
+| Shape Fitz | Wire body | Content-Type auto |
+|---|---|---|
+| `Str` | as-is UTF-8 | no se toca |
+| `Map<Str, Any>` | `serde_json` serialize | `application/json` |
+| `Bytes` | as-is octetos | no se toca |
+
+```fitz
+// Map → JSON automático
+http.post("https://api.example.com/items", {"name": "ada", "age": 36}).await?
+
+// Str → as-is sin tocar headers
+http.post("https://api.example.com/items", "raw body como string").await?
+
+// Bytes → para uploads binarios
+http.post("https://api.example.com/upload", file_bytes).await?
+```
+
+Si pasás un `Map`, el header `Content-Type: application/json` se
+agrega solo. Si lo seteás explícitamente en `headers`, prevalece
+el tuyo.
+
+#### Modelo de errores — dos categorías distintas
+
+Es fundamental separar **errores de transporte** de **status
+codes 4xx/5xx** — Fitz los modela como dos cosas distintas:
+
+| Categoría | Cómo se manifiesta | Cómo se maneja |
+|---|---|---|
+| Transporte (timeout, DNS, TLS, conexión) | `Result::Err(Str)` con prefijo `"http: "` | `?` o `match` |
+| Status 4xx/5xx (404, 500, etc) | `Result::Ok` con `r.status` | chequeo manual `if (r.status >= 400)` |
+
+Patrón canónico con `?`:
+
+```fitz
+async fn fetch_user(id: Int) -> Result<Str> {
+    let r = http.get("https://api.example.com/users/{id}").await?
+    if (r.status >= 400) {
+        return Err("upstream status {r.status}")
+    }
+    return Ok(r.body)
+}
+```
+
+Y con `match` para distinguir categorías:
+
+```fitz
+match http.get(url).await {
+    Ok(r) => {
+        if (r.status >= 400) {
+            print("API error: {r.status}")
+        } else {
+            print("OK: {r.body}")
+        }
+    }
+    Err(e) => print("transporte: {e}"),
+}
+```
+
+Los mensajes de error tienen prefijos identificables — útiles si
+querés clasificar en logs / métricas:
+
+| Mensaje | Causa |
+|---|---|
+| `"http: timeout calling ..."` | timeout |
+| `"http: could not connect to ..."` | DNS fail / conexión rechazada |
+| `"http: invalid request to ..."` | URL malformada / esquema inválido |
+| `"http: request failed to ..."` | TLS handshake / certificado |
+
+#### Integración con el resto del lenguaje
+
+`http.*` es async y devuelve `Future<T>`, por eso encaja natural con:
+
+**Handlers HTTP que proxean upstream** — combinás server-side +
+client-side en el mismo programa:
+
+```fitz
+@get("/data/{id}")
+async fn proxy(id: Int) -> Result<Str> {
+    let r = http.get("https://upstream.example.com/data/{id}").await?
+    return Ok(r.body)
+}
+```
+
+**`@background` + `spawn(...)`** — fire-and-forget para webhooks
+sin bloquear la response:
+
+```fitz
+@background
+async fn dispatch(url: Str, payload: Map<Str, Str>) -> Null {
+    let _ = http.post(url, payload).await
+    return null
+}
+
+@post("/events")
+fn handle_event(input: EventInput) {
+    let _ = spawn(dispatch("https://hooks.slack.com/...", {"text": input.msg}))
+    return 202 {"status": "accepted"}
+}
+```
+
+**`@cron`** — chequeos periódicos sin Celery / cron Unix:
+
+```fitz
+@cron("*/30 * * * * *")
+async fn ping() -> Null {
+    let r = http.head("https://api.example.com/healthz").await
+    match r {
+        Ok(resp) => log.info("upstream up", status: resp.status),
+        Err(e) => log.warn("upstream down", error: e),
+    }
+    return null
+}
+```
+
+#### Limitaciones del MVP
+
+Documentadas para entender qué SÍ entra al MVP y qué se queda como
+deuda visible (refinable post-MVP si entra demanda real):
+
+- **Sin streaming del body** — `r.body: Str` carga el body entero
+  en memoria. Para descargas de archivos grandes (ej. GBs), llega
+  como sub-paso futuro con `r.body_stream()` async iterable.
+- **Sin multipart form-data** — para upload de archivos con
+  `multipart/form-data`. Workaround: armar el body a mano con
+  `Bytes` y setear `Content-Type: multipart/form-data; boundary=...`.
+- **Sin cookie jar** persistente entre requests. Cada call es
+  independiente. Workaround: agarrar `Set-Cookie` de
+  `r.headers` y pasarlo en `Cookie` del próximo request.
+- **Headers de respuesta como `Map<Str, Str>`** — si un header
+  viene duplicado en la response, gana el último. Refinable a
+  `List<(Str, Str)>` si entra demanda.
+- **El módulo `http` tipa como `Any` en el checker** — paralelo a
+  `jwt` / `hash`. Refinable a signatures estrictas post-MVP.
+
+#### Decisión de red para los ejemplos
+
+Los ejemplos abajo apuntan a `httpbin.org` (test target canónico
+para clients HTTP). El smoke `GUIDE_EXAMPLES_COMPILE` solo
+**compila** los ejemplos a binario — no los ejecuta — así que NO
+necesita red durante CI. Para correrlos a mano (`fitz run` o
+`./bin`), hace falta conectividad outbound.
+
+#### Ejemplos runnable
+
+Cuatro ejemplos en `examples/guide/` que cubren el MVP entero:
+
+- **`17e-http-client-basico.fitz`** — los 5 métodos comunes
+  (GET / HEAD / POST con Map / PUT con Str / DELETE) y la
+  inspección de `HttpClientResponse`.
+- **`17f-http-client-errores.fitz`** — manejo completo de errores:
+  timeout, DNS fail, URL inválida, status 4xx/5xx que NO son
+  `Err`, helper canónico que devuelve `Result<Str>` con `?`.
+- **`17g-http-client-webhook.fitz`** — webhook dispatcher que
+  combina HTTP server-side + HTTP client + `@background` +
+  `spawn(...)` + `log.info` estructurado.
+- **`17h-http-client-health-checker.fitz`** — health checker estilo
+  fitzwatch: `@cron("*/30 * * * * *")` + `http.head` con timeout
+  corto + log estructurado.
+
 ---
 
 Con HTTP cerramos la Fase 4 y la mini-fase de Middleware + CORS
-post-Fase 7. Tenés ahora todas las piezas para escribir APIs reales
-en Fitz: rutas, JSON tipado, manejo de errores propagable,
-configuración del server, status codes custom, query params,
-middleware apilable y CORS configurable. El próximo capítulo cubre
-la **paridad con FastAPI en developer experience**: documentación
-de la API autogenerada (`/openapi.json` + UI Scalar en `/docs`).
-Después, el cap 19 cubre la otra mitad de "HTTP nativo":
-concurrencia con `async fn` y `.await`.
+post-Fase 7, más la mini-tanda HTTP client del lado outbound.
+Tenés ahora todas las piezas para escribir APIs reales en Fitz:
+rutas, JSON tipado, manejo de errores propagable, configuración del
+server, status codes custom, query params, middleware apilable, CORS
+configurable y cliente HTTP outbound para integrar con servicios
+externos. El próximo capítulo cubre la **paridad con FastAPI en
+developer experience**: documentación de la API autogenerada
+(`/openapi.json` + UI Scalar en `/docs`). Después, el cap 19 cubre
+la otra mitad de "HTTP nativo": concurrencia con `async fn` y
+`.await`.
 
 ---
 

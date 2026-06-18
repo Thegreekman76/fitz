@@ -1,0 +1,71 @@
+// 17e-http-client-basico.fitz — Ejemplo de la sub-sección
+// "17.X — HTTP client outbound" del capítulo 17.
+//
+// Los 5 métodos comunes del módulo `http` built-in: GET, HEAD, POST,
+// PUT, DELETE. Cada uno devuelve `Future<Result<HttpClientResponse>>`,
+// por eso aparecen siempre con `.await?` en el callsite.
+//
+// Apunta a `httpbin.org` (test target canónico para clients HTTP). El
+// smoke `GUIDE_EXAMPLES_COMPILE` solo compila — no ejecuta — así que
+// el ejemplo no requiere red durante CI. Para correrlo a mano hace
+// falta conectividad outbound.
+//
+//   fitz run  examples/guide/17e-http-client-basico.fitz
+//   fitz build examples/guide/17e-http-client-basico.fitz
+//
+// Output esperado (con red): status 200/204, duration_ms varía,
+// los echos de POST/PUT muestran el body que enviamos.
+
+// El operador `?` solo se permite adentro de una fn que retorna
+// `Result<T>`. La práctica canónica es encapsular el flow happy-path
+// en un `run()` con `Result<Null>` y matchear el resultado desde el
+// top-level.
+async fn run() -> Result<Null> {
+    // GET — método más simple. URL sola, sin body.
+    let g = http.get("https://httpbin.org/get").await?
+    print("GET    /get          → status={g.status} duration_ms={g.duration_ms}")
+
+    // HEAD — útil para health checks: solo headers, sin body.
+    let h = http.head("https://httpbin.org/status/200").await?
+    print("HEAD   /status/200   → status={h.status} body.len={h.body.len()}")
+
+    // POST con body Map. El cliente serializa a JSON y agrega el
+    // header `Content-Type: application/json` automático.
+    let p = http.post(
+        "https://httpbin.org/post",
+        {"name": "Fitz", "version": "0.16"}
+    ).await?
+    print("POST   /post         → status={p.status}")
+
+    // PUT con body Str. El cliente lo manda as-is sin tocar headers
+    // (el server puede asumir text/plain por defecto).
+    let u = http.put("https://httpbin.org/put", "raw body como string").await?
+    print("PUT    /put          → status={u.status}")
+
+    // DELETE — sin body, signature igual a GET/HEAD.
+    let d = http.delete("https://httpbin.org/delete").await?
+    print("DELETE /delete       → status={d.status}")
+
+    // Inspección de la response: 4 fields siempre presentes.
+    print("")
+    print("Inspección del último response (DELETE):")
+    print("  status      = {d.status}")
+    print("  duration_ms = {d.duration_ms}")
+    print("  body.len    = {d.body.len()}")
+    // El Map de headers preserva orden de inserción del server.
+    let server: Str = match d.headers.get("server") {
+        Ok(v) => v,
+        Err(_) => "(desconocido)",
+    }
+    print("  server      = {server}")
+
+    return Ok(null)
+}
+
+// Top-level: invocamos `run()` y matcheamos el Result. Si algún
+// `.await?` se rompió (timeout, DNS, etc.), el `Err` aparece acá con
+// el mensaje completo y prefijo `"http: "`.
+match run().await {
+    Ok(_) => print(""),  // happy path — todo logueado dentro de run().
+    Err(e) => print("✗ error: {e}"),
+}

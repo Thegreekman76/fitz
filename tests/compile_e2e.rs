@@ -2830,6 +2830,14 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "17-http.fitz",
     "17b-middleware.fitz",
     "17c-multipart.fitz",
+    // Mini-tanda HTTP client builtin (Bloque 5) — los 4 ejemplos de
+    // la sub-sección "17.X HTTP client outbound" del cap 17.
+    // Apuntan a `httpbin.org` por didactismo; el smoke solo compila
+    // (no ejecuta), así que cero red durante CI.
+    "17e-http-client-basico.fitz",
+    "17f-http-client-errores.fitz",
+    "17g-http-client-webhook.fitz",
+    "17h-http-client-health-checker.fitz",
     "18-docs.fitz",
     "19-async.fitz",
     "19b-paralelismo.fitz",

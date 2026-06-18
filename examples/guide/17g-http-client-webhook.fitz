@@ -1,0 +1,105 @@
+// 17g-http-client-webhook.fitz — Ejemplo de la sub-sección
+// "17.X — HTTP client outbound" del capítulo 17.
+//
+// Webhook dispatcher canónico: un handler HTTP recibe un evento y lo
+// despacha a un endpoint externo (caso típico: Slack/Discord/Sentry).
+//
+// El handler **no espera** al webhook upstream — la response sale
+// inmediata con 202 Accepted y el dispatch corre fire-and-forget en
+// `spawn(...)` sobre una fn `@background async`. Si el upstream tarda
+// 3 segundos, al cliente le sale en 5 ms.
+//
+// Combina todo el stack:
+//   - HTTP server-side (@post)
+//   - HTTP client outbound (http.post)
+//   - @background async (marcador opt-in)
+//   - spawn(...) (fire-and-forget)
+//   - log.info estructurado (Fase 12.3.a)
+//   - return <status> { ... } para 202 Accepted
+//
+// Probar:
+//   fitz run examples/guide/17g-http-client-webhook.fitz
+//
+//   # En otra terminal:
+//   curl -X POST localhost:43917/events \
+//        -H 'Content-Type: application/json' \
+//        -d '{"event":"signup","user":"ada"}'
+//   # → 202 Accepted casi instantáneo
+//   # En el stdout del server, el log "webhook dispatched" aparece
+//   # 100-300 ms después (lo demora el upstream + la red real).
+
+@server(43917)
+fn main() => 0
+
+// URL del webhook upstream (en producción real, vendría de env vars).
+// httpbin.org/post es un echo server — devuelve 200 con el JSON que
+// le mandamos.
+let WEBHOOK_URL: Str = "https://httpbin.org/post"
+
+// Tipo del payload que aceptamos.
+type EventInput {
+    event: Str,
+    user: Str,
+}
+
+// `@background` marca la fn como autorizada para `spawn(...)`. Sin el
+// decorator, el checker rechaza el callsite antes de runtime — fuerza
+// que el autor opte-in explícito a la mecánica de fire-and-forget.
+@background
+async fn dispatch_webhook(event: Str, user: Str) -> Null {
+    // Construimos el payload tipado como Map. El cliente HTTP lo
+    // serializa a JSON automático y agrega Content-Type.
+    let payload: Map<Str, Str> = {
+        "event": event,
+        "user": user,
+        "source": "fitz-app",
+    }
+    log.info("dispatching webhook", event: event, user: user)
+
+    // El handler HTTP NO espera esto. Si tarda 3 segundos, al cliente
+    // ya le respondimos hace 3 segundos.
+    let r = http.post(WEBHOOK_URL, payload).await
+    match r {
+        Ok(resp) => {
+            if (resp.status >= 200 and resp.status < 300) {
+                log.info(
+                    "webhook dispatched",
+                    event: event,
+                    status: resp.status,
+                    duration_ms: resp.duration_ms,
+                )
+            } else {
+                log.warn(
+                    "webhook rejected",
+                    event: event,
+                    status: resp.status,
+                    body_preview: resp.body,
+                )
+            }
+        }
+        Err(e) => {
+            // Errores de transporte. En producción real, encolaríamos
+            // para reintentar — acá solo logueamos.
+            log.error("webhook failed", event: event, error: e)
+        }
+    }
+    return null
+}
+
+// Handler HTTP: recibe el evento, despacha el webhook en background,
+// responde inmediato con 202 Accepted. El status 202 es la convención
+// REST para "acepté la operación, pero la voy a procesar async".
+@post("/events")
+fn create_event(input: EventInput) {
+    // `spawn(call)` arranca la tarea fire-and-forget. Devuelve un
+    // `Future<Null>` que descartamos con `let _ = ...` — el task
+    // queda detached corriendo hasta completar (o crashear; los
+    // errores no propagan al caller).
+    let _ = spawn(dispatch_webhook(input.event, input.user))
+
+    return 202 {
+        "status": "accepted",
+        "event": input.event,
+        "user": input.user,
+    }
+}

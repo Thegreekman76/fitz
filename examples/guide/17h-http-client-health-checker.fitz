@@ -1,0 +1,136 @@
+// 17h-http-client-health-checker.fitz — Ejemplo de la sub-sección
+// "17.X — HTTP client outbound" del capítulo 17.
+//
+// Health checker minimalista al estilo fitzwatch: cada 30 segundos
+// verifica si tres endpoints están vivos con `http.head` y timeout
+// corto. Combina:
+//
+//   - @cron("expr") — schedule periódico (sintaxis cron Unix).
+//   - http.head     — request HEAD (no descarga body, ideal para
+//                     health checks: rápido + económico).
+//   - http.request  — variante low-level con `timeout_ms` corto.
+//   - log.info / log.warn — output estructurado con kwargs (Fase
+//                     12.3.a).
+//
+// El programa NO tiene `@server` — un binario con solo `@cron` queda
+// vivo bloqueante (modo systemd-friendly). Para parar: Ctrl+C.
+//
+//   fitz run examples/guide/17h-http-client-health-checker.fitz
+//   fitz build examples/guide/17h-http-client-health-checker.fitz
+//
+// Output esperado en stdout cada 30 segundos:
+//   INFO health.up   url=https://example.com status=200 duration_ms=120
+//   WARN health.down url=https://example.com error="http: timeout..."
+//
+// (Requiere red outbound. El smoke `GUIDE_EXAMPLES_COMPILE` solo
+// compila — no ejecuta — así que el `@cron` jamás dispara durante CI.)
+
+// Tipo del resultado por target (struct tipado en vez de Map para
+// que el checker capte typos en `result.X`).
+type HealthResult {
+    url: Str,
+    up: Bool,
+    status: Int = 0,
+    duration_ms: Int = 0,
+    error: Str?,
+}
+
+// Helper: revisa UNA URL con timeout corto y devuelve el resultado
+// tipado. Usa `http.request(...)` low-level para poder configurar
+// `timeout_ms` per-check (5 segundos para no quedarse colgado).
+async fn check_one(url: Str) -> HealthResult {
+    let resp = http.request({
+        "method": "HEAD",
+        "url": url,
+        "timeout_ms": 5000,
+        "follow_redirects": true,
+    }).await
+    match resp {
+        Ok(r) => {
+            // Por convención, status < 400 = "up". Refinable: matchear
+            // contra una whitelist de status esperados por target.
+            let up: Bool = r.status < 400
+            return HealthResult {
+                url: url,
+                up: up,
+                status: r.status,
+                duration_ms: r.duration_ms,
+            }
+        }
+        Err(e) => {
+            // Error de transporte (timeout, DNS, TLS, etc.). El
+            // mensaje empieza con `"http: "` y describe el detalle.
+            return HealthResult {
+                url: url,
+                up: false,
+                error: e,
+            }
+        }
+    }
+}
+
+// Helper: dado un HealthResult, lo loguea con `log.info`/`log.warn`
+// según el status. Encapsular esto en una fn separada deja el body
+// del `@cron` super corto y fácil de leer.
+fn report(r: HealthResult) {
+    if (r.up) {
+        log.info(
+            "health.up",
+            url: r.url,
+            status: r.status,
+            duration_ms: r.duration_ms,
+        )
+    } else {
+        // Caso (a): el servidor respondió pero con status feo (>=400).
+        // Caso (b): error de transporte (r.error tiene el mensaje).
+        let err_msg: Str = match r.error {
+            null => "status {r.status}",
+            msg => msg,
+        }
+        log.warn(
+            "health.down",
+            url: r.url,
+            status: r.status,
+            error: err_msg,
+        )
+    }
+}
+
+// @cron("expr") corre periódicamente. Sintaxis aceptada:
+//   - 5 fields Unix clásico: "min hora día mes día-semana".
+//   - 6 fields con seconds al inicio (ej. "*/30 * * * * *").
+//
+// El job corre en su propio task tokio — si tarda más que el período,
+// no se pisa con la próxima corrida (cada una espera a que la
+// anterior termine).
+//
+// Notá que cada check se lanza secuencialmente con `.await` adentro
+// del cron. Para chequear N targets en paralelo, usá `spawn(...)`
+// sobre una fn `@background`: cada spawn corre como task tokio
+// independiente y el cron retorna apenas dispara todos.
+@cron("*/30 * * * * *")
+async fn check_all() -> Null {
+    log.info("health check tick")
+
+    // Sin loop sobre una List<Str> porque el codegen actual mantiene
+    // el MutexGuard de la lista a través de los `.await` adentro del
+    // body, lo que rompe el bound Send que requiere el scheduler de
+    // `@cron`. Workaround: enumerar los targets como let-bindings
+    // sueltos (cada uno es una String "Send-clean"). Deuda residual
+    // documentada para refinar el codegen post-MVP.
+    let r1 = check_one("https://example.com").await
+    report(r1)
+
+    let r2 = check_one("https://httpbin.org/status/200").await
+    report(r2)
+
+    // "down" intencional para demo del path de error.
+    let r3 = check_one("https://httpbin.org/status/503").await
+    report(r3)
+
+    return null
+}
+
+// Sin `@server`, el binario queda vivo bloqueante con `ctrl_c().await`
+// automático al final del main generado — perfecto para correr como
+// service systemd / unit Docker.
