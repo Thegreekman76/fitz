@@ -36,6 +36,7 @@ pub mod fmt; // Phase 9.z.1 — `fitz fmt` formatter (AST pretty-printer)
 pub mod format; // Mini-batch Fm — runtime FormatSpec application
 pub mod git_dep; // Phase 9.y.3.c — git deps + local cache
 pub mod http; // Phase 4 — native HTTP (registry + runtime)
+pub mod http_client; // Mini-fase HTTP client (2026-06-18) — outbound `http.get/...` builtin
 pub mod launcher_template; // Phase 8.b.3 — launcher template for `--bundle-python`
 pub mod lexer; // Phase 2.1 — tokenisation
 pub mod lint;

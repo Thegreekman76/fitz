@@ -1328,6 +1328,37 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
             },
         ],
     );
+
+    // Mini-fase HTTP client (2026-06-18) — `HttpClientResponse`:
+    // type returned by `http.get`, `http.post`, etc. once `.await`-ed.
+    // Fields fixed: status (Int), body (Str), headers (Map<Str, Str>),
+    // duration_ms (Int). Field order matters for Display and for the
+    // evaluator's struct literal validation, so it MUST mirror what
+    // `http_client::build_http_response_instance` emits.
+    let http_resp_id = env
+        .declare_nominal("HttpClientResponse".to_string())
+        .expect("HttpClientResponse is a built-in nominal — cannot collide");
+    env.set_fields(
+        http_resp_id,
+        vec![
+            ResolvedField {
+                name: "status".into(),
+                type_: Type::Int,
+            },
+            ResolvedField {
+                name: "body".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "headers".into(),
+                type_: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
+            },
+            ResolvedField {
+                name: "duration_ms".into(),
+                type_: Type::Int,
+            },
+        ],
+    );
 }
 
 fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
@@ -11921,11 +11952,15 @@ mod tests {
         // Mini-phase MW.1: `Request` and `Response` are pre-registered as
         // HTTP runtime built-in nominals, even in empty programs.
         // Mini-batch MP2 added `File` as a third built-in.
+        // Mini-fase HTTP client (2026-06-18) added `HttpClientResponse`
+        // for outbound `http.get/post/...` returns (type of `r` in
+        // `let r = http.get(url).await?`).
         // The user can reference them without declaring them.
-        assert_eq!(env.nominal_count(), 3);
+        assert_eq!(env.nominal_count(), 4);
         assert!(env.lookup("Request").is_some());
         assert!(env.lookup("Response").is_some());
         assert!(env.lookup("File").is_some());
+        assert!(env.lookup("HttpClientResponse").is_some());
     }
 
     #[test]

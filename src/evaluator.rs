@@ -283,6 +283,9 @@ pub fn builtin_names() -> &'static [&'static str] {
         // Phase 12.8 — built-in feature flags (manifest [flags] + env vars).
         "flag",
         "flags",
+        // Mini-fase HTTP client (2026-06-18) — outbound HTTP requests.
+        // Module with `get`/`head`/`post`/`put`/`delete`/`request`.
+        "http",
         // 10.8.7 (v0.10.8) — broadcast HTTP → WS cross-handler.
         "ws_broadcast",
         // v0.10.24 — built-in types with static constructors as
@@ -11496,6 +11499,67 @@ fn register_builtins(env: &EnvRef) {
         Value::Module {
             name: "log".into(),
             env: log_env,
+        },
+    );
+
+    // Mini-fase HTTP client (2026-06-18) — `http` module with 6
+    // builtins for outbound requests. All async, return
+    // `Future<Result<HttpClientResponse>>`. The Result wraps
+    // transport-level errors (timeout, DNS, TLS, connect) as
+    // `Err(Str)`; status 4xx/5xx are NOT errors — they live in
+    // `r.status`. Body of `post`/`put` accepts Str/Map/Bytes;
+    // Map auto-serialises to JSON with Content-Type header. The
+    // low-level `request(opts: Map)` takes method/url/timeout_ms/
+    // headers/body/follow_redirects. See `src/http_client.rs` and
+    // `docs/http-client-roadmap.md` for the full design.
+    let http_env = Environment::new();
+    http_env.lock().define(
+        "get",
+        Value::Builtin {
+            name: "get",
+            func: crate::http_client::builtin_http_get,
+        },
+    );
+    http_env.lock().define(
+        "head",
+        Value::Builtin {
+            name: "head",
+            func: crate::http_client::builtin_http_head,
+        },
+    );
+    http_env.lock().define(
+        "post",
+        Value::Builtin {
+            name: "post",
+            func: crate::http_client::builtin_http_post,
+        },
+    );
+    http_env.lock().define(
+        "put",
+        Value::Builtin {
+            name: "put",
+            func: crate::http_client::builtin_http_put,
+        },
+    );
+    http_env.lock().define(
+        "delete",
+        Value::Builtin {
+            name: "delete",
+            func: crate::http_client::builtin_http_delete,
+        },
+    );
+    http_env.lock().define(
+        "request",
+        Value::Builtin {
+            name: "request",
+            func: crate::http_client::builtin_http_request,
+        },
+    );
+    env.lock().define(
+        "http",
+        Value::Module {
+            name: "http".into(),
+            env: http_env,
         },
     );
 

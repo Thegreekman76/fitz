@@ -299,6 +299,24 @@ sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
 
+# Mini-fase HTTP client (2026-06-18) — módulo built-in `http` para
+# requests outbound (`http.get/head/post/put/delete/request`).
+# Detectado como deuda explícita durante el desarrollo de fitzwatch
+# (status page open-source). Plan completo en
+# `docs/http-client-roadmap.md`.
+#
+# `reqwest = "0.12"` viene como dep transitiva de `opentelemetry-otlp`
+# con feature `reqwest-blocking-client`, pero la queremos async +
+# directa para que el dispatch sea explícito. Features elegidas:
+#  - `json`: serialización de body Map<Str,Any> → JSON automática.
+#  - `rustls-tls`: alineado con el resto del proyecto (driver Postgres
+#    también usa rustls). Sin OpenSSL/SChannel/SecTransport — el
+#    binario standalone Fitz NO depende de stack TLS del sistema.
+#  - `default-features = false`: skipea el feature default
+#    `native-tls` (queremos solo rustls) y `default-tls` (alias).
+#  - `gzip`/`brotli`/`deflate` quedan post-MVP si entra demanda.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # Fase 10.1.b — TLS strict para el driver Postgres (sslmode=require/
 # verify-ca/verify-full). Habilita apuntar Fitz a managed DBs reales
 # (Heroku, RDS, Supabase, Neon, Aiven, Render PG) que exigen TLS
