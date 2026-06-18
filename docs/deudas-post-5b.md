@@ -48,6 +48,58 @@
 
 ---
 
+## 🟢 W18 (post-B8) — Codegen cross-module observability CERRADA (2026-06-18, vX.Y.Z al cerrar Bloque 9)
+
+**Hito**: cierra el gap más visible del codegen cross-module heredado de Fase 12.3.b y la dieta de los bloques W11/W16: cuando un módulo importado declaraba un handler HTTP (`@get`/`@post`/`@put`/`@delete`) y/o llamaba `log.{info,warn,error,debug}(...)`, el `__handler_<name>` wrapper emitido en el módulo invocaba 6 símbolos del preludio LOGGING + SPAN_CONTEXT + OTEL pero faltaban los `use crate::{...}` correspondientes. Resultado: `fitz build` rompía con 12-134+ errores E0425/E0433 según el tamaño del proyecto. Bloqueaba la primera versión del boilerplate `boilerplates/api-orm-full` end-to-end (la deuda pre-existente que B8 dejó documentada).
+
+**Detectado**: post-Bloque 8 de la mini-tanda HTTP client (2026-06-18), al validar `boilerplates/api-orm-full` con el webhook outbound recién agregado. Confirmado con `git stash` → HEAD pre-B8 reproduce los mismos errores (NO regresión de B8).
+
+**Repro mínima** (4 líneas en main + 1 handler en módulo):
+```fitz
+// repro/main.fitz
+from handlers import ping
+
+@server(port=3000)
+fn main() => 0
+
+// repro/handlers.fitz
+@get("/ping")
+fn ping() -> Str => "pong"
+```
+Pre-fix: 12 errores rustc, 6 símbolos faltantes (`__fitz_otel_is_enabled`, `__fitz_otel_tracer`, `__FitzSpanContext`, `__fitz_with_span_context`, `__fitz_log_info`, `__FitzLogValue`). Post-fix: compila a binario, arranca server, responde `"pong"` con log estructurado JSON y trace_id correlation.
+
+**Fix** (4 sub-cambios coordinados en `src/codegen.rs`):
+
+1. **Imports observability del wrapper**: el bloque `module_has_http` en `generate_module_rs_with_bindings` ya emitía W11/W16 (`__FitzResponse`/`__ToFitzJson`/`__FromFitzJson`/`__apply_cors_and_respond`/`__panic_payload_msg`/`__parse_*`); extendido para emitir 3 grupos nuevos paralelos cuando `module_has_http && main_observability_enabled`: `__fitz_otel_is_enabled`/`__fitz_otel_tracer` + `__FitzSpanContext` + `__fitz_with_span_context`.
+2. **Imports de los 4 log helpers** (independientes del wrapper): nuevo flag `module_uses_logging = program_uses_logging(program)` paralelo a `module_has_http`. Cuando `(module_has_http && main_observability_enabled) || module_uses_logging`, emite `use crate::{__fitz_log_info, __fitz_log_warn, __fitz_log_error, __fitz_log_debug, __FitzLogValue}`. Cubre dos sources de llamadas: (a) access log auto-emitido por `gen_http_handler_wrapper` cuando observability ON, (b) `log.{info,warn,error,debug}(...)` del user code en cualquier módulo (con o sin HTTP).
+3. **Propagación de `@server(observability=false)` main → módulos**: nuevo helper `extract_main_observability_enabled(program: &Program) -> bool` que walka decorators top-level buscando `@server(...)` con kwarg `observability=Bool`. Por defecto `true`. Pre-scaneado en `generate_project` ANTES del loader y threaded vía nuevo field `ModuleLoader.main_observability_enabled` + setter `set_main_observability_enabled`. `generate_module_rs_with_bindings` recibe el flag como nuevo arg `main_observability_enabled: bool` y setea `ctx.observability_enabled` del módulo. Resultado: cuando main opta por bare-metal, módulos también — el `gen_http_handler_wrapper` lee `self.observability_enabled` y skipea el bloque entero de instrumentación bit-a-bit paralelo. Cierra la inconsistencia semántica que existía desde Fase 12.3.b.5 (main bare-metal pero módulos instrumentados).
+4. **Gating refinado de los `use crate::{...}`**: las 3 líneas observability se gatean por `module_has_http && main_observability_enabled` para NO emitir imports inútiles en bare-metal mode (semánticamente coherente + sin warnings `unused_imports` aunque tengamos el `#[allow]`).
+
+**Tests** (9 unit nuevos en `codegen::tests::w18_*`):
+- `w18_extract_main_observability_default_is_true` / `_with_server_no_kwarg_is_true` / `_false` / `_true_explicit` (helper extract).
+- `w18_module_with_http_handler_emits_use_crate_observability_helpers` (caso happy path — module con `@get`).
+- `w18_module_with_log_call_emits_use_crate_log_helpers` (módulo con `log.warn` sin HTTP).
+- `w18_module_without_http_or_logging_does_not_emit_observability_use_crate` (regresión negativa).
+- `w18_module_with_http_handler_and_observability_false_does_not_emit_wrapper_imports` (propagación `observability=false`).
+- `w18_module_with_http_observability_false_and_user_log_still_imports_log_helpers` (gating refinado — log helpers separados del wrapper).
+
+**Validación end-to-end**:
+- Repro mínima compila a binario + arranca server + responde `"pong"` con log estructurado y trace_id.
+- `boilerplates/api-orm-full` compila a `target/release/fitz-api-orm-full.exe` (~134 errores E0425/E0433 pre-fix → 0 post-fix). Binario arranca, mounta los 13+ endpoints listados en el banner, `/healthz` y `/readyz` responden `{"status":"ok"}`.
+- Full lib suite: **3116 unit tests passing, 0 failed** (post-fix: 9 W18 nuevos).
+- `cargo fmt --all --check` limpio + `cargo clippy --lib --tests --bins -- -D warnings` limpio.
+
+**Impacto user-facing**: sin breaking. Programas single-file y proyectos multi-archivo SIN handlers/log-calls en módulos importados compilan idénticos (test negativo lo anchora). Proyectos multi-archivo CON handlers/log-calls en módulos ahora compilan a binario nativo end-to-end. Cualquier proyecto con `@server(observability=false)` (que antes era inconsistente entre main y módulos) ahora va bare-metal en todo el árbol.
+
+**Deudas residuales derivadas** (NO bloquean — refinamientos visibles post-W18):
+- `gen_http_handler_wrapper` lee `ctx.observability_enabled` en módulos pero **no** considera que main pueda tener su propio `@server` con flag distinto al de un futuro `@server` en módulo. MVP: solo main puede declarar `@server` (parser/loader convention). Si se permite `@server` en módulos en algún momento, el threading necesita refinarse.
+- El detector `extract_main_observability_enabled` solo mira top-level del main — no walkea módulos importados. Coherente con la convención actual (`@server` solo en main).
+- Modules sin HTTP que importan tipos `@table` con campos `Date`/`Time`/`Uuid` siguen el patrón W11/uses_db (no afectados por W18).
+
+**Commits asociados**: el fix completo entrará en el commit del Bloque 8.5 (post-B8 cleanup de la mini-tanda HTTP client) o como commit dedicado pre-B9 según preferencia del autor. SHA específico se suma a esta entrada al cerrar Bloque 9.
+
+---
+
 ## 🟡 Hallazgos del codegen del Bloque 5 HTTP client — 3 deudas residuales NO bloqueantes (2026-06-18)
 
 Descubiertas al validar bit-a-bit `fitz run` ↔ `fitz build` sobre los 4 ejemplos runnable `17e/f/g/h`. Documentadas con workaround idiomático conocido para cada caso; el ejemplo respectivo aplica el workaround en línea con comentario explicativo. Ninguna bloquea la mini-tanda HTTP client.

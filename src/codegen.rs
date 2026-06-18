@@ -138,6 +138,15 @@ pub fn generate_project(
     // already separated out into `python_imports`; the loader skips
     // them (via path[0] == "python").
     let mut loader = ModuleLoader::new(base_dir.clone(), dep_registry);
+    // W18 (post-B8) — pre-scan main's `@server(observability=...)`
+    // BEFORE loading modules. The flag is threaded into the loader
+    // so each `generate_module_rs_with_bindings` call sets its ctx
+    // accordingly. This closes the semantic gap of
+    // `@server(observability=false)`: previously main went bare-metal
+    // but modules' wrappers still emitted full instrumentation
+    // (semantically inconsistent — link-valid but contradictory).
+    let main_observability = extract_main_observability_enabled(program);
+    loader.set_main_observability_enabled(main_observability);
     loader.collect_imports(program)?;
 
     // 5b.6: detect whether the program (or any loaded module) uses
@@ -893,6 +902,44 @@ fn program_uses_jobs(program: &Program) -> bool {
         }
         stmt_uses_spawn(s)
     })
+}
+
+/// W18 (post-B8) — Pre-scans main's program for
+/// `@server(observability=...)` kwarg literal. Returns `false` only
+/// when the kwarg is explicitly `observability=false`. Defaults to
+/// `true` (matches `ServerConfigArgs::default().observability_enabled`).
+///
+/// Used by `generate_project` to thread the flag into the
+/// `ModuleLoader` BEFORE loading modules, so each module's
+/// `generate_module_rs_with_bindings` can set
+/// `ctx.observability_enabled` to match main's choice. Closes the
+/// semantic gap where main went bare-metal but module wrappers still
+/// emitted full instrumentation (link-valid but contradictory).
+///
+/// Recognizes the kwarg only in `@server` decorators attached to
+/// any top-level `Stmt::FnDef`. Multiple `@server` decorators are
+/// an error caught later by `parse_server_decorator`; here we
+/// short-circuit on the first match. Decorator args/kwargs that
+/// aren't bool literals are not our concern (the real parser
+/// rejects them at codegen time with the canonical message).
+fn extract_main_observability_enabled(program: &Program) -> bool {
+    for stmt in program {
+        if let Stmt::FnDef { decorators, .. } = stmt {
+            for dec in decorators {
+                if dec.name != "server" {
+                    continue;
+                }
+                for (key, value) in &dec.kwargs {
+                    if key == "observability" {
+                        if let Expr::Bool(b, _) = value {
+                            return *b;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Phase 12.3.a.3 — detect usage of the built-in `log` module.
@@ -3568,6 +3615,20 @@ struct ModuleLoader {
     /// Parallel to the evaluator's `loader_stack`
     /// (`evaluator::load_module`).
     loading_stack: Vec<PathBuf>,
+    /// W18 (post-B8) — `@server(observability=false)` from main's
+    /// program. Propagated to imported modules so their wrappers
+    /// also go bare-metal when main opts out. Default `true`
+    /// (instrumentation on). Set by `generate_project` BEFORE
+    /// `collect_imports` via `set_main_observability_enabled`. The
+    /// loader passes this flag to `generate_module_rs_with_bindings`
+    /// in each `load_module_at` call so module ctx
+    /// `observability_enabled` matches main's, keeping the
+    /// `@server(observability=...)` opt-out semantically consistent
+    /// across the whole project. Without this, modules emit
+    /// instrumentation calls that resolve at link time (preludes
+    /// always exist when there is HTTP) but contradict main's
+    /// bare-metal choice.
+    main_observability_enabled: bool,
 }
 
 impl ModuleLoader {
@@ -3579,7 +3640,17 @@ impl ModuleLoader {
             bindings: HashMap::new(),
             dep_registry,
             loading_stack: Vec::new(),
+            main_observability_enabled: true,
         }
+    }
+
+    /// W18 — see field docs. Called by `generate_project` with the
+    /// flag pre-extracted from main's `@server(...)` decorator (via
+    /// `extract_main_observability_enabled`) BEFORE
+    /// `collect_imports` so every module loaded inherits the
+    /// correct setting.
+    fn set_main_observability_enabled(&mut self, enabled: bool) {
+        self.main_observability_enabled = enabled;
     }
 
     /// Walks the main program's AST and loads each module
@@ -3840,12 +3911,17 @@ impl ModuleLoader {
         // Transitive Phase 8.7.1 — additionally we pass the Python
         // imports detected above so the module emits its own local
         // statics + getters and the needed `use crate::__fitz_py_*`.
+        //
+        // W18 — propagate main's `@server(observability=...)` flag
+        // so the module's HTTP wrappers go bare-metal too when main
+        // opts out. Default `true`.
         let rust_content = generate_module_rs_with_bindings(
             &module_program,
             &module_env,
             &local_bindings,
             &self.modules,
             &module_python_imports,
+            self.main_observability_enabled,
         )?;
 
         let mod_name = segments.last().cloned().unwrap_or_default();
@@ -4306,6 +4382,7 @@ fn generate_module_rs_with_bindings(
     local_bindings: &HashMap<String, ResolvedBinding>,
     loaded_modules: &[LoadedModule],
     python_imports: &[PythonImport],
+    main_observability_enabled: bool,
 ) -> Result<String, FitzError> {
     // Hpx.2 — for modules compiled via the loader, compute a fresh
     // TypeInfo. The loader ran `resolve_program` before but not
@@ -4313,6 +4390,15 @@ fn generate_module_rs_with_bindings(
     // side-table; the errors were already reported upstream.
     let (_e, type_info, _d, _errs) = crate::types::check_program(program);
     let mut ctx = CodegenCtx::new_for_module(env, &type_info);
+    // W18 (post-B8) — Propagate `@server(observability=...)` from
+    // main. Default `true` (instrumentation on). When main has
+    // `@server(observability=false)`, modules' HTTP wrappers also go
+    // bare-metal — `gen_http_handler_wrapper` reads
+    // `ctx.observability_enabled` and skips the entire span context
+    // scope + access log + metrics block. Without this propagation,
+    // main bypasses the wrapper but modules still emit instrumentation
+    // (semantically inconsistent — fixed bit-for-bit by this flag).
+    ctx.observability_enabled = main_observability_enabled;
     // Phase 8.7.1 transitive — the module's `uses_python` activates
     // the registration of PyAny bindings in `gen_expr::Ident` (parallel
     // to `generate_main_rs`). It is per-module: main may or may not
@@ -4503,6 +4589,56 @@ fn generate_module_rs_with_bindings(
              use crate::__panic_payload_msg;\n\
              #[allow(unused_imports)]\n\
              use crate::{__parse_urlencoded, __extract_multipart_boundary, __parse_multipart};\n\n",
+        );
+    }
+
+    // W18 (post-B8 HTTP client mini-fase) — Observability helpers
+    // from LOGGING_PRELUDE + SPAN_CONTEXT_STRUCT + OTEL_PRELUDE live
+    // in main's crate root and need explicit `use crate::{...}` in
+    // imported modules. Two cases:
+    //
+    //   (a) `module_has_http && main_observability_enabled`:
+    //       `gen_http_handler_wrapper` emits unconditional calls to
+    //       `__fitz_otel_*`, `__FitzSpanContext`,
+    //       `__fitz_with_span_context`, `__fitz_log_info` (access
+    //       log) and `__FitzLogValue`. When main has
+    //       `@server(observability=false)`,
+    //       `main_observability_enabled` is `false`, propagated to
+    //       the module ctx above, and `gen_http_handler_wrapper`
+    //       goes bare-metal → these `use crate::` lines aren't
+    //       needed and stay omitted (avoiding `unused_imports`
+    //       warnings even with the allow attribute, and keeping
+    //       semantic parity with main).
+    //   (b) `module_uses_logging`: user code in the module calls
+    //       `log.{info,warn,error,debug}(...)`, which the codegen
+    //       lowers to `__fitz_log_<level>(...)` + `__FitzLogValue`
+    //       constructors. This is independent of observability_*
+    //       — user code stays as-is.
+    //
+    // Main always emits the corresponding preludes when there is HTTP
+    // or logging anywhere (transitive `uses_logging = has_http ||
+    // program_uses_logging || ...` at line 216-218 and 5135-5137).
+    // Without these `use crate::{...}` lines, modules fail to compile
+    // cross-module with E0425/E0433. Pattern parallel to W11/W16.
+    let module_uses_logging = program_uses_logging(program);
+    if module_has_http && main_observability_enabled {
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__fitz_otel_is_enabled, __fitz_otel_tracer};\n\
+             #[allow(unused_imports)]\n\
+             use crate::__FitzSpanContext;\n\
+             #[allow(unused_imports)]\n\
+             use crate::__fitz_with_span_context;\n",
+        );
+    }
+    if (module_has_http && main_observability_enabled) || module_uses_logging {
+        // Always import the four log fns + __FitzLogValue. Even if
+        // the module only uses one level (`log.info` for example),
+        // the unused ones are tolerated by `#[allow(unused_imports)]`.
+        // This keeps the emission shape simple and stable.
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__fitz_log_info, __fitz_log_warn, __fitz_log_error, __fitz_log_debug, __FitzLogValue};\n\n",
         );
     }
 
@@ -40311,14 +40447,37 @@ mod tests {
     /// Generates the code of a "main" program treating it as an
     /// imported module (without an external loader). Useful to validate
     /// module codegen independently of the orchestrator.
+    ///
+    /// W18 — defaults `main_observability_enabled` to `true`
+    /// (matches default `@server` config). Tests that need to validate
+    /// `observability=false` propagation use
+    /// `gen_module_with_observability` instead.
     fn gen_module(src: &str) -> Result<String, FitzError> {
+        gen_module_with_observability(src, true)
+    }
+
+    /// W18 — variant of `gen_module` that forces a specific
+    /// `main_observability_enabled` flag (default `true`). Used to
+    /// validate that `@server(observability=false)` propagates from
+    /// main to modules' HTTP wrappers (bare-metal mode).
+    fn gen_module_with_observability(
+        src: &str,
+        main_observability_enabled: bool,
+    ) -> Result<String, FitzError> {
         let tokens = crate::lexer::tokenize(src).expect("lex OK");
         let program = crate::parser::parse(tokens).expect("parse OK");
         let (env, _types, _defs, errors) = crate::types::check_program(&program);
         if !errors.is_empty() {
             panic!("checker errors: {:?}", errors);
         }
-        generate_module_rs_with_bindings(&program, &env, &HashMap::new(), &[], &[])
+        generate_module_rs_with_bindings(
+            &program,
+            &env,
+            &HashMap::new(),
+            &[],
+            &[],
+            main_observability_enabled,
+        )
     }
 
     #[test]
@@ -40723,6 +40882,237 @@ mod tests {
             body.contains("String :: from (PREFIX)"),
             "expected `String::from(PREFIX)` in the body, got:\n{}",
             body
+        );
+    }
+
+    #[test]
+    fn w18_module_with_http_handler_emits_use_crate_observability_helpers() {
+        // W18 (post-B8 HTTP client mini-fase) — When a module declares
+        // an HTTP handler (`@get`/`@post`/`@put`/`@delete`), the
+        // emitted `__handler_<name>` wrapper invokes the observability
+        // helpers (`__fitz_otel_is_enabled`/`__fitz_otel_tracer`,
+        // `__FitzSpanContext::with_ids`/`::new_root`,
+        // `__fitz_with_span_context`, `__fitz_log_info`/`__FitzLogValue`)
+        // unconditionally — they live at the crate root because main
+        // always emits LOGGING_PRELUDE + SPAN_CONTEXT_STRUCT +
+        // OTEL_PRELUDE when there is HTTP anywhere.
+        //
+        // Without the `use crate::{...}` lines below, modules with
+        // handlers fail to compile cross-module with E0425/E0433.
+        // This test anchors the W11/W16-style pattern so any future
+        // refactor of the module HTTP imports keeps the observability
+        // helpers in scope.
+        let code = gen_module("@get(\"/ping\")\nfn ping() -> Str => \"pong\"").unwrap();
+        assert!(
+            code.contains("use crate :: { __fitz_otel_is_enabled , __fitz_otel_tracer }")
+                || code.contains("use crate::{__fitz_otel_is_enabled, __fitz_otel_tracer}"),
+            "missing `use crate::{{__fitz_otel_is_enabled, __fitz_otel_tracer}}` in module \
+             with HTTP handler:\n{}",
+            code
+        );
+        assert!(
+            code.contains("use crate :: __FitzSpanContext")
+                || code.contains("use crate::__FitzSpanContext"),
+            "missing `use crate::__FitzSpanContext` in module with HTTP handler:\n{}",
+            code
+        );
+        assert!(
+            code.contains("use crate :: __fitz_with_span_context")
+                || code.contains("use crate::__fitz_with_span_context"),
+            "missing `use crate::__fitz_with_span_context` in module with HTTP handler:\n{}",
+            code
+        );
+        // All four log levels + __FitzLogValue come together — the
+        // access log emitted by the wrapper uses __fitz_log_info, but
+        // we import the four for shape stability.
+        assert!(
+            code.contains(
+                "use crate :: { __fitz_log_info , __fitz_log_warn , __fitz_log_error , __fitz_log_debug , __FitzLogValue }"
+            ) || code.contains(
+                "use crate::{__fitz_log_info, __fitz_log_warn, __fitz_log_error, __fitz_log_debug, __FitzLogValue}"
+            ),
+            "missing `use crate::{{__fitz_log_info, __fitz_log_warn, __fitz_log_error, \
+             __fitz_log_debug, __FitzLogValue}}` in module with HTTP handler:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn w18_module_with_log_call_emits_use_crate_log_helpers() {
+        // W18 second case — a module without HTTP handlers but with
+        // user code calling `log.warn/error/info/debug(...)` also
+        // needs the `use crate::{__fitz_log_*}` line. The codegen
+        // lowers `log.X(msg, kv: v)` to `__fitz_log_X(msg, &[...])`
+        // calls. Without the import, the module would fail to
+        // compile with E0425. Closes the same shape of bug as the
+        // observability case but driven by user code instead of
+        // wrapper instrumentation.
+        let code = gen_module("fn boot() -> Null { log.warn(\"starting\") }").unwrap();
+        assert!(
+            code.contains(
+                "use crate :: { __fitz_log_info , __fitz_log_warn , __fitz_log_error , __fitz_log_debug , __FitzLogValue }"
+            ) || code.contains(
+                "use crate::{__fitz_log_info, __fitz_log_warn, __fitz_log_error, __fitz_log_debug, __FitzLogValue}"
+            ),
+            "missing `use crate::{{__fitz_log_*}}` in module with `log.warn(...)`:\n{}",
+            code
+        );
+        // Module without HTTP must NOT emit the OTel/SpanContext
+        // helpers — the wrapper isn't generated, only user code.
+        assert!(
+            !code.contains("__fitz_otel_is_enabled"),
+            "module without HTTP must not reference `__fitz_otel_is_enabled`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__FitzSpanContext"),
+            "module without HTTP must not reference `__FitzSpanContext`:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn w18_extract_main_observability_default_is_true() {
+        // No `@server` decorator → default `true`.
+        let src = "fn main() => 0";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(extract_main_observability_enabled(&program));
+    }
+
+    #[test]
+    fn w18_extract_main_observability_with_server_no_kwarg_is_true() {
+        let src = "@server(3000)\nfn main() => 0";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(extract_main_observability_enabled(&program));
+    }
+
+    #[test]
+    fn w18_extract_main_observability_false() {
+        let src = "@server(port=3000, observability=false)\nfn main() => 0";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(!extract_main_observability_enabled(&program));
+    }
+
+    #[test]
+    fn w18_extract_main_observability_true_explicit() {
+        let src = "@server(observability=true)\nfn main() => 0";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(extract_main_observability_enabled(&program));
+    }
+
+    #[test]
+    fn w18_module_with_http_handler_and_observability_false_does_not_emit_wrapper_imports() {
+        // When main has `@server(observability=false)`, modules
+        // inherit `main_observability_enabled = false`. The wrapper
+        // goes bare-metal (no span context / no access log / no
+        // metrics), so the observability `use crate::{...}` lines
+        // are omitted. The basic HTTP imports (FitzResponse, traits,
+        // CORS, panic helpers, urlencoded/multipart) stay in place
+        // because the wrapper still emits them.
+        let code =
+            gen_module_with_observability("@get(\"/ping\")\nfn ping() -> Str => \"pong\"", false)
+                .unwrap();
+        // Base HTTP imports must still be there.
+        assert!(
+            code.contains("__FitzResponse"),
+            "module with HTTP must still import __FitzResponse (bare-metal mode):\n{}",
+            code
+        );
+        assert!(
+            code.contains("__ToFitzJson") && code.contains("__FromFitzJson"),
+            "module with HTTP must still import JSON traits (bare-metal mode):\n{}",
+            code
+        );
+        // Observability imports must be OMITTED.
+        assert!(
+            !code.contains("__fitz_otel_is_enabled"),
+            "module with HTTP + observability=false must NOT import \
+             `__fitz_otel_is_enabled`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__FitzSpanContext"),
+            "module with HTTP + observability=false must NOT import \
+             `__FitzSpanContext`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__fitz_with_span_context"),
+            "module with HTTP + observability=false must NOT import \
+             `__fitz_with_span_context`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__fitz_log_info"),
+            "module with HTTP + observability=false (and no user log.X) \
+             must NOT import `__fitz_log_info`:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn w18_module_with_http_observability_false_and_user_log_still_imports_log_helpers() {
+        // When main has `@server(observability=false)` AND the module
+        // has user code with `log.X(...)`, the log helpers DO need to
+        // be imported (user code is independent of the wrapper
+        // instrumentation). Tests that the gating distinguishes the
+        // two sources.
+        let code = gen_module_with_observability(
+            "@get(\"/health\")\nfn health() -> Null { log.warn(\"deprecated\") }",
+            false,
+        )
+        .unwrap();
+        // Observability helpers (wrapper-only) must be omitted.
+        assert!(
+            !code.contains("__fitz_otel_is_enabled"),
+            "wrapper-only OTel helpers must be omitted in bare-metal mode:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__FitzSpanContext"),
+            "wrapper-only SpanContext must be omitted in bare-metal mode:\n{}",
+            code
+        );
+        // Log helpers (user-code-driven) must still be present.
+        assert!(
+            code.contains(
+                "use crate :: { __fitz_log_info , __fitz_log_warn , __fitz_log_error , __fitz_log_debug , __FitzLogValue }"
+            ) || code.contains(
+                "use crate::{__fitz_log_info, __fitz_log_warn, __fitz_log_error, __fitz_log_debug, __FitzLogValue}"
+            ),
+            "user code calling log.warn must still trigger `use crate::{{__fitz_log_*}}` even \
+             in bare-metal mode:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn w18_module_without_http_or_logging_does_not_emit_observability_use_crate() {
+        // Negative regression — a module without HTTP AND without
+        // log.X calls must NOT emit any of the observability /
+        // logging `use crate::{...}` lines (the symbols may not even
+        // exist in main's crate root for non-HTTP non-logging
+        // programs).
+        let code = gen_module("fn double(n: Int) -> Int => n * 2").unwrap();
+        assert!(
+            !code.contains("__fitz_otel_is_enabled"),
+            "module without HTTP must not reference `__fitz_otel_is_enabled`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__FitzSpanContext"),
+            "module without HTTP must not reference `__FitzSpanContext`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__fitz_with_span_context"),
+            "module without HTTP must not reference `__fitz_with_span_context`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__fitz_log_info"),
+            "module without HTTP or log.X must not reference `__fitz_log_info`:\n{}",
+            code
         );
     }
 
