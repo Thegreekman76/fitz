@@ -190,6 +190,498 @@ return 400 { "ok": "false", "error": "missing field" }
 
 ---
 
+## 🔴 PRÓXIMO NORTE INMEDIATO — Cosecha codegen post-fitzwatch (15 bugs, 2026-06-18)
+
+> **Acordado con el autor 2026-06-18**: el próximo norte del lenguaje
+> después de v0.17.0 es atacar esta cosecha. La intención es cerrarla
+> rápido — la mayoría tiene fix mecánico chico; B15 es el grande.
+
+### Contexto
+
+Durante el desarrollo de **fitzwatch** (proyecto en `d:\fitzwatch\`,
+status page + uptime monitor open-source en Fitz puro, showcase
+profesional del stack nativo + Vue 3 + Vuetify + Chart.js + SheetJS),
+descubrimos **15 bugs del codegen Fitz v0.17.0** que bloquean
+`fitz build`. **`fitz check` y `fitz run` no están afectados** —
+todos los bugs son específicos del path codegen → cargo build.
+
+fitzwatch quedó **PAUSADO** esperando cerrar B15 (el crítico).
+El backend (13 módulos Fitz), frontend (admin Vue 3 + Vuetify
++ Chart.js + SheetJS profesional con dashboard + grillas paginadas
++ export Excel + WS live + gestión de webhooks), Docker setup,
+nginx config, deploy README y Cloudflare prep ya están terminados.
+
+**Doc completo con repros**: [`d:\fitzwatch\CODEGEN-BUGS.md`](../../fitzwatch/CODEGEN-BUGS.md).
+
+### B1 — `.order_by("string")` rechazado por codegen (acepta string en run)
+
+**Síntoma**: `✗ codegen: Error en línea N:M — `.order_by(closure)` espera una closure literal (fn(<param>) => <expr>)`.
+
+**Repro**:
+```fitz
+User.where(fn(u) => u.id > 0).order_by("name").all(conn).await
+```
+
+**Workaround user-side**: `.order_by(fn(u) => u.name)`.
+
+**Severity**: Medium. **Fix sugerido**: aceptar Str literal en codegen del ORM `gen_order_by`, paralelo a evaluator. ~15 LoC.
+
+### B2 — `http.post` body con type Instance falla en codegen
+
+**Síntoma**: `✗ codegen: `http.post` body must be Str, Map<Str, Str> strict, or Bytes (MVP); received `<Type>`. Heterogeneous Map<Str, Any> + Instance shapes require `__FitzValue` integration (post-MVP debt parallel to `jwt.encode`)`.
+
+**Repro**:
+```fitz
+type Payload { event: Str, count: Int }
+http.post("https://api.com", Payload { event: "x", count: 1 }).await
+```
+
+**Workaround user-side**: `Map<Str, Str>` con interpolación `"{int}"` para convertir Int.
+
+**Severity**: Medium. **Fix sugerido**: extender body dispatch a Instance — emite `<T as __ToFitzJson>::__to_fitz_json(value)` paralelo al ya emitido para HTTP responses. Probablemente integrarlo con la deuda de `__FitzValue` para `Map<Str, Any>` heterogéneo del body (paralelo a `jwt.encode`).
+
+### B3 — `ws_broadcast` desde módulo sin handler HTTP/WS rompe en cargo build
+
+**Síntoma**: `cargo build: cannot find trait `__ToFitzJson` in this scope --> src/<module>.rs:N`.
+
+**Repro**: módulo X sin `@get/@post/@put/@delete/@ws` propios llama `ws_broadcast("/path", msg)`. El preludio HTTP no se emite en ese módulo, falta `__ToFitzJson`.
+
+**Workaround user-side**: helper en módulo CON handlers HTTP/WS (`fn emit(evt: Map<Str,Str>) { ws_broadcast("/x", evt); return null }`), módulos sin handlers delegan.
+
+**Severity**: High. **Fix sugerido**: si un módulo llama `ws_broadcast` o el preludio HTTP-clientside, gatear emit del trait `__ToFitzJson` (+ `__FromFitzJson` defensivo) independiente de la presencia de handlers HTTP/WS propios. Detector análogo a `program_uses_http_client`. ~25 LoC.
+
+### B4 — `.len()` sobre `List<X>?` (Nullable) rechazado por codegen
+
+**Síntoma**: `✗ codegen: method call `.len` sobre `List<DbRow>?`: no soportado en codegen`.
+
+**Repro**:
+```fitz
+let rows = match conn.query("...", []).await {
+    Ok(r) => r,
+    Err(_) => return ""
+}
+// rows tipa como List<DbRow>? en codegen
+if (rows.len() == 0) { ... }   // ✗
+```
+
+**Workaround user-side**: helper `async fn x() -> Result<T>` con `.await?` (el propagation refine bien). Match con return temprano confunde al codegen.
+
+**Severity**: Medium (síntoma de B14). **Fix sugerido**: refine flow-sensitive de tipos post-match arms que returnan, paralelo a lo que ya hace el checker. La clave es que después de `Err(_) => return ...`, el var en el otro arm no es Nullable. ~50-80 LoC en `gen_match`/`infer_match_var_type`.
+
+### B5 — Indexing `[]` sobre `List<X>?` rechazado por codegen
+
+**Síntoma**: `✗ codegen: indexing `[]` over `List<DbRow>?`: only supported on List<T> and Map<K, V>`.
+
+**Repro**: igual que B4, pero `rows[0]`.
+
+**Severity**: Medium (sub-case de B14). **Fix**: igual que B4 — refine flow-sensitive.
+
+### B6 — Field access `.x` sobre `T?` (Nullable) rechazado por codegen
+
+**Síntoma**: `✗ codegen: field access `.paused` over `T?`: only supported on instances of custom types`.
+
+**Repro**:
+```fitz
+let monitor = match refresh(id).await {
+    Ok(m) => m,
+    Err(_) => return null
+}
+if (monitor.paused) { ... }   // ✗
+```
+
+**Severity**: Medium (sub-case de B14). **Fix**: igual que B4 — refine flow-sensitive.
+
+### B7 — `match { Ok(v) => v, Err(_) => null }` no envuelve en `Some()` al asignar a `Nullable`
+
+**Síntoma** (cargo build):
+```
+error[E0308]: mismatched types
+  | expected `Option<String>`, found `String`
+help: try wrapping the expression in `Some`
+```
+
+**Repro**:
+```fitz
+let opt: Str? = match row.get_str("col") {
+    Ok(v) => v,
+    Err(_) => null,
+}
+```
+
+**Workaround user-side**: cambiar `Str?` a `Str` con sentinel `""`, `Int?` a `Int` con `0`.
+
+**Severity**: Medium. **Fix sugerido**: codegen de `match` con LHS `T?` debería envolver arms ramas `Ok(v) => v` en `Some(v)` y `Err(_) => null` en `None`. ~20 LoC en `gen_match` cuando el `let` destino es Nullable.
+
+### B8 — `Option<T>: __IntoPgValue` not satisfied (query params Nullable → driver PG)
+
+**Síntoma** (cargo build):
+```
+error[E0277]: the trait bound `Option<i64>: __IntoPgValue` is not satisfied
+error[E0277]: the trait bound `Option<String>: __IntoPgValue` is not satisfied
+```
+
+**Repro**:
+```fitz
+@get("/x?id={id}")
+async fn h(id: Int?) -> Result<Null> {
+    let _ = conn.query("SELECT * FROM t WHERE id = $1", [id]).await?
+    return Ok(null)
+}
+```
+
+**Workaround user-side**: convertir `Int?`/`Str?` a `Int`/`Str` con sentinels antes de pasar al `conn.query`/`conn.exec`. Ajustar SQL para usar sentinels (`$1 = 0` en lugar de `$1::int IS NULL`).
+
+**Severity**: Medium. **Fix sugerido**: `impl __IntoPgValue for Option<T> where T: __IntoPgValue` que mapea `None → __FitzPgValue::Null`. ~10 LoC en el preludio DB.
+
+### B9 — `Str? == Str` (Nullable vs concrete) genera `match arms have incompatible types`
+
+**Síntoma** (cargo build):
+```
+error[E0308]: `match` arms have incompatible types
+  | expected `Option<String>`, found `String`
+```
+
+**Repro**:
+```fitz
+let monitor: Monitor = ...
+if (monitor.last_status != "down") { ... }   // last_status: Str?
+```
+
+**Workaround user-side**: coercer a Str con match local antes de comparar.
+
+**Severity**: Low. **Fix sugerido**: codegen del operador `==` / `!=` sobre `T?` vs `T`: emitir `<lhs>.as_deref() == Some(<rhs>.as_str())` o similar. ~15 LoC.
+
+### B10 — `spawn(fn)` cross-module no detecta `@background`
+
+**Síntoma**: `✗ codegen: spawn: fn `run_check` is not declared with `@background`. Mark the fn with `@background\nfn run_check(...) { ... }`...`.
+
+**Repro**:
+```fitz
+// checks.fitz
+@background async fn run_check(id: Int) -> Null { ... }
+
+// scheduler.fitz
+from checks import run_check
+@cron("*/10 * * * * *") async fn tick() -> Result<Null> {
+    spawn(run_check(42))   // ✗ no detecta @background cross-module
+    return Ok(null)
+}
+```
+
+**Workaround user-side**: wrapper local con `@background` en el módulo caller que delega.
+
+**Severity**: Medium. **Fix sugerido**: el detector de `@background` del codegen debería seguir imports cross-module al resolver el callee de `spawn(...)`. Paralelo a cómo el checker resuelve handlers HTTP cross-module via `from <mod> import` (W12/W16). ~30 LoC.
+
+### B11 — Response types con `List<NominalType>` anidados rompen codegen (impacto cross-cutting)
+
+**Síntoma** (cargo build):
+```
+error[E0425]: cannot find type `__FitzValue` in this scope
+  --> src/main.rs:N (Vec<__FitzValue>)
+```
+
+**Repro**:
+```fitz
+type Status { x: Int = 0 }
+type Resp { snapshot: Str = "", items: List<Status> = [] }
+
+@get("/x")
+async fn h() -> Result<Resp> { ... }
+```
+
+El codegen emite `impl __FromFitzJson for RespData` aunque Resp sea solo output (nunca llega como body de un handler), y la deserialización del field `items: List<Status>` emite `Vec<__FitzValue>` que no está en scope.
+
+**Workaround user-side**: split en endpoints separados que devuelvan `List<X>` directo + endpoint de metadata aparte.
+
+**Severity**: High. **Fix sugerido**: dos partes coordinadas:
+1. **No emitir `__FromFitzJson`** para types que son solo output de handlers (nunca input). Detector que walka handlers buscando types usados como body declarado.
+2. **Activar `__FitzValue`** cuando un type con `List<NominalType>` aparece en cualquier handler (input o output). Detector análogo a B3.
+
+~40-60 LoC en los detectores + gating.
+
+### B12 — Cross-module `@auth_provider` detection en codegen
+
+**Síntoma**: `✗ codegen: module `metrics` has type errors: @authenticated on fn ...: no `@auth_provider` registered in the program`.
+
+**Repro**: módulo con `@authenticated` que no hace `import auth` ni `from auth import ...` (aunque el provider esté en `auth` y se haya cargado por main).
+
+**Workaround user-side**: agregar `import auth` en cada módulo con handlers `@authenticated`.
+
+**Severity**: Low. **Fix sugerido**: el codegen del módulo debería usar el `imported_auth_provider` del TypeEnv (que el checker SÍ resuelve via W12) sin requerir `import` explícito del lado user. ~20 LoC.
+
+### B13 — `log.X(...)` con kwargs heterogéneos rompe cross-module
+
+**Síntoma** (cargo build): `error[E0425]: cannot find type `__FitzValue` in this scope` (en código emitido por `log.info("evt", k1: int, k2: str)`).
+
+**Repro**:
+```fitz
+log.info("scheduler.tick", count: 42, name: "x")
+```
+
+**Workaround user-side**: string interpolado sin kwargs (`log.info("scheduler.tick count={n} name={s}")`).
+
+**Severity**: Medium. **Fix sugerido**: gating del trait `__FitzValue` cuando hay llamadas `log.X(...)` con kwargs heterogéneos. Detector análogo a B3/B11. Probablemente puede unificarse con B3+B11 en un solo detector "necesita __FitzValue/`__ToFitzJson`". ~unifica con B3+B11.
+
+### B14 — (meta) `match` con return temprano no refine tipos en codegen
+
+Patrón meta de B4/B5/B6. Documentado para que el fix de los 3 se trate como un solo cambio en `gen_match` con refine flow-sensitive paralelo al checker. Ver B4 para el fix sugerido.
+
+### B15 — 🔴 BLOQUEANTE — `.preload()` sobre virtuales + nullables rompe en cargo build
+
+**Síntoma** (cargo build):
+```
+error[E0277]: the trait bound `Option<i64>: __IntoPgValue` is not satisfied
+error[E0308]: `match` arms have incompatible types
+  | expected `Option<i64>`, found `i64`
+  --> src/main.rs:N (interior del helper de preload virtual)
+```
+
+**Repro mínima**:
+```fitz
+@table("users") type User {
+    @primary id: Int = 0
+    @has_many("Monitor", via="user_id") monitors: List<Monitor> = []
+}
+
+@table("monitors") type Monitor {
+    @primary id: Int = 0
+    @belongs_to("User") user_id: Int = 0
+    user: User?                    // companion virtual
+    last_check_at: Str? = null     // ← nullable
+}
+
+@get("/list")
+async fn list_monitors() -> Result<List<Monitor>> {
+    let conn = db.connect("...").await?
+    return Monitor.where(fn(m) => m.user_id == 1).preload("user").all(conn).await
+}
+```
+
+El helper que el codegen del ORM emite para resolver `.preload("user")` itera los parents y rellena el companion. Al hacer el match interno para popular `user: User?` (Nullable), el codegen mezcla `Option<UserData>` con `UserData` directo según el path del match. Y los FK que se pasan al IN query van como `Option<i64>` que no impl `__IntoPgValue`.
+
+**Workaround user-side**: ❌ **ninguno viable**. Cualquier model Fitz no-trivial tiene nullables (timestamps, foreign keys opcionales, fields opcionales del dominio).
+
+**Severity**: 🔴 **Critical — BLOQUEANTE para fitzwatch entero y probablemente para cualquier proyecto ORM real**.
+
+**Fix sugerido**: dos sub-cambios en el codegen del ORM (`gen_orm_preload` y/o similares):
+1. **Wrap consistente en `Some()`** al popular el companion field `: T?` en el helper de preload (B7 generalizado al contexto ORM virtuales).
+2. **Coerción `Int → __FitzPgValue::Int`** (no `Option<i64>`) al armar el `IN (...)` para la query secundaria del preload. Sub-case de B8 dentro del ORM.
+
+Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos del codegen ORM). Requiere armar repro mínima como tests de codegen (1-2 unit tests + 1 compile_e2e).
+
+### Tabla resumen + plan de ataque sugerido
+
+| # | Bug | Sev | Workaround user | Estimado fix (LoC) | Test E2E necesario |
+|---|---|---|---|---|---|
+| B1  | `.order_by(str)` | Medium | ✅ closure | ~15 | sí |
+| B2  | `http.post` body Instance | Medium | ✅ Map<Str,Str> | ~30 | sí (sobre 17g) |
+| B3  | `ws_broadcast` cross-module | High | ✅ helper | ~25 | sí |
+| B4  | `.len()` sobre `List<X>?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
+| B5  | `[]` sobre `List<X>?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
+| B6  | `.x` sobre `T?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
+| B7  | match no envuelve `Some()` | Medium | ✅ sentinels | ~20 | sí |
+| B8  | `Option<T>: __IntoPgValue` | Medium | ✅ sentinels | ~10 | sí |
+| B9  | `Str? == Str` arms incomp | Low | ✅ coerce local | ~15 | sí |
+| B10 | `spawn(fn)` cross-module @bg | Medium | ✅ wrapper local | ~30 | sí |
+| B11 | Response con `List<Nominal>` | High | ✅ split endpoints | ~50 | sí |
+| B12 | Cross-module `@auth_provider` codegen | Low | ✅ `import auth` | ~20 | sí |
+| B13 | `log.X` kwargs heterogéneos | Medium | ✅ strings | (unifica con B3+B11) | (unifica con B3+B11) |
+| B14 | (meta) match refine | — | (helpers Result) | ~50-80 | sí (cubre B4/B5/B6) |
+| **B15** | **`.preload()` + virtuales + nullables** | 🔴 **Critical** | ❌ **sin workaround** | ~80-150 | sí (sobre fitzwatch) |
+
+**Plan de ataque sugerido** (orden por dependencias + impacto):
+
+1. **Sub-paso "detectores unificados"** — B3 + B11 + B13 (todos son "necesita __FitzValue/`__ToFitzJson` por uso indirecto"). Un solo detector que walke usos. ~80 LoC.
+2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ~80 LoC + tests.
+3. **Sub-paso "wrap automático Some()"** — B7. ~20 LoC + tests.
+4. **Sub-paso "Option<T> → PgValue"** — B8. ~10 LoC + test.
+5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12. Cada uno chico (~15-30 LoC). Probablemente 1 commit cada uno o agrupados de a 2.
+6. **Sub-paso BLOQUEANTE "ORM `.preload()` + Nullable companion"** — B15. El grande. ~80-150 LoC + repro tests sobre fitzwatch como compile_e2e end-to-end. Cerrar acá desbloquea fitzwatch al deploy completo.
+
+**Validación al cerrar la cosecha**:
+- `cd d:\fitzwatch && fitz build` debería pasar limpio.
+- Smoke: `docker compose up -d --build` en fitzwatch + curl tests del API + browser tests del admin Vue 3.
+- Si todo OK → fitzwatch al deploy VPS (Cloudflare DNS + Origin Cert + nginx site enable).
+- Bump versión: probable **v0.17.1** (parche, todos son bugs sin cambios de API) o **v0.18.0** (minor, si se aprovecha para algún feature).
+
+---
+
+## 🟡 SMTP builtin — deuda futura (anotada 2026-06-18 durante fitzwatch)
+
+> Detectada durante el desarrollo de fitzwatch al armar el módulo de
+> notificaciones (`notifications.fitz`). El proyecto necesita despachar
+> notificaciones por email cuando se abre/cierra un incident. **Fitz
+> no tiene SMTP builtin** — el workaround actual es delegar todo a
+> webhooks outbound y que el user enganche un n8n/ifttt/zapier que
+> traduzca webhook → email.
+
+### Contexto
+
+El stack web nativo de Fitz cierra estos ciudadanos de primera clase:
+HTTP server-side, HTTP client (v0.17.0), WebSockets tipados, auth (JWT
++ Argon2id), cron + background jobs, OpenAPI, AsyncAPI, ORM Postgres,
+observability OTel + Prometheus, feature flags, deploy ciudadano.
+**SMTP outbound NO está** — los proyectos que necesitan enviar mail
+(notificaciones, password reset, magic links, alerts, marketing
+transactional, etc.) tienen que rebotar por webhook + servicio
+externo, o aplicar interop Python con `smtplib`.
+
+### API target sugerida (paralelo a `http.X`)
+
+```fitz
+// Módulo `smtp` built-in, paralelo a `http`/`jwt`/`hash`/`log`.
+
+// Send simple (texto plano)
+let r = smtp.send({
+    "to": "user@example.com",
+    "from": "fitzwatch@status.prothos.com.ar",
+    "subject": "Incidente abierto: API Producción",
+    "body": "El monitor cayó hace 30s. Ver detalles: https://...",
+}).await?
+// r: SmtpResult { delivered: Bool, message_id: Str, duration_ms: Int }
+
+// Send con HTML + texto plano (multipart/alternative)
+let r = smtp.send({
+    "to": "user@example.com",
+    "from": "...",
+    "subject": "...",
+    "body_text": "Texto plano fallback",
+    "body_html": "<html>...</html>",
+}).await?
+
+// Send con attachments
+let r = smtp.send({
+    "to": "...",
+    "from": "...",
+    "subject": "...",
+    "body": "...",
+    "attachments": [
+        { "filename": "report.pdf", "bytes": pdf_bytes, "mime": "application/pdf" },
+    ],
+}).await?
+
+// Tipo built-in nuevo paralelo a HttpClientResponse:
+type SmtpResult {
+    delivered: Bool
+    message_id: Str
+    duration_ms: Int
+}
+```
+
+### Configuración (env vars + builtin)
+
+El módulo lee config de env vars al boot (paralelo a cómo `db.connect`
+toma URL):
+
+```bash
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=fitzwatch@example.com
+SMTP_PASSWORD=...
+SMTP_FROM=fitzwatch@example.com   # default From si el send no especifica
+SMTP_TLS=starttls                 # starttls | implicit | none
+```
+
+O config explícita via builtin (sin env vars):
+
+```fitz
+smtp.configure({
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "user": "fitzwatch@example.com",
+    "password": secret("SMTP_PASSWORD"),
+    "tls": "starttls",
+})
+```
+
+### Modelo de errores
+
+Paralelo a `http.X` y `jwt.encode`: `Result<SmtpResult>` con `Err(Str)`
+para errores de transporte (DNS, conexión, auth, TLS handshake,
+timeout, etc.). Status 5xx del SMTP server NO son Err (el user mira
+`r.delivered`); solo errores de transporte van a Err.
+
+### Backend implementación
+
+Probable crate base: `lettre = "0.11"` (la opción canónica del
+ecosistema Rust, soporta async con `tokio1` feature, mantenida
+activamente, sin deps externas en el host). Linkeado estático sin
+openssl (`rustls` backend).
+
+### Integración con el resto del stack
+
+- **`@cron`/`@background`**: dispatch async natural (`smtp.send(...).await?`).
+- **Observability**: cada send emite `log.info("smtp.delivered", ...)`
+  con `duration_ms`, `to`, `message_id`. Métricas Prometheus `smtp_sends_total`
+  + `smtp_send_duration_seconds`.
+- **Templates**: por ahora `body` como Str (con `format!`-style
+  interpolation del lenguaje). Templates dedicados (HBS / Tera-like)
+  como deuda menor del módulo, refinables si entra demanda.
+- **Tipos**: `Map<Str, Any>` como input requiere `__FitzValue`
+  integration (paralelo a `jwt.encode` y al body de `http.post`). Si
+  esa deuda no cerró antes, el MVP del SMTP builtin acepta solo
+  `Map<Str, Str>` strict para los kwargs del `send(...)` y los
+  attachments quedan como deuda menor del builtin.
+
+### 5 diferenciales (paralelo a HTTP client)
+
+1. **Built-in del lenguaje** — no `pip install yagmail` / `npm install
+   nodemailer` / `cargo add lettre`.
+2. **Paridad bit-a-bit `fitz run` ↔ `fitz build`** — el binario
+   standalone tiene el cliente SMTP linkeado.
+3. **Async ciudadano de primera** — se integra con `@cron`/`@background`/
+   handlers HTTP/`spawn(...)`.
+4. **`Result<T>` automático** — errores como valores, `?` propaga.
+5. **Sin deps externas en el host** — `rustls` backend, sin openssl.
+
+### Plan de bloques sugerido (paralelo a HTTP client builtin)
+
+1. **B1 evaluator**: `Value::Module { name: "smtp" }` registrado en
+   `register_builtins` + builtin `smtp.send(...)` async + pre-registro
+   tipo `SmtpResult` + helper privado dispatch input → message lettre.
+2. **B2 checker**: pre-registro `smtp`/`SmtpResult` en `CheckCtx::new`
+   + signatures + regla `?` heredada de Result.
+3. **B3 codegen**: detector `program_uses_smtp(program)` walka AST +
+   `cargo_toml_for` suma `lettre` condicional + preludio `SMTP_PRELUDE`
+   con `static __FITZ_SMTP_CLIENT: LazyLock<SmtpTransport>` + helpers
+   async `__fitz_smtp_send` paralelo bit-a-bit al intérprete + dispatch
+   en `gen_call`.
+4. **B4 LSP**: completions de `smtp` + `SmtpResult`.
+5. **B5 guía + ejemplos**: sub-sección nueva en cap apropiado de
+   `docs/guide.md` con panorama vecino (`smtplib`/`nodemailer`/`lettre`)
+   + ejemplos runnable (envío simple, HTML, attachments, error handling
+   contra MailHog local).
+6. **B6 docs cross-cutting**: CLAUDE + README + index.md + roadmap +
+   este doc actualizado.
+7. **B7 boilerplate**: sumar SMTP a uno de los boilerplates existentes
+   (probable `taskhub` con notificaciones de tasks asignadas, o
+   ejemplo de magic-link auth en alguno de los api-*).
+8. **B8 cierre formal**: CHANGELOG + roadmap + extensión VSCode bump
+   + `.vsix` regenerado + blog drafts ES/EN.
+
+### Severity + prioridad
+
+**Severity**: Medium. **Prioridad**: después de cerrar la cosecha
+codegen post-fitzwatch (próximo norte). Es deuda visible pero no
+bloqueante — los proyectos que necesitan email pueden usar webhook +
+servicio externo mientras tanto (es lo que hace fitzwatch por ahora).
+
+### Workaround actual (lo que aplica fitzwatch v0.x)
+
+`notifications.fitz` despacha solo webhooks. Para `kind="email"`:
+```fitz
+if (channel.kind == "email") {
+    log.warn("notify.email.not_supported ch={ch.id} dest={ch.destination}")
+    return null
+}
+```
+
+El user que quiere emails configura un canal webhook que apunta a
+n8n/ifttt/zapier/activepieces y traduce ahí webhook → SMTP. Funciona
+pero contradice el modelo "todo nativo en el core".
+
+---
+
 ## 🟢 NO es deuda — trade-off documentado del ORM JSON serializer (analizado 2026-06-09, no requiere fix del lenguaje)
 
 **Contexto**: durante el smoke E2E del TaskHub post-v0.15.14, el
