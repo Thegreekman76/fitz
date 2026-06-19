@@ -34,3 +34,18 @@ fn max_drafts_age_days() -> Str => env_or("MAX_DRAFTS_AGE_DAYS", "30")
 // Showcase del módulo `http` builtin del lenguaje (cap M5.C5 del
 // curso, cap 17 sub-sec "HTTP client outbound" de la guía).
 fn webhook_url() -> Str => env_or("WEBHOOK_URL", "")
+
+// smtp_enabled — flag opt-in del email outbound. Si la env var
+// `SMTP_ENABLED` viene como "true"/"1"/"yes", el handler de
+// "published" dispara también un email al autor. Por defecto OFF
+// (dev local arranca sin MailHog/SMTP setup).
+//
+// El módulo `smtp` built-in (mini-tanda v0.18.0, cap 17 sub-sec
+// "SMTP outbound" de la guía) lee SMTP_HOST/PORT/USER/PASSWORD/
+// FROM/TLS al primer send. Para dev local levantás MailHog en
+// localhost:1025 (`docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog`)
+// y exportás SMTP_HOST=localhost / SMTP_PORT=1025 / SMTP_TLS=none.
+fn smtp_enabled() -> Bool {
+    let v = env_or("SMTP_ENABLED", "")
+    return v == "true" or v == "1" or v == "yes"
+}

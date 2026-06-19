@@ -50,6 +50,7 @@ pub mod parser; // Phase 2.3 — AST construction
 pub mod pbs; // Phase 8.b.1 — python-build-standalone download + cache for `--bundle-python`
 pub mod pyi_loader; // 8-pyi.B (v0.9.57) — auto pickup of adjacent .pyi stubs
 pub mod pyi_stub; // pyi-stubs (v0.9.39) — .pyi parser (PEP 484/561 subset)
+pub mod smtp; // Mini-tanda SMTP builtin (2026-06-19) — outbound `smtp.send(opts)`
 pub mod testing; // Phase 9.z.2 — built-in testing (registry + @test + asserts)
 pub mod types; // Phase 5.2 — resolved type system + base checker
 pub mod value; // Phase 2.4 — runtime values // Phase 9.z.5 — `fitz lint` (4 lints + suppression)

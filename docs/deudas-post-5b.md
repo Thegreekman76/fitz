@@ -725,7 +725,18 @@ let rows = conn.query("""
 
 ---
 
-## 🟡 SMTP builtin — deuda futura (anotada 2026-06-18 durante fitzwatch)
+## 🟢 SMTP builtin — CERRADA v0.18.0 (mini-tanda 2026-06-19)
+
+> **CERRADA**: el módulo `smtp` built-in fue implementado en bloque
+> (B1-B8) durante la mini-tanda iniciada el 2026-06-19, cerrando la
+> deuda anotada el 2026-06-18 durante el desarrollo de fitzwatch.
+> Fitz tiene ahora **`smtp.send(opts)` async ciudadano de primera
+> clase**, paralelo bit-a-bit al HTTP client de v0.17.0, con paridad
+> intérprete↔binario, sin deps externas en el host. Ver `CHANGELOG`
+> v0.18.0, cap 17 de `docs/guide.md` (sub-sección "SMTP outbound"),
+> y los 3 ejemplos runnable
+> `examples/guide/17{i,j,k}-smtp-{basico,errores,magic-link}.fitz`.
+> El plan original (deuda anotada abajo) fue cumplido al 100%.
 
 > Detectada durante el desarrollo de fitzwatch al armar el módulo de
 > notificaciones (`notifications.fitz`). El proyecto necesita despachar

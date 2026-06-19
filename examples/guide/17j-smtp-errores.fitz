@@ -1,0 +1,68 @@
+// 17j-smtp-errores.fitz — Modelo de errores del módulo `smtp`.
+//
+// Paralelo bit-a-bit al 17f del HTTP client: muestra los casos típicos
+// de Err que un programa real va a encontrar, y el patrón canónico
+// para clasificarlos.
+//
+// Los errores de transporte llegan como `Result::Err(Str)` con prefijo
+// `"smtp: "`. El user puede pattern-match por prefijo si quiere
+// clasificar (timeout vs DNS vs auth vs server reject).
+//
+// Levantás MailHog para los casos exitosos:
+//
+//   docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog
+//   export SMTP_HOST=localhost
+//   export SMTP_PORT=1025
+//   export SMTP_TLS=none
+//   fitz run examples/guide/17j-smtp-errores.fitz
+
+// Helper canónico: una sola fn que recibe destination/subject/body y
+// devuelve `Result<Str>` con el `message_id` adentro del Ok. El `?`
+// propaga errores de transporte; el caller decide qué hacer.
+async fn notify(addr: Str, subject: Str, body: Str) -> Result<Str> {
+    let r = smtp.send({
+        "to": addr,
+        "from": "bot@fitz.dev",
+        "subject": subject,
+        "body": body,
+    }).await?
+    return Ok(r.message_id)
+}
+
+async fn run() -> Result<Null> {
+    // Happy path — el mail llega a MailHog.
+    match notify("user@example.com", "Test 1", "Cuerpo del primer mail").await {
+        Ok(id) => print("✓ Test 1 OK: message_id={id}"),
+        Err(e) => print("✗ Test 1 fail: {e}"),
+    }
+
+    // Address malformada — el parse de `Mailbox` falla → Err con
+    // prefijo `"smtp: invalid `to` address ..."`.
+    let bad_addr = smtp.send({
+        "to": "esto-no-es-un-mail-valido",
+        "from": "bot@fitz.dev",
+        "subject": "Test 2",
+        "body": "No debería llegar.",
+    }).await
+    match bad_addr {
+        Ok(r) => print("? Test 2 inesperado OK: {r.message_id}"),
+        Err(e) => print("✓ Test 2 fail esperado: {e}"),
+    }
+
+    // Body multi-line con interpolación. Mostramos que `\n` funciona
+    // adentro del body string (paralelo a Python `\n`).
+    let user_name = "Ada"
+    let link = "https://app.example.com/verify?t=abc123"
+    let body = "Hola {user_name},\n\nHacé click acá para verificar:\n{link}\n\nGracias."
+    match notify("user@example.com", "Bienvenido", body).await {
+        Ok(id) => print("✓ Test 3 OK: message_id={id}"),
+        Err(e) => print("✗ Test 3 fail: {e}"),
+    }
+
+    return Ok(null)
+}
+
+match run().await {
+    Ok(_) => print(""),
+    Err(e) => print("✗ run() falló: {e}"),
+}

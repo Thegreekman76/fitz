@@ -1497,6 +1497,18 @@ fn after_dot_completions(
                 ),
             ]);
         }
+        // Mini-tanda SMTP builtin (2026-06-19) — built-in module `smtp`
+        // (outbound mail). Same bypass as http/jwt/hash/log/auth/db:
+        // typed as `Any` in the checker (MVP). The single builtin is
+        // async + returns Result<SmtpResult>. Config via env vars
+        // (SMTP_HOST/PORT/USER/PASSWORD/FROM/TLS) at first send.
+        "smtp" => {
+            return method_items(&[(
+                "send",
+                "fn(opts: Map) -> Future<Result<SmtpResult>>  // to/from/subject + body|body_text|body_html"
+                    .into(),
+            )]);
+        }
         _ => {}
     }
 
@@ -2915,6 +2927,13 @@ fn scope_level_completions(
         (
             "http",
             "module: get, head, post, put, delete, request (HTTP client outbound)",
+        ),
+        // Mini-tanda SMTP builtin (2026-06-19) — outbound SMTP.
+        // `smtp.send(opts)` async returning Future<Result<SmtpResult>>.
+        // Env vars: SMTP_HOST/PORT/USER/PASSWORD/FROM/TLS at first send.
+        (
+            "smtp",
+            "module: send (SMTP outbound; env vars: SMTP_HOST/PORT/USER/PASSWORD/FROM/TLS)",
         ),
     ] {
         items.push(CompletionItem {
@@ -5629,5 +5648,90 @@ mod tests {
         }
         let status_item = items.iter().find(|i| i.label == "status").unwrap();
         assert_eq!(status_item.kind, Some(CompletionItemKind::FIELD));
+    }
+
+    // ---- Mini-tanda SMTP builtin (2026-06-19): Bloque 4 — LSP ----
+
+    #[test]
+    fn after_dot_on_smtp_lists_send_with_signature() {
+        // Paralelo a `after_dot_on_http_lists_six_methods`: dispatch
+        // por nombre de receiver matchea antes de tocar TypeInfo.
+        let src = "let x = smtp.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor right after the dot: line 0, col 13.
+        let items = completion_at_position(src, &program, &type_info, &env, 0, 13);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"send"),
+            "missing smtp method `send`: {labels:?}"
+        );
+        let send_item = items.iter().find(|i| i.label == "send").unwrap();
+        assert_eq!(send_item.kind, Some(CompletionItemKind::METHOD));
+        let send_detail = send_item.detail.as_deref().unwrap_or("");
+        assert!(
+            send_detail.contains("Future<Result<SmtpResult>>"),
+            "expected `Future<Result<SmtpResult>>` in detail of send, was: {send_detail}",
+        );
+        assert!(
+            send_detail.contains("opts: Map"),
+            "expected `opts: Map` in detail of send, was: {send_detail}",
+        );
+        // No bleed from neighboring modules.
+        assert!(
+            !labels.contains(&"get"),
+            "should not include http.get: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"encode"),
+            "should not include jwt.encode: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn after_dot_on_smtp_result_lists_three_fields() {
+        // `SmtpResult` is pre-registered as Nominal in TypeEnv
+        // (B2, types.rs::register_http_builtin_types). With an
+        // annotated param `r: SmtpResult`, after-dot on `r.` falls
+        // through the Nominal dispatch and lists fields.
+        let src = "fn show(r: SmtpResult) -> Bool {\n  return r.delivered\n}\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor right after `r.` at line 1, col 11.
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 11);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["delivered", "message_id", "duration_ms"] {
+            assert!(
+                labels.contains(&expected),
+                "missing SmtpResult field `{expected}`: {labels:?}"
+            );
+        }
+        let delivered_item = items.iter().find(|i| i.label == "delivered").unwrap();
+        assert_eq!(delivered_item.kind, Some(CompletionItemKind::FIELD));
+    }
+
+    #[test]
+    fn scope_level_lists_smtp_module() {
+        // At scope-level (no `.`), the user should see the `smtp`
+        // module alongside `http`/`jwt`/`hash`/`log`/`db`.
+        let src = "let x = 1\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor at line 1 col 0 (after the let stmt).
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
+        let smtp_item = items.iter().find(|i| i.label == "smtp");
+        assert!(
+            smtp_item.is_some(),
+            "missing `smtp` module at scope-level: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        let smtp_item = smtp_item.unwrap();
+        assert_eq!(smtp_item.kind, Some(CompletionItemKind::MODULE));
+        let detail = smtp_item.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("send"),
+            "expected `send` in smtp module detail, was: {detail}"
+        );
+        assert!(
+            detail.contains("SMTP_HOST") || detail.contains("env vars"),
+            "expected env vars hint in detail, was: {detail}"
+        );
     }
 }

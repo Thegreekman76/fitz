@@ -2838,6 +2838,13 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "17f-http-client-errores.fitz",
     "17g-http-client-webhook.fitz",
     "17h-http-client-health-checker.fitz",
+    // Mini-tanda SMTP builtin (Bloque 5) — los 3 ejemplos de la
+    // sub-sección "17.X SMTP outbound" del cap 17. Apuntan a MailHog
+    // en localhost:1025 por didactismo; el smoke solo compila (no
+    // ejecuta), así que cero MailHog real durante CI.
+    "17i-smtp-basico.fitz",
+    "17j-smtp-errores.fitz",
+    "17k-smtp-magic-link.fitz",
     "18-docs.fitz",
     "19-async.fitz",
     "19b-paralelismo.fitz",

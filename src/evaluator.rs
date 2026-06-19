@@ -11563,6 +11563,31 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
+    // Mini-tanda SMTP builtin (2026-06-19) — `smtp` module with one
+    // async builtin for outbound mail. Returns
+    // `Future<Result<SmtpResult>>`. Configuration via env vars at first
+    // send (SMTP_HOST/PORT/USER/PASSWORD/FROM/TLS). The `opts: Map`
+    // requires `to`/`subject` (Str) and at least one body shape
+    // (`body`/`body_text`/`body_html`). MVP rejects `attachments` with
+    // a clear message — refinable post-MVP if demand. See
+    // `src/smtp.rs` for the full design + roadmap entry under
+    // "Mini-tanda SMTP builtin" in `docs/deudas-post-5b.md`.
+    let smtp_env = Environment::new();
+    smtp_env.lock().define(
+        "send",
+        Value::Builtin {
+            name: "send",
+            func: crate::smtp::builtin_smtp_send,
+        },
+    );
+    env.lock().define(
+        "smtp",
+        Value::Module {
+            name: "smtp".into(),
+            env: smtp_env,
+        },
+    );
+
     // Phase 10.1.b — `db` module: native Postgres driver. Only
     // exposes `connect(url)` which returns `Future<Result<DbConn>>`.
     // Methods on the connection (`query`/`exec`/`close`) are

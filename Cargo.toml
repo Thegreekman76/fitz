@@ -1,6 +1,6 @@
 [package]
 name = "fitz"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 rust-version = "1.95"
 description = "The Fitz programming language"
@@ -316,6 +316,29 @@ base64 = "0.22"
 #    `native-tls` (queremos solo rustls) y `default-tls` (alias).
 #  - `gzip`/`brotli`/`deflate` quedan post-MVP si entra demanda.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Mini-tanda SMTP builtin (2026-06-19) — módulo built-in `smtp` para
+# requests outbound (`smtp.send(opts)`). Detectado como deuda explícita
+# durante el desarrollo de fitzwatch (status page open-source) que
+# necesita despachar mails de incidents. Plan completo en
+# `docs/deudas-post-5b.md` → "SMTP builtin".
+#
+# `lettre = "0.11"` es la opción canónica del ecosistema Rust para
+# SMTP outbound. Features elegidas:
+#  - `tokio1-rustls-tls`: async transport sobre tokio + TLS via
+#    rustls. Sin openssl en el host — paralelo al stack del HTTP
+#    client + driver Postgres.
+#  - `smtp-transport`: el transport SMTP (otros son `sendmail-transport`,
+#    `file-transport`, no los queremos).
+#  - `pool`: connection pool reusa la conexión TCP/TLS entre sends.
+#    Crítico para handlers HTTP / cron jobs que despachan varios
+#    mails seguidos.
+#  - `builder`: API fluida para construir Message (`.from(...).to(...)`).
+#  - `hostname`: detecta hostname local para incluir en headers (Message-ID
+#    canónico).
+#  - `default-features = false`: skipea features default (`native-tls`,
+#    el equivalente openssl que no queremos).
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "pool", "builder", "hostname"] }
 
 # Fase 10.1.b — TLS strict para el driver Postgres (sslmode=require/
 # verify-ca/verify-full). Habilita apuntar Fitz a managed DBs reales

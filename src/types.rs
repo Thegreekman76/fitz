@@ -1383,6 +1383,32 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
             },
         ],
     );
+
+    // Mini-tanda SMTP builtin (2026-06-19) — `SmtpResult`: type returned
+    // by `smtp.send(opts)` once `.await`-ed. Fields fixed: delivered
+    // (Bool), message_id (Str), duration_ms (Int). Field order matters
+    // for Display and for the evaluator's struct literal validation, so
+    // it MUST mirror what `smtp::build_smtp_result_instance` emits.
+    let smtp_result_id = env
+        .declare_nominal("SmtpResult".to_string())
+        .expect("SmtpResult is a built-in nominal — cannot collide");
+    env.set_fields(
+        smtp_result_id,
+        vec![
+            ResolvedField {
+                name: "delivered".into(),
+                type_: Type::Bool,
+            },
+            ResolvedField {
+                name: "message_id".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "duration_ms".into(),
+                type_: Type::Int,
+            },
+        ],
+    );
 }
 
 fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
@@ -3347,6 +3373,28 @@ impl<'a> CheckCtx<'a> {
         // statically once the user lands on the nominal.
         self.scopes[0].insert(
             "http".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // Mini-tanda SMTP builtin (2026-06-19) — `smtp` module always
+        // available. Same `Type::Any` pattern as `http`/`jwt`/`hash`:
+        // `smtp.send(opts: Map) -> Future<Result<SmtpResult>>` has
+        // Future + Result + heterogeneous opts (always Map<Str, Str>
+        // in MVP, but future deuda is Map<Str, Any> with attachments
+        // as List<Map>). Field access on `smtp` falls to gradual; the
+        // single call is validated by the runtime builtin with clear
+        // messages. The nominal `SmtpResult` IS pre-registered (see
+        // `register_http_builtin_types`) so that
+        // `let r = smtp.send(opts).await?` followed by
+        // `r.delivered: Bool`, `r.message_id: Str`, `r.duration_ms: Int`
+        // type-checks statically once the user annotates the binding.
+        self.scopes[0].insert(
+            "smtp".into(),
             VarBinding {
                 ty: Type::Any,
                 annotated: false,
@@ -11832,6 +11880,110 @@ mod tests {
         assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
     }
 
+    // ---- Mini-tanda SMTP builtin (2026-06-19): Bloque 2 — checker ----
+
+    #[test]
+    fn smtp_module_is_pre_registered_as_any() {
+        // Mini-tanda SMTP builtin. `smtp` is registered in
+        // `CheckCtx::new()` as `Type::Any`, so calling
+        // `smtp.send(...)` does not error (field access + call fall
+        // to gradual). Pre-condition for the rest of the SMTP checker
+        // tests.
+        let errors = errors_of(
+            "async fn notify(addr: Str) -> Result<Str> {\n\
+                 let r = smtp.send({\n\
+                     \"to\": addr,\n\
+                     \"from\": \"bot@example.com\",\n\
+                     \"subject\": \"hi\",\n\
+                     \"body\": \"hola\",\n\
+                 }).await?\n\
+                 return Ok(r.message_id)\n\
+             }",
+        );
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
+    }
+
+    #[test]
+    fn smtp_result_is_referenceable_builtin() {
+        // `SmtpResult` is pre-registered as a built-in nominal
+        // (`register_http_builtin_types`). The user can annotate
+        // a fn arg / return type with it without declaring it locally
+        // — parallel to `HttpClientResponse` / `Request` / `Response` / `File`.
+        let errors = errors_of(
+            "fn check(r: SmtpResult) -> Bool {\n\
+                 return r.delivered\n\
+             }",
+        );
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
+    }
+
+    #[test]
+    fn smtp_result_field_delivered_is_bool() {
+        // `SmtpResult.delivered` is `Bool` per
+        // `register_http_builtin_types`. Field access via TypeInfo
+        // (F16) on a binding annotated `: SmtpResult` must persist Bool.
+        let info = types_of("fn get_delivered(r: SmtpResult) -> Bool => r.delivered\n");
+        let bool_on_line1 = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 1 && matches!(t, Type::Bool));
+        assert!(
+            bool_on_line1,
+            "line 1 must persist Bool for r.delivered: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn smtp_result_field_message_id_is_str() {
+        // `SmtpResult.message_id` is `Str`.
+        let info = types_of("fn get_id(r: SmtpResult) -> Str => r.message_id\n");
+        let str_on_line1 = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 1 && matches!(t, Type::Str));
+        assert!(
+            str_on_line1,
+            "line 1 must persist Str for r.message_id: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn smtp_result_field_duration_ms_is_int() {
+        // `SmtpResult.duration_ms` is `Int`.
+        let info = types_of("fn get_duration(r: SmtpResult) -> Int => r.duration_ms\n");
+        let int_on_line1 = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 1 && matches!(t, Type::Int));
+        assert!(
+            int_on_line1,
+            "line 1 must persist Int for r.duration_ms: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn smtp_send_with_try_operator_inside_result_fn_passes() {
+        // The `?` operator works because the call falls to Any → Result<Any>
+        // (consistent with `http.X(...)?`); the containing fn returns
+        // `Result<...>` so the propagation rule (Phase 5.3.3) is satisfied.
+        let errors = errors_of(
+            "async fn dispatch() -> Result<Str> {\n\
+                 let opts = {\n\
+                     \"to\": \"u@x.com\",\n\
+                     \"from\": \"bot@x.com\",\n\
+                     \"subject\": \"hi\",\n\
+                     \"body\": \"hola\",\n\
+                 }\n\
+                 let r = smtp.send(opts).await?\n\
+                 return Ok(r.message_id)\n\
+             }",
+        );
+        assert!(errors.is_empty(), "expected no errors, was: {:?}", errors);
+    }
+
     #[test]
     fn return_status_inside_middleware_passes_checker() {
         // A fn applied as `@middleware(fn)` can do
@@ -12159,12 +12311,16 @@ mod tests {
         // Mini-fase HTTP client (2026-06-18) added `HttpClientResponse`
         // for outbound `http.get/post/...` returns (type of `r` in
         // `let r = http.get(url).await?`).
+        // Mini-tanda SMTP builtin (2026-06-19) added `SmtpResult` for
+        // outbound `smtp.send(...)` returns (type of `r` in
+        // `let r = smtp.send(opts).await?`).
         // The user can reference them without declaring them.
-        assert_eq!(env.nominal_count(), 4);
+        assert_eq!(env.nominal_count(), 5);
         assert!(env.lookup("Request").is_some());
         assert!(env.lookup("Response").is_some());
         assert!(env.lookup("File").is_some());
         assert!(env.lookup("HttpClientResponse").is_some());
+        assert!(env.lookup("SmtpResult").is_some());
     }
 
     #[test]

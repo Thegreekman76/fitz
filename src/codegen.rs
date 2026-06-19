@@ -319,6 +319,13 @@ pub fn generate_project(
     let uses_http_client =
         program_uses_http_client(program) || loader.modules.iter().any(|m| m.uses_http_client);
 
+    // Mini-tanda SMTP builtin (2026-06-19) — `smtp.send(...)` calls in
+    // main OR any loaded module. Same transitive pattern as
+    // `uses_http_client`: a `notifications.fitz` module that
+    // dispatches mails, plus a main that only orchestrates with
+    // `spawn(notify(...))`.
+    let uses_smtp = program_uses_smtp(program) || loader.modules.iter().any(|m| m.uses_smtp);
+
     // Phase 12.8 — feature flags: detects `@flag(...)` or builtins
     // `flag(...)`/`flags.X(...)`. The program can always use the
     // builtin even with no defaults declared, so we also turn on
@@ -358,6 +365,7 @@ pub fn generate_project(
             uses_date_or_uuid,
             uses_prometheus_export,
             uses_http_client,
+            uses_smtp,
         ),
         main_rs,
         mod_files: {
@@ -1817,6 +1825,121 @@ fn program_uses_http_client(program: &Program) -> bool {
     program.iter().any(stmt_uses_http)
 }
 
+/// Mini-tanda SMTP builtin (2026-06-19) — `true` if the program calls
+/// `smtp.send(...)`. Triggers emission of `SMTP_PRELUDE` and adds
+/// `lettre = "0.11"` with rustls + pool features to the generated
+/// Cargo.toml.
+///
+/// Pattern: recursive walk parallel to `program_uses_http_client`,
+/// matching `Expr::Call` whose callee is
+/// `Expr::Field { object: Ident("smtp"), field: "send", .. }`. The
+/// walk loses user-defined `smtp` shadowing — the callsite's codegen
+/// handles that case at dispatch time (parallel to `http`/`db`).
+fn program_uses_smtp(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_smtp(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
+                    if let Expr::Ident(recv, _) = object.as_ref() {
+                        if recv == "smtp" && field == "send" {
+                            return true;
+                        }
+                    }
+                }
+                expr_uses_smtp(callee) || args.iter().any(expr_uses_smtp)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_smtp(left) || expr_uses_smtp(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_smtp(operand),
+            Expr::Field { object, .. } => expr_uses_smtp(object),
+            Expr::Index { object, index, .. } => expr_uses_smtp(object) || expr_uses_smtp(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_smtp(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_smtp(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_smtp(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_smtp(start) || expr_uses_smtp(end),
+            Expr::List(items, _) | Expr::Tuple(items, _) => items.iter().any(expr_uses_smtp),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_smtp(expr)
+                    || expr_uses_smtp(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_smtp(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_smtp(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_smtp(key)
+                    || expr_uses_smtp(value)
+                    || expr_uses_smtp(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_smtp(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_smtp(f))
+            }
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_smtp(k) || expr_uses_smtp(v)),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_smtp(v)),
+            Expr::TupleField { tuple, .. } => expr_uses_smtp(tuple),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_smtp(condition)
+                    || then.iter().any(stmt_uses_smtp)
+                    || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses_smtp))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_smtp(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_smtp))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_smtp),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Lit(_) => false,
+                StrPart::Expr(inner, _) => expr_uses_smtp(inner),
+            }),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_smtp),
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_smtp(inner),
+            Expr::NamedArg { value, .. } => expr_uses_smtp(value),
+            _ => false,
+        }
+    }
+    fn stmt_uses_smtp(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_smtp),
+            Stmt::Assign { value, .. } => expr_uses_smtp(value),
+            Stmt::Expr(e, _) => expr_uses_smtp(e),
+            Stmt::Return(e, _) => expr_uses_smtp(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_smtp(status) || body.as_ref().is_some_and(expr_uses_smtp)
+            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_smtp(condition) || body.iter().any(stmt_uses_smtp),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_smtp),
+            Stmt::For { iter, body, .. } => expr_uses_smtp(iter) || body.iter().any(stmt_uses_smtp),
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_smtp)
+}
+
 /// Phase 6.6: True if the program uses async — any user-declared
 /// `async fn`, any `Expr::Await` somewhere, or a call to the `sleep`
 /// builtin. Codegen consults this flag to decide three things:
@@ -3072,6 +3195,7 @@ fn cargo_toml_for(
     uses_date_or_uuid: bool,
     uses_prometheus_export: bool,
     uses_http_client: bool,
+    uses_smtp: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -3097,12 +3221,16 @@ fn cargo_toml_for(
     // tokio's macros + rt-multi-thread to compile the emitted
     // `#[tokio::main]` shim (we already enable async for HTTP client
     // callsites — they always come via `.await`).
-    let needs_tokio = has_http || uses_async || uses_jobs || uses_db || uses_http_client;
+    let needs_tokio =
+        has_http || uses_async || uses_jobs || uses_db || uses_http_client || uses_smtp;
     // Phase 10.b fix: `uses_db` also needs `time` because the
     // driver (the embedded `src/db.rs`) uses `tokio::time::timeout`
     // for the pool's health check + lazy reconnect. Without feature
     // `time` → E0433 at compile time.
-    let needs_time = uses_async || uses_jobs || uses_db;
+    // Mini-tanda SMTP builtin (2026-06-19) — lettre's pool uses
+    // `tokio::time::timeout` internally for handshake / connection
+    // checks. Without `time` feature, compilation breaks.
+    let needs_time = uses_async || uses_jobs || uses_db || uses_smtp;
     // Phase 12.1.c — HTTP also needs `signal` for the
     // graceful-shutdown shutdown_signal (ctrl_c trap). Previously
     // only cron-only mode asked for it (cron-only main does
@@ -3171,7 +3299,8 @@ fn cargo_toml_for(
         || uses_trace_metric
         || uses_db
         || uses_date_or_uuid
-        || uses_http_client;
+        || uses_http_client
+        || uses_smtp;
     if !needs_deps_section {
         return header;
     }
@@ -3426,8 +3555,19 @@ fn cargo_toml_for(
     } else {
         ""
     };
+    // Mini-tanda SMTP builtin (2026-06-19) — `lettre = "0.11"` with
+    // features `tokio1-rustls-tls` + `smtp-transport` + `pool` +
+    // `builder` + `hostname`. Same `rustls` posture as `http_client`
+    // (no openssl on host). Pool reuses the TCP/TLS connection across
+    // sends — critical for handlers / cron jobs that dispatch
+    // multiple mails in quick succession.
+    let smtp_lines = if uses_smtp {
+        "lettre = { version = \"0.11\", default-features = false, features = [\"tokio1-rustls-tls\", \"smtp-transport\", \"pool\", \"builder\", \"hostname\"] }\n"
+    } else {
+        ""
+    };
     format!(
-        "{}\n[dependencies]\n{}{}{}{}{}{}{}{}{}",
+        "{}\n[dependencies]\n{}{}{}{}{}{}{}{}{}{}",
         header,
         http_lines,
         tokio_line,
@@ -3437,7 +3577,8 @@ fn cargo_toml_for(
         db_lines,
         date_uuid_lines,
         logging_lines,
-        http_client_lines
+        http_client_lines,
+        smtp_lines
     )
 }
 
@@ -3589,6 +3730,14 @@ struct LoadedModule {
     /// and main only orchestrates). The module's emitted code references
     /// `use crate::{__fitz_http_*}`.
     uses_http_client: bool,
+    /// Mini-tanda SMTP builtin (2026-06-19) — same pattern as
+    /// `uses_http_client`. `program_uses_smtp(module_program)`. The
+    /// main ORs it with its own flag so the `__fitz_smtp_*` prelude
+    /// lives in the crate root when a module's body invokes
+    /// `smtp.send(...)` (typical case: `notifications.fitz` declares
+    /// `async fn send_alert(addr, body) { smtp.send({...}).await? }`).
+    /// The module's emitted code references `use crate::{__fitz_smtp_*}`.
+    uses_smtp: bool,
 }
 
 /// Binding visible in the importer file. Produced by the loader
@@ -4068,6 +4217,11 @@ impl ModuleLoader {
         // so the main ORs the flag and emits the prelude when at least
         // one module references the HTTP client.
         let module_uses_http_client = program_uses_http_client(&module_program);
+        // Mini-tanda SMTP builtin (2026-06-19) — paralelo a
+        // module_uses_http_client: detect whether the module calls
+        // `smtp.send(...)` so the main ORs the flag and emits the
+        // prelude when at least one module references SMTP.
+        let module_uses_smtp = program_uses_smtp(&module_program);
         // W12 (v0.10.8) — detect `@auth_provider` declared IN this
         // module. If the module has it, we expose
         // `(fn_name, is_async, user_type_name)` to the main so
@@ -4148,6 +4302,7 @@ impl ModuleLoader {
             http_fn_stmts: module_http_fn_stmts,
             ws_fn_stmts: module_ws_fn_stmts,
             uses_http_client: module_uses_http_client,
+            uses_smtp: module_uses_smtp,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -4703,6 +4858,22 @@ fn generate_module_rs_with_bindings(
              use crate::{__fitz_http_body_from_str, __fitz_http_body_from_bytes, __fitz_http_body_from_map_str_str};\n\
              #[allow(unused_imports)]\n\
              use crate::__FitzHttpRequestOpts;\n\n",
+        );
+    }
+    // Mini-tanda SMTP builtin (2026-06-19) — module-side mirror of
+    // `module_uses_http_client_local`. When the module body calls
+    // `smtp.send(...)`, emit `use crate::{__fitz_smtp_send,
+    // SmtpResult, SmtpResultData}` so the dispatch in `gen_call`
+    // resolves at link time. The crate root prelude (emitted by
+    // `emit_smtp_prelude`) owns the symbols when main ORs the flag.
+    let module_uses_smtp_local = program_uses_smtp(program);
+    if module_uses_smtp_local {
+        ctx.uses_smtp = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{SmtpResult, SmtpResultData};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_smtp_send, __FitzSmtpSendOpts};\n\n",
         );
     }
 
@@ -5467,6 +5638,10 @@ fn generate_main_rs(
     let uses_http_client =
         program_uses_http_client(program) || loader.modules.iter().any(|m| m.uses_http_client);
 
+    // Mini-tanda SMTP builtin (2026-06-19) — `smtp.send(...)` calls
+    // in main OR any loaded module. Same transitive pattern.
+    let uses_smtp = program_uses_smtp(program) || loader.modules.iter().any(|m| m.uses_smtp);
+
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
     ctx.uses_python = uses_python;
@@ -5491,6 +5666,7 @@ fn generate_main_rs(
     ctx.uses_db = uses_db;
     ctx.uses_date_or_uuid = uses_date_or_uuid;
     ctx.uses_http_client = uses_http_client;
+    ctx.uses_smtp = uses_smtp;
     // 10.8.7 (v0.10.8) — pre-scan of the `ws_broadcast(endpoint, msg)`
     // builtin in main. Set BEFORE emit_prelude so that
     // `emit_http_runtime_prelude` emits the `__fitz_ws_broadcast`
@@ -6045,6 +6221,11 @@ fn emit_main_rs_body(
     // `__ToFitzJson`/`__FromFitzJson` impls so the response can be
     // returned from handlers.
     ctx.emit_http_client_prelude();
+    // Mini-tanda SMTP builtin (2026-06-19) — emit `SmtpResult` struct
+    // + shared `AsyncSmtpTransport` LazyLock + async helper
+    // `__fitz_smtp_send` paralelos bit-a-bit al intérprete. Only when
+    // the program (or any loaded module) calls `smtp.send(...)`.
+    ctx.emit_smtp_prelude();
     // Phase 10.1.c — `db` module prelude: opaque types
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + async helpers for connect/query/exec/close.
@@ -7322,6 +7503,15 @@ struct CodegenCtx<'a> {
     /// without `http.X` calls pay nothing (no reqwest in deps, no
     /// prelude in main).
     uses_http_client: bool,
+    /// Mini-tanda SMTP builtin (2026-06-19): `true` if the program
+    /// calls `smtp.send(opts)`. Enables emission of `SMTP_PRELUDE`
+    /// (struct `SmtpResult` + `__FITZ_SMTP_TRANSPORT` static +
+    /// `__fitz_smtp_send` helper) and adds `lettre = "0.11"` (with
+    /// `tokio1-rustls-tls` + `smtp-transport` + `pool` + `builder` +
+    /// `hostname` features) to the generated Cargo.toml. Programs
+    /// without `smtp.send` calls pay nothing (no lettre in deps, no
+    /// prelude in main).
+    uses_smtp: bool,
     /// Phase 9.w.3.c: info of each cron job, pre-collected. Each
     /// entry has the Rust name of the target fn, the cron-expression
     /// Str, and an `is_async` flag. `gen_main`/`gen_http_main` use
@@ -7561,6 +7751,7 @@ impl<'a> CodegenCtx<'a> {
             uses_db: false,
             uses_date_or_uuid: false,
             uses_http_client: false,
+            uses_smtp: false,
             cron_jobs_info: Vec::new(),
             ws_heartbeat_secs: 30,
             observability_enabled: true,
@@ -9215,6 +9406,22 @@ impl __FitzRetryConfig {
         self.emit("\n");
         if self.has_http {
             self.emit(HTTP_CLIENT_HTTP_INTEGRATION_PRELUDE);
+            self.emit("\n");
+        }
+    }
+
+    /// Mini-tanda SMTP builtin (2026-06-19) — emit the SMTP prelude
+    /// (struct `SmtpResult` + shared `AsyncSmtpTransport` LazyLock +
+    /// async `__fitz_smtp_send` helper). Only when the program (or
+    /// any loaded module) calls `smtp.send(...)`.
+    fn emit_smtp_prelude(&mut self) {
+        if !self.uses_smtp {
+            return;
+        }
+        self.emit(SMTP_PRELUDE);
+        self.emit("\n");
+        if self.has_http {
+            self.emit(SMTP_HTTP_INTEGRATION_PRELUDE);
             self.emit("\n");
         }
     }
@@ -15217,6 +15424,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if recv == "http" && self.lookup_var(recv).is_none() {
                     return self.gen_http_client_call(field, args, *field_span);
                 }
+                // Mini-tanda SMTP builtin (2026-06-19) — `smtp.X(...)`.
+                // Same shadowing semantics as `http.X(...)`. Dispatch
+                // emits `__fitz_smtp_send(...)` and returns
+                // `Future<Result<SmtpResult>>`.
+                if recv == "smtp" && self.lookup_var(recv).is_none() {
+                    return self.gen_smtp_call(field, args, *field_span);
+                }
             }
 
             // Phase 10.1.c — method over a `DbConn` (opaque handle).
@@ -17913,6 +18127,185 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             body_bytes = body_bytes_c,
             body_ct = body_ct_c,
             follow = follow_c,
+        ))
+    }
+
+    /// Mini-tanda SMTP builtin (2026-06-19) — dispatch of `smtp.send(opts)`.
+    /// MVP scope: only `send` field; only `Map` literal at callsite
+    /// (paralelo a `http.request(opts)` / `jwt.encode`). Validates
+    /// required keys + body shape statically.
+    ///
+    /// Required keys: `to` (Str), `subject` (Str), and one of
+    /// `body`/`body_text`/`body_html` (Str).
+    /// Optional keys: `from` (Str — overrides SMTP_FROM env var).
+    /// Other keys (e.g. `attachments`) emit a clear error citing
+    /// MVP scope.
+    fn gen_smtp_call(
+        &mut self,
+        field: &str,
+        args: &[Expr],
+        field_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if field != "send" {
+            return Err(self.err_at(
+                field_span,
+                format!("module `smtp` has no `{}` (supported: send)", field),
+            ));
+        }
+        if args.len() != 1 {
+            return Err(self.err_at(
+                field_span,
+                format!(
+                    "`smtp.send` expects 1 argument (opts: Map), got {}",
+                    args.len()
+                ),
+            ));
+        }
+        let opts_code = self.gen_smtp_send_opts(&args[0], field_span)?;
+        let result_id = self
+            .env
+            .lookup("SmtpResult")
+            .expect("SmtpResult pre-registered en TypeEnv (types.rs)");
+        let ret_type = Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::Nominal(result_id)),
+            err: Box::new(Type::Str),
+        }));
+        Ok((
+            format!("(async {{ __fitz_smtp_send({}).await }})", opts_code),
+            ret_type,
+        ))
+    }
+
+    /// Mini-tanda SMTP builtin (2026-06-19) — converts the Map literal
+    /// at the callsite of `smtp.send(opts)` to the Rust expression
+    /// that constructs `__FitzSmtpSendOpts`. Validates shape eagerly:
+    /// `to`/`subject` required (Str), `from` optional (Str), `body`/
+    /// `body_text`/`body_html` at least one (Str) — `body` is alias
+    /// for `body_text`. `attachments` rejected with clear MVP message.
+    fn gen_smtp_send_opts(
+        &mut self,
+        opts_expr: &Expr,
+        field_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        let pairs = match opts_expr {
+            Expr::Map(pairs, _) => pairs,
+            _ => {
+                return Err(self.err_at(
+                    opts_expr.span(),
+                    "`smtp.send(opts)` requires a Map literal at the callsite for the MVP \
+                     (so the codegen can validate the shape statically). \
+                     Workaround: inline the Map keys instead of passing a variable.",
+                ));
+            }
+        };
+
+        let mut to_expr: Option<&Expr> = None;
+        let mut from_expr: Option<&Expr> = None;
+        let mut subject_expr: Option<&Expr> = None;
+        let mut body_expr: Option<&Expr> = None;
+        let mut body_text_expr: Option<&Expr> = None;
+        let mut body_html_expr: Option<&Expr> = None;
+
+        for (k, v) in pairs {
+            let key_name = match k {
+                Expr::Str(s, _) => s.clone(),
+                _ => {
+                    return Err(
+                        self.err_at(k.span(), "`smtp.send(opts)` Map keys must be Str literals")
+                    );
+                }
+            };
+            match key_name.as_str() {
+                "to" => to_expr = Some(v),
+                "from" => from_expr = Some(v),
+                "subject" => subject_expr = Some(v),
+                "body" => body_expr = Some(v),
+                "body_text" => body_text_expr = Some(v),
+                "body_html" => body_html_expr = Some(v),
+                "attachments" => {
+                    return Err(self.err_at(
+                        k.span(),
+                        "`smtp.send(opts)` `attachments` not supported in MVP \
+                         (deuda menor — refinable si entra demanda)",
+                    ));
+                }
+                other => {
+                    return Err(self.err_at(
+                        k.span(),
+                        format!(
+                            "`smtp.send(opts)` unknown key `{}` — supported: to, from, subject, body, body_text, body_html",
+                            other
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // `body` is alias for `body_text` — collision is error.
+        if body_expr.is_some() && body_text_expr.is_some() {
+            return Err(self.err_at(
+                field_span,
+                "`smtp.send(opts)` cannot pass both `body` and `body_text` — `body` is alias for `body_text`",
+            ));
+        }
+        let effective_body_text = body_text_expr.or(body_expr);
+
+        if effective_body_text.is_none() && body_html_expr.is_none() {
+            return Err(self.err_at(
+                field_span,
+                "`smtp.send(opts)` requires at least one of: `body`, `body_text`, `body_html`",
+            ));
+        }
+
+        let to = to_expr.ok_or_else(|| {
+            self.err_at(field_span, "`smtp.send(opts)` requires the key `to` (Str)")
+        })?;
+        let subject = subject_expr.ok_or_else(|| {
+            self.err_at(
+                field_span,
+                "`smtp.send(opts)` requires the key `subject` (Str)",
+            )
+        })?;
+
+        let (to_code, to_ty) = self.gen_expr(to)?;
+        let to_c = coerce(&to_code, &to_ty, &Type::Str, self.env);
+        let (subject_code, subject_ty) = self.gen_expr(subject)?;
+        let subject_c = coerce(&subject_code, &subject_ty, &Type::Str, self.env);
+
+        let from_c = match from_expr {
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                let c = coerce(&c, &t, &Type::Str, self.env);
+                format!("Some({})", c)
+            }
+            None => "None".to_string(),
+        };
+
+        let body_text_c = match effective_body_text {
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                let c = coerce(&c, &t, &Type::Str, self.env);
+                format!("Some({})", c)
+            }
+            None => "None".to_string(),
+        };
+        let body_html_c = match body_html_expr {
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                let c = coerce(&c, &t, &Type::Str, self.env);
+                format!("Some({})", c)
+            }
+            None => "None".to_string(),
+        };
+
+        Ok(format!(
+            "__FitzSmtpSendOpts {{ to: {to}, from: {from}, subject: {subject}, \
+             body_text: {body_text}, body_html: {body_html} }}",
+            to = to_c,
+            from = from_c,
+            subject = subject_c,
+            body_text = body_text_c,
+            body_html = body_html_c,
         ))
     }
 
@@ -35860,6 +36253,375 @@ fn __fitz_http_body_from_json(json: serde_json::Value) -> (Option<Vec<u8>>, Opti
 }
 "##;
 
+/// Mini-tanda SMTP builtin (2026-06-19) — emitted in the crate root
+/// when `program_uses_smtp` fires. Provides:
+///
+/// - Built-in nominal `SmtpResult` (struct `SmtpResultData` + alias
+///   `Arc<Mutex<...>>` + Display + PartialEq) returned by
+///   `smtp.send(...)` once `.await`-ed.
+/// - Shared `AsyncSmtpTransport<Tokio1Executor>` via `LazyLock`.
+///   Loaded from env vars at first send. If config is broken, every
+///   send returns `Err(Str)` with the same captured message.
+/// - Async helper `__fitz_smtp_send(opts)` paralelo bit-a-bit a
+///   `builtin_smtp_send` of the interpreter.
+/// - Internal struct `__FitzSmtpSendOpts` for the codegen callsite
+///   (paralleling `__FitzHttpRequestOpts`).
+///
+/// Mirrors the contract of `src/smtp.rs` (interpreter): success →
+/// `Ok(SmtpResult)` with `delivered=true`; transport errors / DNS /
+/// TLS handshake / auth fail / server reject → `Err(String)` with
+/// `"smtp: ..."` prefix.
+const SMTP_PRELUDE: &str = r##"
+// --- mini-tanda SMTP builtin (2026-06-19): built-in `smtp` module ---
+
+/// Built-in nominal `SmtpResult`. Convention parallel to every user
+/// `type`: `struct Data` + alias `Arc<Mutex<Data>>`.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct SmtpResultData {
+    delivered: bool,
+    message_id: String,
+    duration_ms: i64,
+}
+#[allow(dead_code)]
+type SmtpResult = Arc<Mutex<SmtpResultData>>;
+
+impl PartialEq for SmtpResultData {
+    fn eq(&self, other: &Self) -> bool {
+        self.delivered == other.delivered
+            && self.message_id == other.message_id
+            && self.duration_ms == other.duration_ms
+    }
+}
+
+impl std::fmt::Display for SmtpResultData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "SmtpResult {{ delivered: {}, message_id: \"{}\", duration_ms: {} }}",
+            self.delivered, self.message_id, self.duration_ms,
+        )
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum __FitzSmtpTlsMode {
+    StartTls,
+    Implicit,
+    None,
+}
+
+impl __FitzSmtpTlsMode {
+    fn default_port(self) -> u16 {
+        match self {
+            __FitzSmtpTlsMode::StartTls => 587,
+            __FitzSmtpTlsMode::Implicit => 465,
+            __FitzSmtpTlsMode::None => 25,
+        }
+    }
+    fn parse(s: &str) -> Result<__FitzSmtpTlsMode, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "starttls" | "" => Ok(__FitzSmtpTlsMode::StartTls),
+            "implicit" | "tls" | "ssl" => Ok(__FitzSmtpTlsMode::Implicit),
+            "none" | "plain" => Ok(__FitzSmtpTlsMode::None),
+            other => Err(format!(
+                "SMTP_TLS must be one of `starttls`, `implicit`, `none`, received `{}`",
+                other
+            )),
+        }
+    }
+}
+
+#[allow(dead_code)]
+struct __FitzSmtpConfig {
+    host: String,
+    port: u16,
+    user: Option<String>,
+    password: Option<String>,
+    from_default: Option<String>,
+    tls: __FitzSmtpTlsMode,
+}
+
+#[allow(dead_code)]
+fn __fitz_smtp_load_config() -> Result<__FitzSmtpConfig, String> {
+    let host = std::env::var("SMTP_HOST")
+        .map_err(|_| "SMTP_HOST is not set (required for `smtp.send`)".to_string())?;
+    if host.trim().is_empty() {
+        return Err("SMTP_HOST is empty".to_string());
+    }
+    let tls = __FitzSmtpTlsMode::parse(&std::env::var("SMTP_TLS").unwrap_or_default())?;
+    let port = match std::env::var("SMTP_PORT") {
+        Ok(s) if !s.trim().is_empty() => s
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("SMTP_PORT is not a valid u16: `{}`", s))?,
+        _ => tls.default_port(),
+    };
+    let user = std::env::var("SMTP_USER").ok().filter(|s| !s.is_empty());
+    let password = std::env::var("SMTP_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
+    match (&user, &password) {
+        (Some(_), None) => {
+            return Err(
+                "SMTP_USER is set but SMTP_PASSWORD is not — both required for auth".into(),
+            );
+        }
+        (None, Some(_)) => {
+            return Err(
+                "SMTP_PASSWORD is set but SMTP_USER is not — both required for auth".into(),
+            );
+        }
+        _ => {}
+    }
+    let from_default = std::env::var("SMTP_FROM").ok().filter(|s| !s.is_empty());
+    Ok(__FitzSmtpConfig {
+        host,
+        port,
+        user,
+        password,
+        from_default,
+        tls,
+    })
+}
+
+#[allow(dead_code)]
+fn __fitz_smtp_build_transport(
+    cfg: &__FitzSmtpConfig,
+) -> Result<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>, String> {
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::transport::smtp::client::Tls;
+    use lettre::AsyncSmtpTransport;
+    use lettre::Tokio1Executor;
+    let builder = match cfg.tls {
+        __FitzSmtpTlsMode::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)
+            .map_err(|e| format!("could not build TLS relay for `{}`: {}", cfg.host, e))?,
+        __FitzSmtpTlsMode::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)
+            .map_err(|e| format!("could not build TLS relay for `{}`: {}", cfg.host, e))?,
+        __FitzSmtpTlsMode::None => {
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host).tls(Tls::None)
+        }
+    };
+    let builder = builder.port(cfg.port);
+    let builder = match (&cfg.user, &cfg.password) {
+        (Some(u), Some(p)) => builder.credentials(Credentials::new(u.clone(), p.clone())),
+        _ => builder,
+    };
+    Ok(builder.build())
+}
+
+#[allow(dead_code)]
+struct __FitzSmtpTransportCache {
+    transport: lettre::AsyncSmtpTransport<lettre::Tokio1Executor>,
+    from_default: Option<String>,
+}
+
+static __FITZ_SMTP_TRANSPORT: std::sync::LazyLock<Result<__FitzSmtpTransportCache, String>> =
+    std::sync::LazyLock::new(|| {
+        let cfg = __fitz_smtp_load_config()?;
+        let transport = __fitz_smtp_build_transport(&cfg)?;
+        Ok(__FitzSmtpTransportCache {
+            transport,
+            from_default: cfg.from_default,
+        })
+    });
+
+/// Internal: parsed options for `smtp.send(opts)`. Constructed by the
+/// dispatch in `gen_call` from the Map literal arg. Parallel to
+/// `__FitzHttpRequestOpts`.
+#[allow(dead_code)]
+struct __FitzSmtpSendOpts {
+    to: String,
+    from: Option<String>,
+    subject: String,
+    body_text: Option<String>,
+    body_html: Option<String>,
+}
+
+/// Build the `SmtpResult` instance returned to the user. Order of
+/// fields mirrors `types::register_http_builtin_types`.
+#[allow(dead_code)]
+fn __fitz_smtp_build_result(delivered: bool, message_id: String, duration_ms: i64) -> SmtpResult {
+    Arc::new(Mutex::new(SmtpResultData {
+        delivered,
+        message_id,
+        duration_ms,
+    }))
+}
+
+/// Map `lettre::transport::smtp::Error` to a user-facing message with
+/// identifiable prefix. Parallel to `smtp::format_smtp_error` of the
+/// interpreter — same prefixes, same shape, so user code that does
+/// `e.starts_with("smtp: server rejected")` continues working bit-for-bit.
+#[allow(dead_code)]
+fn __fitz_smtp_format_error(e: &lettre::transport::smtp::Error) -> String {
+    let msg = e.to_string();
+    if e.is_response() {
+        format!("smtp: server rejected mail: {}", msg)
+    } else if e.is_client() {
+        format!("smtp: client error: {}", msg)
+    } else if e.is_transient() {
+        format!("smtp: transient error: {}", msg)
+    } else if e.is_permanent() {
+        format!("smtp: permanent error: {}", msg)
+    } else {
+        format!("smtp: {}", msg)
+    }
+}
+
+/// `smtp.send(opts)` codegen helper. Paralelo bit-a-bit a
+/// `smtp::do_send` del intérprete: resuelve config + from, parsea
+/// mailboxes, arma el Message (text-only / html-only / multipart
+/// alternative), envía via shared transport, mide `duration_ms`,
+/// devuelve `SmtpResult` o `Err(String)`.
+#[allow(dead_code)]
+async fn __fitz_smtp_send(opts: __FitzSmtpSendOpts) -> Result<SmtpResult, String> {
+    use lettre::message::header::ContentType;
+    use lettre::message::{Mailbox, MultiPart, SinglePart};
+    use lettre::{AsyncTransport, Message};
+
+    let started = std::time::Instant::now();
+
+    let cache = match &*__FITZ_SMTP_TRANSPORT {
+        Ok(c) => c,
+        Err(e) => return Err(format!("smtp: {}", e)),
+    };
+
+    let from_str = match opts
+        .from
+        .or_else(|| cache.from_default.clone())
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s,
+        None => {
+            return Err("smtp: no `from` provided and SMTP_FROM env var is not set".to_string());
+        }
+    };
+
+    let from_mbx: Mailbox = match from_str.parse() {
+        Ok(m) => m,
+        Err(e) => {
+            return Err(format!(
+                "smtp: invalid `from` address `{}`: {}",
+                from_str, e
+            ));
+        }
+    };
+    let to_mbx: Mailbox = match opts.to.parse() {
+        Ok(m) => m,
+        Err(e) => {
+            return Err(format!("smtp: invalid `to` address `{}`: {}", opts.to, e));
+        }
+    };
+
+    let builder = Message::builder()
+        .from(from_mbx)
+        .to(to_mbx)
+        .subject(&opts.subject);
+
+    let message = match (opts.body_text, opts.body_html) {
+        (Some(text), Some(html)) => builder.multipart(
+            MultiPart::alternative()
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_PLAIN)
+                        .body(text),
+                )
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_HTML)
+                        .body(html),
+                ),
+        ),
+        (Some(text), None) => builder.body(text),
+        (None, Some(html)) => builder.header(ContentType::TEXT_HTML).body(html),
+        (None, None) => unreachable!("dispatch enforces at least one body"),
+    };
+
+    let message = match message {
+        Ok(m) => m,
+        Err(e) => return Err(format!("smtp: could not build message: {}", e)),
+    };
+
+    let message_id = message
+        .headers()
+        .get_raw("Message-ID")
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let message_id = message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_string();
+
+    match cache.transport.send(message).await {
+        Ok(_response) => {
+            let duration_ms = started.elapsed().as_millis() as i64;
+            Ok(__fitz_smtp_build_result(true, message_id, duration_ms))
+        }
+        Err(e) => Err(__fitz_smtp_format_error(&e)),
+    }
+}
+"##;
+
+/// Mini-tanda SMTP builtin (2026-06-19) — `__ToFitzJson`/`__FromFitzJson`
+/// impls for `SmtpResultData`. Only emitted when ALSO `has_http = true`
+/// (we need `serde_json::Value` in scope, pulled in by
+/// `HTTP_RUNTIME_PRELUDE`). Without HTTP, the response type still
+/// exists but cannot be serialized as a handler response — acceptable:
+/// pure-CLI programs that only use `smtp.send` do not need JSON
+/// serialization of the response.
+const SMTP_HTTP_INTEGRATION_PRELUDE: &str = r##"
+// --- mini-tanda SMTP builtin (2026-06-19): SmtpResult + JSON ---
+
+impl __ToFitzJson for SmtpResultData {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "delivered".to_string(),
+            serde_json::Value::Bool(self.delivered),
+        );
+        obj.insert(
+            "message_id".to_string(),
+            serde_json::Value::String(self.message_id.clone()),
+        );
+        obj.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::Number((self.duration_ms).into()),
+        );
+        serde_json::Value::Object(obj)
+    }
+}
+
+impl __FromFitzJson for SmtpResultData {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let obj = match json {
+            serde_json::Value::Object(o) => o,
+            _ => return Err("expected JSON object for SmtpResult".to_string()),
+        };
+        let delivered = obj
+            .get("delivered")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| "SmtpResult: missing or invalid `delivered`".to_string())?;
+        let message_id = obj
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "SmtpResult: missing or invalid `message_id`".to_string())?;
+        let duration_ms = obj
+            .get("duration_ms")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| "SmtpResult: missing or invalid `duration_ms`".to_string())?;
+        Ok(SmtpResultData {
+            delivered,
+            message_id,
+            duration_ms,
+        })
+    }
+}
+"##;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -36023,7 +36785,7 @@ mod tests {
         // feature `time` (no axum).
         let toml = cargo_toml_for(
             "foo", false, true, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(toml.contains("tokio"), "expected tokio in deps");
         assert!(toml.contains("\"time\""), "expected feature `time`");
@@ -36034,7 +36796,7 @@ mod tests {
     fn cargo_toml_async_with_http_includes_tokio_time_and_axum() {
         let toml = cargo_toml_for(
             "foo", true, true, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
@@ -36045,7 +36807,7 @@ mod tests {
     fn cargo_toml_without_async_without_http_is_minimal() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
@@ -36065,7 +36827,7 @@ mod tests {
         // tracing + tracing-subscriber + chrono + serde_json.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, true, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -36100,7 +36862,7 @@ mod tests {
         // once (jobs_lines emits it; logging_lines skips it).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, true, true, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         let count_chrono = toml.matches("chrono = ").count();
         assert!(
@@ -36115,7 +36877,7 @@ mod tests {
     fn cargo_toml_without_logging_does_not_include_tracing() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             !toml.contains("tracing"),
@@ -36129,7 +36891,7 @@ mod tests {
         // HTTP already brings serde_json; logging_lines must NOT duplicate.
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         let count = toml.matches("serde_json = ").count();
         assert!(
@@ -36151,7 +36913,7 @@ mod tests {
         // if `uses_logging`).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, true, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -36174,7 +36936,7 @@ mod tests {
     fn cargo_toml_without_trace_metric_does_not_include_tracing_or_metrics() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(!toml.contains("tracing"), "should not include tracing");
         assert!(!toml.contains("metrics"), "should not include metrics");
@@ -36432,7 +37194,7 @@ mod tests {
         // uses_prometheus_export).
         let cargo = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             !cargo.contains("metrics-exporter-prometheus"),
@@ -36480,7 +37242,7 @@ mod tests {
         // uses_prometheus_export).
         let cargo = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false, true,
-            false,
+            false, false,
         );
         assert!(
             cargo.contains("metrics-exporter-prometheus"),
@@ -36620,7 +37382,7 @@ mod tests {
         // 14th positional arg (uses_http_client) = true → reqwest in deps.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, true,
+            false, true, false,
         );
         assert!(
             toml.contains("reqwest = "),
@@ -36639,12 +37401,255 @@ mod tests {
         // 14th positional arg = false → no reqwest.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             !toml.contains("reqwest"),
             "should NOT include reqwest without uses_http_client=true, was: {}",
             toml
+        );
+    }
+
+    // ---- Mini-tanda SMTP builtin (2026-06-19): Bloque 3 — codegen ----
+
+    #[test]
+    fn smtp_program_uses_smtp_detects_send() {
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        let src = "async fn notify() -> Result<Str> {\n\
+                       let r = smtp.send({\
+                           \"to\": \"a@b.com\",\
+                           \"from\": \"bot@b.com\",\
+                           \"subject\": \"hi\",\
+                           \"body\": \"hola\",\
+                       }).await?\n\
+                       return Ok(r.message_id)\n\
+                   }";
+        let tokens = tokenize(src).expect("tokenize ok");
+        let program = parse(tokens).expect("parse ok");
+        assert!(
+            program_uses_smtp(&program),
+            "expected true for `smtp.send(...)`"
+        );
+    }
+
+    #[test]
+    fn smtp_program_uses_smtp_does_not_trigger_without_call() {
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        for src in [
+            "fn double(n: Int) -> Int => n * 2",
+            "@get(\"/x\")\nfn h() -> Str => \"ok\"\n",
+            // `http.get` is NOT `smtp.send` — different module.
+            "async fn check(url: Str) -> Result<Int> {\n\
+                 let r = http.get(url).await?\n\
+                 return Ok(r.status)\n\
+             }",
+        ] {
+            let tokens = tokenize(src).expect("tokenize ok");
+            let program = parse(tokens).expect("parse ok");
+            assert!(
+                !program_uses_smtp(&program),
+                "should NOT trigger on: {}",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn smtp_cargo_toml_emits_lettre_when_uses_smtp_true() {
+        // 15th positional arg (uses_smtp) = true → lettre in deps.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false, false, true,
+        );
+        assert!(
+            toml.contains("lettre = "),
+            "expected lettre in deps with uses_smtp=true, was: {}",
+            toml
+        );
+        assert!(
+            toml.contains("tokio1-rustls-tls"),
+            "expected tokio1-rustls-tls feature, was: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn smtp_cargo_toml_does_not_emit_lettre_without_flag() {
+        // 15th positional arg = false → no lettre.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false, false, false,
+        );
+        assert!(
+            !toml.contains("lettre"),
+            "should NOT include lettre without uses_smtp=true, was: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn smtp_cargo_toml_uses_smtp_pulls_tokio_with_time() {
+        // CLI program with only `smtp.send` — lettre's pool uses
+        // `tokio::time::timeout` internally, so we need feature `time`.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false, false, true,
+        );
+        assert!(
+            toml.contains("tokio = "),
+            "expected tokio entry with uses_smtp=true: {}",
+            toml
+        );
+        assert!(
+            toml.contains("\"macros\""),
+            "expected macros feature: {}",
+            toml
+        );
+        assert!(
+            toml.contains("\"time\""),
+            "expected time feature for lettre pool: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn smtp_codegen_emits_prelude_when_program_uses_smtp_send() {
+        // End-to-end: `smtp.send(...)` produces Rust with `SMTP_PRELUDE`
+        // hooks (struct `SmtpResultData`, static
+        // `__FITZ_SMTP_TRANSPORT`, helper `__fitz_smtp_send`).
+        let rust = gen("async fn notify() -> Result<Str> {\n\
+                 let r = smtp.send({\
+                     \"to\": \"a@b.com\",\
+                     \"from\": \"bot@b.com\",\
+                     \"subject\": \"hi\",\
+                     \"body\": \"hola\",\
+                 }).await?\n\
+                 return Ok(r.message_id)\n\
+             }")
+        .expect("smtp codegen ok");
+        assert!(
+            rust.contains("struct SmtpResultData"),
+            "expected SmtpResultData in generated Rust"
+        );
+        assert!(
+            rust.contains("__FITZ_SMTP_TRANSPORT"),
+            "expected static __FITZ_SMTP_TRANSPORT"
+        );
+        assert!(
+            rust.contains("async fn __fitz_smtp_send"),
+            "expected __fitz_smtp_send async helper"
+        );
+        assert!(
+            rust.contains("__FitzSmtpSendOpts"),
+            "expected callsite construction of __FitzSmtpSendOpts"
+        );
+    }
+
+    #[test]
+    fn smtp_codegen_rejects_non_literal_opts_with_clear_message() {
+        // Map literal at the callsite is required (paralelo a
+        // `http.request(opts)`). A `let opts = {...}` + `smtp.send(opts)`
+        // must error with a clear message.
+        let err = gen("async fn notify() -> Result<Str> {\n\
+                 let opts = {\
+                     \"to\": \"a@b.com\",\
+                     \"from\": \"bot@b.com\",\
+                     \"subject\": \"hi\",\
+                     \"body\": \"hola\",\
+                 }\n\
+                 let r = smtp.send(opts).await?\n\
+                 return Ok(r.message_id)\n\
+             }")
+        .expect_err("expected codegen error for non-literal opts");
+        assert!(
+            err.message.contains("Map literal"),
+            "expected message about Map literal, was: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn smtp_codegen_rejects_attachments_with_clear_message() {
+        let err = gen("async fn notify() -> Result<Str> {\n\
+                 let r = smtp.send({\
+                     \"to\": \"a@b.com\",\
+                     \"from\": \"bot@b.com\",\
+                     \"subject\": \"hi\",\
+                     \"body\": \"hola\",\
+                     \"attachments\": [],\
+                 }).await?\n\
+                 return Ok(r.message_id)\n\
+             }")
+        .expect_err("expected codegen error for attachments");
+        assert!(
+            err.message.contains("attachments"),
+            "expected message about attachments, was: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("MVP"),
+            "expected message citing MVP, was: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn smtp_codegen_rejects_missing_to_with_clear_message() {
+        let err = gen("async fn notify() -> Result<Str> {\n\
+                 let r = smtp.send({\
+                     \"from\": \"bot@b.com\",\
+                     \"subject\": \"hi\",\
+                     \"body\": \"hola\",\
+                 }).await?\n\
+                 return Ok(r.message_id)\n\
+             }")
+        .expect_err("expected codegen error for missing `to`");
+        assert!(
+            err.message.contains("`to`") || err.message.contains("requires the key `to`"),
+            "expected message about missing `to`, was: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn smtp_codegen_rejects_body_and_body_text_together() {
+        let err = gen("async fn notify() -> Result<Str> {\n\
+                 let r = smtp.send({\
+                     \"to\": \"a@b.com\",\
+                     \"from\": \"bot@b.com\",\
+                     \"subject\": \"hi\",\
+                     \"body\": \"hola\",\
+                     \"body_text\": \"otro\",\
+                 }).await?\n\
+                 return Ok(r.message_id)\n\
+             }")
+        .expect_err("expected codegen error for body+body_text");
+        assert!(
+            err.message.contains("alias"),
+            "expected message about alias, was: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn smtp_codegen_accepts_body_html_only() {
+        // `body_html` alone (no `body_text`/`body`) is valid: emits
+        // single-part HTML message. The codegen must not require both.
+        let rust = gen("async fn notify() -> Result<Str> {\n\
+                 let r = smtp.send({\
+                     \"to\": \"a@b.com\",\
+                     \"from\": \"bot@b.com\",\
+                     \"subject\": \"hi\",\
+                     \"body_html\": \"<p>hola</p>\",\
+                 }).await?\n\
+                 return Ok(r.message_id)\n\
+             }")
+        .expect("smtp html-only codegen ok");
+        assert!(
+            rust.contains("__FitzSmtpSendOpts"),
+            "expected __FitzSmtpSendOpts construction"
         );
     }
 
@@ -36656,7 +37661,7 @@ mod tests {
         // emitted `[dependencies]` section must include tokio.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, true,
+            false, true, false,
         );
         assert!(
             toml.contains("tokio = "),
@@ -36933,7 +37938,7 @@ mod tests {
         // that emits the OTel + metrics + uuid + chrono + tracing deps.
         let cargo = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             cargo.contains("opentelemetry-otlp"),
@@ -36999,7 +38004,7 @@ mod tests {
         // with `abi3-py310` + `auto-initialize`.
         let toml = cargo_toml_for(
             "foo", false, false, true, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(toml.contains("[dependencies]"), "expected deps section");
         assert!(toml.contains("pyo3"), "expected pyo3 in deps");
@@ -37019,7 +38024,7 @@ mod tests {
     fn cargo_toml_python_and_http_include_both() {
         let toml = cargo_toml_for(
             "foo", true, false, true, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
@@ -37030,7 +38035,7 @@ mod tests {
     fn cargo_toml_without_python_does_not_include_pyo3() {
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
@@ -42865,7 +43870,7 @@ mod tests {
     fn cargo_toml_with_jobs_includes_cron_and_chrono() {
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
@@ -42879,7 +43884,7 @@ mod tests {
         // Cron-only mode needs `signal` for ctrl_c.
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             toml.contains("\"signal\""),
@@ -42897,7 +43902,7 @@ mod tests {
         // `__fitz_shutdown_signal`, so it needs the `signal` feature.
         let toml = cargo_toml_for(
             "app", true, false, false, false, false, true, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(toml.contains("cron"));
         assert!(
@@ -43844,7 +44849,7 @@ mod tests {
         // We use `cargo_toml_for` directly (parallel to existing tests).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, true, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             toml.contains("sha2 = \"0.10\""),
@@ -43899,7 +44904,7 @@ mod tests {
     fn codegen_db_cargo_toml_without_db_does_not_add_deps() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             !toml.contains("sha2"),
@@ -45381,7 +46386,7 @@ mod tests {
         // serde_json with preserve_order.
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, false, false, false, true, true, false,
-            false, false,
+            false, false, false,
         );
         assert!(
             toml.contains("serde_json"),

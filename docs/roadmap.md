@@ -35,6 +35,42 @@ Plan completo + tabla de estado con todos los bugs en [`docs/deudas-post-5b.md`]
 
 ---
 
+## Mini-tanda — SMTP builtin ✅ CERRADA v0.18.0 (2026-06-19)
+
+**Hito**: el módulo `smtp` builtin (cliente SMTP outbound) entra al lenguaje como ciudadano de primera clase, paralelo bit-a-bit al HTTP client de v0.17.0. **Cierra la otra brecha chica del stack web outbound** — HTTP client + SMTP cubren los dos casos canónicos: cliente para APIs externas + cliente para email. **Detectada como deuda explícita** el 2026-06-18 durante el desarrollo de fitzwatch (que necesita despachar emails de incidents y workaroundeaba via webhook + n8n/zapier).
+
+**API**: una sola función — `smtp.send(opts: Map) -> Future<Result<SmtpResult>>`.
+- Required keys: `to`/`subject` (Str).
+- At least one of: `body`/`body_text`/`body_html` (Str). `body` solo es alias de `body_text` para el caso 90%.
+- Optional: `from` (Str — opcional si `SMTP_FROM` env var está seteada).
+- Texto plano + HTML juntos → multipart/alternative automático.
+- Tipo built-in nuevo `SmtpResult { delivered: Bool, message_id: Str, duration_ms: Int }` pre-registrado en `TypeEnv`.
+
+**Configuración via env vars** (al boot):
+- `SMTP_HOST` (required), `SMTP_PORT` (default según TLS: 587/465/25).
+- `SMTP_USER` + `SMTP_PASSWORD` (juntos o ninguno, error claro si desbalanceado).
+- `SMTP_FROM` (default `From`).
+- `SMTP_TLS` (`starttls`/`implicit`/`none`, aliases `tls`/`ssl`/`plain`).
+
+**Modelo de errores**: `Result::Err(Str)` con prefijo `"smtp: "` para fallos de transporte (DNS, conexión, auth, TLS handshake, server reject, address parse, missing config). Status 5xx del SMTP server cuenta como Err — lettre solo acepta el relay con response 250.
+
+**Backend**: `lettre = "0.11"` con features `tokio1-rustls-tls` + `smtp-transport` + `pool` + `builder` + `hostname`. Linkeado estático sin openssl. Connection pool reusa TCP/TLS entre sends.
+
+**5 diferenciales** (ver CHANGELOG v0.18.0 + cap 17 de la guía sub-sección "SMTP outbound"):
+1. Built-in del lenguaje — no `pip install yagmail` / `npm install nodemailer` / `cargo add lettre` / Maven `JavaMail`. Solo Go tiene `net/smtp` stdlib pero es low-level.
+2. Paridad bit-a-bit `fitz run` ↔ `fitz build` — `lettre` linkeado estático con `tokio1-rustls-tls`, sin openssl en el host.
+3. Async ciudadano de primera (`@cron` digests/reportes, `@background`+`spawn` welcome emails, handlers HTTP magic-link auth).
+4. `Result<T>` automático — `?` propaga, checker exige manejo (regla 5.3.3).
+5. Sin deps externas en el host — el binario standalone NO requiere SMTP libs del SO.
+
+**8 sub-bloques cerrados**: B1 evaluator (`src/smtp.rs` nuevo ~520 LoC + 10 unit tests) + B2 checker (pre-registro + 6 unit tests) + B3 codegen (`SMTP_PRELUDE` ~280 LoC + dispatch `gen_smtp_call` + 11 unit tests + 24 call sites de `cargo_toml_for` actualizados) + B4 LSP (scope_level + after_dot completions + 3 unit tests) + B5 guía+ejemplos (sub-sección nueva en cap 17 + 3 ejemplos runnable `17i`/`17j`/`17k` contra MailHog) + B6 cross-docs + B7 boilerplate + B8 cierre formal v0.18.0.
+
+**Verificación pre-bump**: 3171 unit lib (+30 vs cosecha: 10 smtp + 6 checker + 11 codegen + 3 LSP) + smoke `GUIDE_EXAMPLES_COMPILE` verde 369 ejemplos en 282.28s (+3 SMTP nuevos) + build manual de `17i`/`17j`/`17k` verde a binario nativo.
+
+Plan completo + decisiones técnicas en [`docs/deudas-post-5b.md`](deudas-post-5b.md) → "🟢 SMTP builtin — CERRADA v0.18.0". Detalle release-style en [`CHANGELOG.md`](../CHANGELOG.md) → v0.18.0.
+
+---
+
 ## Mini-tanda — HTTP client builtin ✅ CERRADA v0.17.0 (2026-06-18)
 
 **Hito**: el módulo `http` builtin (cliente HTTP outbound) entra al lenguaje como ciudadano de primera clase, paralelo al HTTP server-side cerrado en Fase 4. 9 bloques cerrados en una sesión + fix coordinado W18 para destrabar el codegen cross-module observability descubierto al validar B8 sobre `boilerplates/api-orm-full` multi-archivo.

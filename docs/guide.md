@@ -7727,19 +7727,296 @@ Cuatro ejemplos en `examples/guide/` que cubren el MVP entero:
   fitzwatch: `@cron("*/30 * * * * *")` + `http.head` con timeout
   corto + log estructurado.
 
+### SMTP outbound
+
+Si HTTP outbound es "el lado cliente" para APIs externas, **`smtp`**
+es el equivalente para **email**. Mandar mails — notificaciones de
+incidents, password resets, magic links, alerts, marketing
+transactional — desde un programa Fitz no requiere ningún paquete
+extra: el módulo `smtp` es **built-in del lenguaje**, paralelo
+exacto a `http`/`log`/`jwt`/`hash`.
+
+Casos típicos:
+
+- Notificaciones de status page: el monitor cae → mandás email a la
+  team list.
+- Password reset / magic-link auth: generás el token, enviás el mail
+  con el link único.
+- Alertas de jobs `@cron`: el backup nightly falló → email al
+  on-call.
+- Welcome emails después de un signup HTTP exitoso.
+- Reportes diarios / weekly digests despachados desde `@cron`.
+
+**Panorama vecino**:
+
+| Lenguaje | Cliente SMTP típico | Built-in | Sin deps extras |
+|---|---|---|---|
+| Python | `smtplib` (stdlib) o `yagmail` (pip) | parcial (`smtplib`) | sí (stdlib) / no (yagmail) |
+| JavaScript | `nodemailer` (`npm install`) | no | no |
+| Rust | `lettre` (`cargo add`) | no | no |
+| Java | `JavaMail` (Maven) o `Jakarta Mail` | no | no |
+| Go | `net/smtp` (stdlib, low-level) | sí | sí |
+| **Fitz** | **`smtp` (built-in)** | **sí** | **sí** |
+
+**Por qué Fitz hace esto distinto** — cinco diferenciales que
+componen exactamente como los del HTTP client outbound:
+
+1. **Built-in del lenguaje, no lib externa**: `smtp` está
+   pre-registrado en el evaluator y el checker. Cero
+   `pip install yagmail`, `npm install nodemailer`, `cargo add lettre`.
+2. **Paridad bit-a-bit `fitz run` ↔ `fitz build`**: el binario
+   compilado lleva `lettre` linkeado estático con TLS via rustls.
+   El mismo programa produce los mismos frames SMTP en intérprete y
+   compilado.
+3. **Async ciudadano de primera**: `smtp.send(opts)` devuelve
+   `Future<Result<SmtpResult>>` y se integra natural con `@cron`,
+   `@background`, `spawn(...)`, y handlers HTTP server-side. El
+   connection pool (TCP/TLS reusable entre sends) es transparente.
+4. **`Result<T>` automático**: errores de transporte (DNS fail,
+   auth incorrecta, TLS handshake, server reject, address parse
+   inválido) llegan como `Result::Err(Str)` con prefijo `"smtp: "`.
+   El `?` propaga, el `match` clasifica, el checker exige
+   manejarlos.
+5. **Sin deps externas en el binario final**: el binario `fitz`
+   ya trae `lettre` con `rustls-tls`. `fitz build` produce un
+   `.exe` standalone — no hace falta OpenSSL ni nada en la máquina
+   destino.
+
+#### API completo
+
+Una sola función — `smtp.send(opts: Map)`:
+
+```fitz
+let r = smtp.send({
+    "to": "user@example.com",
+    "from": "bot@example.com",       // opcional si SMTP_FROM está en env
+    "subject": "Hola desde Fitz",
+    "body": "Texto plano del email.",
+}).await?
+```
+
+Para HTML + texto plano (multipart/alternative), pasás los dos
+bodies:
+
+```fitz
+let r = smtp.send({
+    "to": "user@example.com",
+    "from": "bot@example.com",
+    "subject": "Hola",
+    "body_text": "Versión texto plano para clientes viejos.",
+    "body_html": "<h1>Hola</h1><p>Versión <b>HTML</b>.</p>",
+}).await?
+```
+
+`body` solo (sin sufijos) es alias de `body_text` — cómodo para el
+caso 90%.
+
+#### El tipo `SmtpResult`
+
+Cada call exitoso devuelve un `Result::Ok(SmtpResult)` con tres
+fields:
+
+```fitz
+type SmtpResult {
+    delivered: Bool      // true si el servidor aceptó el relay (250)
+    message_id: Str      // Message-ID generado por lettre
+    duration_ms: Int     // tiempo total (handshake + send + cierre)
+}
+```
+
+`SmtpResult` es **built-in** (paralelo a `HttpClientResponse`): no
+lo importás, está disponible siempre. El LSP lo conoce, el checker
+verifica los fields, el codegen lo emite como struct Rust nativo.
+
+#### Configuración via env vars
+
+El módulo lee la configuración del SMTP server desde el **entorno
+del proceso** la primera vez que llamás `smtp.send`. Convención
+estándar (la misma que Postfix / sendmail-like clients usan en
+Docker / Kubernetes):
+
+| Env var | Default | Significado |
+|---|---|---|
+| `SMTP_HOST` | (required) | hostname del SMTP server |
+| `SMTP_PORT` | depende de TLS (587 / 465 / 25) | puerto TCP |
+| `SMTP_USER` | (sin auth) | usuario para auth |
+| `SMTP_PASSWORD` | (sin auth) | password para auth |
+| `SMTP_FROM` | (sin default) | From por defecto si la opts no especifica |
+| `SMTP_TLS` | `starttls` | `starttls` (puerto 587) / `implicit` (465) / `none` (25) |
+
+`SMTP_USER` y `SMTP_PASSWORD` van juntos: si uno está y el otro no,
+el primer send aborta con error claro citando el desbalance.
+
+Para dev local, una sola env var alcanza si apuntás a
+[MailHog](https://github.com/mailhog/MailHog) (smtp server fake con
+UI web que retiene los mails sin reenviar):
+
+```bash
+docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog
+export SMTP_HOST=localhost
+export SMTP_PORT=1025
+export SMTP_TLS=none
+# Después abrís http://localhost:8025 en el browser para ver los mails.
+```
+
+#### Modelo de errores
+
+Paralelo bit-a-bit a HTTP client: los errores de transporte llegan
+como `Result::Err(Str)` con prefijo `"smtp: "`, identificables:
+
+| Mensaje | Causa |
+|---|---|
+| `"smtp: SMTP_HOST is not set"` | falta config en el entorno |
+| `"smtp: invalid `to` address ..."` | parse de email malformado |
+| `"smtp: server rejected mail: ..."` | el server respondió 5xx (5.x.x SMTP) |
+| `"smtp: transient error: ..."` | response 4xx temporario (4.x.x SMTP) |
+| `"smtp: client error: ..."` | TLS handshake, auth fail, protocolo |
+| `"smtp: permanent error: ..."` | conexión rechazada por el server |
+
+Patrón canónico con `?`:
+
+```fitz
+async fn notify(addr: Str, subject: Str, body: Str) -> Result<Str> {
+    let r = smtp.send({
+        "to": addr,
+        "subject": subject,
+        "body": body,
+    }).await?
+    return Ok(r.message_id)
+}
+```
+
+Y con `match` para distinguir categorías:
+
+```fitz
+match smtp.send(opts).await {
+    Ok(r) => log.info("smtp.delivered", message_id: r.message_id, ms: r.duration_ms),
+    Err(e) => log.warn("smtp.failed", error: e),
+}
+```
+
+#### Integración con el resto del lenguaje
+
+Igual que `http.*`, `smtp.send` es async y devuelve `Future<T>`, así
+que encaja natural con:
+
+**`@background` + `spawn(...)`** — fire-and-forget para no bloquear
+la HTTP response del signup:
+
+```fitz
+@background
+async fn send_welcome(email: Str) -> Null {
+    let _ = smtp.send({
+        "to": email,
+        "subject": "Bienvenido",
+        "body": "Hola, gracias por unirte.",
+    }).await
+    return null
+}
+
+@post("/signup")
+fn signup(input: SignupInput) {
+    // ... crear el user en la DB ...
+    let _ = spawn(send_welcome(input.email))
+    return 201 {"id": new_user_id}
+}
+```
+
+**`@cron`** — digests / reportes periódicos:
+
+```fitz
+@cron("0 0 9 * * *")  // todos los días 09:00
+async fn daily_digest() -> Null {
+    let r = smtp.send({
+        "to": "team@example.com",
+        "subject": "Daily digest",
+        "body_html": "<p>Hoy: ...</p>",
+    }).await
+    match r {
+        Ok(_) => log.info("digest.sent"),
+        Err(e) => log.error("digest.failed", error: e),
+    }
+    return null
+}
+```
+
+**Combinado con `auth` + `jwt`** — magic-link auth en un solo
+binario:
+
+```fitz
+@post("/auth/magic-link")
+async fn magic_link(input: EmailRequest) -> Result<Str> {
+    let token = jwt.encode({"email": input.email}, "secret", {})?
+    let link = "https://app.example.com/auth/verify?t={token}"
+    let r = smtp.send({
+        "to": input.email,
+        "subject": "Tu link de login",
+        "body": "Hacé click en este link para entrar:\n{link}",
+    }).await?
+    return Ok(r.message_id)
+}
+```
+
+#### Limitaciones del MVP
+
+Documentadas para entender qué SÍ entra y qué queda como deuda
+visible (refinable post-MVP):
+
+- **Sin attachments** — `attachments` en `opts` se rechaza con
+  error claro. Workaround: typical flow es bundle de attachments
+  via S3/object storage + link en el body.
+- **Sin `smtp.configure(...)`** — la config sale solo de env vars
+  hoy. Si necesitás override programático (multi-tenant con un SMTP
+  server por tenant), te queda como sub-paso post-MVP.
+- **Map literal solo strings** — en `fitz build`, las keys son `Str`
+  estrictas. Heterogéneos `Map<Str, Any>` con valores como Int /
+  Bool requieren `__FitzValue` integration (deuda paralela a
+  `jwt.encode`). Workaround: stringificar antes con interpolación.
+- **El módulo `smtp` tipa como `Any` en el checker** — paralelo a
+  `http`/`jwt`/`hash`. Refinable a signatures estrictas post-MVP.
+- **Sin templates dedicados** — el body es `Str` con interpolación
+  `"hola {name}"`. Para templates más sofisticados (Handlebars,
+  Tera), queda como deuda.
+- **Sin retry built-in** — `smtp.send` falla → es tu responsabilidad
+  reintentar (típicamente con `@cron` + tabla de outbox).
+
+#### Decisión de red para los ejemplos
+
+Los ejemplos abajo apuntan a **MailHog** en `localhost:1025`. El
+smoke `GUIDE_EXAMPLES_COMPILE` solo **compila** los ejemplos —
+no los ejecuta — así que no necesita SMTP server real durante CI.
+Para correrlos a mano (`fitz run` o `./bin`), levantás MailHog con
+el `docker run` de arriba y exportás las 3 env vars.
+
+#### Ejemplos runnable
+
+Tres ejemplos en `examples/guide/` que cubren el MVP entero:
+
+- **`17i-smtp-basico.fitz`** — `smtp.send` simple con body plano
+  contra MailHog local; inspección de `SmtpResult.delivered` y
+  `r.message_id`.
+- **`17j-smtp-errores.fitz`** — modelo de errores: faltan env vars,
+  address malformada, body multi-line con interpolación; helper
+  canónico que devuelve `Result<Str>` con `?`.
+- **`17k-smtp-magic-link.fitz`** — magic-link auth combinando
+  `@post` HTTP server-side + `jwt.encode` + `smtp.send` con HTML +
+  body texto plano alternativos (`body_text` + `body_html` →
+  multipart/alternative automático).
+
 ---
 
 Con HTTP cerramos la Fase 4 y la mini-fase de Middleware + CORS
-post-Fase 7, más la mini-tanda HTTP client del lado outbound.
-Tenés ahora todas las piezas para escribir APIs reales en Fitz:
-rutas, JSON tipado, manejo de errores propagable, configuración del
-server, status codes custom, query params, middleware apilable, CORS
-configurable y cliente HTTP outbound para integrar con servicios
-externos. El próximo capítulo cubre la **paridad con FastAPI en
-developer experience**: documentación de la API autogenerada
-(`/openapi.json` + UI Scalar en `/docs`). Después, el cap 19 cubre
-la otra mitad de "HTTP nativo": concurrencia con `async fn` y
-`.await`.
+post-Fase 7, más la mini-tanda HTTP client del lado outbound y la
+mini-tanda SMTP. Tenés ahora todas las piezas para escribir APIs
+reales en Fitz: rutas, JSON tipado, manejo de errores propagable,
+configuración del server, status codes custom, query params,
+middleware apilable, CORS configurable, cliente HTTP outbound para
+integrar con servicios externos, y SMTP outbound para mandar mails
+sin libs extras. El próximo capítulo cubre la **paridad con
+FastAPI en developer experience**: documentación de la API
+autogenerada (`/openapi.json` + UI Scalar en `/docs`). Después, el
+cap 19 cubre la otra mitad de "HTTP nativo": concurrencia con
+`async fn` y `.await`.
 
 ---
 

@@ -28,7 +28,7 @@
 //   - Anotar `let x: Str = match Result { ... }` cuando hay
 //     early-return en el Err arm (bug del checker, deuda menor).
 
-from config import db_url, webhook_url
+from config import db_url, webhook_url, smtp_enabled
 // Importar TODOS los @table types — el codegen valida las
 // relations de cada type referenciado (W17 + deuda residual).
 from models import User, Profile, Post, Comment
@@ -220,6 +220,56 @@ async fn notify_post_published(post_id: Int, slug: Str, title: Str) -> Null {
     return null
 }
 
+// --- @background notify_author_by_email — SMTP outbound ---------
+//
+// **Showcase del módulo `smtp` builtin del lenguaje** (mini-tanda
+// v0.18.0, cap 17 sub-sec "SMTP outbound" de la guía).
+//
+// Paralelo a `notify_post_published` pero por email en lugar de
+// webhook: cuando el handler `update_post` mueve un post a status
+// "published", también manda un email al autor confirmando que
+// su post está vivo.
+//
+// **Política**: si `SMTP_ENABLED=false` (default) → skip
+// silencioso. Sin overhead para el caso 90% dev local. Si el
+// usuario opt-in, el módulo `smtp` lee SMTP_HOST/PORT/USER/etc
+// del entorno al primer send (paralelo a `db.connect`).
+//
+// **Fire-and-forget**: lanzado desde `update_post` via
+// `spawn(...)`, la response al cliente sale inmediato sin
+// esperar al server SMTP. Cero panic — errores van a stderr
+// como `log.error(...)` estructurado.
+@background
+async fn notify_author_by_email(author_email: Str, slug: Str, title: Str) -> Null {
+    if (not smtp_enabled()) {
+        return null
+    }
+    if (author_email == "") {
+        log.warn("smtp skip — author email empty", slug: slug)
+        return null
+    }
+    log.info("smtp dispatching", to: author_email, slug: slug)
+    // Body multi-line con interpolación — el módulo smtp soporta
+    // `\n` literal adentro de strings interpolados.
+    let body = "Tu post '{title}' fue publicado.\n\nSlug: {slug}\n\nFitz Blog automated email."
+    let r = smtp.send({
+        "to": author_email,
+        "subject": "Tu post '{title}' fue publicado",
+        "body": body,
+    }).await
+    match r {
+        Ok(resp) => log.info(
+            "smtp delivered",
+            to: author_email,
+            slug: slug,
+            message_id: resp.message_id,
+            duration_ms: resp.duration_ms,
+        ),
+        Err(e) => log.error("smtp transport error", to: author_email, error: e),
+    }
+    return null
+}
+
 // --- PUT /posts/{id} — actualizar (auth + owner check) -----------
 //
 // Verifica que el `user.id` autenticado sea el `author_id` del
@@ -251,15 +301,35 @@ async fn update_post(user: User, id: Int, body: PostUpdate) -> Result<Int> {
 
     let affected = Post.where(fn(p) => p.id == id).update(conn, updates).await?
 
-    // Webhook outbound: dispara solo si este PUT cambia status a
-    // "published" (no en cada update). Datos del post para el
-    // payload los tomamos del `body` actualizado o del `existing`
-    // si el body no los pisó. Slug/title NO se renombran a menudo,
-    // pero por consistencia usamos los efectivos.
+    // Side-effects outbound: webhook + email cuando el PUT cambia
+    // status a "published". Ambos fire-and-forget via `spawn(...)`,
+    // la response al cliente sale inmediato.
+    //
+    // El webhook (`notify_post_published`) ejercita el módulo `http`
+    // builtin; el email (`notify_author_by_email`) ejercita el
+    // módulo `smtp` builtin (mini-tanda v0.18.0). Ambos opt-in via
+    // env vars (`WEBHOOK_URL` / `SMTP_ENABLED`).
     if (body.status == "published") {
         let effective_slug = if (body.slug == "") { existing.slug } else { body.slug }
         let effective_title = if (body.title == "") { existing.title } else { body.title }
         let _ = spawn(notify_post_published(id, effective_slug, effective_title))
+        // Email outbound: necesitamos el email del autor. Lo
+        // resolvemos via User.where(...).first() — una sola query
+        // adicional, asíncrona del lado del @background. Si la
+        // query falla (user borrado entre el update y el lookup),
+        // se skipea con log.warn.
+        let author_result = User.where(fn(u) => u.id == existing.author_id).first(conn).await
+        match author_result {
+            Ok(author) => {
+                let _ = spawn(notify_author_by_email(author.email, effective_slug, effective_title))
+            }
+            Err(e) => log.warn(
+                "smtp skip — author lookup failed",
+                post_id: id,
+                author_id: existing.author_id,
+                error: e,
+            ),
+        }
     }
 
     return Ok(affected)

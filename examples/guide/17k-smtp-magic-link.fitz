@@ -1,0 +1,78 @@
+// 17k-smtp-magic-link.fitz — Magic-link auth combinando HTTP
+// server-side + jwt + smtp en un solo binario.
+//
+// El usuario hace POST /auth/magic-link con su email. El handler
+// genera un JWT con expiración corta, arma el link único, y manda el
+// mail con texto plano + HTML alternativos (multipart/alternative
+// automático cuando pasás `body_text` + `body_html`).
+//
+// Este patrón es el caso 90% de auth sin password: SaaS modernos
+// (Notion, Vercel, Substack) usan exactamente esto.
+//
+// Para correrlo a mano:
+//
+//   docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog
+//   export SMTP_HOST=localhost
+//   export SMTP_PORT=1025
+//   export SMTP_TLS=none
+//   export SMTP_FROM=auth@app.example.com
+//   fitz run examples/guide/17k-smtp-magic-link.fitz
+//
+// En otra terminal:
+//
+//   curl -X POST http://127.0.0.1:9000/auth/magic-link \
+//     -H "Content-Type: application/json" \
+//     -d '{"email": "user@example.com"}'
+//
+// Después abrís http://localhost:8025 para ver el mail con el link.
+
+type EmailRequest {
+    email: Str
+}
+
+type MagicLinkResponse {
+    sent: Bool
+    message_id: Str
+    duration_ms: Int
+}
+
+@post("/auth/magic-link")
+async fn magic_link(input: EmailRequest) -> Result<MagicLinkResponse> {
+    // 1) Generamos el JWT con el email adentro. En producción
+    //    agregaríamos un `exp` corto (5 minutos) — para el MVP del
+    //    ejemplo lo dejamos simple. `jwt.encode` es sync, devuelve
+    //    `Str` directo (no Result), por eso sin `?`.
+    let payload = { "email": input.email }
+    let token = jwt.encode(payload, "dev-secret-no-prod")
+
+    // 2) Armamos el link único. En producción el `https://app.example.com`
+    //    sale de una env var o de la config del deploy.
+    let link = "http://localhost:9000/auth/verify?t={token}"
+
+    // 3) Mandamos el mail. Texto plano + HTML alternativos:
+    //    multipart/alternative automático adentro de lettre.
+    let r = smtp.send({
+        "to": input.email,
+        "subject": "Tu link de login",
+        "body_text": "Hola,\n\nHacé click en este link para entrar:\n{link}\n\nExpira en 5 minutos.\n\nFitz Magic Link",
+        "body_html": "<h2>Tu link de login</h2><p>Hacé click <a href=\"{link}\">acá</a> para entrar.</p><p>Expira en 5 minutos.</p>",
+    }).await?
+
+    return Ok(MagicLinkResponse {
+        sent: r.delivered,
+        message_id: r.message_id,
+        duration_ms: r.duration_ms,
+    })
+}
+
+@get("/auth/verify")
+fn verify(t: Str) -> Str {
+    // Stub del verify — en producción acá decodificás el token,
+    // chequeás la firma, validás `exp`, y emitís una session cookie /
+    // session token. El ejemplo se queda en mostrar que el link llegó.
+    let preview = if (t.len() > 16) { "{t.left(16)}..." } else { t }
+    return "Token recibido: {preview} (decode + verify queda al lector)"
+}
+
+@server(9000)
+fn main() => 0

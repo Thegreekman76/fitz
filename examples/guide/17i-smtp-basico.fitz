@@ -1,0 +1,76 @@
+// 17i-smtp-basico.fitz — Ejemplo de la sub-sección "SMTP outbound"
+// del capítulo 17.
+//
+// `smtp.send(opts)` es el único builtin del módulo `smtp`. Devuelve
+// `Future<Result<SmtpResult>>`, por eso aparece siempre con `.await?`
+// en el callsite.
+//
+// Apunta a MailHog en localhost:1025 (SMTP server fake con UI web en
+// puerto 8025 que retiene los mails sin reenviar — ideal para dev /
+// CI). El smoke `GUIDE_EXAMPLES_COMPILE` solo compila — no ejecuta —
+// así que el ejemplo no requiere MailHog vivo durante CI.
+//
+// Para correrlo a mano levantás MailHog:
+//
+//   docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog
+//   export SMTP_HOST=localhost
+//   export SMTP_PORT=1025
+//   export SMTP_TLS=none
+//   fitz run examples/guide/17i-smtp-basico.fitz
+//   # Después abrís http://localhost:8025 en el browser.
+
+// El operador `?` solo se permite adentro de una fn que retorna
+// `Result<T>`. Encapsulamos el flow happy-path en `run()` con
+// `Result<Null>` y matcheamos desde top-level (patrón canónico,
+// paralelo a `17e-http-client-basico`).
+async fn run() -> Result<Null> {
+    // Caso 1 — body texto plano. Required: to/subject + body.
+    // `from` es opcional si SMTP_FROM está en el entorno; lo pasamos
+    // explícito para que el ejemplo sea autosuficiente.
+    let r = smtp.send({
+        "to": "user@example.com",
+        "from": "bot@fitz.dev",
+        "subject": "Hola desde Fitz",
+        "body": "Este es el primer mail despachado por smtp.send.",
+    }).await?
+    print("✓ delivered: {r.delivered}")
+    print("  message_id: {r.message_id}")
+    print("  duration_ms: {r.duration_ms}")
+
+    // Caso 2 — multipart/alternative (texto + HTML). Cuando pasás
+    // los dos `body_text` y `body_html`, lettre arma un mail
+    // multipart automático. El cliente moderno gana HTML; fallback a
+    // texto si no soporta HTML.
+    let r2 = smtp.send({
+        "to": "user@example.com",
+        "from": "bot@fitz.dev",
+        "subject": "Email multipart",
+        "body_text": "Versión texto plano para clientes viejos.",
+        "body_html": "<h1>Hola</h1><p>Versión <b>HTML</b> de Fitz.</p>",
+    }).await?
+    print("")
+    print("✓ multipart delivered: {r2.delivered}")
+    print("  message_id: {r2.message_id}")
+
+    // Caso 3 — solo HTML (sin fallback texto). El header
+    // Content-Type sale como text/html automático.
+    let r3 = smtp.send({
+        "to": "user@example.com",
+        "from": "bot@fitz.dev",
+        "subject": "Email HTML-only",
+        "body_html": "<p>HTML sin fallback texto.</p>",
+    }).await?
+    print("")
+    print("✓ html-only delivered: {r3.delivered}")
+    print("  message_id: {r3.message_id}")
+
+    return Ok(null)
+}
+
+// Top-level: invocamos `run()` y matcheamos el Result. Si algún
+// `.await?` se rompió (DNS, auth, server reject), el `Err` aparece
+// acá con prefijo `"smtp: "`.
+match run().await {
+    Ok(_) => print(""),  // happy path — todo logueado dentro de run().
+    Err(e) => print("✗ error: {e}"),
+}

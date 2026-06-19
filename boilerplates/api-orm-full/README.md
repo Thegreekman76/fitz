@@ -37,6 +37,7 @@ binario `fitz` mismo, paridad bit-a-bit `fitz run` ↔ `fitz build`.
 | **WebSockets tipados + AsyncAPI 3.0**| `@ws("/feed")` + broadcast + heartbeat + `/asyncapi.json` |
 | **Cron jobs sin broker**             | `@cron("0 0 * * *")` scheduler embebido en el binario   |
 | **HTTP client outbound built-in**    | `http.post(WEBHOOK_URL, payload)` + `@background + spawn` |
+| **SMTP outbound built-in**           | `smtp.send({...})` cuando `SMTP_ENABLED=true` + `@background + spawn` |
 | **ORM declarativo sobre `type`**     | `@table`/`@primary`/`@belongs_to`/`@has_many`/`@has_one`|
 | **Driver Postgres puro Fitz/Rust**   | Wire protocol v3.0 directo, sin libpq                   |
 | **Relations + eager loading**        | `.preload("author")` + `.preload("comments")`           |
@@ -274,6 +275,50 @@ lenguaje** (no `pip install requests`, no `npm install axios`,
 no `cargo add reqwest` — todo built-in del compilador). Detalle
 exhaustivo en el [cap M5.C5 del curso](../../docs/curso/m5-async-auth-rt/c5-http-client.md)
 y la sub-sección "HTTP client outbound" del cap 17 de la
+[guía](../../docs/guide.md).
+
+## Email outbound al publicar un post (v0.18.0)
+
+Paralelo al webhook outbound: cuando el `PUT /posts/{id}` pasa
+un post a `"published"`, el handler también dispara un **email
+al autor confirmando** que su post está publicado. Fire-and-forget
+via `@background + spawn(...)`, idéntico patrón al webhook.
+
+**Opt-in via env var `SMTP_ENABLED=true`**: por default el
+dispatch se skipea silencioso (dev local arranca sin MailHog
+ni SMTP setup). Cuando opt-in, el módulo `smtp` lee config del
+entorno al primer send.
+
+Para probar end-to-end contra MailHog local:
+
+```bash
+# Levantar MailHog (SMTP fake con UI web en puerto 8025).
+docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog
+
+# Habilitar el feature + apuntar a MailHog.
+export SMTP_ENABLED=true
+export SMTP_HOST=localhost
+export SMTP_PORT=1025
+export SMTP_TLS=none
+export SMTP_FROM=blog@example.com
+fitz run src/main.fitz
+
+# En otra terminal: crear post + publicar como en el webhook.
+# Después abrís http://localhost:8025 en el browser para ver el mail.
+```
+
+En stderr del server vas a ver:
+
+```text
+{"level":"info","msg":"smtp dispatching","to":"ada@example.com","slug":"hola"}
+{"level":"info","msg":"smtp delivered","to":"ada@example.com","message_id":"abc","duration_ms":42}
+```
+
+**Implementación**: ver `notify_author_by_email` en
+`src/posts.fitz`. Showcase del **módulo `smtp` builtin del
+lenguaje** (no `pip install yagmail`, no `npm install nodemailer`,
+no `cargo add lettre` — todo built-in del compilador). Detalle
+exhaustivo en la sub-sección "SMTP outbound" del cap 17 de la
 [guía](../../docs/guide.md).
 
 ## Imagen distroless

@@ -9,7 +9,71 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
-## [Sin publicar]
+## [v0.18.0] — 2026-06-19 — Mini-tanda SMTP builtin CERRADA + cosecha codegen post-fitzwatch CERRADA
+
+Release coordinado de dos hitos en 1 día: (1) cosecha codegen post-fitzwatch (14 de 15 bugs cerrados, B15 el bloqueante incluido) y (2) mini-tanda SMTP builtin entera (8 sub-bloques). Cierra dos deudas explícitas heredadas del desarrollo de fitzwatch (status page open-source en Fitz puro, pausada el 2026-06-18 esperando ambas).
+
+### Mini-tanda SMTP builtin CERRADA ENTERA (2026-06-19)
+
+Mini-tanda en bloque coordinado (8 sub-bloques B1-B8) que cierra
+la deuda "SMTP builtin" anotada el 2026-06-18 durante el desarrollo
+de fitzwatch. Fitz suma el módulo built-in `smtp` con `smtp.send(opts)`
+async, paralelo bit-a-bit al HTTP client de v0.17.0 y al resto del
+stack web nativo (HTTP server, WebSockets, auth, jobs, ORM, observability).
+
+| Bloque | Resumen | Tests nuevos |
+|---|---|---|
+| **B1 evaluator** | Módulo `Value::Module { name: "smtp" }` + `builtin_smtp_send` async + tipo `SmtpResult` pre-registrado + dispatch input → message lettre | 7 unit |
+| **B2 checker** | Pre-registro `smtp` (Type::Any) + `SmtpResult` (Nominal) en `CheckCtx::new` + regla `?` heredada de Result | 5 unit |
+| **B3 codegen** | Detector `program_uses_smtp` + Cargo.toml condicional `lettre = "0.11"` + `SMTP_PRELUDE` con `__FITZ_SMTP_TRANSPORT` LazyLock + dispatch `gen_smtp_call` + Map literal strict | 11 unit |
+| **B4 LSP** | Completions `scope_level` (`smtp` MODULE) + `after_dot` resuelve `smtp.send` (METHOD) + after-dot sobre `SmtpResult` lista 3 fields | 3 unit LSP |
+| **B5 guía + ejemplos** | Sub-sección "SMTP outbound" en cap 17 de `docs/guide.md` con panorama vecino + 5 diferenciales + 3 ejemplos runnable contra MailHog (`17i`/`17j`/`17k`) | smoke `GUIDE_EXAMPLES_COMPILE` (+3 ejemplos) |
+| **B6 docs cross-cutting** | CLAUDE + README + `docs/index.md` + roadmap + `deudas-post-5b` marcan CERRADA | — |
+| **B7 boilerplate** | `api-orm-full` suma `notify_author_by_email` paralelo a `notify_post_published` (opt-in via `SMTP_ENABLED`) | — |
+| **B8 cierre formal** | Bump v0.18.0 + extensión VSCode 0.18.0 + `.vsix` regenerado + blog drafts ES/EN en `docs/blogs/` | — |
+
+**API**: única función — `smtp.send(opts: Map) -> Future<Result<SmtpResult>>`.
+Required keys `to`/`subject` + al menos uno de `body`/`body_text`/`body_html`.
+`from` opcional si `SMTP_FROM` env var está seteada. Texto plano + HTML
+juntos → multipart/alternative automático.
+
+**Configuración**: env vars `SMTP_HOST` (required), `SMTP_PORT`
+(default según TLS: 587/465/25), `SMTP_USER` + `SMTP_PASSWORD`
+(juntos o ninguno), `SMTP_FROM` (default `From`), `SMTP_TLS`
+(`starttls`/`implicit`/`none`). `smtp.configure(...)` programático
+queda como deuda menor post-MVP.
+
+**Modelo de errores**: `Result::Err(Str)` con prefijo `"smtp: "` para
+errores de transporte (DNS, conexión, auth, TLS, server reject,
+address parse, missing config). Status 5xx del SMTP server cuenta
+como Err — lettre solo acepta el relay con response 250.
+
+**Tipo built-in nuevo** `SmtpResult { delivered: Bool, message_id: Str,
+duration_ms: Int }` pre-registrado en `TypeEnv` paralelo a
+`HttpClientResponse`/`Request`/`Response`/`File`. Accesible sin
+import, con autocomplete LSP de fields.
+
+**Backend**: `lettre = "0.11"` con features `tokio1-rustls-tls` +
+`smtp-transport` + `pool` + `builder` + `hostname`. Linkeado estático
+sin openssl. Connection pool reusa la conexión TCP/TLS entre sends
+(crítico para handlers HTTP / cron jobs que despachan varios mails
+seguidos).
+
+**Diferenciales** (paralelo a HTTP client):
+
+1. Built-in del lenguaje (zero `pip install yagmail` / `npm install nodemailer` / `cargo add lettre`).
+2. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+3. Async ciudadano de primera (`@cron`/`@background`/`spawn`/handlers HTTP).
+4. `Result<T>` automático con `?` propagation + checker exhaustividad.
+5. Sin deps externas en el host (`rustls-tls` no exige openssl).
+
+**Ningún lenguaje moderno del cuadro provee SMTP outbound como
+builtin del lenguaje con paridad bit-a-bit intérprete↔binario y zero
+deps externas para activarlo** — Python necesita `pip install` para
+yagmail (stdlib smtplib es low-level), JS/Node `npm install
+nodemailer`, Rust `cargo add lettre`, Java `JavaMail` con Maven. Solo
+Go tiene `net/smtp` en stdlib pero es low-level (RFC 5321 a mano);
+Fitz `smtp.send(opts)` es 1 línea.
 
 ### Cosecha codegen post-fitzwatch CERRADA ENTERA (2026-06-19)
 
