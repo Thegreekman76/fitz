@@ -9154,6 +9154,19 @@ impl<'a> __IntoPgValue for &'a str {
 impl __IntoPgValue for Vec<u8> {
     fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Bytes(self) }
 }
+/// Sub-paso 4 (cosecha codegen post-fitzwatch) — Nullable Fitz
+/// values (T?) lower to Option<T> in Rust. Without this blanket
+/// impl, passing a Nullable as the [..] arg of conn.query/conn.exec
+/// would fail with E0277 (trait bound not satisfied). None maps to
+/// SQL NULL, Some(v) delegates to the inner impl. Cierra B8.
+impl<T: __IntoPgValue> __IntoPgValue for Option<T> {
+    fn into_pg(self) -> __FitzPgValue {
+        match self {
+            Some(v) => v.into_pg(),
+            None => __FitzPgValue::Null,
+        }
+    }
+}
 /// `db.connect(url) -> Future<Result<DbConn>>`. Maps the runtime's
 /// `DbError` to `String` so it unpacks identically to other Fitz
 /// `Result<T, String>` (parallel to `Result<T, String>` of
@@ -43625,6 +43638,66 @@ mod tests {
         assert!(
             rust.contains("__row.get(\"author_id\")"),
             "expected lookup by sql_name override in __FromFitzDbRow",
+        );
+    }
+
+    #[test]
+    fn db_prelude_emits_into_pg_value_for_option_t_b8() {
+        // B8 — sub-paso 4 cosecha codegen post-fitzwatch. The blanket
+        // impl `__IntoPgValue for Option<T>` must be present in the
+        // emitted DB prelude so that `Nullable` Fitz values (lowered
+        // as `Option<T>` in Rust) can be passed as `[..]` args of
+        // `conn.query`/`conn.exec` without the `E0277` trait bound
+        // failure.
+        let src = "async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("impl<T: __IntoPgValue> __IntoPgValue for Option<T>"),
+            "expected blanket `impl __IntoPgValue for Option<T>` in DB prelude, was: {rust}",
+        );
+        assert!(
+            rust.contains("None => __FitzPgValue::Null"),
+            "expected None arm mapping to __FitzPgValue::Null, was: {rust}",
+        );
+        assert!(
+            rust.contains("Some(v) => v.into_pg()"),
+            "expected Some(v) arm delegating to inner into_pg(), was: {rust}",
+        );
+    }
+
+    #[test]
+    fn db_prelude_not_emitted_when_program_does_not_use_db_b8() {
+        // B8 sanity — the blanket impl lives in the DB prelude. A
+        // program without `db.*` calls should NOT emit it (the prelude
+        // is gated by `program_uses_db`). Otherwise we would pay the
+        // codegen weight for every CLI program.
+        let src = "fn main() {\n  let x: Int? = null\n  print(x)\n}\nmain()\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            !rust.contains("impl<T: __IntoPgValue> __IntoPgValue for Option<T>"),
+            "did NOT expect Option<T> impl when program does not use db, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn db_query_with_nullable_arg_emits_into_pg_value_call_b8() {
+        // B8 end-to-end — `conn.query` with a Nullable arg emits
+        // the standard `<_ as __IntoPgValue>::into_pg(<expr>)` call.
+        // The dispatch resolution lives in trait selection, so as long
+        // as `Option<T>: __IntoPgValue` exists, rustc accepts it.
+        let src = "async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let id: Int? = null\n  \
+                       let _ = db.query(\"SELECT 1 WHERE id = $1\", [id]).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("<_ as __IntoPgValue>::into_pg"),
+            "expected __IntoPgValue::into_pg call on Nullable arg, was: {rust}",
         );
     }
 

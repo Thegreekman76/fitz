@@ -321,15 +321,15 @@ Arms divergentes (`return`/`break`/`continue`, type `!`) coercen a cualquier `T`
 
 Repro en `d:/tmp/sub3-nullable-wrap-repro/repro.fitz` validado bit-a-bit `fitz run` ↔ `fitz build` ↔ binario nativo (cinco prints, salida `hola\nnull\n42\nnull\nnull`).
 
-### B8 — `Option<T>: __IntoPgValue` not satisfied (query params Nullable → driver PG)
+### B8 — `Option<T>: __IntoPgValue` not satisfied (query params Nullable → driver PG) — **CERRADO 2026-06-19** (sub-paso 4)
 
-**Síntoma** (cargo build):
+**Síntoma original** (cargo build):
 ```
 error[E0277]: the trait bound `Option<i64>: __IntoPgValue` is not satisfied
 error[E0277]: the trait bound `Option<String>: __IntoPgValue` is not satisfied
 ```
 
-**Repro**:
+**Repro original**:
 ```fitz
 @get("/x?id={id}")
 async fn h(id: Int?) -> Result<Null> {
@@ -338,9 +338,12 @@ async fn h(id: Int?) -> Result<Null> {
 }
 ```
 
-**Workaround user-side**: convertir `Int?`/`Str?` a `Int`/`Str` con sentinels antes de pasar al `conn.query`/`conn.exec`. Ajustar SQL para usar sentinels (`$1 = 0` en lugar de `$1::int IS NULL`).
+**Severity**: ~~Medium~~. **Fix aplicado** (sub-paso 4 de la cosecha post-fitzwatch): blanket impl `impl<T: __IntoPgValue> __IntoPgValue for Option<T>` sumado al preludio DB del codegen (gated por `program_uses_db`, no entra a programas sin `db.*`). `None → __FitzPgValue::Null`, `Some(v) → v.into_pg()` delegando al impl interno. ~12 LoC efectivas en `src/codegen.rs::emit_db_prelude`. Tests unit dedicados:
+- `db_prelude_emits_into_pg_value_for_option_t_b8` (impl + arms presentes en preludio)
+- `db_prelude_not_emitted_when_program_does_not_use_db_b8` (gating verificado)
+- `db_query_with_nullable_arg_emits_into_pg_value_call_b8` (call site emite `<_ as __IntoPgValue>::into_pg(<expr>)` y rustc resuelve la trait selection vía el blanket impl)
 
-**Severity**: Medium. **Fix sugerido**: `impl __IntoPgValue for Option<T> where T: __IntoPgValue` que mapea `None → __FitzPgValue::Null`. ~10 LoC en el preludio DB.
+Repro en `d:/tmp/sub4-option-pg-repro/repro.fitz` validado: `fitz check` OK, `fitz build` OK (binario compilado), `fitz run` y binario nativo producen el mismo error de runtime ("I/O: ...") al intentar conectar al puerto inexistente — paridad bit-a-bit confirmada porque el código compila y solo falla en runtime DB, no en codegen ni en cargo build.
 
 ### B9 — `Str? == Str` (Nullable vs concrete) genera `match arms have incompatible types`
 
@@ -475,7 +478,7 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 | **B5**  | **`[]` sobre `List<X>?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | **B6**  | **`.x` sobre `T?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | **B7**  | **match no envuelve `Some()`** | Medium | ✅ sentinels | ✅ **CERRADO 2026-06-19** ~60 LoC + 3 unit tests | unit |
-| B8  | `Option<T>: __IntoPgValue` | Medium | ✅ sentinels | ~10 | sí |
+| **B8**  | **`Option<T>: __IntoPgValue`** | Medium | ✅ sentinels | ✅ **CERRADO 2026-06-19** ~12 LoC + 3 unit tests | unit |
 | B9  | `Str? == Str` arms incomp | Low | ✅ coerce local | ~15 | sí |
 | B10 | `spawn(fn)` cross-module @bg | Medium | ✅ wrapper local | ~30 | sí |
 | **B11** | **Response con `List<Nominal>`** | High | ✅ split endpoints | ✅ **CERRADO 2026-06-19** ~150 LoC | sí |
@@ -488,8 +491,8 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 
 1. **Sub-paso "detectores unificados"** — B3 + B11 + B13 — ✅ **CERRADO 2026-06-19**. B3 + B11 fixeados con ~150 LoC en `src/codegen.rs`; B13 NO reprodujo en v0.17.0 (W18 lo había cerrado). Detalle: ver entries individuales arriba. Smoke: `cargo test --release --lib` 3116/3116 verde post-fix.
 2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ✅ **CERRADO 2026-06-19**. ~80 LoC + 4 unit tests. Filtro de arms divergent (`return`/`break`/`continue`) en el LUB de `gen_match`. Smoke `cargo test --release --lib match_with` 12/12 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 363/363 verde; repro mínima end-to-end (`d:\tmp\sub2-divergent-repro\repro.fitz`) check + run + build + binario ejecutado con paridad bit-a-bit.
-3. **Sub-paso "wrap automático Some()"** — B7. ✅ **CERRADO 2026-06-19**. ~60 LoC + 3 unit tests. Post-procesamiento en `gen_match` después del LUB: cuando `result_ty` queda como `Nullable(inner)`, los arms no-divergentes con `body_ty == Null` se reescriben a `None` y los arms con `body_ty` concreto compatible con `inner` se envuelven en `Some(...)`. Arms ya `Nullable` quedan idempotentes; arms divergentes (`!`) no requieren rewrite. Smoke `cargo test --release --lib match_` 84/84 verde; repro mínima end-to-end (`d:/tmp/sub3-nullable-wrap-repro/repro.fitz`) validada bit-a-bit `fitz run` ↔ `fitz build`. **Próximo norte de la cosecha**: sub-paso 4.
-4. **Sub-paso "Option<T> → PgValue"** — B8. ~10 LoC + test.
+3. **Sub-paso "wrap automático Some()"** — B7. ✅ **CERRADO 2026-06-19**. ~60 LoC + 3 unit tests. Post-procesamiento en `gen_match` después del LUB: cuando `result_ty` queda como `Nullable(inner)`, los arms no-divergentes con `body_ty == Null` se reescriben a `None` y los arms con `body_ty` concreto compatible con `inner` se envuelven en `Some(...)`. Arms ya `Nullable` quedan idempotentes; arms divergentes (`!`) no requieren rewrite. Smoke `cargo test --release --lib match_` 84/84 verde; repro mínima end-to-end (`d:/tmp/sub3-nullable-wrap-repro/repro.fitz`) validada bit-a-bit `fitz run` ↔ `fitz build`.
+4. **Sub-paso "Option<T> → PgValue"** — B8. ✅ **CERRADO 2026-06-19**. ~12 LoC + 3 unit tests. Blanket impl `__IntoPgValue for Option<T>` sumado al preludio DB del codegen (gated por `program_uses_db`). `None → __FitzPgValue::Null`, `Some(v) → v.into_pg()`. Lib `cargo test --release --lib b8` 19/19 verde (incluye los 3 nuevos); lib completa 3126/3126 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 363/363 verde (~4 min); repro mínima end-to-end (`d:/tmp/sub4-option-pg-repro/repro.fitz`) — `fitz check` OK, `fitz build` OK, paridad bit-a-bit `fitz run` ↔ binario nativo (mismo error de runtime DB esperado). **Próximo norte de la cosecha**: sub-paso 5.
 5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12 + **nuevo E0308 match arms `i64` vs `()`** (descubierto al reproducir fitzwatch: `Ok(_) => 0, Err(e) => log.error(...)` donde `log.error` retorna `Null` rompe la unificación del match; documentar como bug aparte). Cada uno chico (~15-30 LoC). Probablemente 1 commit cada uno o agrupados de a 2.
 6. **Sub-paso BLOQUEANTE "ORM `.preload()` + Nullable companion"** — B15. El grande. ~80-150 LoC + repro tests sobre fitzwatch como compile_e2e end-to-end. Cerrar acá desbloquea fitzwatch al deploy completo.
 
