@@ -250,7 +250,7 @@ http.post("https://api.com", Payload { event: "x", count: 1 }).await
 
 **Severity**: High. **Fix aplicado**: separado del bloque HTTP el import de `use crate::{__ToFitzJson, __FromFitzJson};` en `generate_module_rs_with_bindings` (`src/codegen.rs`). Se emite cuando `module_has_http || program_uses_ws_broadcast(program)`. ~20 LoC. Validado contra el repro fitzwatch (`checks.fitz` sin handlers HTTP llamando a `ws_broadcast` directo): los 3× `error[E0405] cannot find trait __ToFitzJson` desaparecieron.
 
-### B4 — `.len()` sobre `List<X>?` (Nullable) rechazado por codegen
+### B4 — `.len()` sobre `List<X>?` (Nullable) rechazado por codegen — **CERRADO 2026-06-19 (sub-paso 2 cosecha)**
 
 **Síntoma**: `✗ codegen: method call `.len` sobre `List<DbRow>?`: no soportado en codegen`.
 
@@ -266,17 +266,17 @@ if (rows.len() == 0) { ... }   // ✗
 
 **Workaround user-side**: helper `async fn x() -> Result<T>` con `.await?` (el propagation refine bien). Match con return temprano confunde al codegen.
 
-**Severity**: Medium (síntoma de B14). **Fix sugerido**: refine flow-sensitive de tipos post-match arms que returnan, paralelo a lo que ya hace el checker. La clave es que después de `Err(_) => return ...`, el var en el otro arm no es Nullable. ~50-80 LoC en `gen_match`/`infer_match_var_type`.
+**Severity**: ~~Medium~~ (sub-case de B14). **Fix aplicado** (parte del meta B14): flow-sensitive refinement en `gen_match` (`src/codegen.rs` ~línea 24796). El método ahora trackea un `Vec<bool>` paralelo `arm_divergent` que marca cada arm cuyo body termina en `return`/`break`/`continue`. El cálculo del LUB filtra esos arms antes de unificar (`!` en Rust coerce a cualquier T; incluirlos widening-eaba spuriously al `Nullable`). Si todos divergen, el resultado queda `Type::Null` (comportamiento legacy preservado — rustc acepta `!` → `()`). 4 unit tests nuevos: `match_with_divergent_err_arm_does_not_widen_to_nullable_b4_len` / `_b5_index` / `_b6_field` + `match_with_all_divergent_arms_types_as_null`. ~80 LoC totales. Validado contra repro mínima en `d:\tmp\sub2-divergent-repro\repro.fitz` (canonical pattern con `Ok(r) => r, Err(_) => return Err(...)`).
 
-### B5 — Indexing `[]` sobre `List<X>?` rechazado por codegen
+### B5 — Indexing `[]` sobre `List<X>?` rechazado por codegen — **CERRADO 2026-06-19 (sub-paso 2 cosecha)**
 
 **Síntoma**: `✗ codegen: indexing `[]` over `List<DbRow>?`: only supported on List<T> and Map<K, V>`.
 
 **Repro**: igual que B4, pero `rows[0]`.
 
-**Severity**: Medium (sub-case de B14). **Fix**: igual que B4 — refine flow-sensitive.
+**Severity**: ~~Medium~~ (sub-case de B14). **Fix aplicado**: cerrado junto a B4 — el mismo cambio en `gen_match` filtra arms divergentes del LUB, así `rows` queda como `List<X>` directo y `[]` dispatch funciona normal. Test unit dedicado `match_with_divergent_err_arm_does_not_widen_to_nullable_b5_index` valida que `rows[0]` sobre `List<Int>` tipa como `i64`.
 
-### B6 — Field access `.x` sobre `T?` (Nullable) rechazado por codegen
+### B6 — Field access `.x` sobre `T?` (Nullable) rechazado por codegen — **CERRADO 2026-06-19 (sub-paso 2 cosecha)**
 
 **Síntoma**: `✗ codegen: field access `.paused` over `T?`: only supported on instances of custom types`.
 
@@ -289,7 +289,7 @@ let monitor = match refresh(id).await {
 if (monitor.paused) { ... }   // ✗
 ```
 
-**Severity**: Medium (sub-case de B14). **Fix**: igual que B4 — refine flow-sensitive.
+**Severity**: ~~Medium~~ (sub-case de B14). **Fix aplicado**: cerrado junto a B4/B5 — el mismo cambio en `gen_match` filtra arms divergentes del LUB, así `monitor` queda como `T` (Nominal directo) y field access dispatch funciona normal. Test unit dedicado `match_with_divergent_err_arm_does_not_widen_to_nullable_b6_field` valida que `who: User` después del match y `who.name` tipa como `String`.
 
 ### B7 — `match { Ok(v) => v, Err(_) => null }` no envuelve en `Some()` al asignar a `Nullable`
 
@@ -408,9 +408,9 @@ error[E0425]: cannot find type `__FitzValue` in this scope
 
 **Severity**: ~~Medium~~ NO APLICA. **Acción**: ninguna — el bug está cerrado por W18. Si reaparece en algún caso edge, abrir entrada nueva.
 
-### B14 — (meta) `match` con return temprano no refine tipos en codegen
+### B14 — (meta) `match` con return temprano no refine tipos en codegen — **CERRADO 2026-06-19 (sub-paso 2 cosecha)**
 
-Patrón meta de B4/B5/B6. Documentado para que el fix de los 3 se trate como un solo cambio en `gen_match` con refine flow-sensitive paralelo al checker. Ver B4 para el fix sugerido.
+Patrón meta de B4/B5/B6. Cierra junto a los 3 con un solo cambio en `gen_match` (~80 LoC + 4 unit tests). El fix es **flow-sensitive refinement** sobre los arms del match: cuando un arm body termina en `return`/`break`/`continue`, su body code emite `!` (never) en Rust (vía `strip_trailing_semi` ya existente), pero el TIPO interno de Fitz se setteaba a `Type::Null` y entraba al LUB de los arms, widening-eando spuriously hacia `Nullable(T)`. Ahora trackeamos divergencia con un `Vec<bool>` paralelo (`arm_divergent`) y filtramos esos arms del LUB. Si todos divergen, el resultado queda `Null` (rustc acepta `!` → `()`). El binding del `let` siguiente queda con el tipo correcto (`List<X>`, `T` Nominal, lo que sea del arm Ok), y `.len()` / `[]` / `.field` dispatchan normal en codegen. Ver B4 para detalle del fix aplicado.
 
 ### B15 — 🔴 BLOQUEANTE — `.preload()` sobre virtuales + nullables rompe en cargo build
 
@@ -462,9 +462,9 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 | B1  | `.order_by(str)` | Medium | ✅ closure | ~15 | sí |
 | B2  | `http.post` body Instance | Medium | ✅ Map<Str,Str> | ~30 | sí (sobre 17g) |
 | **B3**  | **`ws_broadcast` cross-module** | High | ✅ helper | ✅ **CERRADO 2026-06-19** ~20 LoC | sí |
-| B4  | `.len()` sobre `List<X>?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
-| B5  | `[]` sobre `List<X>?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
-| B6  | `.x` sobre `T?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
+| **B4**  | **`.len()` sobre `List<X>?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
+| **B5**  | **`[]` sobre `List<X>?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
+| **B6**  | **`.x` sobre `T?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | B7  | match no envuelve `Some()` | Medium | ✅ sentinels | ~20 | sí |
 | B8  | `Option<T>: __IntoPgValue` | Medium | ✅ sentinels | ~10 | sí |
 | B9  | `Str? == Str` arms incomp | Low | ✅ coerce local | ~15 | sí |
@@ -472,13 +472,13 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 | **B11** | **Response con `List<Nominal>`** | High | ✅ split endpoints | ✅ **CERRADO 2026-06-19** ~150 LoC | sí |
 | B12 | Cross-module `@auth_provider` codegen | Low | ✅ `import auth` | ~20 | sí |
 | **B13** | **`log.X` kwargs heterogéneos** | ~~Medium~~ | (n/a) | ✅ **NO REPRO en v0.17.0** (W18 lo cerró) | n/a |
-| B14 | (meta) match refine | — | (helpers Result) | ~50-80 | sí (cubre B4/B5/B6) |
+| **B14** | **(meta) match refine** | — | (helpers Result) | ✅ **CERRADO 2026-06-19** ~80 LoC + 4 unit tests | unit (cubre B4/B5/B6 + all-divergent) |
 | **B15** | **`.preload()` + virtuales + nullables** | 🔴 **Critical** | ❌ **sin workaround** | ~80-150 | sí (sobre fitzwatch) |
 
 **Plan de ataque sugerido** (orden por dependencias + impacto):
 
 1. **Sub-paso "detectores unificados"** — B3 + B11 + B13 — ✅ **CERRADO 2026-06-19**. B3 + B11 fixeados con ~150 LoC en `src/codegen.rs`; B13 NO reprodujo en v0.17.0 (W18 lo había cerrado). Detalle: ver entries individuales arriba. Smoke: `cargo test --release --lib` 3116/3116 verde post-fix.
-2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ~80 LoC + tests. **Próximo norte de la cosecha**.
+2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ✅ **CERRADO 2026-06-19**. ~80 LoC + 4 unit tests. Filtro de arms divergent (`return`/`break`/`continue`) en el LUB de `gen_match`. Smoke `cargo test --release --lib match_with` 12/12 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 363/363 verde; repro mínima end-to-end (`d:\tmp\sub2-divergent-repro\repro.fitz`) check + run + build + binario ejecutado con paridad bit-a-bit. **Próximo norte de la cosecha**: sub-paso 3.
 3. **Sub-paso "wrap automático Some()"** — B7. ~20 LoC + tests.
 4. **Sub-paso "Option<T> → PgValue"** — B8. ~10 LoC + test.
 5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12 + **nuevo E0308 match arms `i64` vs `()`** (descubierto al reproducir fitzwatch: `Ok(_) => 0, Err(e) => log.error(...)` donde `log.error` retorna `Null` rompe la unificación del match; documentar como bug aparte). Cada uno chico (~15-30 LoC). Probablemente 1 commit cada uno o agrupados de a 2.

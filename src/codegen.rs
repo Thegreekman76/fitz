@@ -24787,6 +24787,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
 
         let mut arm_pieces: Vec<String> = Vec::with_capacity(arms.len() + 1);
         let mut arm_tys: Vec<Type> = Vec::with_capacity(arms.len());
+        // Sub-paso 2 (cosecha codegen post-fitzwatch) — flow-sensitive
+        // refinement on `match`. An arm whose body is `return`/`break`/
+        // `continue` types as `!` in Rust and coerces to any T. We must
+        // NOT include it in the LUB of the match — otherwise the canonical
+        // pattern `match conn.query(...).await { Ok(r) => r, Err(_) =>
+        // return null }` would type as `List<DbRow>?` instead of
+        // `List<DbRow>`, spuriously breaking `.len()`/indexing/field
+        // access on the binding. Cierra B4 + B5 + B6 + meta B14.
+        let mut arm_divergent: Vec<bool> = Vec::with_capacity(arms.len());
         let mut has_catch_all = false;
         let mut has_ok = false;
         let mut has_err = false;
@@ -24839,14 +24848,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let trimmed = s.trim_end();
                 trimmed.strip_suffix(';').unwrap_or(trimmed).to_string()
             }
-            let (body_code, body_ty) = if arm.body.len() == 1 {
+            let (body_code, body_ty, is_divergent) = if arm.body.len() == 1 {
                 match &arm.body[0] {
                     Stmt::Expr(e, _) => {
                         if is_print_call(e) {
                             let print_code = self.gen_print_to_string(e)?;
-                            (format!("{{ {}; }}", print_code), Type::Null)
+                            (format!("{{ {}; }}", print_code), Type::Null, false)
                         } else {
-                            self.gen_expr(e)?
+                            let (c, t) = self.gen_expr(e)?;
+                            (c, t, false)
                         }
                     }
                     other @ (Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..)) => {
@@ -24854,12 +24864,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         // — type `!` that coerces to any T of the match.
                         let stmt_code = self.gen_stmt_to_string(other)?;
                         let stripped = strip_trailing_semi(&stmt_code);
-                        (format!("{{ {} }}", stripped), Type::Null)
+                        (format!("{{ {} }}", stripped), Type::Null, true)
                     }
                     other => {
                         // Other stmts: normal emission with `;`.
                         let stmt_code = self.gen_stmt_to_string(other)?;
-                        (format!("{{ {} }}", stmt_code), Type::Null)
+                        (format!("{{ {} }}", stmt_code), Type::Null, false)
                     }
                 }
             } else {
@@ -24868,6 +24878,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // it is Return/Break/Continue (without trailing `;`).
                 let mut block = String::from("{ ");
                 let mut tail_ty = Type::Null;
+                let mut tail_divergent = false;
                 for (i, stmt) in arm.body.iter().enumerate() {
                     let is_last = i + 1 == arm.body.len();
                     if is_last {
@@ -24882,6 +24893,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 let code = self.gen_stmt_to_string(stmt)?;
                                 block.push_str(&strip_trailing_semi(&code));
                                 tail_ty = Type::Null;
+                                tail_divergent = true;
                                 continue;
                             }
                             _ => {}
@@ -24892,7 +24904,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     block.push(' ');
                 }
                 block.push_str(" }");
-                (block, tail_ty)
+                (block, tail_ty, tail_divergent)
             };
             self.pop_scope();
 
@@ -24905,6 +24917,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             };
             arm_pieces.push(format!("{}{} => {}", pat_code, guard_combined, body_code));
             arm_tys.push(body_ty);
+            arm_divergent.push(is_divergent);
         }
 
         // Decide whether we need an artificial catch-all so
@@ -24916,15 +24929,28 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             arm_pieces.push("_ => panic!(\"`match` did not match any arm\")".to_string());
         }
 
-        // Output type: lub of the arms; if they fail to unify, Any.
+        // Output type: lub of the NON-divergent arms; if they fail to
+        // unify, Any. Divergent arms (`return`/`break`/`continue`) type
+        // as `!` in Rust and coerce to any T — including them in the
+        // LUB would spuriously widen (sub-paso 2 / B4+B5+B6+B14).
+        // If every arm diverges, the match returns `Null` (preserved
+        // legacy behavior — rustc accepts it because `!` coerces to ()).
         let result_ty = if arm_tys.is_empty() {
             Type::Null
         } else {
-            let mut acc = arm_tys[0].clone();
-            for t in &arm_tys[1..] {
-                acc = lub(&acc, t).unwrap_or(Type::Any);
+            let mut iter = arm_tys
+                .iter()
+                .zip(arm_divergent.iter())
+                .filter_map(|(t, &div)| if div { None } else { Some(t) });
+            if let Some(first) = iter.next() {
+                let mut acc = first.clone();
+                for t in iter {
+                    acc = lub(&acc, t).unwrap_or(Type::Any);
+                }
+                acc
+            } else {
+                Type::Null
             }
-            acc
         };
 
         let code = format!("(match {} {{ {} }})", scrut_code, arm_pieces.join(", "));
@@ -40682,6 +40708,132 @@ mod tests {
             body.contains(". lock") && body.contains(". id"),
             "expected field access like `u.lock().unwrap().id` in the arm body, got: {}",
             body
+        );
+    }
+
+    // Sub-paso 2 cosecha post-fitzwatch — flow-sensitive refinement on
+    // `match`. An arm whose body is `return`/`break`/`continue` types as
+    // `!` in Rust and coerces to any T; it must NOT participate in the
+    // LUB. Otherwise the canonical pattern
+    //   `let rows = match conn.query(...).await { Ok(r) => r, Err(_) => return null }`
+    // ends up typed `List<DbRow>?` and breaks `.len()` / indexing /
+    // field access on the binding. Cierra B4 + B5 + B6 + meta B14.
+    #[test]
+    fn match_with_divergent_err_arm_does_not_widen_to_nullable_b4_len() {
+        // B4 — `rows.len()` after a match whose `Err` arm diverges.
+        // The binding must type as `Arc<Mutex<Vec<i64>>>` (NOT
+        // `Option<...>`); otherwise rustc would either fail to compile
+        // the wrapper or `len()` would not dispatch to the List method.
+        let src = "fn run() {\n\
+                       let xs: Result<List<Int>> = Ok([1, 2, 3])\n\
+                       let rows = match xs { Ok(r) => r, Err(_) => return }\n\
+                       let n = rows.len()\n\
+                   }";
+        let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let run = ast_test::find_item_fn(&file, "run").expect("missing fn run");
+        let rows = ast_test::find_local_in_fn(run, "rows").expect("missing let rows");
+        assert_eq!(
+            ast_test::local_type(&rows).as_deref(),
+            Some("Arc < Mutex < Vec < i64 > > >"),
+            "rows should NOT widen to `Option<...>` — the divergent Err arm \
+             must be filtered out of the LUB. Local was: {:?}",
+            ast_test::local_type(&rows)
+        );
+        let n = ast_test::find_local_in_fn(run, "n").expect("missing let n");
+        // `n = rows.len()` over List<Int> emits `(rows.clone().lock()
+        // .unwrap().len() as i64)` — verify the chain at least contains
+        // `lock` + `len` (the exact format is covered by other tests).
+        let init = ast_test::local_init(&n).unwrap();
+        assert!(
+            init.contains("lock") && init.contains("len"),
+            "expected lock+len chain on `n`, got: {}",
+            init
+        );
+    }
+
+    #[test]
+    fn match_with_divergent_err_arm_does_not_widen_to_nullable_b5_index() {
+        // B5 — `rows[0]` after a match whose `Err` arm diverges. Same
+        // binding as B4, the indexing operation must dispatch to List
+        // not to a Nullable-wrapping type.
+        let src = "fn run() {\n\
+                       let xs: Result<List<Int>> = Ok([1, 2, 3])\n\
+                       let rows = match xs { Ok(r) => r, Err(_) => return }\n\
+                       let first = rows[0]\n\
+                   }";
+        let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let run = ast_test::find_item_fn(&file, "run").expect("missing fn run");
+        let rows = ast_test::find_local_in_fn(run, "rows").expect("missing let rows");
+        assert_eq!(
+            ast_test::local_type(&rows).as_deref(),
+            Some("Arc < Mutex < Vec < i64 > > >"),
+            "rows should NOT widen to `Option<...>`"
+        );
+        let first = ast_test::find_local_in_fn(run, "first").expect("missing let first");
+        assert_eq!(
+            ast_test::local_type(&first).as_deref(),
+            Some("i64"),
+            "rows[0] over List<Int> should type as i64, got: {:?}",
+            ast_test::local_type(&first)
+        );
+    }
+
+    #[test]
+    fn match_with_divergent_err_arm_does_not_widen_to_nullable_b6_field() {
+        // B6 — `user.name` after a match whose `Err` arm diverges. The
+        // binding must type as the nominal struct (not as Option), so
+        // field access compiles without an outer `.unwrap()` or pattern.
+        let src = "type User { name: Str }\n\
+                   fn run() {\n\
+                       let u: Result<User> = Ok(User { name: \"ada\" })\n\
+                       let who = match u { Ok(v) => v, Err(_) => return }\n\
+                       let nm = who.name\n\
+                   }";
+        let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let run = ast_test::find_item_fn(&file, "run").expect("missing fn run");
+        let who = ast_test::find_local_in_fn(run, "who").expect("missing let who");
+        assert_eq!(
+            ast_test::local_type(&who).as_deref(),
+            Some("User"),
+            "who should NOT widen to `Option<User>` — divergent Err arm \
+             must be filtered out of the LUB. Local was: {:?}",
+            ast_test::local_type(&who)
+        );
+        // Field access — `nm = who.name` should emit the field path
+        // (Phase 10.b refactor: `let __obj = who.clone(); let __g =
+        // __obj.lock().unwrap(); __g.name.clone()`). The exact shape
+        // is covered by other tests; here we just verify `nm` typed
+        // as String (not Option<String>).
+        let nm = ast_test::find_local_in_fn(run, "nm").expect("missing let nm");
+        assert_eq!(
+            ast_test::local_type(&nm).as_deref(),
+            Some("String"),
+            "nm should type as `String` (not `Option<String>`)"
+        );
+    }
+
+    #[test]
+    fn match_with_all_divergent_arms_types_as_null() {
+        // Sanity test — if EVERY arm diverges, the match still types
+        // (as Null / `()` in Rust). Rustc accepts `!` coercing to `()`.
+        // The binding emits `let mut v: () = (...);` which is a useless
+        // binding but at least does not break compile.
+        let src = "fn run(x: Int) {\n\
+                       let v = match x { 1 => return null, _ => return null }\n\
+                       let _ = v\n\
+                   }";
+        let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let run = ast_test::find_item_fn(&file, "run").expect("missing fn run");
+        let v = ast_test::find_local_in_fn(run, "v").expect("missing let v");
+        assert_eq!(
+            ast_test::local_type(&v).as_deref(),
+            Some("()"),
+            "all-divergent match should type as `()`, got: {:?}",
+            ast_test::local_type(&v)
         );
     }
 
