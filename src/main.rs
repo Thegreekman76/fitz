@@ -1208,6 +1208,13 @@ fn check_program_with_pyi_stubs_and_deps(
     if let Some(provider) = pre_scan_imported_auth_provider(program, &base_dir, dep_registry) {
         env.set_imported_auth_provider(provider);
     }
+    // B10 — cross-module `@background` fns pre-scan. Adds the names
+    // collected across imports so the importer's `spawn(<imp>(...))`
+    // passes the checker's `@background` validation.
+    let bg_names = pre_scan_imported_background_fns(program, &base_dir, dep_registry);
+    if !bg_names.is_empty() {
+        env.add_imported_background_fns(bg_names);
+    }
     types::check_with_env(program, env, errors)
 }
 
@@ -1286,6 +1293,62 @@ fn pre_scan_imported_auth_provider(
         }
     }
     None
+}
+
+/// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — scans each
+/// `Stmt::Import` / `Stmt::FromImport`, resolves the `.fitz` file,
+/// parses it, and invokes `types::extract_background_fn_names` to
+/// collect the names of top-level fns marked with `@background`
+/// across all direct imports. The importer's checker merges them
+/// into `CheckCtx.background_fns` so `spawn(<imp>(args))` passes
+/// the static validation.
+///
+/// **Error policy**: module read/parse errors are silenced (silent
+/// fallback — parallel to `pre_scan_imported_auth_provider`). The
+/// real runtime loader (`evaluator::eval_with_base_and_deps`) and
+/// codegen (`ModuleLoader` in `codegen.rs`) load modules on their
+/// own and report clear errors if they fail.
+///
+/// **MVP scope**: a single level of depth (does not recurse into
+/// transitive imports), paralelo a `pre_scan_imported_auth_provider`.
+fn pre_scan_imported_background_fns(
+    program: &ast::Program,
+    base_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for stmt in program {
+        let path_segments = match stmt {
+            ast::Stmt::Import { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            ast::Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) = resolve_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(tokens) = lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = parser::parse(tokens) else {
+            continue;
+        };
+        out.extend(types::extract_background_fn_names(&module_program));
+    }
+    out
 }
 
 /// W12 (v0.10.8) — resolves the `path` of a `Stmt::Import` /

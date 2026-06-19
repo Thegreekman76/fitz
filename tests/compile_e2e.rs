@@ -11986,3 +11986,147 @@ match result {
         stdout
     );
 }
+
+/// B12 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — `fitz build`
+/// pasa cuando un módulo con `@authenticated` no importa `auth`
+/// directamente pero el `@auth_provider` vive en otro módulo
+/// importado desde MAIN. Antes del fix, el checker del módulo
+/// rompía con "no `@auth_provider` registered in the program"
+/// aunque todo el árbol del proyecto sí tuviera uno.
+#[test]
+fn cross_module_auth_provider_via_main_b12() {
+    let stem = "cross_module_auth_provider_via_main_b12";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // types.fitz — User declarado en módulo dedicado.
+    std::fs::write(
+        dir.join("types.fitz"),
+        "type User {\n  \
+            id: Int = 0\n  \
+            role: Str = \"\"\n\
+         }\n",
+    )
+    .expect("escribir types.fitz");
+
+    // auth.fitz — provider importa User desde types.
+    std::fs::write(
+        dir.join("auth.fitz"),
+        "from types import User\n\
+\n\
+@auth_provider\n\
+async fn lookup(headers: Map<Str, Str>) -> Result<User> {\n  \
+    return Ok(User { id: 1, role: \"admin\" })\n\
+}\n",
+    )
+    .expect("escribir auth.fitz");
+
+    // metrics.fitz — `@authenticated` handler SIN importar auth.
+    // Importa User desde types (lo necesita para el param del handler).
+    std::fs::write(
+        dir.join("metrics.fitz"),
+        "from types import User\n\
+\n\
+@authenticated\n\
+@get(\"/metrics\")\n\
+fn handler(user: User) -> Str {\n  \
+    return \"ok\"\n\
+}\n",
+    )
+    .expect("escribir metrics.fitz");
+
+    // main.fitz — importa AMBOS (auth + metrics).
+    let main_src = "\
+import auth\n\
+import metrics\n\
+\n\
+@server(43919)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B12):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+}
+
+/// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — `fitz build`
+/// pasa cuando una fn `@background` vive en un módulo importado y
+/// `spawn(<imported_fn>(...))` se llama desde el módulo importador.
+/// Antes del fix, el checker rompía con
+/// "spawn: fn `run_check` is not declared with `@background`" porque
+/// `collect_background_fns` solo miraba los fns top-level locales.
+#[test]
+fn cross_module_spawn_background_b10() {
+    let stem = "cross_module_spawn_background_b10";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // checks.fitz — fn marcada con `@background` en módulo
+    // independiente.
+    std::fs::write(
+        dir.join("checks.fitz"),
+        "@background\n\
+         async fn run_check(id: Int) -> Null {\n  \
+            print(\"check id={id}\")\n  \
+            return null\n\
+         }\n",
+    )
+    .expect("escribir checks.fitz");
+
+    // Importer hace `from checks import run_check` y llama
+    // `spawn(run_check(42))`.
+    let main_src = "from checks import run_check\n\
+\n\
+async fn boot() -> Null {\n  \
+    let _ = spawn(run_check(42))\n  \
+    return null\n\
+}\n\
+\n\
+boot().await\n";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B10):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+}

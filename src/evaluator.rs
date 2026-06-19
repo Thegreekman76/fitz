@@ -14109,18 +14109,69 @@ fn orm_qb_order_by(
             ),
         ));
     }
+    // B1 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — accept
+    // a Str literal as shorthand: `.order_by("name")` ≡
+    // `.order_by(fn(u) => u.name)`, `.order_by("-name")` ≡
+    // `.order_by(fn(u) => -u.name)`. Field existence is validated
+    // (same rule as closure path). Direction lives in the leading
+    // `-` of the string; the rest is the field name. No SQL
+    // injection — column resolves via `meta.columns` and falls
+    // back to the field name (which the type system already validated).
+    if let Value::Str(raw) = &args[0] {
+        let raw = raw.trim();
+        let (direction, field_name) = if let Some(rest) = raw.strip_prefix('-') {
+            ("DESC", rest.trim().to_string())
+        } else {
+            ("ASC", raw.to_string())
+        };
+        if field_name.is_empty() {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                "`.order_by(\"...\")`: the string must be `\"field\"` or `\"-field\"` (received empty string)".to_string(),
+            ));
+        }
+        if !state.fields.iter().any(|f| f.name == field_name) {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`.order_by`: field `{field_name}` does not exist in the type (fields: {})",
+                    state
+                        .fields
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        let sql_col = state
+            .meta
+            .columns
+            .get(&field_name)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(field_name.as_str())
+            .to_string();
+        state
+            .order_by_clauses
+            .push(format!("\"{sql_col}\" {direction}"));
+        return Ok(Value::QueryBuilder(Arc::new(state)));
+    }
     let (params, body) = match &args[0] {
         Value::Function { params, body, .. } => (params.clone(), body.clone()),
         other => {
             return Err(FitzError::new(
                 ErrorKind::TypeMismatch {
-                    expected: "Function".into(),
+                    expected: "Function or Str literal".into(),
                     found: other.type_name().into(),
                 },
                 span.line,
                 span.column,
                 format!(
-                    "`.order_by(closure)` expects `fn(u) => u.field` or `fn(u) => -u.field`, received `{}`",
+                    "`.order_by(closure)` expects `fn(u) => u.field`, `fn(u) => -u.field`, or a Str literal `\"field\"`/`\"-field\"`, received `{}`",
                     other.type_name()
                 ),
             ));

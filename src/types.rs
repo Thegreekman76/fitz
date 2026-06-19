@@ -16,7 +16,7 @@
 // return of fns, let annotations). Checking function bodies against
 // values is left for 5.3.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Decorator, Expr, Field, Param, Program, Span, Stmt, TypeExpr};
 use crate::error::{ErrorKind, FitzError};
@@ -784,6 +784,13 @@ pub struct TypeEnv {
     /// The codegen also consults it to emit wrapper
     /// invocations with qualified path (`<module>::<fn>`).
     imported_auth_provider: Option<ImportedAuthProvider>,
+    /// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — names
+    /// of top-level fns marked with `@background` that live in
+    /// modules imported by the local program. Pre-scanned by the
+    /// caller via `extract_background_fn_names` and merged into
+    /// `CheckCtx.background_fns` so `spawn(<imported_fn>(args))`
+    /// in the importer passes the checker's `@background` validation.
+    imported_background_fns: HashSet<String>,
 }
 
 impl TypeEnv {
@@ -890,6 +897,23 @@ impl TypeEnv {
     /// the codegen (to emit module-qualified invocations).
     pub fn imported_auth_provider(&self) -> Option<&ImportedAuthProvider> {
         self.imported_auth_provider.as_ref()
+    }
+
+    /// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) —
+    /// Registers names of top-level fns marked with `@background`
+    /// in a module imported by the local program. Pre-scanned via
+    /// `extract_background_fn_names`. The caller invokes this AFTER
+    /// `resolve_program` and BEFORE `check_with_env` so the checker
+    /// (`collect_background_fns`) sees them when validating
+    /// `spawn(<imported_fn>(...))`.
+    pub fn add_imported_background_fns<I: IntoIterator<Item = String>>(&mut self, names: I) {
+        self.imported_background_fns.extend(names);
+    }
+
+    /// B10 — Returns names of top-level fns marked with `@background`
+    /// in cross-module imports.
+    pub fn imported_background_fns(&self) -> &HashSet<String> {
+        &self.imported_background_fns
     }
 }
 
@@ -10102,6 +10126,43 @@ fn collect_background_fns(ctx: &mut CheckCtx, program: &Program) {
             ctx.background_fns.insert(name.clone());
         }
     }
+    // B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — merge
+    // cross-module `@background` fns pre-scanned by the caller via
+    // `extract_background_fn_names` + `TypeEnv::add_imported_background_fns`.
+    // Without this merge, `spawn(<imported_fn>(...))` in the
+    // importer fails with "fn `X` is not declared with
+    // `@background`" because the local walk above only sees the
+    // importer's own fns.
+    for name in ctx.types.imported_background_fns() {
+        ctx.background_fns.insert(name.clone());
+    }
+}
+
+/// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — Public
+/// extractor for cross-module `@background` fn names. The caller
+/// (typically `main.rs::pre_scan_imported_background_fns` paralelo a
+/// `pre_scan_imported_auth_provider`) walks each `Stmt::Import` /
+/// `Stmt::FromImport`, parses the imported module, and feeds the
+/// result of this function back to the importer's `TypeEnv` via
+/// `add_imported_background_fns`. The checker then validates
+/// `spawn(<imported>(...))` against the merged set.
+///
+/// **Scope**: single level (does not recurse into transitive
+/// imports). Parallel to `extract_auth_provider_signature`.
+pub fn extract_background_fn_names(program: &Program) -> Vec<String> {
+    let mut names = Vec::new();
+    for stmt in program {
+        let Stmt::FnDef {
+            name, decorators, ..
+        } = stmt
+        else {
+            continue;
+        };
+        if decorators.iter().any(|d| d.name == "background") {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 /// Phase 9.w.3 — validates `@cron("cron-expr")` on top-level `fn`s.
@@ -17446,6 +17507,68 @@ print(total)
                    fn main() -> Int { return spawn(42) }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
+    }
+
+    // B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — cross-module
+    // `@background` detection via `extract_background_fn_names` +
+    // `TypeEnv::add_imported_background_fns`.
+    #[test]
+    fn extract_background_fn_names_collects_marked_top_level_fns_b10() {
+        let src = "@background async fn run_check(id: Int) -> Null { return null }\n\
+                   fn no_marker(x: Int) -> Int { return x }\n\
+                   @background fn cleanup() -> Null { return null }\n";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let names = extract_background_fn_names(&program);
+        assert_eq!(names, vec!["run_check".to_string(), "cleanup".to_string()]);
+    }
+
+    #[test]
+    fn extract_background_fn_names_returns_empty_when_no_background_fns_b10() {
+        let src = "fn a() -> Int { return 1 }\n\
+                   async fn b() -> Null { return null }\n";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let names = extract_background_fn_names(&program);
+        assert!(names.is_empty(), "expected empty, was: {:?}", names);
+    }
+
+    #[test]
+    fn spawn_cross_module_imported_background_fn_passes_with_pre_scan_b10() {
+        // The importer program calls `spawn(remote_fn(42))` where
+        // `remote_fn` was imported with `from <mod> import remote_fn`
+        // and the imported module had `@background` on it. Without
+        // pre-scan, the checker rejects with "is not declared with
+        // `@background`"; with `add_imported_background_fns`, it
+        // passes.
+        let src = "from checks import remote_fn\n\
+                   async fn caller() -> Null {\n\
+                       let _ = spawn(remote_fn(42))\n\
+                       return null\n\
+                   }";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        // Without pre-scan: should fail.
+        let (_env_pre, _ti, _di, errors_no_scan) = check_program(&program);
+        assert!(
+            errors_no_scan
+                .iter()
+                .any(|e| e.message.contains("@background")),
+            "without pre-scan, expected `@background` error: {:?}",
+            errors_no_scan
+        );
+        // With pre-scan: should pass (the checker also reports any
+        // OTHER errors, but the `@background` one must be gone).
+        let (mut env, errors) = resolve_program(&program);
+        env.add_imported_background_fns(std::iter::once("remote_fn".to_string()));
+        let (_env2, _ti, _di, errors_with_scan) = check_with_env(&program, env, errors);
+        assert!(
+            !errors_with_scan
+                .iter()
+                .any(|e| e.message.contains("is not declared with `@background`")),
+            "with pre-scan, did not expect `@background` error: {:?}",
+            errors_with_scan
+        );
     }
 
     // ===== Phase 10.3.a — ORM decorator checker =====

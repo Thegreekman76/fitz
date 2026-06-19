@@ -147,6 +147,22 @@ pub fn generate_project(
     // (semantically inconsistent — link-valid but contradictory).
     let main_observability = extract_main_observability_enabled(program);
     loader.set_main_observability_enabled(main_observability);
+    // B12 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — pre-scan
+    // main's imports for `@auth_provider` and propagate to every
+    // module being checked by the loader. Sin esto, módulos con
+    // `@authenticated` sin import propio de auth rompen el checker
+    // del módulo. Paralelo al pre-scan de `main.rs`.
+    let main_imp_auth =
+        pre_scan_imported_auth_provider_for_loader(program, &base_dir, &loader.dep_registry);
+    loader.set_main_imported_auth_provider(main_imp_auth);
+    // B10 — pre-scan main's imports for `@background` fns and
+    // propagate the names to every module loaded. Sin esto, módulos
+    // que hacen `from <bg_mod> import bg` + `spawn(bg(...))` pero
+    // el módulo del bg ya está importado desde MAIN (no desde el
+    // módulo importer del spawn) rompen el checker del módulo.
+    let main_imp_bg =
+        pre_scan_imported_background_fns_for_loader(program, &base_dir, &loader.dep_registry);
+    loader.set_main_imported_background_fns(main_imp_bg);
     loader.collect_imports(program)?;
 
     // 5b.6: detect whether the program (or any loaded module) uses
@@ -3639,6 +3655,23 @@ struct ModuleLoader {
     /// always exist when there is HTTP) but contradict main's
     /// bare-metal choice.
     main_observability_enabled: bool,
+    /// B12 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) —
+    /// `@auth_provider` discovered from main's `Stmt::Import` /
+    /// `Stmt::FromImport` chain (paralelo a la pre-scan que main.rs
+    /// hace para `fitz check`/`fitz run`). When a module being
+    /// generated (`load_module`) has `@authenticated`/`@admin`
+    /// handlers but its own pre-scan does NOT find a provider, we
+    /// fall back to this slot so its check_with_env sees the
+    /// provider main has and the module compiles. Closes the gap
+    /// reported as B12 in the post-fitzwatch sweep.
+    main_imported_auth_provider: Option<crate::types::ImportedAuthProvider>,
+    /// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — names
+    /// of fns marked with `@background` reachable from main's
+    /// imports. Propagated to each module's check_with_env so
+    /// modules that re-export the bg fn (e.g. `metrics.fitz` calls
+    /// `spawn(<bg>(...))` after `from <bg_mod> import bg`) also see
+    /// the cross-module name and pass the checker.
+    main_imported_background_fns: Vec<String>,
 }
 
 impl ModuleLoader {
@@ -3651,6 +3684,8 @@ impl ModuleLoader {
             dep_registry,
             loading_stack: Vec::new(),
             main_observability_enabled: true,
+            main_imported_auth_provider: None,
+            main_imported_background_fns: Vec::new(),
         }
     }
 
@@ -3661,6 +3696,23 @@ impl ModuleLoader {
     /// correct setting.
     fn set_main_observability_enabled(&mut self, enabled: bool) {
         self.main_observability_enabled = enabled;
+    }
+
+    /// B12 — see field docs. Called by `generate_project` BEFORE
+    /// `collect_imports` with the provider info pre-scanned from
+    /// main's imports.
+    fn set_main_imported_auth_provider(
+        &mut self,
+        provider: Option<crate::types::ImportedAuthProvider>,
+    ) {
+        self.main_imported_auth_provider = provider;
+    }
+
+    /// B10 — see field docs. Called by `generate_project` BEFORE
+    /// `collect_imports` with the cross-module `@background` fn names
+    /// pre-scanned from main's imports.
+    fn set_main_imported_background_fns(&mut self, names: Vec<String>) {
+        self.main_imported_background_fns = names;
     }
 
     /// Walks the main program's AST and loads each module
@@ -3829,12 +3881,40 @@ impl ModuleLoader {
             crate::types::TypeEnv::new(),
             Vec::new(),
         );
-        if let Some(provider) = pre_scan_imported_auth_provider_for_loader(
+        // B12 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) —
+        // dos fuentes para el provider del módulo:
+        // (a) las imports del propio módulo (path histórico W12);
+        // (b) si las del módulo no traen nada, usar el provider
+        //     pre-scanneado del MAIN (`self.main_imported_auth_provider`).
+        // Esto resuelve el caso del bug: `metrics.fitz` declara
+        // `@authenticated` pero NO importa `auth` (porque el main
+        // ya lo importó). Sin esto, el checker del módulo rompe con
+        // "no `@auth_provider` registered in the program" aunque
+        // todo el árbol del proyecto sí tenga uno.
+        let module_provider = pre_scan_imported_auth_provider_for_loader(
             &module_program,
             &module_base_dir,
             &self.dep_registry,
-        ) {
+        )
+        .or_else(|| self.main_imported_auth_provider.clone());
+        if let Some(provider) = module_provider {
             module_env.set_imported_auth_provider(provider);
+        }
+        // B10 — cross-module `@background` pre-scan paralelo al de
+        // `@auth_provider`. Sin esto, un módulo que hace
+        // `from <bg_mod> import run_check` + `spawn(run_check(...))`
+        // falla su checker por la regla `@background`. Con esto, el
+        // checker del módulo ve el set merged y acepta el spawn. Dos
+        // fuentes: imports propias del módulo + nombres ya
+        // pre-scanneados desde main.
+        let mut bg_names = pre_scan_imported_background_fns_for_loader(
+            &module_program,
+            &module_base_dir,
+            &self.dep_registry,
+        );
+        bg_names.extend(self.main_imported_background_fns.iter().cloned());
+        if !bg_names.is_empty() {
+            module_env.add_imported_background_fns(bg_names);
         }
         let (module_env, _types, _defs, type_errors) =
             crate::types::check_with_env(&module_program, module_env, module_errors);
@@ -4343,6 +4423,55 @@ fn pre_scan_imported_auth_provider_for_loader(
         }
     }
     None
+}
+
+/// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — Mirror of
+/// `pre_scan_imported_auth_provider_for_loader` for `@background`.
+/// Scans each `Stmt::Import` / `Stmt::FromImport`, parses the
+/// imported `.fitz`, and collects names of top-level fns marked
+/// with `@background`. The codegen merges them into the importer's
+/// `TypeEnv` via `add_imported_background_fns` so the module's
+/// checker accepts `spawn(<imported>(...))` without the import-side
+/// having to declare its own `@background` wrapper.
+fn pre_scan_imported_background_fns_for_loader(
+    program: &Program,
+    base_dir: &Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for stmt in program {
+        let path_segments = match stmt {
+            Stmt::Import { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) =
+            resolve_loader_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(tokens) = crate::lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = crate::parser::parse(tokens) else {
+            continue;
+        };
+        out.extend(crate::types::extract_background_fn_names(&module_program));
+    }
+    out
 }
 
 /// W12 (v0.10.8) — `.fitz` file resolution for an import path.
@@ -14889,6 +15018,42 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if matches!(rt, Type::Nullable(_)) && matches!(lt, Type::Null) {
                     return Ok((null_check(&rc, is_eq), Type::Bool));
                 }
+                // B9 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) —
+                // Nullable<T> vs concrete T over primitives. Without
+                // this branch, codegen falls through to `Option<T> == T`
+                // which rustc rejects with E0308. We translate to
+                // `<opt>.as_ref() == Some(&<concrete>)` (PartialEq over
+                // `Option<&T>` compares by value for primitives). Only
+                // applies when the Nullable inner type matches the
+                // concrete side exactly (Str↔Str, Int↔Int, Float↔Float,
+                // Bool↔Bool). Mixed primitives (Int vs Float) or
+                // nominals fall through — pre-existing behavior preserved.
+                let op_sym = if is_eq { "==" } else { "!=" };
+                let nullable_primitive_match = |opt_inner: &Type, conc: &Type| -> bool {
+                    matches!(
+                        (opt_inner, conc),
+                        (Type::Str, Type::Str)
+                            | (Type::Int, Type::Int)
+                            | (Type::Float, Type::Float)
+                            | (Type::Bool, Type::Bool)
+                    )
+                };
+                if let Type::Nullable(inner) = &lt {
+                    if nullable_primitive_match(inner, &rt) {
+                        return Ok((
+                            format!("(({}).as_ref() {} Some(&{}))", lc, op_sym, rc),
+                            Type::Bool,
+                        ));
+                    }
+                }
+                if let Type::Nullable(inner) = &rt {
+                    if nullable_primitive_match(inner, &lt) {
+                        return Ok((
+                            format!("(({}).as_ref() {} Some(&{}))", rc, op_sym, lc),
+                            Type::Bool,
+                        ));
+                    }
+                }
                 // Structural equality between instances of the same
                 // type: we borrow both sides and compare by value —
                 // `#[derive(PartialEq)]` over `FooData` recurses
@@ -15784,12 +15949,51 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         };
         // Look up the signature of the target fn to know its ret type
         // (Future<T> vs plain T) + param types to coerce args.
-        let sig = self.fn_sigs.get(target_name).cloned().ok_or_else(|| {
-            self.err_at(
+        //
+        // B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — first
+        // look in local `fn_sigs`. If not found, fall back to
+        // `module_bindings`: `from <bg_mod> import run_check` registers
+        // `run_check` as a `Named { kind: Fn }` binding whose sig
+        // lives in `loaded_modules[idx].fn_sigs`. With the
+        // `use crate::<bg_mod>::run_check;` already emitted by
+        // `emit_module_use_decls`, the inner call can be emitted with
+        // the unqualified name (`run_check(args)` instead of
+        // `bg_mod::run_check(args)`).
+        let sig = if let Some(sig) = self.fn_sigs.get(target_name).cloned() {
+            sig
+        } else if let Some(ResolvedBinding::Named {
+            module_index,
+            item,
+            kind,
+        }) = self.module_bindings.get(target_name).cloned()
+        {
+            if !matches!(kind, NamedKind::Fn) {
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "spawn: `{}` is imported but is not a fn binding.",
+                        target_name
+                    ),
+                ));
+            }
+            self.loaded_modules
+                .get(module_index)
+                .and_then(|m| m.fn_sigs.get(&item).cloned())
+                .ok_or_else(|| {
+                    self.err_at(
+                        call_span,
+                        format!(
+                            "spawn: cross-module fn `{}` has no visible signature.",
+                            target_name
+                        ),
+                    )
+                })?
+        } else {
+            return Err(self.err_at(
                 call_span,
                 format!("spawn: fn `{}` is not defined in this scope.", target_name),
-            )
-        })?;
+            ));
+        };
         // Generate the args' code, coercing to the param's type.
         if inner_args.len() != sig.params.len() {
             return Err(self.err_at(
@@ -17506,6 +17710,29 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     body_ty,
                 ))
             }
+            // B2 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) —
+            // Nominal types serialize via `__to_fitz_json()` (the
+            // same path HTTP server uses for responses). The
+            // `Arc<Mutex<XData>>` blanket impl forwards to
+            // `XData::__to_fitz_json` automatically. Requires
+            // `has_http` because the trait + serde_json live in
+            // `HTTP_RUNTIME_PRELUDE` + `HTTP_CLIENT_HTTP_INTEGRATION_PRELUDE`.
+            // Programs that use `http.X(...)` con Instance body sin
+            // declarar handlers HTTP propios reciben error claro.
+            Type::Nominal(_) if self.has_http => Ok((
+                format!("__fitz_http_body_from_json(({}).__to_fitz_json())", body_code),
+                body_ty,
+            )),
+            Type::Nominal(_) => Err(self.err_at(
+                body_expr.span(),
+                format!(
+                    "`http.{}` body with Instance type requires the program to also declare \
+                     HTTP server handlers (`@get`/`@post`/etc.) so the JSON serialization \
+                     trait `__ToFitzJson` is in scope. Workaround: declare a stub `@get(\"/__noop\")` \
+                     handler, or convert the Instance to `Map<Str, Str>` manually.",
+                    field
+                ),
+            )),
             // Any (gradual escape) — runtime panic if wrong shape.
             // Pragmatic: covers `http.post(url, body)` where `body`
             // is the param of an outer fn typed Any (typical case
@@ -20225,6 +20452,43 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     "`.order_by(closure)` expects 1 argument, got {}",
                     args.len()
                 ),
+            ));
+        }
+        // B1 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — accept
+        // a Str literal as shorthand: `.order_by("name")` ≡
+        // `.order_by(fn(u) => u.name)`. `"-name"` = DESC. Field
+        // existence validated against the type's fields list. Identical
+        // SQL output to the closure path via `with_order_by`.
+        if let Expr::Str(raw, _) = &args[0] {
+            let raw = raw.trim();
+            let (descending, field_name) = if let Some(rest) = raw.strip_prefix('-') {
+                (true, rest.trim().to_string())
+            } else {
+                (false, raw.to_string())
+            };
+            if field_name.is_empty() {
+                return Err(self.err_at(
+                    call_span,
+                    "`.order_by(\"...\")`: the string must be `\"field\"` or `\"-field\"` (received empty string)".to_string(),
+                ));
+            }
+            if !fields.iter().any(|f| f.name == field_name) {
+                return Err(self.err_at(
+                    call_span,
+                    format!("`.order_by`: field `{field_name}` does not exist in the type"),
+                ));
+            }
+            let sql_col = meta
+                .columns
+                .get(&field_name)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(field_name.as_str())
+                .to_string();
+            return Ok(format!(
+                "({recv}).with_order_by({col}, {desc})",
+                recv = receiver_code,
+                col = rust_str_literal(&sql_col),
+                desc = if descending { "true" } else { "false" },
             ));
         }
         let (param_name, body) = self.extract_closure_body(&args[0], "order_by")?;
@@ -35519,6 +35783,20 @@ impl __FromFitzJson for HttpClientResponseData {
         })
     }
 }
+
+/// B2 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — body
+/// marshalling for Nominal types: serializes the `serde_json::Value`
+/// produced by `__to_fitz_json()` to a JSON byte stream and sets
+/// Content-Type to `application/json`. Lives in the HTTP integration
+/// prelude (gated by `has_http`) because it depends on `serde_json`
+/// + `__ToFitzJson` (both pulled in by HTTP server-side).
+#[allow(dead_code)]
+fn __fitz_http_body_from_json(json: serde_json::Value) -> (Option<Vec<u8>>, Option<&'static str>) {
+    match serde_json::to_string(&json) {
+        Ok(s) => (Some(s.into_bytes()), Some("application/json")),
+        Err(_) => (Some(Vec::new()), Some("application/json")),
+    }
+}
 "##;
 
 // ---------------------------------------------------------------------------
@@ -37510,6 +37788,56 @@ mod tests {
             init.contains("1i64") && init.contains("as f64") && init.contains("2f64"),
             "expected Int→Float coercion in the init, was: {}",
             init
+        );
+    }
+
+    // B9 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) —
+    // Nullable<T> vs concrete T equality/inequality emits
+    // `<opt>.as_ref() == Some(&<conc>)` instead of failing the
+    // type check or emitting incompatible Rust.
+    #[test]
+    fn binop_eq_nullable_str_vs_str_emits_as_ref_some_b9() {
+        let src = "let s: Str? = null\nlet b = (s == \"hello\")";
+        let code = gen(src).expect("codegen OK");
+        assert!(
+            code.contains(").as_ref() == Some(&"),
+            "expected `.as_ref() == Some(&...)` in generated code, was: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn binop_neq_nullable_str_vs_str_emits_as_ref_some_b9() {
+        let src = "let s: Str? = null\nlet b = (s != \"down\")";
+        let code = gen(src).expect("codegen OK");
+        assert!(
+            code.contains(").as_ref() != Some(&"),
+            "expected `.as_ref() != Some(&...)` in generated code, was: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn binop_eq_nullable_int_vs_int_emits_as_ref_some_b9() {
+        let src = "let n: Int? = null\nlet b = (n == 7)";
+        let code = gen(src).expect("codegen OK");
+        assert!(
+            code.contains(").as_ref() == Some(&"),
+            "expected `.as_ref() == Some(&...)` in generated code, was: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn binop_eq_str_vs_nullable_str_emits_as_ref_some_swapped_b9() {
+        // Same pattern from the LHS side: `"hello" == s` should also
+        // work (we swap arguments and emit the same shape).
+        let src = "let s: Str? = null\nlet b = (\"hello\" == s)";
+        let code = gen(src).expect("codegen OK");
+        assert!(
+            code.contains(").as_ref() == Some(&"),
+            "expected `.as_ref() == Some(&...)` even when Nullable is on the right, was: {}",
+            code
         );
     }
 
@@ -44078,6 +44406,100 @@ mod tests {
             rust.contains(".with_limit(5i64)"),
             "expected `.with_limit(5i64)`, was: {rust}",
         );
+    }
+
+    // B1 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — accept
+    // a Str literal as shorthand for `.order_by`. ASC by default,
+    // DESC if prefixed with `-`. Field existence validated.
+    // B2 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — Nominal
+    // (Instance) bodies marshal via `__fitz_http_body_from_json`
+    // when has_http=true. Without HTTP server, the codegen emits a
+    // clear error citing the workaround.
+    #[test]
+    fn codegen_http_post_body_instance_emits_from_json_b2() {
+        let src = "type Payload {\n  \
+                      event: Str = \"\"\n  \
+                      count: Int = 0\n\
+                   }\n\
+                   @get(\"/noop\")\n\
+                   fn noop() -> Str { return \"ok\" }\n\
+                   async fn dispatch() -> Result<Null> {\n  \
+                      let p = Payload { event: \"x\", count: 1 }\n  \
+                      let _ = http.post(\"https://api.com\", p).await?\n  \
+                      return Ok(null)\n\
+                   }\n";
+        let code = gen(src).expect("codegen OK");
+        assert!(
+            code.contains("__fitz_http_body_from_json"),
+            "expected `__fitz_http_body_from_json` call in generated code, was missing"
+        );
+    }
+
+    #[test]
+    fn codegen_http_post_body_instance_without_http_server_aborts_b2() {
+        // Program with http.X(...) + Instance but NO HTTP server
+        // handlers. Without `__ToFitzJson` in scope, we abort with
+        // a clear error citing the workaround.
+        let src = "type Payload {\n  \
+                      event: Str = \"\"\n  \
+                      count: Int = 0\n\
+                   }\n\
+                   async fn dispatch() -> Result<Null> {\n  \
+                      let p = Payload { event: \"x\", count: 1 }\n  \
+                      let _ = http.post(\"https://api.com\", p).await?\n  \
+                      return Ok(null)\n\
+                   }\n";
+        assert_err_contains(src, &["body with Instance", "HTTP server", "__ToFitzJson"]);
+    }
+
+    #[test]
+    fn codegen_orm_order_by_accepts_str_literal_asc_b1() {
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.order_by(\"age\").limit(5).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"age\", false)"),
+            "expected `.with_order_by(\"age\", false)` (ASC) in the chain, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_order_by_accepts_str_literal_desc_with_dash_b1() {
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.order_by(\"-age\").limit(5).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"age\", true)"),
+            "expected `.with_order_by(\"age\", true)` (DESC) in the chain, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_order_by_str_literal_unknown_field_aborts_b1() {
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.order_by(\"name\").all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        assert_err_contains(src, &["`.order_by`", "field `name`", "does not exist"]);
     }
 
     #[test]

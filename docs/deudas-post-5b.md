@@ -213,32 +213,34 @@ nginx config, deploy README y Cloudflare prep ya están terminados.
 
 **Doc completo con repros**: [`d:\fitzwatch\CODEGEN-BUGS.md`](../../fitzwatch/CODEGEN-BUGS.md).
 
-### B1 — `.order_by("string")` rechazado por codegen (acepta string en run)
+### B1 — `.order_by("string")` rechazado por codegen — **CERRADO 2026-06-19 (sub-paso 5 cosecha)**
 
-**Síntoma**: `✗ codegen: Error en línea N:M — `.order_by(closure)` espera una closure literal (fn(<param>) => <expr>)`.
+**Síntoma original** (cargo build):
+```
+✗ codegen: Error en línea N:M — `.order_by(closure)` espera una closure literal (fn(<param>) => <expr>)
+```
 
-**Repro**:
+**Repro original**:
 ```fitz
 User.where(fn(u) => u.id > 0).order_by("name").all(conn).await
 ```
 
-**Workaround user-side**: `.order_by(fn(u) => u.name)`.
+**Severity**: ~~Medium~~. **Fix aplicado**: `.order_by("col")` y `.order_by("-col")` (DESC con `-` prefix) ahora aceptados tanto en evaluator (`orm_qb_order_by` en `src/evaluator.rs`) como en codegen (`emit_qb_order_by_chain` en `src/codegen.rs`). Validación de field existence consistente con el path closure (chequea `state.fields`/`fields`). Direction extraída del `-` prefix; el resto del string es el nombre del field. SQL emitido idéntico al path closure (`"\"<sql_col>\" {ASC|DESC}"` en evaluator, `.with_order_by(col, desc)` en codegen). 3 unit tests nuevos: `codegen_orm_order_by_accepts_str_literal_asc_b1`, `codegen_orm_order_by_accepts_str_literal_desc_with_dash_b1`, `codegen_orm_order_by_str_literal_unknown_field_aborts_b1`. ~70 LoC totales.
 
-**Severity**: Medium. **Fix sugerido**: aceptar Str literal en codegen del ORM `gen_order_by`, paralelo a evaluator. ~15 LoC.
+### B2 — `http.post` body con type Instance — **CERRADO 2026-06-19 (sub-paso 5 cosecha)**
 
-### B2 — `http.post` body con type Instance falla en codegen
+**Síntoma original** (cargo build):
+```
+✗ codegen: `http.post` body must be Str, Map<Str, Str> strict, or Bytes (MVP)
+```
 
-**Síntoma**: `✗ codegen: `http.post` body must be Str, Map<Str, Str> strict, or Bytes (MVP); received `<Type>`. Heterogeneous Map<Str, Any> + Instance shapes require `__FitzValue` integration (post-MVP debt parallel to `jwt.encode`)`.
-
-**Repro**:
+**Repro original**:
 ```fitz
 type Payload { event: Str, count: Int }
 http.post("https://api.com", Payload { event: "x", count: 1 }).await
 ```
 
-**Workaround user-side**: `Map<Str, Str>` con interpolación `"{int}"` para convertir Int.
-
-**Severity**: Medium. **Fix sugerido**: extender body dispatch a Instance — emite `<T as __ToFitzJson>::__to_fitz_json(value)` paralelo al ya emitido para HTTP responses. Probablemente integrarlo con la deuda de `__FitzValue` para `Map<Str, Any>` heterogéneo del body (paralelo a `jwt.encode`).
+**Severity**: ~~Medium~~. **Fix aplicado**: `gen_http_body_marshal` (`src/codegen.rs`) suma rama para `Type::Nominal(_)` que emite `__fitz_http_body_from_json(({body}).__to_fitz_json())`. Helper nuevo `__fitz_http_body_from_json(json: serde_json::Value)` sumado al `HTTP_CLIENT_HTTP_INTEGRATION_PRELUDE` (que ya está gated por `has_http`, donde `__ToFitzJson` + `serde_json` viven). Auto-setea `Content-Type: application/json`. La blanket impl `__ToFitzJson for Arc<Mutex<T>>` ya existente delega a `T::__to_fitz_json()` automáticamente. **Limitación documentada**: requiere `has_http=true` (programa con al menos un `@get`/`@post`/etc.) porque sin HTTP server-side la trait + serde_json no están en scope. Caso 90% real (webhook dispatcher: handler HTTP propio + outbound a API externa) cubierto. Programas con solo HTTP client + Instance body reciben error claro citando workarounds (declarar stub handler o convertir manual a Map<Str,Str>). 2 unit tests nuevos: `codegen_http_post_body_instance_emits_from_json_b2`, `codegen_http_post_body_instance_without_http_server_aborts_b2`. ~45 LoC totales.
 
 ### B3 — `ws_broadcast` desde módulo sin handler HTTP/WS rompe en cargo build — **CERRADO 2026-06-19 (sub-paso 1 cosecha)**
 
@@ -345,29 +347,30 @@ async fn h(id: Int?) -> Result<Null> {
 
 Repro en `d:/tmp/sub4-option-pg-repro/repro.fitz` validado: `fitz check` OK, `fitz build` OK (binario compilado), `fitz run` y binario nativo producen el mismo error de runtime ("I/O: ...") al intentar conectar al puerto inexistente — paridad bit-a-bit confirmada porque el código compila y solo falla en runtime DB, no en codegen ni en cargo build.
 
-### B9 — `Str? == Str` (Nullable vs concrete) genera `match arms have incompatible types`
+### B9 — `Str? == Str` (Nullable vs concrete) — **CERRADO 2026-06-19 (sub-paso 5 cosecha)**
 
-**Síntoma** (cargo build):
+**Síntoma original** (cargo build):
 ```
 error[E0308]: `match` arms have incompatible types
   | expected `Option<String>`, found `String`
 ```
 
-**Repro**:
+**Repro original**:
 ```fitz
 let monitor: Monitor = ...
 if (monitor.last_status != "down") { ... }   // last_status: Str?
 ```
 
-**Workaround user-side**: coercer a Str con match local antes de comparar.
+**Severity**: ~~Low~~. **Fix aplicado**: `gen_binop` (`src/codegen.rs`, `Eq`/`NotEq` arm) suma rama nueva entre la verificación de Nullable vs Null y los paths de Nominal/Str/numeric. Cuando un lado es `Type::Nullable(inner)` y el otro es exactamente el mismo primitivo (Str/Int/Float/Bool), emite `<opt>.as_ref() == Some(&<conc>)` (o `!=`) que rustc resuelve correctamente sobre PartialEq de `Option<&T>`. Aplica simétrico (LHS o RHS Nullable). Mixed primitives (Int↔Float Nullable vs concrete distinct primitivo) y comparaciones Nominal Nullable vs concrete quedan como deuda menor (caen al path existente). 4 unit tests nuevos: `binop_eq_nullable_str_vs_str_emits_as_ref_some_b9`, `binop_neq_nullable_str_vs_str_emits_as_ref_some_b9`, `binop_eq_nullable_int_vs_int_emits_as_ref_some_b9`, `binop_eq_str_vs_nullable_str_emits_as_ref_some_swapped_b9`. ~40 LoC totales.
 
-**Severity**: Low. **Fix sugerido**: codegen del operador `==` / `!=` sobre `T?` vs `T`: emitir `<lhs>.as_deref() == Some(<rhs>.as_str())` o similar. ~15 LoC.
+### B10 — `spawn(fn)` cross-module no detecta `@background` — **CERRADO 2026-06-19 (sub-paso 5 cosecha)**
 
-### B10 — `spawn(fn)` cross-module no detecta `@background`
+**Síntoma original**:
+```
+✗ codegen: spawn: fn `run_check` is not declared with `@background`. Mark the fn with `@background\nfn run_check(...) { ... }`...
+```
 
-**Síntoma**: `✗ codegen: spawn: fn `run_check` is not declared with `@background`. Mark the fn with `@background\nfn run_check(...) { ... }`...`.
-
-**Repro**:
+**Repro original**:
 ```fitz
 // checks.fitz
 @background async fn run_check(id: Int) -> Null { ... }
@@ -380,9 +383,13 @@ from checks import run_check
 }
 ```
 
-**Workaround user-side**: wrapper local con `@background` en el módulo caller que delega.
+**Severity**: ~~Medium~~. **Fix aplicado** (3 piezas coordinadas):
 
-**Severity**: Medium. **Fix sugerido**: el detector de `@background` del codegen debería seguir imports cross-module al resolver el callee de `spawn(...)`. Paralelo a cómo el checker resuelve handlers HTTP cross-module via `from <mod> import` (W12/W16). ~30 LoC.
+1. **Infrastructure del checker**: `TypeEnv` suma `imported_background_fns: HashSet<String>` (paralelo a `imported_auth_provider`); métodos pub `add_imported_background_fns(I: IntoIterator<Item = String>)` + `imported_background_fns()`; pub fn nueva en `src/types.rs`: `extract_background_fn_names(program) -> Vec<String>` walks top-level FnDefs y colecta los marcados con `@background`. `collect_background_fns` extiende a merge de los imported names sobre el set local.
+2. **Pre-scans en main.rs y codegen.rs**: `pre_scan_imported_background_fns` en `main.rs` (path `fitz check`/`fitz run`) + `pre_scan_imported_background_fns_for_loader` en `codegen.rs` (path `fitz build`, walk per-módulo). `ModuleLoader` suma campo `main_imported_background_fns: Vec<String>` propagado a cada módulo en `load_module` (combinado con las imports propias del módulo).
+3. **Dispatch del codegen**: `gen_spawn_call` extiende el lookup del target — primero `self.fn_sigs` local, fallback a `module_bindings` cuando el target es `from <bg_mod> import bg`. La sig viene de `self.loaded_modules[idx].fn_sigs`. La `use crate::<bg_mod>::bg;` ya emitida por `emit_module_use_decls` permite emitir la call con el nombre unqualified (`bg(args)` en lugar de `bg_mod::bg(args)`).
+
+3 unit tests nuevos en types: `extract_background_fn_names_collects_marked_top_level_fns_b10`, `extract_background_fn_names_returns_empty_when_no_background_fns_b10`, `spawn_cross_module_imported_background_fn_passes_with_pre_scan_b10`. 1 E2E nuevo en compile_e2e: `cross_module_spawn_background_b10` (3-archivos canonical: `checks.fitz` con `@background`, main importa + `spawn(run_check(42))`). ~150 LoC totales.
 
 ### B11 — Response types con `List<NominalType>` anidados rompen codegen (impacto cross-cutting) — **CERRADO 2026-06-19 (sub-paso 1 cosecha)**
 
@@ -402,15 +409,16 @@ error[E0425]: cannot find type `__FitzValue` in this scope
 
 ~150 LoC totales. Validado contra el repro fitzwatch (`public.fitz` con `PublicOverview { monitors: List<MonitorStatus>, incidents_open: List<OpenIncident>, incidents_recent: List<RecentIncident> }`): los 6× `error[E0425] cannot find type __FitzValue` desaparecieron.
 
-### B12 — Cross-module `@auth_provider` detection en codegen
+### B12 — Cross-module `@auth_provider` detection en codegen — **CERRADO 2026-06-19 (sub-paso 5 cosecha)**
 
-**Síntoma**: `✗ codegen: module `metrics` has type errors: @authenticated on fn ...: no `@auth_provider` registered in the program`.
+**Síntoma original**:
+```
+✗ codegen: module `metrics` has type errors: @authenticated on fn ...: no `@auth_provider` registered in the program
+```
 
-**Repro**: módulo con `@authenticated` que no hace `import auth` ni `from auth import ...` (aunque el provider esté en `auth` y se haya cargado por main).
+**Repro original**: módulo con `@authenticated` que no hace `import auth` ni `from auth import ...` (aunque el provider esté en `auth` y se haya cargado por main).
 
-**Workaround user-side**: agregar `import auth` en cada módulo con handlers `@authenticated`.
-
-**Severity**: Low. **Fix sugerido**: el codegen del módulo debería usar el `imported_auth_provider` del TypeEnv (que el checker SÍ resuelve via W12) sin requerir `import` explícito del lado user. ~20 LoC.
+**Severity**: ~~Low~~. **Fix aplicado**: `ModuleLoader` suma campo `main_imported_auth_provider: Option<ImportedAuthProvider>` + setter `set_main_imported_auth_provider`. `generate_project` pre-scanea las imports de MAIN ANTES de `collect_imports` y popula el slot del loader (usa `pre_scan_imported_auth_provider_for_loader` existente). En `load_module`, el provider del módulo se calcula como `pre_scan_imported_auth_provider_for_loader(módulo) or_else main_imported_auth_provider`. Cierra el caso típico donde un módulo importer (ej. `metrics.fitz`) tiene handlers `@authenticated` pero solo importa el User type desde un módulo no-auth (ej. `from types import User`), y el `@auth_provider` real vive en `auth.fitz` (importado solo desde main). El módulo ahora ve el provider via fallback de main. 1 E2E nuevo en compile_e2e: `cross_module_auth_provider_via_main_b12` (4-archivos canonical: `types.fitz` declara User, `auth.fitz` importa User + tiene `@auth_provider`, `metrics.fitz` importa User + tiene `@authenticated` sin importar auth, `main.fitz` importa auth + metrics). ~70 LoC totales.
 
 ### B13 — `log.X(...)` con kwargs heterogéneos rompe cross-module — **NO REPRODUCE en v0.17.0 (cerrado por W18, 2026-06-18)**
 
@@ -467,25 +475,58 @@ El helper que el codegen del ORM emite para resolver `.preload("user")` itera lo
 
 Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos del codegen ORM). Requiere armar repro mínima como tests de codegen (1-2 unit tests + 1 compile_e2e).
 
+### B16 — match arms con tipos incompatibles (`i64` vs `()`) en posición no-Nullable
+
+**Descubierto** durante el sub-paso 2 de la cosecha al reproducir fitzwatch. **NO se cierra en el sub-paso 5** — el fix correcto vive en el checker (no es mecánico como B1/B9 etc.) y requiere discusión de UX (error proactivo del checker vs trade-off de over-trigger).
+
+**Síntoma** (cargo build):
+```
+error[E0308]: `match` arms have incompatible types
+  | expected `i64`, found `()`
+```
+
+**Repro**:
+```fitz
+let n = match result {
+    Ok(_) => 0,
+    Err(e) => log.error("msg", err: e),  // log.error retorna Null (i.e. () en Rust)
+}
+```
+
+`log.error(...)` retorna `Null` (no es divergent — no aborta), y el otro arm retorna `i64`. La unificación en el codegen NO promueve a Nullable(Int) (porque ninguno de los arms es `null` literal o tipa como Nullable), así que el match queda como expresión de tipo Int pero un arm produce ().
+
+**Workaround user-side** (validado durante sub-paso 2):
+```fitz
+let n = match result {
+    Ok(_) => 0,
+    Err(e) => { log.error("msg", err: e); 0 },  // terminar arm con sentinel `; 0`
+}
+```
+
+**Severity**: Low. **Diferencia con B7** (que sí cerramos en sub-paso 3): B7 cuando uno de los arms es `null` literal y el otro tiene un T concreto → LUB produce Nullable(T) y mi fix wrap-ea con Some()/None. B16 cuando uno de los arms es una **call expression** que devuelve `Null` y el otro un T concreto → LUB no promueve a Nullable (no hay `null` literal involucrado). El codegen NO tiene info suficiente para insertarle el sentinel automáticamente.
+
+**Fix sugerido futuro** (sub-paso 6+): detectarlo en el checker como type error claro citando el workaround. Mensaje sugerido: "match arm N retorna `Int`, arm M retorna `Null`. Si querés ignorar el valor del log call, terminá el arm con `; <valor_default>`". Alternativa más invasiva: el codegen detecta el caso y auto-emite el `;` + sentinel del tipo del otro arm — me gusta menos por semánticamente oscuro.
+
 ### Tabla resumen + plan de ataque sugerido
 
 | # | Bug | Sev | Workaround user | Estimado fix (LoC) | Test E2E necesario |
 |---|---|---|---|---|---|
-| B1  | `.order_by(str)` | Medium | ✅ closure | ~15 | sí |
-| B2  | `http.post` body Instance | Medium | ✅ Map<Str,Str> | ~30 | sí (sobre 17g) |
+| **B1**  | **`.order_by(str)`** | Medium | ✅ closure | ✅ **CERRADO 2026-06-19** ~70 LoC + 3 unit tests | sí |
+| **B2**  | **`http.post` body Instance** | Medium | ✅ Map<Str,Str> | ✅ **CERRADO 2026-06-19** ~45 LoC + 2 unit tests | sí |
 | **B3**  | **`ws_broadcast` cross-module** | High | ✅ helper | ✅ **CERRADO 2026-06-19** ~20 LoC | sí |
 | **B4**  | **`.len()` sobre `List<X>?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | **B5**  | **`[]` sobre `List<X>?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | **B6**  | **`.x` sobre `T?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | **B7**  | **match no envuelve `Some()`** | Medium | ✅ sentinels | ✅ **CERRADO 2026-06-19** ~60 LoC + 3 unit tests | unit |
 | **B8**  | **`Option<T>: __IntoPgValue`** | Medium | ✅ sentinels | ✅ **CERRADO 2026-06-19** ~12 LoC + 3 unit tests | unit |
-| B9  | `Str? == Str` arms incomp | Low | ✅ coerce local | ~15 | sí |
-| B10 | `spawn(fn)` cross-module @bg | Medium | ✅ wrapper local | ~30 | sí |
+| **B9**  | **`Str? == Str` arms incomp** | Low | ✅ coerce local | ✅ **CERRADO 2026-06-19** ~40 LoC + 4 unit tests | unit |
+| **B10** | **`spawn(fn)` cross-module @bg** | Medium | ✅ wrapper local | ✅ **CERRADO 2026-06-19** ~150 LoC + 3 unit + 1 E2E | sí |
 | **B11** | **Response con `List<Nominal>`** | High | ✅ split endpoints | ✅ **CERRADO 2026-06-19** ~150 LoC | sí |
-| B12 | Cross-module `@auth_provider` codegen | Low | ✅ `import auth` | ~20 | sí |
+| **B12** | **Cross-module `@auth_provider` codegen** | Low | ✅ `import auth` | ✅ **CERRADO 2026-06-19** ~70 LoC + 1 E2E | sí |
 | **B13** | **`log.X` kwargs heterogéneos** | ~~Medium~~ | (n/a) | ✅ **NO REPRO en v0.17.0** (W18 lo cerró) | n/a |
 | **B14** | **(meta) match refine** | — | (helpers Result) | ✅ **CERRADO 2026-06-19** ~80 LoC + 4 unit tests | unit (cubre B4/B5/B6 + all-divergent) |
 | **B15** | **`.preload()` + virtuales + nullables** | 🔴 **Critical** | ❌ **sin workaround** | ~80-150 | sí (sobre fitzwatch) |
+| **B16** | **match arms `i64` vs `()` E0308** | Low | ✅ `; <sentinel>` | abierta (sub-paso 6+) | sí |
 
 **Plan de ataque sugerido** (orden por dependencias + impacto):
 
@@ -493,7 +534,14 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ✅ **CERRADO 2026-06-19**. ~80 LoC + 4 unit tests. Filtro de arms divergent (`return`/`break`/`continue`) en el LUB de `gen_match`. Smoke `cargo test --release --lib match_with` 12/12 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 363/363 verde; repro mínima end-to-end (`d:\tmp\sub2-divergent-repro\repro.fitz`) check + run + build + binario ejecutado con paridad bit-a-bit.
 3. **Sub-paso "wrap automático Some()"** — B7. ✅ **CERRADO 2026-06-19**. ~60 LoC + 3 unit tests. Post-procesamiento en `gen_match` después del LUB: cuando `result_ty` queda como `Nullable(inner)`, los arms no-divergentes con `body_ty == Null` se reescriben a `None` y los arms con `body_ty` concreto compatible con `inner` se envuelven en `Some(...)`. Arms ya `Nullable` quedan idempotentes; arms divergentes (`!`) no requieren rewrite. Smoke `cargo test --release --lib match_` 84/84 verde; repro mínima end-to-end (`d:/tmp/sub3-nullable-wrap-repro/repro.fitz`) validada bit-a-bit `fitz run` ↔ `fitz build`.
 4. **Sub-paso "Option<T> → PgValue"** — B8. ✅ **CERRADO 2026-06-19**. ~12 LoC + 3 unit tests. Blanket impl `__IntoPgValue for Option<T>` sumado al preludio DB del codegen (gated por `program_uses_db`). `None → __FitzPgValue::Null`, `Some(v) → v.into_pg()`. Lib `cargo test --release --lib b8` 19/19 verde (incluye los 3 nuevos); lib completa 3126/3126 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 363/363 verde (~4 min); repro mínima end-to-end (`d:/tmp/sub4-option-pg-repro/repro.fitz`) — `fitz check` OK, `fitz build` OK, paridad bit-a-bit `fitz run` ↔ binario nativo (mismo error de runtime DB esperado). **Próximo norte de la cosecha**: sub-paso 5.
-5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12 + **nuevo E0308 match arms `i64` vs `()`** (descubierto al reproducir fitzwatch: `Ok(_) => 0, Err(e) => log.error(...)` donde `log.error` retorna `Null` rompe la unificación del match; documentar como bug aparte). Cada uno chico (~15-30 LoC). Probablemente 1 commit cada uno o agrupados de a 2.
+5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12. ✅ **CERRADO 2026-06-19**. ~~Nuevo E0308 match arms `i64` vs `()` registrado como B16 (deuda separada — fix requiere refinement del checker, no es mecánico)~~. ~375 LoC + 16 tests nuevos (unit + E2E). Detalle:
+    - **B1** (~70 LoC + 3 unit): `.order_by("col")` y `.order_by("-col")` con Str literal aceptados por el evaluator (`orm_qb_order_by`) y por el codegen (`emit_qb_order_by_chain`); ASC por default, `-` prefix → DESC; validación de field existence consistente con el path closure; emite mismo `.with_order_by(col, desc)` en codegen.
+    - **B2** (~45 LoC + 2 unit): body con type Instance en `http.post`/`put`/etc. ahora despacha a `__fitz_http_body_from_json(__to_fitz_json())` cuando `has_http=true` (la trait `__ToFitzJson` + serde_json viven en el preludio HTTP server-side). Helper nuevo sumado al `HTTP_CLIENT_HTTP_INTEGRATION_PRELUDE`. Sin `has_http`, error claro citando el workaround (declarar handler stub o convertir a Map<Str,Str>).
+    - **B9** (~40 LoC + 4 unit): `Nullable(T) == T` / `!= T` para primitivos (Str/Int/Float/Bool) emite `<opt>.as_ref() == Some(&<conc>)` (paralelo a `.is_none()`/`.is_some()` ya existente para Nullable vs Null). Aplica simétrico (LHS o RHS). Mixed primitives (Int↔Float) y nominales quedan como deuda menor (cae al path existente que sigue rechazando).
+    - **B10** (~150 LoC + 3 unit + 1 E2E): cross-module `@background` detection. `TypeEnv` suma `imported_background_fns: HashSet<String>` + métodos `add_imported_background_fns`/`imported_background_fns`. Nueva pub fn en types: `extract_background_fn_names(program)`. Pre-scans nuevos: `pre_scan_imported_background_fns` en `main.rs` (path `fitz check`/`fitz run`) + `pre_scan_imported_background_fns_for_loader` en `codegen.rs` (path `fitz build` per-módulo). El `ModuleLoader` suma campo `main_imported_background_fns` propagado a cada módulo. `gen_spawn_call` extiende su lookup para chequear `module_bindings` además del `fn_sigs` local, así emite la llamada Rust con la sig importada cuando target = `from <bg_mod> import bg`.
+    - **B12** (~70 LoC + 1 E2E): cross-module `@auth_provider` para módulos. El `ModuleLoader` suma campo `main_imported_auth_provider` pre-scanneado en `generate_project` ANTES de `collect_imports`. En `load_module`, el provider del módulo es `or_else`-combined: primero las propias imports del módulo (path histórico W12), luego como fallback el de main. Cierra el caso "módulo con `@authenticated` sin `import auth` propio porque main ya lo importó".
+
+    Smoke `cargo test --release --lib b1 b2 b9 b10 b12` 14/14 verde. Smoke `cargo test --release --test compile_e2e cross_module_spawn_background_b10 cross_module_auth_provider_via_main_b12` 2/2 verde. **Próximo norte de la cosecha**: sub-paso 6 (B15 — el bloqueante).
 6. **Sub-paso BLOQUEANTE "ORM `.preload()` + Nullable companion"** — B15. El grande. ~80-150 LoC + repro tests sobre fitzwatch como compile_e2e end-to-end. Cerrar acá desbloquea fitzwatch al deploy completo.
 
 **Validación al cerrar la cosecha**:
