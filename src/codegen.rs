@@ -24785,7 +24785,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             _ => None,
         };
 
-        let mut arm_pieces: Vec<String> = Vec::with_capacity(arms.len() + 1);
+        // Sub-paso 3 (cosecha codegen post-fitzwatch) — to fix B7
+        // (Nullable wrap on Null/inner arms) we need to potentially
+        // rewrite each arm body AFTER computing result_ty. So we store
+        // pat+guard prefix and body code separately and assemble the
+        // final arm strings at the end.
+        let mut arm_prefixes: Vec<String> = Vec::with_capacity(arms.len());
+        let mut arm_bodies: Vec<String> = Vec::with_capacity(arms.len());
         let mut arm_tys: Vec<Type> = Vec::with_capacity(arms.len());
         // Sub-paso 2 (cosecha codegen post-fitzwatch) — flow-sensitive
         // refinement on `match`. An arm whose body is `return`/`break`/
@@ -24859,9 +24865,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             (c, t, false)
                         }
                     }
-                    other @ (Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..)) => {
-                        // `return X`/`break`/`continue` without trailing `;`
-                        // — type `!` that coerces to any T of the match.
+                    other @ (Stmt::Return(..)
+                    | Stmt::Break(..)
+                    | Stmt::Continue(..)
+                    | Stmt::ReturnStatus { .. }) => {
+                        // `return X`/`return <status> { ... }`/`break`/
+                        // `continue` without trailing `;` — type `!`
+                        // that coerces to any T of the match.
+                        // `ReturnStatus` is divergent inside an HTTP
+                        // handler (it returns the response and exits).
                         let stmt_code = self.gen_stmt_to_string(other)?;
                         let stripped = strip_trailing_semi(&stmt_code);
                         (format!("{{ {} }}", stripped), Type::Null, true)
@@ -24889,7 +24901,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 tail_ty = ty;
                                 continue;
                             }
-                            Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..) => {
+                            Stmt::Return(..)
+                            | Stmt::Break(..)
+                            | Stmt::Continue(..)
+                            | Stmt::ReturnStatus { .. } => {
                                 let code = self.gen_stmt_to_string(stmt)?;
                                 block.push_str(&strip_trailing_semi(&code));
                                 tail_ty = Type::Null;
@@ -24915,18 +24930,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 (Some(g), None) | (None, Some(g)) => format!(" if {}", g),
                 (Some(g1), Some(g2)) => format!(" if ({}) && ({})", g1, g2),
             };
-            arm_pieces.push(format!("{}{} => {}", pat_code, guard_combined, body_code));
+            arm_prefixes.push(format!("{}{} => ", pat_code, guard_combined));
+            arm_bodies.push(body_code);
             arm_tys.push(body_ty);
             arm_divergent.push(is_divergent);
-        }
-
-        // Decide whether we need an artificial catch-all so
-        // rustc accepts the match. Exhaustive cases without adding anything:
-        //   - there is an Ident/Wildcard arm;
-        //   - the scrutinee is Result<T> and we have at least one Ok and one Err.
-        let result_exhaustive = inner_ok_ty.is_some() && has_ok && has_err;
-        if !has_catch_all && (!result_exhaustive || has_or_arm) {
-            arm_pieces.push("_ => panic!(\"`match` did not match any arm\")".to_string());
         }
 
         // Output type: lub of the NON-divergent arms; if they fail to
@@ -24952,6 +24959,60 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Type::Null
             }
         };
+
+        // Sub-paso 3 (cosecha codegen post-fitzwatch) — when the LUB
+        // settles on `Nullable(T)`, rewrite each non-divergent arm body
+        // so rustc accepts the unification:
+        //   - body_ty == Null and body_code == "()" → emit `None`.
+        //   - body_ty == Null with side-effects in a block → wrap
+        //     `{ <body>; None }` so the side-effects run then yield None.
+        //   - body_ty already Nullable(_) → leave alone (idempotent —
+        //     handles arms that already wrote `Some(x)` / `None`).
+        //   - body_ty otherwise (the inner T or any compatible
+        //     concrete) → wrap in `Some(<body>)`.
+        // Divergent arms (`!`) coerce to anything, no rewrite needed.
+        // Cierra B7.
+        if let Type::Nullable(_) = &result_ty {
+            for i in 0..arm_bodies.len() {
+                if arm_divergent[i] {
+                    continue;
+                }
+                match &arm_tys[i] {
+                    Type::Nullable(_) => {
+                        // Already a Nullable expression (e.g., explicit
+                        // `Some(x)` / `None` / a binding refined as
+                        // `T?`). Leave it untouched.
+                    }
+                    Type::Null => {
+                        let body = &arm_bodies[i];
+                        if body.trim() == "()" {
+                            arm_bodies[i] = "None".to_string();
+                        } else {
+                            arm_bodies[i] = format!("{{ {}; None }}", body);
+                        }
+                    }
+                    _ => {
+                        arm_bodies[i] = format!("Some({})", arm_bodies[i]);
+                    }
+                }
+            }
+        }
+
+        // Assemble arm_pieces from prefixes + (possibly rewritten) bodies.
+        let mut arm_pieces: Vec<String> = arm_prefixes
+            .into_iter()
+            .zip(arm_bodies)
+            .map(|(prefix, body)| format!("{}{}", prefix, body))
+            .collect();
+
+        // Decide whether we need an artificial catch-all so
+        // rustc accepts the match. Exhaustive cases without adding anything:
+        //   - there is an Ident/Wildcard arm;
+        //   - the scrutinee is Result<T> and we have at least one Ok and one Err.
+        let result_exhaustive = inner_ok_ty.is_some() && has_ok && has_err;
+        if !has_catch_all && (!result_exhaustive || has_or_arm) {
+            arm_pieces.push("_ => panic!(\"`match` did not match any arm\")".to_string());
+        }
 
         let code = format!("(match {} {{ {} }})", scrut_code, arm_pieces.join(", "));
         Ok((code, result_ty))
@@ -40834,6 +40895,108 @@ mod tests {
             Some("()"),
             "all-divergent match should type as `()`, got: {:?}",
             ast_test::local_type(&v)
+        );
+    }
+
+    #[test]
+    fn match_with_nullable_lub_wraps_inner_arm_in_some_and_null_arm_in_none_b7() {
+        // B7 — `match { Ok(v) => v, Err(_) => null }` assigned to `Str?`.
+        // The result_ty after LUB is `Nullable(Str)`. The codegen must
+        // post-process arm bodies so the Ok arm wraps `v` in `Some(...)`
+        // and the Err arm emits `None` instead of the bare `()` literal.
+        // Without the wrap, rustc rejects with E0308 `expected
+        // Option<String>, found String`.
+        let src = "fn run() {\n\
+                       let r: Result<Str> = Ok(\"hi\")\n\
+                       let opt: Str? = match r { Ok(v) => v, Err(_) => null }\n\
+                   }";
+        let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let run = ast_test::find_item_fn(&file, "run").expect("missing fn run");
+        let opt = ast_test::find_local_in_fn(run, "opt").expect("missing let opt");
+        assert_eq!(
+            ast_test::local_type(&opt).as_deref(),
+            Some("Option < String >"),
+            "opt should be annotated as Option<String>, got: {:?}",
+            ast_test::local_type(&opt)
+        );
+        let init = ast_test::local_init(&opt).unwrap();
+        // The Ok arm body is `v` (a Str binding) — depending on the
+        // call site emission, the codegen may add `.clone()`. We only
+        // require that the body is wrapped in `Some(...)`.
+        assert!(
+            init.contains("Some (v)") || init.contains("Some(v)") || init.contains("Some (v ."),
+            "expected Ok arm body wrapped as `Some(v...)`, got: {}",
+            init
+        );
+        assert!(
+            init.contains("=> None"),
+            "expected Err arm body rewritten to `None`, got: {}",
+            init
+        );
+    }
+
+    #[test]
+    fn match_with_nullable_lub_wraps_int_arm_in_some_b7() {
+        // B7 — same shape with `Int?` to exercise primitive coercion.
+        // The Ok arm yields `n` (i64) which the codegen must wrap as
+        // `Some(n)` to satisfy `Option<i64>`.
+        let src = "fn run() {\n\
+                       let r: Result<Int> = Ok(42)\n\
+                       let opt: Int? = match r { Ok(n) => n, Err(_) => null }\n\
+                   }";
+        let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let run = ast_test::find_item_fn(&file, "run").expect("missing fn run");
+        let opt = ast_test::find_local_in_fn(run, "opt").expect("missing let opt");
+        assert_eq!(
+            ast_test::local_type(&opt).as_deref(),
+            Some("Option < i64 >"),
+            "opt should be annotated as Option<i64>, got: {:?}",
+            ast_test::local_type(&opt)
+        );
+        let init = ast_test::local_init(&opt).unwrap();
+        assert!(
+            init.contains("Some (n)") || init.contains("Some(n)"),
+            "expected Ok arm body wrapped as `Some(n)`, got: {}",
+            init
+        );
+        assert!(
+            init.contains("=> None"),
+            "expected Err arm body rewritten to `None`, got: {}",
+            init
+        );
+    }
+
+    #[test]
+    fn match_with_nullable_binding_arm_does_not_double_wrap_b7() {
+        // B7 — when an arm body is already `Nullable(_)` (here `prev`,
+        // typed as `Str?`), the post-LUB rewrite must leave it
+        // untouched (idempotent). Otherwise we would emit
+        // `Some(Some(...))` which rustc rejects. Fitz has no `Some/None`
+        // syntax, so this is the realistic idempotency case.
+        let src = "fn run() {\n\
+                       let prev: Str? = null\n\
+                       let r: Result<Str> = Ok(\"hi\")\n\
+                       let opt: Str? = match r { Ok(_) => prev, Err(_) => null }\n\
+                   }";
+        let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let run = ast_test::find_item_fn(&file, "run").expect("missing fn run");
+        let opt = ast_test::find_local_in_fn(run, "opt").expect("missing let opt");
+        let init = ast_test::local_init(&opt).unwrap();
+        // The `prev` binding is already `Option<String>` — the Ok arm
+        // body must NOT be wrapped again in Some(...).
+        assert!(
+            !init.contains("Some (prev") && !init.contains("Some(prev"),
+            "the Nullable binding should not be double-wrapped, got: {}",
+            init
+        );
+        // The Null arm still becomes None.
+        assert!(
+            init.contains("=> None"),
+            "expected Err arm body rewritten to `None`, got: {}",
+            init
         );
     }
 

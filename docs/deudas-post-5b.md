@@ -291,16 +291,16 @@ if (monitor.paused) { ... }   // ✗
 
 **Severity**: ~~Medium~~ (sub-case de B14). **Fix aplicado**: cerrado junto a B4/B5 — el mismo cambio en `gen_match` filtra arms divergentes del LUB, así `monitor` queda como `T` (Nominal directo) y field access dispatch funciona normal. Test unit dedicado `match_with_divergent_err_arm_does_not_widen_to_nullable_b6_field` valida que `who: User` después del match y `who.name` tipa como `String`.
 
-### B7 — `match { Ok(v) => v, Err(_) => null }` no envuelve en `Some()` al asignar a `Nullable`
+### B7 — `match { Ok(v) => v, Err(_) => null }` no envuelve en `Some()` al asignar a `Nullable` — **CERRADO 2026-06-19** (sub-paso 3)
 
-**Síntoma** (cargo build):
+**Síntoma original** (cargo build):
 ```
 error[E0308]: mismatched types
   | expected `Option<String>`, found `String`
 help: try wrapping the expression in `Some`
 ```
 
-**Repro**:
+**Repro original**:
 ```fitz
 let opt: Str? = match row.get_str("col") {
     Ok(v) => v,
@@ -308,9 +308,18 @@ let opt: Str? = match row.get_str("col") {
 }
 ```
 
-**Workaround user-side**: cambiar `Str?` a `Str` con sentinel `""`, `Int?` a `Int` con `0`.
+**Severity**: ~~Medium~~. **Fix aplicado** (sub-paso 3 de la cosecha post-fitzwatch): post-procesamiento en `gen_match` después de calcular `result_ty`. Cuando el LUB de los arms no-divergentes da `Nullable(inner)`, recorremos cada arm no-divergente y aplicamos:
+- `body_ty == Null` con `body_code == "()"` → emitimos `None` directo.
+- `body_ty == Null` con side-effects en bloque → emitimos `{ <body>; None }` para preservar los side-effects.
+- `body_ty` ya `Nullable(_)` → dejamos sin tocar (idempotente — handles bindings ya tipados como `T?`).
+- otherwise → wrap en `Some(<body>)`.
 
-**Severity**: Medium. **Fix sugerido**: codegen de `match` con LHS `T?` debería envolver arms ramas `Ok(v) => v` en `Some(v)` y `Err(_) => null` en `None`. ~20 LoC en `gen_match` cuando el `let` destino es Nullable.
+Arms divergentes (`return`/`break`/`continue`, type `!`) coercen a cualquier `T` y no requieren rewrite. ~60 LoC en `src/codegen.rs::gen_match` (incluyendo refactor menor para guardar `pat_prefix` + `body_code` separados antes de ensamblar `arm_pieces`). Tests unit dedicados:
+- `match_with_nullable_lub_wraps_inner_arm_in_some_and_null_arm_in_none_b7` (Str?)
+- `match_with_nullable_lub_wraps_int_arm_in_some_b7` (Int?)
+- `match_with_nullable_binding_arm_does_not_double_wrap_b7` (idempotencia)
+
+Repro en `d:/tmp/sub3-nullable-wrap-repro/repro.fitz` validado bit-a-bit `fitz run` ↔ `fitz build` ↔ binario nativo (cinco prints, salida `hola\nnull\n42\nnull\nnull`).
 
 ### B8 — `Option<T>: __IntoPgValue` not satisfied (query params Nullable → driver PG)
 
@@ -465,7 +474,7 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 | **B4**  | **`.len()` sobre `List<X>?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | **B5**  | **`[]` sobre `List<X>?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
 | **B6**  | **`.x` sobre `T?`** | Medium | ✅ helper Result | ✅ **CERRADO 2026-06-19** (parte de B14) | unit |
-| B7  | match no envuelve `Some()` | Medium | ✅ sentinels | ~20 | sí |
+| **B7**  | **match no envuelve `Some()`** | Medium | ✅ sentinels | ✅ **CERRADO 2026-06-19** ~60 LoC + 3 unit tests | unit |
 | B8  | `Option<T>: __IntoPgValue` | Medium | ✅ sentinels | ~10 | sí |
 | B9  | `Str? == Str` arms incomp | Low | ✅ coerce local | ~15 | sí |
 | B10 | `spawn(fn)` cross-module @bg | Medium | ✅ wrapper local | ~30 | sí |
@@ -478,8 +487,8 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 **Plan de ataque sugerido** (orden por dependencias + impacto):
 
 1. **Sub-paso "detectores unificados"** — B3 + B11 + B13 — ✅ **CERRADO 2026-06-19**. B3 + B11 fixeados con ~150 LoC en `src/codegen.rs`; B13 NO reprodujo en v0.17.0 (W18 lo había cerrado). Detalle: ver entries individuales arriba. Smoke: `cargo test --release --lib` 3116/3116 verde post-fix.
-2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ✅ **CERRADO 2026-06-19**. ~80 LoC + 4 unit tests. Filtro de arms divergent (`return`/`break`/`continue`) en el LUB de `gen_match`. Smoke `cargo test --release --lib match_with` 12/12 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 363/363 verde; repro mínima end-to-end (`d:\tmp\sub2-divergent-repro\repro.fitz`) check + run + build + binario ejecutado con paridad bit-a-bit. **Próximo norte de la cosecha**: sub-paso 3.
-3. **Sub-paso "wrap automático Some()"** — B7. ~20 LoC + tests.
+2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ✅ **CERRADO 2026-06-19**. ~80 LoC + 4 unit tests. Filtro de arms divergent (`return`/`break`/`continue`) en el LUB de `gen_match`. Smoke `cargo test --release --lib match_with` 12/12 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 363/363 verde; repro mínima end-to-end (`d:\tmp\sub2-divergent-repro\repro.fitz`) check + run + build + binario ejecutado con paridad bit-a-bit.
+3. **Sub-paso "wrap automático Some()"** — B7. ✅ **CERRADO 2026-06-19**. ~60 LoC + 3 unit tests. Post-procesamiento en `gen_match` después del LUB: cuando `result_ty` queda como `Nullable(inner)`, los arms no-divergentes con `body_ty == Null` se reescriben a `None` y los arms con `body_ty` concreto compatible con `inner` se envuelven en `Some(...)`. Arms ya `Nullable` quedan idempotentes; arms divergentes (`!`) no requieren rewrite. Smoke `cargo test --release --lib match_` 84/84 verde; repro mínima end-to-end (`d:/tmp/sub3-nullable-wrap-repro/repro.fitz`) validada bit-a-bit `fitz run` ↔ `fitz build`. **Próximo norte de la cosecha**: sub-paso 4.
 4. **Sub-paso "Option<T> → PgValue"** — B8. ~10 LoC + test.
 5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12 + **nuevo E0308 match arms `i64` vs `()`** (descubierto al reproducir fitzwatch: `Ok(_) => 0, Err(e) => log.error(...)` donde `log.error` retorna `Null` rompe la unificación del match; documentar como bug aparte). Cada uno chico (~15-30 LoC). Probablemente 1 commit cada uno o agrupados de a 2.
 6. **Sub-paso BLOQUEANTE "ORM `.preload()` + Nullable companion"** — B15. El grande. ~80-150 LoC + repro tests sobre fitzwatch como compile_e2e end-to-end. Cerrar acá desbloquea fitzwatch al deploy completo.
