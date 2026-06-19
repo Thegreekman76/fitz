@@ -240,7 +240,7 @@ http.post("https://api.com", Payload { event: "x", count: 1 }).await
 
 **Severity**: Medium. **Fix sugerido**: extender body dispatch a Instance — emite `<T as __ToFitzJson>::__to_fitz_json(value)` paralelo al ya emitido para HTTP responses. Probablemente integrarlo con la deuda de `__FitzValue` para `Map<Str, Any>` heterogéneo del body (paralelo a `jwt.encode`).
 
-### B3 — `ws_broadcast` desde módulo sin handler HTTP/WS rompe en cargo build
+### B3 — `ws_broadcast` desde módulo sin handler HTTP/WS rompe en cargo build — **CERRADO 2026-06-19 (sub-paso 1 cosecha)**
 
 **Síntoma**: `cargo build: cannot find trait `__ToFitzJson` in this scope --> src/<module>.rs:N`.
 
@@ -248,7 +248,7 @@ http.post("https://api.com", Payload { event: "x", count: 1 }).await
 
 **Workaround user-side**: helper en módulo CON handlers HTTP/WS (`fn emit(evt: Map<Str,Str>) { ws_broadcast("/x", evt); return null }`), módulos sin handlers delegan.
 
-**Severity**: High. **Fix sugerido**: si un módulo llama `ws_broadcast` o el preludio HTTP-clientside, gatear emit del trait `__ToFitzJson` (+ `__FromFitzJson` defensivo) independiente de la presencia de handlers HTTP/WS propios. Detector análogo a `program_uses_http_client`. ~25 LoC.
+**Severity**: High. **Fix aplicado**: separado del bloque HTTP el import de `use crate::{__ToFitzJson, __FromFitzJson};` en `generate_module_rs_with_bindings` (`src/codegen.rs`). Se emite cuando `module_has_http || program_uses_ws_broadcast(program)`. ~20 LoC. Validado contra el repro fitzwatch (`checks.fitz` sin handlers HTTP llamando a `ws_broadcast` directo): los 3× `error[E0405] cannot find trait __ToFitzJson` desaparecieron.
 
 ### B4 — `.len()` sobre `List<X>?` (Nullable) rechazado por codegen
 
@@ -372,7 +372,7 @@ from checks import run_check
 
 **Severity**: Medium. **Fix sugerido**: el detector de `@background` del codegen debería seguir imports cross-module al resolver el callee de `spawn(...)`. Paralelo a cómo el checker resuelve handlers HTTP cross-module via `from <mod> import` (W12/W16). ~30 LoC.
 
-### B11 — Response types con `List<NominalType>` anidados rompen codegen (impacto cross-cutting)
+### B11 — Response types con `List<NominalType>` anidados rompen codegen (impacto cross-cutting) — **CERRADO 2026-06-19 (sub-paso 1 cosecha)**
 
 **Síntoma** (cargo build):
 ```
@@ -380,24 +380,15 @@ error[E0425]: cannot find type `__FitzValue` in this scope
   --> src/main.rs:N (Vec<__FitzValue>)
 ```
 
-**Repro**:
-```fitz
-type Status { x: Int = 0 }
-type Resp { snapshot: Str = "", items: List<Status> = [] }
-
-@get("/x")
-async fn h() -> Result<Resp> { ... }
-```
-
-El codegen emite `impl __FromFitzJson for RespData` aunque Resp sea solo output (nunca llega como body de un handler), y la deserialización del field `items: List<Status>` emite `Vec<__FitzValue>` que no está en scope.
+**Trigger real (descubierto al reproducir desde fitzwatch)**: el caso dispara **cross-module** — `public.fitz` declara `type PublicOverview { items: List<MonitorStatus> = [] }` con handler `@get("/x") fn(...) -> Result<PublicOverview>`. `main.fitz` importa el handler con `from public import handler` pero NO los nested types (`MonitorStatus`). `emit_helpers_for_imported_types` en main.rs hace remap del field `items: List<MonitorStatus>` → `List<Any>` (porque `MonitorStatus` no está en el env del main) → emite `impl __FromFitzJson for PublicOverviewData { let items: Vec<__FitzValue> = ... }`. Pero `__FitzValue` no se activa por ningún detector (el walker `program_uses_fitz_value` mira ASTs, no el remap codegen-time), así que rustc rompe.
 
 **Workaround user-side**: split en endpoints separados que devuelvan `List<X>` directo + endpoint de metadata aparte.
 
-**Severity**: High. **Fix sugerido**: dos partes coordinadas:
-1. **No emitir `__FromFitzJson`** para types que son solo output de handlers (nunca input). Detector que walka handlers buscando types usados como body declarado.
-2. **Activar `__FitzValue`** cuando un type con `List<NominalType>` aparece en cualquier handler (input o output). Detector análogo a B3.
+**Severity**: High. **Fix aplicado** (2 sub-cambios coordinados en `src/codegen.rs`):
+1. **Detector pre-pass** `cross_module_compound_degrades_to_fitz_value(program, loader)` — walka `loader.modules.type_sigs` y por cada field con compound (`List<Nominal>` / `Map<_, Nominal>` / `Map<Nominal, _>` o `Nullable` wrappers) chequea si el inner Nominal es resoluble por main (local TypeDef + types importados via `from X import T`). Si no → activa `uses_fitz_value = true` antes del `emit_prelude`. Aplicado en `generate_project` (línea ~272) Y en `generate_main_rs` (línea ~5290 — recompute path heredado del split de Phase 5b).
+2. **Stub `__FromFitzJson`** — nuevo enum `FromFitzJsonMode { Real, Stub }` + variante `gen_type_http_impls_for_sig_with_meta_and_mode`. Cuando `emit_helpers_for_imported_types` detecta compound degrade (helper nuevo `field_type_compound_degraded` que compara original vs remapped), emite `__FromFitzJson` con cuerpo `Err("cross-module __FromFitzJson for X is a stub: the type has compound fields...; if you need to deserialize this body cross-module, `from <module> import` every nested type the body references")`. El stub satisface el trait bound; `__ToFitzJson` se emite normal (solo invoca `self.<field>.__to_fitz_json()` — no referencia el tipo remapped). El stub se dispara en runtime solo si alguien intenta deserializar el type cross-module — el caso típico (response output-only) NUNCA llega ahí.
 
-~40-60 LoC en los detectores + gating.
+~150 LoC totales. Validado contra el repro fitzwatch (`public.fitz` con `PublicOverview { monitors: List<MonitorStatus>, incidents_open: List<OpenIncident>, incidents_recent: List<RecentIncident> }`): los 6× `error[E0425] cannot find type __FitzValue` desaparecieron.
 
 ### B12 — Cross-module `@auth_provider` detection en codegen
 
@@ -409,18 +400,13 @@ El codegen emite `impl __FromFitzJson for RespData` aunque Resp sea solo output 
 
 **Severity**: Low. **Fix sugerido**: el codegen del módulo debería usar el `imported_auth_provider` del TypeEnv (que el checker SÍ resuelve via W12) sin requerir `import` explícito del lado user. ~20 LoC.
 
-### B13 — `log.X(...)` con kwargs heterogéneos rompe cross-module
+### B13 — `log.X(...)` con kwargs heterogéneos rompe cross-module — **NO REPRODUCE en v0.17.0 (cerrado por W18, 2026-06-18)**
 
-**Síntoma** (cargo build): `error[E0425]: cannot find type `__FitzValue` in this scope` (en código emitido por `log.info("evt", k1: int, k2: str)`).
+**Investigación 2026-06-19 (sub-paso 1 cosecha)**: el repro del doc (`log.info("evt", count: 42, name: "x")` cross-module) **NO dispara** en v0.17.0. Reverteamos el workaround en `checks.fitz` de fitzwatch (cambiando los string interp a kwargs heterogéneos) y compila limpio. Probablemente W18 (commit `63b3d3f`, 2026-06-18, mismo día del cierre de fitzwatch) cerró este caso cuando atacó el preludio cross-module de logging para que módulos importados que llaman `log.X` reciban los imports correctos. El doc fitzwatch quedó con el bug listado porque se escribió contra una versión PRE-W18 (probable v0.16.x).
 
-**Repro**:
-```fitz
-log.info("scheduler.tick", count: 42, name: "x")
-```
+**`gen_log_call` (`src/codegen.rs` ~línea 15855)** emite cada kwarg como `__FitzLogValue::Int(...)` / `__FitzLogValue::Str(...)` / etc directos — nunca usa el enum `__FitzValue` (son tipos distintos: `__FitzLogValue` es el tagged union local del módulo logging). El walker `program_uses_logging` activa el preludio `__FitzLogValue` ya en módulos cross-module desde W18.
 
-**Workaround user-side**: string interpolado sin kwargs (`log.info("scheduler.tick count={n} name={s}")`).
-
-**Severity**: Medium. **Fix sugerido**: gating del trait `__FitzValue` cuando hay llamadas `log.X(...)` con kwargs heterogéneos. Detector análogo a B3/B11. Probablemente puede unificarse con B3+B11 en un solo detector "necesita __FitzValue/`__ToFitzJson`". ~unifica con B3+B11.
+**Severity**: ~~Medium~~ NO APLICA. **Acción**: ninguna — el bug está cerrado por W18. Si reaparece en algún caso edge, abrir entrada nueva.
 
 ### B14 — (meta) `match` con return temprano no refine tipos en codegen
 
@@ -475,7 +461,7 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 |---|---|---|---|---|---|
 | B1  | `.order_by(str)` | Medium | ✅ closure | ~15 | sí |
 | B2  | `http.post` body Instance | Medium | ✅ Map<Str,Str> | ~30 | sí (sobre 17g) |
-| B3  | `ws_broadcast` cross-module | High | ✅ helper | ~25 | sí |
+| **B3**  | **`ws_broadcast` cross-module** | High | ✅ helper | ✅ **CERRADO 2026-06-19** ~20 LoC | sí |
 | B4  | `.len()` sobre `List<X>?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
 | B5  | `[]` sobre `List<X>?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
 | B6  | `.x` sobre `T?` | Medium | ✅ helper Result | (parte de B14) | (parte de B14) |
@@ -483,19 +469,19 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 | B8  | `Option<T>: __IntoPgValue` | Medium | ✅ sentinels | ~10 | sí |
 | B9  | `Str? == Str` arms incomp | Low | ✅ coerce local | ~15 | sí |
 | B10 | `spawn(fn)` cross-module @bg | Medium | ✅ wrapper local | ~30 | sí |
-| B11 | Response con `List<Nominal>` | High | ✅ split endpoints | ~50 | sí |
+| **B11** | **Response con `List<Nominal>`** | High | ✅ split endpoints | ✅ **CERRADO 2026-06-19** ~150 LoC | sí |
 | B12 | Cross-module `@auth_provider` codegen | Low | ✅ `import auth` | ~20 | sí |
-| B13 | `log.X` kwargs heterogéneos | Medium | ✅ strings | (unifica con B3+B11) | (unifica con B3+B11) |
+| **B13** | **`log.X` kwargs heterogéneos** | ~~Medium~~ | (n/a) | ✅ **NO REPRO en v0.17.0** (W18 lo cerró) | n/a |
 | B14 | (meta) match refine | — | (helpers Result) | ~50-80 | sí (cubre B4/B5/B6) |
 | **B15** | **`.preload()` + virtuales + nullables** | 🔴 **Critical** | ❌ **sin workaround** | ~80-150 | sí (sobre fitzwatch) |
 
 **Plan de ataque sugerido** (orden por dependencias + impacto):
 
-1. **Sub-paso "detectores unificados"** — B3 + B11 + B13 (todos son "necesita __FitzValue/`__ToFitzJson` por uso indirecto"). Un solo detector que walke usos. ~80 LoC.
-2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ~80 LoC + tests.
+1. **Sub-paso "detectores unificados"** — B3 + B11 + B13 — ✅ **CERRADO 2026-06-19**. B3 + B11 fixeados con ~150 LoC en `src/codegen.rs`; B13 NO reprodujo en v0.17.0 (W18 lo había cerrado). Detalle: ver entries individuales arriba. Smoke: `cargo test --release --lib` 3116/3116 verde post-fix.
+2. **Sub-paso "refine flow-sensitive en match"** — B4 + B5 + B6 (todos del meta B14). ~80 LoC + tests. **Próximo norte de la cosecha**.
 3. **Sub-paso "wrap automático Some()"** — B7. ~20 LoC + tests.
 4. **Sub-paso "Option<T> → PgValue"** — B8. ~10 LoC + test.
-5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12. Cada uno chico (~15-30 LoC). Probablemente 1 commit cada uno o agrupados de a 2.
+5. **Sub-paso "fixes mecánicos"** — B1 + B2 + B9 + B10 + B12 + **nuevo E0308 match arms `i64` vs `()`** (descubierto al reproducir fitzwatch: `Ok(_) => 0, Err(e) => log.error(...)` donde `log.error` retorna `Null` rompe la unificación del match; documentar como bug aparte). Cada uno chico (~15-30 LoC). Probablemente 1 commit cada uno o agrupados de a 2.
 6. **Sub-paso BLOQUEANTE "ORM `.preload()` + Nullable companion"** — B15. El grande. ~80-150 LoC + repro tests sobre fitzwatch como compile_e2e end-to-end. Cerrar acá desbloquea fitzwatch al deploy completo.
 
 **Validación al cerrar la cosecha**:
@@ -503,6 +489,129 @@ Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos
 - Smoke: `docker compose up -d --build` en fitzwatch + curl tests del API + browser tests del admin Vue 3.
 - Si todo OK → fitzwatch al deploy VPS (Cloudflare DNS + Origin Cert + nginx site enable).
 - Bump versión: probable **v0.17.1** (parche, todos son bugs sin cambios de API) o **v0.18.0** (minor, si se aprovecha para algún feature).
+
+---
+
+## 🟡 ORM nativo — gaps detectados durante fitzwatch (2026-06-18)
+
+> **Auditoría hermana de la cosecha codegen** (arriba). Durante el
+> desarrollo de **fitzwatch** (`d:\fitzwatch\`, status page +
+> uptime monitor en Fitz puro) auditamos el balance ORM:SQL-crudo del
+> proyecto. Terminó **35:65** en queries totales — el ORM nativo
+> cubre el CRUD básico, pero seis categorías nos forzaron a bajar a
+> `conn.query`/`conn.exec` crudo. Esta sección las agrupa para que
+> futuras tandas las evalúen en conjunto.
+>
+> **Independiente de la cosecha codegen** — pueden cerrarse en
+> cualquier orden o paralelo. Los workarounds user-side
+> (`conn.query`/`conn.exec`) son el patrón canónico documentado en
+> [`docs/db-orm.md`](db-orm.md) y replicado en los boilerplates
+> `api-orm-full`/`taskhub`/`api-multi-tenant`.
+
+### O1 — `.update({...})` no acepta expresiones SQL como `NOW()` / `EXTRACT`
+
+**Síntoma**: el ORM `.update(conn, {...})` solo acepta valores literales o variables Fitz. Para `last_check_at = NOW()` o `duration_secs = EXTRACT(EPOCH FROM (NOW() - started_at))::int` hay que bajar a `conn.exec(SQL crudo, [args])`.
+
+**Repro fitzwatch** (`checks.fitz` → `update_monitor_last_status` y `close_open_incidents`):
+```fitz
+let _ = conn.exec(
+    "UPDATE monitors SET last_check_at = NOW(), last_status = $1 WHERE id = $2",
+    [status, monitor_id],
+).await?
+```
+
+**Workaround user-side**: `conn.exec(...)` crudo. Funciona pero pierde tipado del lenguaje sobre el field.
+
+**Severity**: Medium. **Fix sugerido**: permitir expresiones whitelisted en el Map del `.update({...})`, tipo `{"last_check_at": db.now(), "count": db.raw("count + 1")}` o helpers similares. Otra opción más quirúrgica: aceptar strings prefijados con `SQL!` que el ORM trata como expresión cruda (similar a `sqlalchemy.func.now()`). ~80-120 LoC.
+
+### O2 — Sin migrations automáticas (`fitz db diff`/`migrate`)
+
+**Síntoma**: cualquier proyecto serio que usa ORM nativo tiene que mantener el SQL crudo del `CREATE TABLE` en un módulo aparte (`schema.fitz` en fitzwatch) y llamarlo al boot del main con `init_schema().await`. El ORM declara los `@table` types pero no genera ni el DDL inicial ni los diffs cuando los types cambian.
+
+**Repro fitzwatch** (`schema.fitz` → 5 `CREATE TABLE IF NOT EXISTS`).
+
+**Workaround user-side**: `db.exec("CREATE TABLE IF NOT EXISTS ...", [])` al boot. Es lo que hacen también los boilerplates `api-orm-full`, `api-multi-tenant`, `taskhub`, etc. (patrón canónico).
+
+**Severity**: High (impacto al ecosistema entero). **Fix sugerido**: **deuda 10.6 ya conocida** — `fitz db diff` + `fitz db migrate`. Mini-fase dedicada cuando la cosecha codegen cierre — paralelo a Diesel CLI / Alembic / Prisma migrate. NO bloquea la cosecha; queda como deuda visible en el roadmap.
+
+### O3 — Aritmética de fechas no soportada en `.where(closure)`
+
+**Síntoma**: filtros tipo "monitores con `last_check_at + interval_secs < NOW()`" no se pueden expresar con el translator AST→SQL del `.where(...)`. Sin SQL crudo, hay que cargar TODOS los monitores activos y filtrar en aplicación con date arithmetic JS-style — N queries ineficientes.
+
+**Repro fitzwatch** (`scheduler.fitz`):
+```fitz
+let rows = conn.query(
+    "SELECT id FROM monitors WHERE paused = false AND (last_check_at IS NULL OR last_check_at + make_interval(secs => interval_secs) < NOW())",
+    [],
+).await?
+```
+
+**Workaround user-side**: `conn.query` crudo.
+
+**Severity**: Medium. **Fix sugerido**: extender el translator `.where(...)` para soportar operadores de fecha (método tipo `m.last_check_at.add_seconds(m.interval_secs) < db.now()` con helpers `db.now()` / `db.add_interval(...)`). Probablemente paralelo a la deuda del tipo nativo `DateTime` mencionada en fitzwatch DEUDA.md. ~100-150 LoC (junto con O1 comparten translator).
+
+### O4 — Agregaciones complejas (`COUNT` + `SUM(CASE WHEN)` + JOINs + GROUP BY)
+
+**Síntoma**: el `.aggregate(...)` del ORM cubre count, sum, avg, min, max simples por una sola columna, pero NO expresiones tipo `SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END)` o `COUNT(*) / NULLIF(COUNT(c.id), 0)` con `LEFT JOIN`.
+
+**Repro fitzwatch** (`public.fitz` → `fetch_monitor_statuses`, el snapshot del status page público):
+```fitz
+let rows = conn.query("""
+    SELECT m.id, m.name, m.kind, m.last_status, m.last_check_at,
+           COALESCE(ROUND(100.0 * SUM(CASE WHEN c.status = 'up' THEN 1 ELSE 0 END)
+                          / NULLIF(COUNT(c.id), 0), 2), 0)::float8 AS uptime_24h_pct,
+           COUNT(c.id) AS checks_24h_count
+    FROM monitors m
+    LEFT JOIN checks c ON c.monitor_id = m.id
+        AND c.recorded_at > NOW() - INTERVAL '24 hours'
+    WHERE m.paused = false
+    GROUP BY m.id, m.name, m.kind, m.last_status, m.last_check_at
+    ORDER BY m.name
+""", []).await?
+```
+
+**Workaround user-side**: `conn.query` crudo.
+
+**Severity**: Low (el escape hatch es el patrón canónico). **Fix sugerido**: probable que **NO se cierre nunca** — los proyectos serios con SQL complejo siempre necesitan crudo (Diesel también recomienda esto). Lo relevante es documentar más fuerte en `db-orm.md` y la guía que es un trade-off intencional, no un gap. ~50 LoC docs.
+
+### O5 — CTEs anidadas + window functions + `percentile_cont` + `date_trunc`
+
+**Síntoma**: el ORM no expresa CTEs (`WITH ... AS`), window functions (`OVER (...)`), funciones de Postgres específicas (`percentile_cont(0.95) WITHIN GROUP ORDER BY ...`, `date_trunc('hour', ts)`).
+
+**Repro fitzwatch** (`metrics.fitz` → `dashboard_overview` con CTE anidada de 3 niveles + `monitor_timeline` con `percentile_cont` + `date_trunc`).
+
+**Workaround user-side**: `conn.query` crudo.
+
+**Severity**: Low (igual que O4 — el escape hatch es canónico). **Fix sugerido**: igual que O4 — documentar más fuerte que es un trade-off intencional. CTEs y window functions en un ORM serían un mini-DSL en sí mismas. ~50 LoC docs (junto con O4).
+
+### O6 — JOINs custom con `SELECT` alias (`m.name AS monitor_name`)
+
+**Síntoma**: el ORM soporta JOINs implícitos via `.preload(...)` que populan el companion field del type parent. Pero **no soporta** SELECTs con alias custom tipo `SELECT i.id, m.name AS monitor_name FROM incidents i JOIN monitors m ON ...`, donde el resultado es un row con shape distinto al type ORM (mezcla campos de varios).
+
+**Repro fitzwatch** (`grids.fitz` → `grid_incidents` con JOIN + filtros opcionales con sentinels `($2 = '' OR ...)`).
+
+**Workaround user-side**: `conn.query` crudo + tipo plano construido manualmente desde `row.get_str(...)` (que también sufrió bugs del codegen B7+B11 sobre nullable fields).
+
+**Severity**: Low (sub-case de O4/O5 — escape hatch canónico). **Fix sugerido**: posible API tipo `.select_custom("col1, col2, ...").join(...)` que devuelva `List<Map<Str, Any>>` o similar. Pero probablemente no se justifique — el escape hatch ya está. ~80 LoC si entra demanda real.
+
+### Tabla resumen + plan sugerido
+
+| # | Gap | Sev | Workaround user | Fix sugerido / decisión |
+|---|---|---|---|---|
+| O1 | `.update()` con `NOW()`/`EXTRACT` | Medium | ✅ `conn.exec` crudo | helpers `db.now()`/`db.raw(...)` o tipo `SQL!` strings |
+| O2 | Sin migrations automáticas | High | ✅ `CREATE TABLE IF NOT EXISTS` al boot | deuda 10.6 ya conocida — `fitz db diff`/`migrate` |
+| O3 | Aritmética de fechas en `.where` | Medium | ✅ `conn.query` crudo | helpers `db.now()`/`db.add_interval(...)` (junto con O1) |
+| O4 | Agregaciones complejas (SUM/CASE) | Low | ✅ `conn.query` crudo | documentar como trade-off, no cerrar |
+| O5 | CTEs + window functions + Postgres-specifics | Low | ✅ `conn.query` crudo | documentar como trade-off, no cerrar |
+| O6 | JOINs custom con `SELECT` alias | Low | ✅ `conn.query` crudo + tipo manual | sub-case de O4/O5 — escape hatch canónico |
+
+**Plan de ataque sugerido** (después de cerrar la cosecha codegen — son independientes):
+
+1. **O1 + O3 — helpers de expresiones SQL en ORM**: nueva sub-fase del ORM que suma `db.now()` / `db.add_interval(...)` / `db.raw(...)` para usar adentro de `.update({...})` y `.where(closure)`. ~150-200 LoC. Cierra los dos en un solo bloque coordinado porque comparten el translator.
+2. **O2 — migrations automáticas**: deuda 10.6, mini-fase dedicada (proyecto separado, paralelo a Diesel CLI / Alembic / Prisma migrate). ~500-1000 LoC. Cuando entre, beneficia al ecosistema entero. **No bloquea la cosecha codegen ni fitzwatch**.
+3. **O4 + O5 + O6 — documentación reforzada**: actualizar `docs/db-orm.md` y `docs/guide.md` cap 31 con un párrafo explícito tipo "estos tres casos son intencionales — `conn.query` crudo es el escape hatch canónico, paralelo a Diesel/SQLAlchemy". Sumar a `docs/curso/m6/` también. ~100 LoC docs.
+
+**Origen de la auditoría**: balance ORM:SQL-crudo de fitzwatch terminó en aproximadamente **35:65** en términos de queries. La filosofía es la misma que en los boilerplates `api-orm-full` / `taskhub` / `api-multi-tenant`: ORM para CRUD básico, SQL crudo para todo lo demás. La tabla por módulo de fitzwatch está en `d:\fitzwatch\NEXT-SESSION.md`.
 
 ---
 

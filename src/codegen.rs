@@ -260,8 +260,18 @@ pub fn generate_project(
     //
     // W11 (v0.10.7) — transitive: the main adds deps if ANY loaded
     // module has Map<Str, Any> / List<Any>.
-    let uses_fitz_value =
-        program_uses_fitz_value(program) || loader.modules.iter().any(|m| m.uses_fitz_value);
+    //
+    // B11 (cosecha post-fitzwatch, 2026-06-19) — `__FitzValue` is
+    // also required when an imported type has a compound field whose
+    // inner Nominal cannot be resolved in main's env. The codegen
+    // emits `impl __FromFitzJson for FooData` in main.rs (via
+    // `emit_helpers_for_imported_types`) and the remap degrades
+    // `List<Nominal>` to `List<Any>` → `Vec<__FitzValue>`. Closes
+    // the case reported on fitzwatch with `public.fitz` declaring
+    // `type PublicOverview { monitors: List<MonitorStatus>, ... }`.
+    let uses_fitz_value = program_uses_fitz_value(program)
+        || loader.modules.iter().any(|m| m.uses_fitz_value)
+        || cross_module_compound_degrades_to_fitz_value(program, &loader);
 
     // v0.10.26 — Date/DateTime/Uuid in the program or any loaded
     // module. Triggers chrono+uuid deps + emission of prelude helpers.
@@ -4582,13 +4592,30 @@ fn generate_module_rs_with_bindings(
             "#[allow(unused_imports)]\n\
              use crate::__FitzResponse;\n\
              #[allow(unused_imports)]\n\
-             use crate::{__ToFitzJson, __FromFitzJson};\n\
-             #[allow(unused_imports)]\n\
              use crate::__apply_cors_and_respond;\n\
              #[allow(unused_imports)]\n\
              use crate::__panic_payload_msg;\n\
              #[allow(unused_imports)]\n\
              use crate::{__parse_urlencoded, __extract_multipart_boundary, __parse_multipart};\n\n",
+        );
+    }
+    // B3 (cosecha post-fitzwatch, 2026-06-19) — `__ToFitzJson` /
+    // `__FromFitzJson` are needed not only by HTTP handlers but also
+    // by `ws_broadcast(...)` calls (the codegen emits
+    // `<MsgType as __ToFitzJson>::__to_fitz_json(&msg)` at the call
+    // site). Modules that broadcast from `@cron`/`@background`/library
+    // helpers without their own `@get`/`@post`/`@ws` need the trait in
+    // scope too. Split off from the HTTP block above so this gate is
+    // independent. The crate root prelude emits the traits whenever
+    // `has_http` is true at the project level (`generate_project` ORs
+    // `has_http_routes(program)` with any module's `has_http`), so
+    // `ws_broadcast` callers in pure-cron/library modules can still
+    // reuse them via `crate::*`.
+    let module_uses_ws_broadcast_local = program_uses_ws_broadcast(program);
+    if module_has_http || module_uses_ws_broadcast_local {
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__ToFitzJson, __FromFitzJson};\n\n",
         );
     }
 
@@ -5252,8 +5279,16 @@ fn generate_main_rs(
     // transitivity, the module's `use crate::__FitzValue` would
     // fail with E0432 unresolved import because main did not emit
     // the enum.
-    let uses_fitz_value =
-        program_uses_fitz_value(program) || loader.modules.iter().any(|m| m.uses_fitz_value);
+    //
+    // B11 (cosecha post-fitzwatch, 2026-06-19) — also fire when an
+    // imported type has a compound field whose inner Nominal cannot
+    // be resolved in main's env. Closes the case reported on
+    // fitzwatch with `public.fitz` declaring `type PublicOverview
+    // { monitors: List<MonitorStatus>, ... }`. See the doc comment
+    // on `cross_module_compound_degrades_to_fitz_value` for detail.
+    let uses_fitz_value = program_uses_fitz_value(program)
+        || loader.modules.iter().any(|m| m.uses_fitz_value)
+        || cross_module_compound_degrades_to_fitz_value(program, loader);
     // W10 (v0.10.7) — transitive auth/ws/jobs. Parallel to transitive
     // uses_db (W8): if ANY loaded module declares those kinds of
     // handlers, main emits the corresponding preludes so that the
@@ -6659,6 +6694,157 @@ fn field_type_has_unresolved_any(ty: &Type) -> bool {
 fn field_is_degraded_any(ty: &Type) -> bool {
     matches!(ty, Type::Any)
         || matches!(ty, Type::Nullable(inner) if matches!(inner.as_ref(), Type::Any))
+}
+
+/// B11 (cosecha post-fitzwatch, 2026-06-19) — controls how the
+/// cross-module emit of `impl __FromFitzJson for FooData` is
+/// generated. `Real` emits the regular body (deserialize each
+/// field via `__from_fitz_json`). `Stub` emits a body that returns
+/// `Err(...)` at runtime — used when the type has a compound
+/// degrade (`List<Nominal>` → `List<Any>`) that makes the real body
+/// reference `Vec<__FitzValue>` while the struct declares
+/// `Vec<ConcreteData>`. Typical case: output-only response types in
+/// fitzwatch-style projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FromFitzJsonMode {
+    Real,
+    Stub,
+}
+
+/// B11 (cosecha post-fitzwatch, 2026-06-19) — companion of
+/// `field_is_degraded_any` for compound fields. Returns true when the
+/// remap from the original field type degraded a `List<Nominal>`,
+/// `Map<Nominal, _>`, or `Map<_, Nominal>` (or `Nullable` of these)
+/// to `List<Any>` / `Map<Any, _>` / `Map<_, Any>` because the inner
+/// Nominal is not resolvable in main's env. The compound degrade
+/// makes the cross-module `__ToFitzJson`/`__FromFitzJson` impl
+/// inconsistent with the type's actual Rust layout (declared in the
+/// origin module's `.rs` with the concrete inner type, not
+/// `__FitzValue`), so the safest action is to skip emit of the
+/// helpers entirely — the type stays as a remote opaque, parallel to
+/// the bare-Any policy of W9.
+///
+/// "Legitimate" `List<Any>` / `Map<Str, Any>` (JSONB) declared in the
+/// original sig stays distinguishable because the original side is
+/// already `Any` (no degrade).
+fn field_type_compound_degraded(orig: &Type, remapped: &Type) -> bool {
+    match (orig, remapped) {
+        (Type::List(o), Type::List(r)) => {
+            (matches!(**o, Type::Nominal(_)) && matches!(**r, Type::Any))
+                || field_type_compound_degraded(o, r)
+        }
+        (Type::Map(ok, ov), Type::Map(rk, rv)) => {
+            (matches!(**ok, Type::Nominal(_)) && matches!(**rk, Type::Any))
+                || (matches!(**ov, Type::Nominal(_)) && matches!(**rv, Type::Any))
+                || field_type_compound_degraded(ok, rk)
+                || field_type_compound_degraded(ov, rv)
+        }
+        (Type::Nullable(o), Type::Nullable(r)) => field_type_compound_degraded(o, r),
+        (Type::Tuple(orig_items), Type::Tuple(rem_items))
+            if orig_items.len() == rem_items.len() =>
+        {
+            orig_items
+                .iter()
+                .zip(rem_items.iter())
+                .any(|(o, r)| field_type_compound_degraded(o, r))
+        }
+        _ => false,
+    }
+}
+
+/// B11 (cosecha post-fitzwatch, 2026-06-19) — pre-pass parallel to
+/// `remap_imported_nominals` + `emit_helpers_for_imported_types`.
+///
+/// When a loaded module declares a type whose field is `List<Nominal>`,
+/// `Map<Nominal, _>`, or `Map<_, Nominal>` (or `Nullable` wrappers
+/// thereof) and the inner Nominal's name is NOT main-resolvable
+/// (neither declared locally in `program` nor imported with
+/// `from X import T`), the cross-module `__FromFitzJson` impl that
+/// `emit_helpers_for_imported_types` emits in main.rs degrades the
+/// compound to `List<__FitzValue>` / `Map<__FitzValue, _>`. That
+/// requires the `__FitzValue` enum + JSONB helpers in the crate root
+/// prelude.
+///
+/// The regular `program_uses_fitz_value` walker does NOT see this case
+/// — it walks the program/module ASTs but the degrade happens
+/// post-walk during the codegen-time remap. This helper closes the gap
+/// so `generate_project` can flip `uses_fitz_value = true` BEFORE
+/// emitting the prelude.
+///
+/// Typical case: `public.fitz` declares `type Overview { items:
+/// List<MonitorStatus> }` + handler returning `Overview`. `main.fitz`
+/// imports `public_overview` (the fn) but NOT `MonitorStatus` (the
+/// nested type). main.rs needs `impl __FromFitzJson for OverviewData`
+/// to compile, but `MonitorStatus` is not in scope → remap degrades
+/// `List<MonitorStatus>` to `List<Any>` → emit references
+/// `Vec<__FitzValue>` which fails rustc when `__FitzValue` is not
+/// activated.
+fn cross_module_compound_degrades_to_fitz_value(program: &Program, loader: &ModuleLoader) -> bool {
+    use std::collections::HashSet;
+
+    // Set of type names that main can resolve in its env: local
+    // `Stmt::TypeDef` + types imported via `from X import T`.
+    let mut main_known: HashSet<String> = HashSet::new();
+    for stmt in program {
+        if let Stmt::TypeDef { name, .. } = stmt {
+            main_known.insert(name.clone());
+        }
+    }
+    for (local_name, binding) in &loader.bindings {
+        if matches!(
+            binding,
+            ResolvedBinding::Named {
+                kind: NamedKind::Type,
+                ..
+            }
+        ) {
+            main_known.insert(local_name.clone());
+        }
+    }
+
+    fn nominal_is_unknown(ty: &Type, m: &LoadedModule, main_known: &HashSet<String>) -> bool {
+        match ty {
+            Type::Nominal(id) => match m.type_sigs.iter().find(|(_, sig)| sig.id == *id) {
+                Some((name, _)) => !main_known.contains(name),
+                // Unknown id in this module's sigs → cannot resolve
+                // → conservatively counts as degraded.
+                None => true,
+            },
+            Type::Nullable(inner) => nominal_is_unknown(inner, m, main_known),
+            _ => false,
+        }
+    }
+
+    fn compound_carries_unknown(ty: &Type, m: &LoadedModule, main_known: &HashSet<String>) -> bool {
+        match ty {
+            Type::List(inner) => {
+                nominal_is_unknown(inner, m, main_known)
+                    || compound_carries_unknown(inner, m, main_known)
+            }
+            Type::Map(k, v) => {
+                nominal_is_unknown(k, m, main_known)
+                    || nominal_is_unknown(v, m, main_known)
+                    || compound_carries_unknown(k, m, main_known)
+                    || compound_carries_unknown(v, m, main_known)
+            }
+            Type::Nullable(inner) => compound_carries_unknown(inner, m, main_known),
+            Type::Tuple(items) => items
+                .iter()
+                .any(|t| compound_carries_unknown(t, m, main_known)),
+            _ => false,
+        }
+    }
+
+    for m in &loader.modules {
+        for sig in m.type_sigs.values() {
+            for f in &sig.fields {
+                if compound_carries_unknown(&f.type_, m, &main_known) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// W7 (v0.10.6) — codegen result of the SET fragment of `.update`.
@@ -12064,6 +12250,43 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     emitted.insert(type_name.clone());
                     continue;
                 }
+                // B11 (cosecha post-fitzwatch, 2026-06-19) — detect
+                // compound degrade (a `List<Nominal>` / `Map<_,
+                // Nominal>` whose inner is not main-resolvable was
+                // remapped to `List<Any>` / `Map<_, Any>`). The
+                // `impl __ToFitzJson` is safe to emit normally
+                // (its body only does `self.<field>.__to_fitz_json()`
+                // — no mention of the remapped type), but
+                // `impl __FromFitzJson` would emit a `let
+                // <field>: Vec<__FitzValue> = ...` that clashes
+                // with the struct's actual layout
+                // (`Vec<ConcreteData>`). Emit a stub Err for
+                // `__FromFitzJson` so the trait bound is
+                // satisfied without a body that would not
+                // typecheck. The stub fires at runtime only if
+                // someone tries to deserialize this type
+                // cross-module — typical compound-degraded types
+                // are output-only handlers responses, so the
+                // stub is never invoked in practice. The user
+                // who really needs cross-module body
+                // deserialization for such a type must import
+                // every nested Nominal to main (`from X import
+                // Inner1, Inner2, ...`) — that brings the type
+                // back into the main-resolvable set and the
+                // regular impl flow takes over.
+                let has_compound_degrade =
+                    remapped_sig
+                        .fields
+                        .iter()
+                        .zip(sig.fields.iter())
+                        .any(|(rf, of)| {
+                            if let Some(meta) = table_meta {
+                                if meta.is_virtual_field(&rf.name) {
+                                    return false;
+                                }
+                            }
+                            field_type_compound_degraded(&of.type_, &rf.type_)
+                        });
                 if do_http {
                     // W17 (v0.10.7) — pass the `TableMetadata`
                     // when the type has `@table`, so the
@@ -12075,7 +12298,29 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     // → `Vec<__FitzValue>` which fails rustc
                     // when `__FitzValue` is not activated.
                     let meta = m.table_metadata.get(type_name);
-                    self.gen_type_http_impls_for_sig_with_meta(type_name, &remapped_sig, meta)?;
+                    // B11 (cosecha post-fitzwatch, 2026-06-19) —
+                    // if any field had a compound degrade, the
+                    // real `__FromFitzJson` body cannot be
+                    // emitted (it would reference the degraded
+                    // `Vec<__FitzValue>` while the struct
+                    // declares `Vec<ConcreteData>`). Use the
+                    // stub mode that emits a runtime Err for
+                    // `__FromFitzJson` while keeping
+                    // `__ToFitzJson` fully functional (only
+                    // serializes existing fields via
+                    // `.__to_fitz_json()`, never references the
+                    // remapped type).
+                    let from_mode = if has_compound_degrade {
+                        FromFitzJsonMode::Stub
+                    } else {
+                        FromFitzJsonMode::Real
+                    };
+                    self.gen_type_http_impls_for_sig_with_meta_and_mode(
+                        type_name,
+                        &remapped_sig,
+                        meta,
+                        from_mode,
+                    )?;
                 }
                 if do_python {
                     // W17-parallel (v0.15.10+) — pass
@@ -26067,6 +26312,28 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         sig: &TypeSig,
         meta: Option<&crate::types::TableMetadata>,
     ) -> Result<(), FitzError> {
+        self.gen_type_http_impls_for_sig_with_meta_and_mode(name, sig, meta, FromFitzJsonMode::Real)
+    }
+
+    /// B11 (cosecha post-fitzwatch, 2026-06-19) — variant that
+    /// allows the cross-module emit path to request a stub
+    /// implementation of `__FromFitzJson` when the type has fields
+    /// with a compound degrade (`List<Nominal>` → `List<Any>` because
+    /// the inner Nominal is not main-resolvable). The stub satisfies
+    /// the trait bound so handlers and `Vec<T>` impls compile, but
+    /// returns a runtime Err if anybody calls it — typical use is
+    /// output-only response types, so the stub is never invoked in
+    /// practice. `__ToFitzJson` is always emitted with the real
+    /// body (its codegen only references existing field paths via
+    /// `self.<f>.__to_fitz_json()`, never the remapped type, so the
+    /// degrade does not affect it).
+    fn gen_type_http_impls_for_sig_with_meta_and_mode(
+        &mut self,
+        name: &str,
+        sig: &TypeSig,
+        meta: Option<&crate::types::TableMetadata>,
+        from_mode: FromFitzJsonMode,
+    ) -> Result<(), FitzError> {
         let data_name = format!("{}Data", name);
 
         // W17 — local helper to decide if a field is virtual.
@@ -26171,6 +26438,32 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("    }\n}\n\n");
 
         // impl __FromFitzJson for <Foo>Data
+        //
+        // B11 (cosecha post-fitzwatch, 2026-06-19) — Stub mode emits
+        // a body that returns Err at runtime. Used when the type has
+        // compound-degraded fields whose real body would reference
+        // `Vec<__FitzValue>` instead of the actual concrete struct
+        // type. Satisfies the trait bound so handler wrappers
+        // compile. Triggers only at runtime if the type is used as
+        // request body — typical compound-degraded types are
+        // output-only responses, so the stub is rarely hit. The
+        // workaround for users that need real cross-module body
+        // deserialization is to `from X import` every nested
+        // Nominal that the field uses (which restores main's
+        // ability to resolve and brings the type back to the Real
+        // path).
+        if from_mode == FromFitzJsonMode::Stub {
+            writeln!(&mut self.output, "impl __FromFitzJson for {} {{", data_name).unwrap();
+            self.emit("    fn __from_fitz_json(_: &serde_json::Value) -> Result<Self, String> {\n");
+            writeln!(
+                &mut self.output,
+                "        Err(format!(\"cross-module `__FromFitzJson for {}` is a stub: the type has compound fields whose inner Nominal is not imported into main; if you need to deserialize this body cross-module, `from <module> import` every nested type the body references\"))",
+                name
+            )
+            .unwrap();
+            self.emit("    }\n}\n\n");
+            return Ok(());
+        }
         writeln!(&mut self.output, "impl __FromFitzJson for {} {{", data_name).unwrap();
         self.emit("    fn __from_fitz_json(__j: &serde_json::Value) -> Result<Self, String> {\n");
         writeln!(
