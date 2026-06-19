@@ -34,7 +34,9 @@
 // endpoint o que el WS reciba el trigger del cliente mismo.
 
 from models import User, Profile, Post, Comment
-import auth
+// B12 cerrado (cosecha codegen post-fitzwatch, 2026-06-19) — no hace
+// falta `import auth` acá: el provider del main se propaga a módulos
+// automáticamente.
 
 // FeedEvent — el shape del mensaje que viaja por el WS. El user
 // y created_at los inyecta el server; el cliente solo necesita

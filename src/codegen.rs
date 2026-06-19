@@ -20745,6 +20745,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .single_pk()
             .map(String::from)
             .unwrap_or_default();
+        // B15 (v0.17.1) — load parent_fields so we can detect nullable
+        // FKs on the BelongsToCompanion path. The companion FK lives on
+        // the parent, so we need its `Type::Nullable` flag here.
+        let (_, parent_fields) =
+            self.orm_lookup_meta_and_fields(parent_type_name, crate::ast::Span::ZERO)?;
         for (rel_name, rel) in parent_meta.relations.iter() {
             // Debt #2 (v0.10.5) — include BelongsToCompanion in addition
             // to HasMany. The companion is served with inverse SQL
@@ -20756,6 +20761,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     rel_name,
                     rel,
                     &parent_pk,
+                    &parent_fields,
                 )?;
                 arms.push_str(&arm);
                 continue;
@@ -20783,6 +20789,20 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             // FK in the target (e.g. "user_id").
             let parent_field = rel_name;
             let fk_fitz = &rel.fk_field;
+            // B15 (v0.17.1) — HasMany side: the FK on the child (target)
+            // may be `Int?`. If nullable, the child's `__cg2.{fk_fitz}`
+            // is `Option<i64>`, so the equality must be `Some(__pid)`
+            // instead of bare `__pid`.
+            let child_fk_is_nullable = target_fields
+                .iter()
+                .find(|f| f.name == *fk_fitz)
+                .map(|f| matches!(f.type_, Type::Nullable(_)))
+                .unwrap_or(false);
+            let child_fk_eq = if child_fk_is_nullable {
+                format!("__cg2.{fk_fitz} == Some(__pid)")
+            } else {
+                format!("__cg2.{fk_fitz} == __pid")
+            };
             arms.push_str(&format!(
                 "{name_lit} => {{ \
                     let __ids: Vec<__FitzPgValue> = {{ \
@@ -20807,7 +20827,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 for __p in __pg.iter() {{ \
                                     let __pid = {{ let __g = __p.lock().unwrap(); __g.{parent_pk} }}; \
                                     let __matching: Vec<std::sync::Arc<std::sync::Mutex<{target_data}>>> = __children.iter().filter(|__c| {{ \
-                                        let __cg2 = __c.lock().unwrap(); __cg2.{fk_fitz} == __pid \
+                                        let __cg2 = __c.lock().unwrap(); {child_fk_eq} \
                                     }}).cloned().collect(); \
                                     let mut __pg2 = __p.lock().unwrap(); \
                                     __pg2.{parent_field} = std::sync::Arc::new(std::sync::Mutex::new(__matching)); \
@@ -20823,7 +20843,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 table_lit = target_table.replace('"', "\\\""),
                 fk_lit = fk_sql,
                 target_data = target_data,
-                fk_fitz = fk_fitz,
+                child_fk_eq = child_fk_eq,
                 parent_field = parent_field,
             ));
         }
@@ -20860,6 +20880,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         companion_field: &str,
         rel: &crate::types::RelationMetadata,
         _parent_pk: &str,
+        parent_fields: &[TypeSigField],
     ) -> Result<String, FitzError> {
         let target_name = &rel.target_type;
         let (target_meta, target_fields) =
@@ -20886,11 +20907,52 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .unwrap_or(target_pk_fitz.as_str())
             .to_string();
         let fk_fitz = &rel.fk_field;
+        // B15 (v0.17.1) — detect whether the FK on the parent is
+        // `Int?` (Nullable). Without this branch the codegen emits
+        // `__FitzPgValue::Int(__g.<fk>)` and `__tg2.<pk> == __fk`
+        // assuming the FK is `i64`, which fails to type-check when
+        // the field is `Option<i64>`. Two changes when nullable:
+        //   * IDs collection: `filter_map` over `Some(v)` so rows with
+        //     `None` skip the `IN (...)` query entirely.
+        //   * Match lookup: `match __fk { None => None, Some(__fk_v) =>
+        //     __targets.iter().find(|t| t.pk == __fk_v).cloned() }`.
+        let fk_is_nullable = parent_fields
+            .iter()
+            .find(|f| f.name == *fk_fitz)
+            .map(|f| matches!(f.type_, Type::Nullable(_)))
+            .unwrap_or(false);
+        let ids_collection = if fk_is_nullable {
+            format!(
+                "__guard.iter().filter_map(|__p| {{ let __g = __p.lock().unwrap(); __g.{fk_fitz}.map(__FitzPgValue::Int) }}).collect()"
+            )
+        } else {
+            format!(
+                "__guard.iter().map(|__p| {{ let __g = __p.lock().unwrap(); __FitzPgValue::Int(__g.{fk_fitz}) }}).collect()"
+            )
+        };
+        let matched_lookup = if fk_is_nullable {
+            format!(
+                "match __fk {{ \
+                    None => None, \
+                    Some(__fk_v) => __targets.iter().find(|__t| {{ \
+                        let __tg2 = __t.lock().unwrap(); __tg2.{pk_fitz} == __fk_v \
+                    }}).cloned(), \
+                }}",
+                pk_fitz = target_pk_fitz,
+            )
+        } else {
+            format!(
+                "__targets.iter().find(|__t| {{ \
+                    let __tg2 = __t.lock().unwrap(); __tg2.{pk_fitz} == __fk \
+                }}).cloned()",
+                pk_fitz = target_pk_fitz,
+            )
+        };
         Ok(format!(
             "{name_lit} => {{ \
                 let __ids: Vec<__FitzPgValue> = {{ \
                     let __guard = __rows.lock().unwrap(); \
-                    __guard.iter().map(|__p| {{ let __g = __p.lock().unwrap(); __FitzPgValue::Int(__g.{fk_fitz}) }}).collect() \
+                    {ids_collection} \
                 }}; \
                 if !__ids.is_empty() {{ \
                     let __placeholders = (1..=__ids.len()).map(|__i| format!(\"${{}}\", __i)).collect::<Vec<_>>().join(\", \"); \
@@ -20909,9 +20971,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             let __pg = __rows.lock().unwrap(); \
                             for __p in __pg.iter() {{ \
                                 let __fk = {{ let __g = __p.lock().unwrap(); __g.{fk_fitz} }}; \
-                                let __matched: Option<std::sync::Arc<std::sync::Mutex<{target_data}>>> = __targets.iter().find(|__t| {{ \
-                                    let __tg2 = __t.lock().unwrap(); __tg2.{pk_fitz} == __fk \
-                                }}).cloned(); \
+                                let __matched: Option<std::sync::Arc<std::sync::Mutex<{target_data}>>> = {matched_lookup}; \
                                 let mut __pg2 = __p.lock().unwrap(); \
                                 __pg2.{companion_field} = __matched; \
                             }} \
@@ -20926,7 +20986,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             pk_lit = target_pk_sql,
             target_data = target_data,
             fk_fitz = fk_fitz,
-            pk_fitz = target_pk_fitz,
+            ids_collection = ids_collection,
+            matched_lookup = matched_lookup,
             companion_field = companion_field,
         ))
     }
@@ -44026,6 +44087,126 @@ mod tests {
         assert!(
             rust.contains("<_ as __IntoPgValue>::into_pg"),
             "expected __IntoPgValue::into_pg call on Nullable arg, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_preload_companion_with_nullable_fk_emits_filter_map_b15() {
+        // B15 — sub-paso 6 cosecha codegen post-fitzwatch. When the FK
+        // declared adjacent to a `BelongsToCompanion` field is `Int?`
+        // (Nullable), the emitted preload arm must:
+        //   * collect IDs via `filter_map` (skip rows with `None` FK),
+        //     using `__g.<fk>.map(__FitzPgValue::Int)` to unwrap Some.
+        //   * resolve `__matched` via `match __fk { None => None,
+        //     Some(__fk_v) => __targets.iter().find(...) }` so the
+        //     comparison `__tg2.<pk> == __fk_v` operates on `i64`.
+        // Pre-fix the emit was `__FitzPgValue::Int(__g.<fk>)` directly
+        // (failing with `expected i64, found Option<i64>`) and the
+        // lookup compared `__tg2.<pk> == __fk` (failing with
+        // `can't compare i64 with Option<i64>`).
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str = \"\"\n\
+                   }\n\
+                   @table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       @belongs_to(\"User\") author_id: Int? = null\n  \
+                       author: User?\n  \
+                       title: Str = \"\"\n\
+                   }\n\
+                   async fn boot() -> Result<List<Post>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Post.where(fn(p) => p.title == \"x\").preload(\"author\").all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".filter_map(|__p|"),
+            "expected `filter_map` for IDs when FK is nullable, was: {rust}",
+        );
+        assert!(
+            rust.contains(".map(__FitzPgValue::Int)"),
+            "expected `__g.<fk>.map(__FitzPgValue::Int)` for nullable FK, was: {rust}",
+        );
+        assert!(
+            rust.contains("match __fk"),
+            "expected `match __fk` for nullable FK lookup, was: {rust}",
+        );
+        assert!(
+            rust.contains("Some(__fk_v) => __targets.iter().find"),
+            "expected `Some(__fk_v)` arm with find lookup, was: {rust}",
+        );
+        assert!(
+            rust.contains("None => None"),
+            "expected `None => None` arm in nullable lookup, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_preload_companion_with_nonnull_fk_emits_simple_map_b15() {
+        // B15 no-regression — when the FK is `Int` (NOT nullable) the
+        // emit stays on the original path: bare `map` for IDs +
+        // `__targets.iter().find(...).cloned()` for lookup. No
+        // `filter_map`, no `match __fk`, no `Some(__fk_v)`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str = \"\"\n\
+                   }\n\
+                   @table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       @belongs_to(\"User\") author_id: Int = 0\n  \
+                       author: User?\n  \
+                       title: Str = \"\"\n\
+                   }\n\
+                   async fn boot() -> Result<List<Post>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Post.where(fn(p) => p.title == \"x\").preload(\"author\").all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // The legacy emit must still be the chosen path.
+        assert!(
+            rust.contains("__FitzPgValue::Int(__g.author_id)"),
+            "expected legacy `__FitzPgValue::Int(__g.author_id)` for non-null FK, was: {rust}",
+        );
+        assert!(
+            !rust.contains(".filter_map(|__p|"),
+            "did NOT expect `filter_map` for non-null FK, was: {rust}",
+        );
+        assert!(
+            !rust.contains("match __fk"),
+            "did NOT expect `match __fk` for non-null FK, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_preload_has_many_with_nullable_child_fk_emits_some_pid_b15() {
+        // B15 sibling — HasMany side: when the FK lives on the child
+        // (target) and the child's `<fk>` is `Int?`, the filter must
+        // compare `__cg2.<fk> == Some(__pid)` instead of the legacy
+        // bare `__cg2.<fk> == __pid` (which fails with
+        // `expected Option<i64>, found i64`).
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str = \"\"\n  \
+                       @has_many(\"Post\", via=\"author_id\") posts: List<Post> = []\n\
+                   }\n\
+                   @table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       @belongs_to(\"User\") author_id: Int? = null\n  \
+                       author: User?\n  \
+                       title: Str = \"\"\n\
+                   }\n\
+                   async fn boot() -> Result<List<User>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return User.where(fn(u) => u.id > 0).preload(\"posts\").all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__cg2.author_id == Some(__pid)"),
+            "expected `__cg2.author_id == Some(__pid)` for nullable child FK, was: {rust}",
+        );
+        assert!(
+            !rust.contains("__cg2.author_id == __pid"),
+            "did NOT expect legacy `__cg2.author_id == __pid` for nullable child FK, was: {rust}",
         );
     }
 

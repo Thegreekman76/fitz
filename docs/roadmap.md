@@ -2,6 +2,39 @@
 
 ---
 
+## Cosecha codegen post-fitzwatch ✅ CERRADA ENTERA (2026-06-19, [Sin publicar])
+
+**Hito**: 14 de los 15 bugs del codegen descubiertos durante el desarrollo de **fitzwatch** (status page open-source en Fitz puro, pausado el 2026-06-18 esperando estos fixes) cerrados en 6 sub-pasos a lo largo de 2 días. **`fitz check` y `fitz run` nunca estuvieron afectados** — todos los bugs eran específicos del path codegen → cargo build. B13 no reprodujo en v0.17.0 (W18 lo había cerrado); B16 abierto como deuda separada porque el fix vive en el checker (no es mecánico).
+
+| Sub-paso | Bugs | Trigger | Fix |
+|---|---|---|---|
+| **1** | B3 + B11 | Cross-module `ws_broadcast` + Response con `List<Nominal>` | Detectores unificados (~150 LoC) |
+| **2** | B4 + B5 + B6 + meta **B14** | `match` con `return`/`break`/`continue` widening spuriously a `Nullable(T)` | Flow-sensitive refinement filtra arms divergentes del LUB (~80 LoC + 4 unit) |
+| **3** | B7 | LUB del `match` queda `Nullable(T)` pero arms no se envuelven en `Some()`/`None` | Post-procesamiento en `gen_match` (~60 LoC + 3 unit) |
+| **4** | B8 | `Option<T>: __IntoPgValue` no implementado | Blanket impl en preludio DB (~12 LoC + 3 unit) |
+| **5** | B1 + B2 + B9 + B10 + B12 | 5 fixes mecánicos asimétricos | ~375 LoC + 16 tests |
+| **6** | **B15** 🔴 | **`.preload()` con FK Nullable** (`@belongs_to ... X_id: Int? = null`) | FK-nullable-aware emission en BelongsToCompanion + HasMany sibling (~115 LoC + 3 unit + 1 E2E) |
+
+**Sub-paso 6 (B15)** — el grande. Dos cambios coordinados en `src/codegen.rs`:
+
+1. `emit_belongs_to_companion_preload_arm` recibe `parent_fields` y, cuando el FK es `Type::Nullable(_)`, emite `filter_map(|p| p.<fk>.map(__FitzPgValue::Int))` para el `IN (...)` + `match __fk { None => None, Some(v) => find(v) }` para el lookup.
+2. `emit_preload_dispatch` (path HasMany sibling) detecta FK Nullable del child y emite `__cg2.<fk> == Some(__pid)` en lugar de bare `__pid`.
+
+Hallazgo al diagnosticar: el doc original de B15 decía "nullables en el parent type" como trigger; el trigger REAL es FK Nullable. Los models de fitzwatch declaran todos los FK como `Int = 0` sentinel, así que probablemente fitzwatch estaba pausado por W18 (cerrado en v0.17.0) y no por B15 estricto. Pero B15 sigue siendo crítico: cualquier usuario con FK opcional lo dispara sin workaround user-side.
+
+**Verificación pre-bump (cosecha entera)**:
+- `cargo test --release --lib` → **3141/3141** ✓
+- `cargo test --release --test compile_e2e cross_module_orm_preload_nullable_fk_b15` → **1/1** ✓
+- `cargo test --release --test compile_e2e smoke_ejemplos_guia_compilables_compilan` → **366/366** ✓ (~5 min)
+- `cargo fmt --all --check` ✓
+- `cargo clippy --release --lib --tests --bins -- -D warnings` ✓
+
+**Próximo norte**: retomar **fitzwatch** — el blocker está cerrado. Si dispara errores nuevos (improbable), se documentan como bugs numerados nuevos. **B16** abierto como deuda separada (match arms `i64` vs `()` E0308 cuando uno es call que retorna `Null`; fix sugerido en el checker).
+
+Plan completo + tabla de estado con todos los bugs en [`docs/deudas-post-5b.md`](deudas-post-5b.md) → "🟢 Cosecha codegen post-fitzwatch CERRADA ENTERA 2026-06-19". Detalle release-style en [`CHANGELOG.md`](../CHANGELOG.md) → "Sin publicar".
+
+---
+
 ## Mini-tanda — HTTP client builtin ✅ CERRADA v0.17.0 (2026-06-18)
 
 **Hito**: el módulo `http` builtin (cliente HTTP outbound) entra al lenguaje como ciudadano de primera clase, paralelo al HTTP server-side cerrado en Fase 4. 9 bloques cerrados en una sesión + fix coordinado W18 para destrabar el codegen cross-module observability descubierto al validar B8 sobre `boilerplates/api-orm-full` multi-archivo.

@@ -19,7 +19,9 @@
 
 from config import db_url
 from models import User, Profile, Post, Comment
-import auth
+// B12 cerrado (cosecha codegen post-fitzwatch, 2026-06-19) — no hace
+// falta `import auth` acá: el provider del main se propaga a módulos
+// automáticamente.
 
 type CommentInput {
     content: Str

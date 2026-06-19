@@ -313,14 +313,17 @@ Workaround conocido (deuda residual del codegen cross-module).
 ### Provider de auth cross-module
 
 El `@auth_provider` declarado en `auth.fitz` se encuentra
-cross-module vía W12 — pero los módulos que usan `@authenticated`
-necesitan **importar `auth` también** (sino el pre-scan no lo
-descubre):
+cross-module automáticamente — el main lo importa, el pre-scan del
+codegen + checker propaga el provider a los módulos sin necesidad
+de `import auth` redundante (**B12 cerrado en la cosecha codegen
+post-fitzwatch, 2026-06-19**). Antes de v0.17.1 los módulos
+con `@authenticated` necesitaban `import auth` propio aunque el
+main ya lo importara; ahora ya no:
 
 ```fitz
 // posts.fitz
-import auth   // necesario para que el provider del auth.fitz
-              // sea visible al chequear los @authenticated locales
+from models import User
+// (NO necesita `import auth` — el provider se hereda de main)
 
 @authenticated
 @post("/posts")

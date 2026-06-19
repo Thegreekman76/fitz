@@ -32,13 +32,10 @@ from config import db_url, webhook_url
 // Importar TODOS los @table types — el codegen valida las
 // relations de cada type referenciado (W17 + deuda residual).
 from models import User, Profile, Post, Comment
-// W12 — el `@auth_provider` vive en `auth.fitz`. El pre-scan del
-// checker recorre los imports DEL MÓDULO actual para encontrar
-// providers cross-module, así que necesitamos importar `auth`
-// también acá (no alcanza con que el main lo importe). El
-// ModuleLoader cachea por path, los handlers de `auth.fitz` no
-// se registran dos veces.
-import auth
+// B12 cerrado (cosecha codegen post-fitzwatch, 2026-06-19) —
+// el `@auth_provider` vive en `auth.fitz`. El pre-scan del codegen
+// + checker propaga el provider de main → módulos automáticamente,
+// así que NO hace falta `import auth` acá.
 
 // --- Tipos de input/output ----------------------------------------
 

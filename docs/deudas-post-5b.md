@@ -190,11 +190,20 @@ return 400 { "ok": "false", "error": "missing field" }
 
 ---
 
-## 🔴 PRÓXIMO NORTE INMEDIATO — Cosecha codegen post-fitzwatch (15 bugs, 2026-06-18)
+## 🟢 Cosecha codegen post-fitzwatch — **CERRADA ENTERA 2026-06-19**
 
-> **Acordado con el autor 2026-06-18**: el próximo norte del lenguaje
-> después de v0.17.0 es atacar esta cosecha. La intención es cerrarla
-> rápido — la mayoría tiene fix mecánico chico; B15 es el grande.
+> **Acordado con el autor 2026-06-18**, **cerrado 2026-06-19**: el
+> próximo norte del lenguaje después de v0.17.0 era atacar esta
+> cosecha. 6 sub-pasos en 2 días cierran B1-B12 + B14 + B15 (B13 NO
+> reprodujo en v0.17.0, W18 lo había cerrado; B16 descubierto durante
+> sub-paso 2, abierto como deuda separada porque el fix vive en el
+> checker, no es mecánico). **B15 fue el grande** (sub-paso 6,
+> ~115 LoC + 3 unit + 1 E2E) y al diagnosticarlo descubrimos que el
+> trigger REAL era FK Nullable, no nullables-en-parent-type como
+> decía el doc original. Probablemente fitzwatch no estaba pausado
+> por B15 estricto (sus models declaran todos los FK como `Int = 0`
+> sentinel) sino por W18 (cerrado en v0.17.0); cuando el autor retome
+> fitzwatch va a poder hacer `fitz build` directo.
 
 ### Contexto
 
@@ -432,48 +441,89 @@ error[E0425]: cannot find type `__FitzValue` in this scope
 
 Patrón meta de B4/B5/B6. Cierra junto a los 3 con un solo cambio en `gen_match` (~80 LoC + 4 unit tests). El fix es **flow-sensitive refinement** sobre los arms del match: cuando un arm body termina en `return`/`break`/`continue`, su body code emite `!` (never) en Rust (vía `strip_trailing_semi` ya existente), pero el TIPO interno de Fitz se setteaba a `Type::Null` y entraba al LUB de los arms, widening-eando spuriously hacia `Nullable(T)`. Ahora trackeamos divergencia con un `Vec<bool>` paralelo (`arm_divergent`) y filtramos esos arms del LUB. Si todos divergen, el resultado queda `Null` (rustc acepta `!` → `()`). El binding del `let` siguiente queda con el tipo correcto (`List<X>`, `T` Nominal, lo que sea del arm Ok), y `.len()` / `[]` / `.field` dispatchan normal en codegen. Ver B4 para detalle del fix aplicado.
 
-### B15 — 🔴 BLOQUEANTE — `.preload()` sobre virtuales + nullables rompe en cargo build
+### B15 — `.preload()` sobre `@belongs_to` companion con FK Nullable + path HasMany simétrico — **CERRADO 2026-06-19 (sub-paso 6 cosecha)**
 
-**Síntoma** (cargo build):
+**Síntoma original** (cargo build):
 ```
-error[E0277]: the trait bound `Option<i64>: __IntoPgValue` is not satisfied
-error[E0308]: `match` arms have incompatible types
-  | expected `Option<i64>`, found `i64`
-  --> src/main.rs:N (interior del helper de preload virtual)
+error[E0308]: mismatched types
+  | expected `i64`, found `Option<i64>`
+  --> src/main.rs:N (en __FitzPgValue::Int(__g.<fk>))
+
+error[E0277]: can't compare `i64` with `Option<i64>`
+  --> src/main.rs:N (en __tg2.<pk> == __fk)
 ```
 
-**Repro mínima**:
+**Repro mínima REAL** (descubierto al diagnosticar — el trigger es **FK
+nullable en el parent del `@belongs_to`**, NO "nullables en el parent
+type" como decía el doc original):
 ```fitz
 @table("users") type User {
     @primary id: Int = 0
-    @has_many("Monitor", via="user_id") monitors: List<Monitor> = []
+    name: Str = ""
+    @has_many("Post", via="author_id") posts: List<Post> = []
 }
 
-@table("monitors") type Monitor {
+@table("posts") type Post {
     @primary id: Int = 0
-    @belongs_to("User") user_id: Int = 0
-    user: User?                    // companion virtual
-    last_check_at: Str? = null     // ← nullable
+    @belongs_to("User") author_id: Int? = null   // ← FK nullable
+    author: User?
+    title: Str = ""
 }
 
-@get("/list")
-async fn list_monitors() -> Result<List<Monitor>> {
+@get("/posts")
+async fn list_posts() -> Result<List<Post>> {
     let conn = db.connect("...").await?
-    return Monitor.where(fn(m) => m.user_id == 1).preload("user").all(conn).await
+    return Post.where(fn(p) => p.title == "x").preload("author").all(conn).await
 }
 ```
 
-El helper que el codegen del ORM emite para resolver `.preload("user")` itera los parents y rellena el companion. Al hacer el match interno para popular `user: User?` (Nullable), el codegen mezcla `Option<UserData>` con `UserData` directo según el path del match. Y los FK que se pasan al IN query van como `Option<i64>` que no impl `__IntoPgValue`.
+**Hallazgo importante al diagnosticar**: el repro original del doc
+(con FK `Int = 0` no-nullable + nullables varios en el parent type)
+**NO disparaba el bug** post-sub-pasos 1-5 (B7 + B8 lo habían cerrado
+parcial). El trigger REAL del E0277/E0308 es el FK Nullable
+(`@belongs_to ... X_id: Int? = null`). Los models de fitzwatch
+declaran todos los FK como `Int = 0` sentinel, así que probablemente
+fitzwatch quedó pausado por otro bug (W18 cerrado en v0.17.0) y no por
+B15 estricto. **Pero B15 sigue siendo bug crítico** porque cualquier
+usuario que declare FK opcional (`Int?`) lo dispara, sin workaround
+viable user-side.
 
-**Workaround user-side**: ❌ **ninguno viable**. Cualquier model Fitz no-trivial tiene nullables (timestamps, foreign keys opcionales, fields opcionales del dominio).
+**Severity**: ~~🔴 Critical — BLOQUEANTE~~. **Fix aplicado**: dos
+cambios coordinados en `src/codegen.rs`:
 
-**Severity**: 🔴 **Critical — BLOQUEANTE para fitzwatch entero y probablemente para cualquier proyecto ORM real**.
+1. **`emit_belongs_to_companion_preload_arm`** — nuevo param
+   `parent_fields: &[TypeSigField]` para detectar nullable del FK.
+   Cuando `Type::Nullable(_)`:
+   - IDs collection emite `filter_map` en lugar de `map`:
+     `__guard.iter().filter_map(|__p| { let __g = __p.lock().unwrap();
+     __g.<fk>.map(__FitzPgValue::Int) }).collect()` — las rows con
+     `None` FK skipean el `IN (...)` query entero.
+   - Lookup del `__matched` emite `match __fk { None => None,
+     Some(__fk_v) => __targets.iter().find(|__t| { let __tg2 =
+     __t.lock().unwrap(); __tg2.<pk> == __fk_v }).cloned(), }` —
+     comparación con `i64` directo en el arm `Some`.
 
-**Fix sugerido**: dos sub-cambios en el codegen del ORM (`gen_orm_preload` y/o similares):
-1. **Wrap consistente en `Some()`** al popular el companion field `: T?` en el helper de preload (B7 generalizado al contexto ORM virtuales).
-2. **Coerción `Int → __FitzPgValue::Int`** (no `Option<i64>`) al armar el `IN (...)` para la query secundaria del preload. Sub-case de B8 dentro del ORM.
+2. **`emit_preload_dispatch`** (path HasMany) — sibling fix:
+   `target_fields` busca el FK del child. Si nullable, emite
+   `__cg2.<fk> == Some(__pid)` en lugar de `__cg2.<fk> == __pid`. El
+   `__pid` es `i64` (PK del parent) y el `__cg2.<fk>` ya es
+   `Option<i64>`.
 
-Probablemente ~80-150 LoC en `gen_orm_preload_resolve_virtual` (helpers internos del codegen ORM). Requiere armar repro mínima como tests de codegen (1-2 unit tests + 1 compile_e2e).
+Política consistente: row con FK = None significa "no tiene parent
+en el target" → el companion queda como `None` (no agarra ningún
+match). Semántica idéntica al intérprete (que usa la representación
+unificada `Value`).
+
+**Tests nuevos** (3 unit + 1 E2E):
+- `codegen_orm_preload_companion_with_nullable_fk_emits_filter_map_b15`
+- `codegen_orm_preload_companion_with_nonnull_fk_emits_simple_map_b15`
+  (no-regression — FK no-nullable sigue emitiendo el path legacy)
+- `codegen_orm_preload_has_many_with_nullable_child_fk_emits_some_pid_b15`
+- `tests/compile_e2e.rs::cross_module_orm_preload_nullable_fk_b15` —
+  end-to-end con BelongsToCompanion + HasMany ambos con FK nullable
+  en el mismo programa.
+
+~115 LoC totales en `src/codegen.rs` (delta + tests inline).
 
 ### B16 — match arms con tipos incompatibles (`i64` vs `()`) en posición no-Nullable
 
@@ -525,8 +575,8 @@ let n = match result {
 | **B12** | **Cross-module `@auth_provider` codegen** | Low | ✅ `import auth` | ✅ **CERRADO 2026-06-19** ~70 LoC + 1 E2E | sí |
 | **B13** | **`log.X` kwargs heterogéneos** | ~~Medium~~ | (n/a) | ✅ **NO REPRO en v0.17.0** (W18 lo cerró) | n/a |
 | **B14** | **(meta) match refine** | — | (helpers Result) | ✅ **CERRADO 2026-06-19** ~80 LoC + 4 unit tests | unit (cubre B4/B5/B6 + all-divergent) |
-| **B15** | **`.preload()` + virtuales + nullables** | 🔴 **Critical** | ❌ **sin workaround** | ~80-150 | sí (sobre fitzwatch) |
-| **B16** | **match arms `i64` vs `()` E0308** | Low | ✅ `; <sentinel>` | abierta (sub-paso 6+) | sí |
+| **B15** | **`.preload()` + FK Nullable** | 🔴 **Critical** | ❌ sin workaround | ✅ **CERRADO 2026-06-19** ~115 LoC + 3 unit + 1 E2E | sí |
+| **B16** | **match arms `i64` vs `()` E0308** | Low | ✅ `; <sentinel>` | abierta (sub-paso 7+) | sí |
 
 **Plan de ataque sugerido** (orden por dependencias + impacto):
 
@@ -542,7 +592,7 @@ let n = match result {
     - **B12** (~70 LoC + 1 E2E): cross-module `@auth_provider` para módulos. El `ModuleLoader` suma campo `main_imported_auth_provider` pre-scanneado en `generate_project` ANTES de `collect_imports`. En `load_module`, el provider del módulo es `or_else`-combined: primero las propias imports del módulo (path histórico W12), luego como fallback el de main. Cierra el caso "módulo con `@authenticated` sin `import auth` propio porque main ya lo importó".
 
     Smoke `cargo test --release --lib b1 b2 b9 b10 b12` 14/14 verde. Smoke `cargo test --release --test compile_e2e cross_module_spawn_background_b10 cross_module_auth_provider_via_main_b12` 2/2 verde. **Próximo norte de la cosecha**: sub-paso 6 (B15 — el bloqueante).
-6. **Sub-paso BLOQUEANTE "ORM `.preload()` + Nullable companion"** — B15. El grande. ~80-150 LoC + repro tests sobre fitzwatch como compile_e2e end-to-end. Cerrar acá desbloquea fitzwatch al deploy completo.
+6. **Sub-paso BLOQUEANTE "ORM `.preload()` + Nullable companion"** — B15. ✅ **CERRADO 2026-06-19**. ~115 LoC + 3 unit + 1 E2E. **Hallazgo importante al diagnosticar**: el trigger REAL es FK Nullable (`@belongs_to ... X_id: Int? = null`) en el parent del companion, NO "nullables en el parent type" como decía el doc original (que post-sub-pasos 1-5 con B7+B8 cerrados ya NO disparaba el bug). Dos cambios coordinados en `src/codegen.rs`: (a) `emit_belongs_to_companion_preload_arm` recibe `parent_fields` y, cuando el FK es Nullable, emite `filter_map(|p| p.<fk>.map(__FitzPgValue::Int))` para el `IN (...)` + `match __fk { None => None, Some(v) => find(v) }` para el lookup; (b) `emit_preload_dispatch` (path HasMany sibling) detecta el FK del child Nullable y emite `__cg2.<fk> == Some(__pid)` en lugar de bare `__pid`. Smoke `cargo test --release --lib b15` 3/3 verde; smoke `cargo test --release --test compile_e2e cross_module_orm_preload_nullable_fk_b15` 1/1 verde; smoke `compile_e2e smoke_ejemplos_guia_compilables_compilan` 366/366 verde (~5 min); fmt + clippy `--lib --tests --bins -- -D warnings` limpios. Lib completa **3141/3141 verde** (+3 vs sub-paso 5). Repro mínima validada end-to-end (`d:/tmp/sub6-preload-repro/repro_fk_null.fitz` con FK `Int? = null` + companion + handler — `fitz build` produce binario nativo). **Importante para fitzwatch**: los models declaran todos los FK como `Int = 0` sentinel (no Nullable), así que probablemente el bug que pausó fitzwatch fue otro (W18 cerrado en v0.17.0), no B15 estricto. Pero B15 sigue siendo bug crítico que cualquier usuario con FK `Int?` dispara sin workaround viable user-side. **Cosecha codegen post-fitzwatch CERRADA ENTERA**: sub-pasos 1-6 cubren B1-B12 + B14 + B15 cerrados; B13 NO reproduce (W18); B16 abierto como deuda separada (fix vive en el checker, no es mecánico).
 
 **Validación al cerrar la cosecha**:
 - `cd d:\fitzwatch && fitz build` debería pasar limpio.

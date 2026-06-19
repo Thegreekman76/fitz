@@ -12130,3 +12130,72 @@ boot().await\n";
         bin_name
     );
 }
+
+/// B15 (sub-paso 6 cosecha post-fitzwatch, 2026-06-19) — `fitz build`
+/// pasa cuando `.preload("companion")` se hace sobre una relation
+/// `BelongsToCompanion` cuyo FK en el parent es `Int?` (Nullable).
+/// Antes del fix, el codegen emitía `__FitzPgValue::Int(__g.<fk>)`
+/// directo (rustc: `expected i64, found Option<i64>`) y comparaba
+/// `__tg2.<pk> == __fk` (rustc: `can't compare i64 with Option<i64>`).
+/// El fix emite `filter_map(|p| p.<fk>.map(__FitzPgValue::Int))` para
+/// el `IN (...)` y `match __fk { None => None, Some(v) => find(v) }`
+/// para el lookup. Cubre también el path HasMany con FK del child
+/// nullable (sibling fix con `__cg2.<fk> == Some(__pid)`).
+#[test]
+fn cross_module_orm_preload_nullable_fk_b15() {
+    let stem = "cross_module_orm_preload_nullable_fk_b15";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // BelongsToCompanion + HasMany ambos con FK nullable. Ejercita
+    // los dos caminos del fix en un solo programa.
+    let src = "@table(\"users\") type User {\n  \
+                   @primary id: Int = 0\n  \
+                   name: Str = \"\"\n  \
+                   @has_many(\"Post\", via=\"author_id\") posts: List<Post> = []\n\
+               }\n\
+               @table(\"posts\") type Post {\n  \
+                   @primary id: Int = 0\n  \
+                   @belongs_to(\"User\") author_id: Int? = null\n  \
+                   author: User?\n  \
+                   title: Str = \"\"\n\
+               }\n\
+               @get(\"/posts-with-author\")\n\
+               async fn posts_with_author() -> Result<List<Post>> {\n  \
+                   let conn = db.connect(\"postgres://x@h/d\").await?\n  \
+                   return Post.where(fn(p) => p.title == \"x\").preload(\"author\").all(conn).await\n\
+               }\n\
+               @get(\"/users-with-posts\")\n\
+               async fn users_with_posts() -> Result<List<User>> {\n  \
+                   let conn = db.connect(\"postgres://x@h/d\").await?\n  \
+                   return User.where(fn(u) => u.id > 0).preload(\"posts\").all(conn).await\n\
+               }\n\
+               @server(43920)\n\
+               fn main() => 0\n";
+
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B15):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+}
