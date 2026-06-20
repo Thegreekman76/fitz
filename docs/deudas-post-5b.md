@@ -4,6 +4,24 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 B20 — `@cron(store=X)` cross-module no resuelve binding del módulo origen (deuda futura, 2026-06-20)
+
+**Detectada al destrabar fitzwatch** después de cerrar B19 (cron cross-module no spawneaba). Caso edge no soportado por el codegen: `@cron(..., store=X)` declarado en un módulo importado (e.g., `scheduler.fitz`) referencia un binding `X` que debería resolver al `let X = db.connect(...).await` también declarado en el módulo. Hoy el spawn cross-module emite `(&X).into_store()` en `fn main()` del crate root, donde `X` no está en scope → `error[E0425] cannot find value 'X' in this scope`.
+
+**Workaround canónico (pattern TaskHub)**: declarar `let X = db.connect(...).await` + `@cron(store=X)` en el archivo `main.fitz`. El módulo importado solo exporta la fn async helper sin decorator, y el `@cron` del main la llama (`mod.fn().await`). Pattern usado en TaskHub + fitzwatch (post-refactor v0.18.2).
+
+**Por qué no cerramos en v0.18.2**: implementar cross-module store=X resolution requiere ~200-300 LoC:
+- Soportar `let X = db.connect(...).await` top-level en módulos (hoy `pre_register_top_lets` solo acepta consts literales).
+- Emitir `pub static __FITZ_STATE_X: OnceCell<__FitzDbConn>` + init fn `pub async fn __init_state_X()` en el módulo.
+- En `emit_cron_job_spawns`, cuando `module_path.is_some()` y `store_var.is_some()`, materializar `let X = crate::<mod>::__FITZ_STATE_X.get().unwrap().clone()` ANTES del spawn.
+- Tocar el module emission entero — riesgo alto de break en TaskHub + curso + guía.
+
+**Plan de cierre cuando aparezca demanda real**: el patrón canónico (declarar en main) cubre el 90% del caso de uso. Si aparece un boilerplate o user externo que requiere cross-module organization estricta del cron + store, abrir mini-fase dedicada con auditoría de los call sites afectados y tests E2E paralelos a TaskHub.
+
+**Tests verdes que cubren el pattern canónico actual**: `cron_in_imported_module_is_spawned_b19` (B19) + `cron_with_persistent_store_in_imported_module_b19_derived` (bug derivado del preludio); ambos en `tests/compile_e2e.rs`. Smoke real fitzwatch v0.18.2 valida persistencia + retry cross-module (refactor en main).
+
+---
+
 ## 🟢 Mini-tanda traducción ES→EN del código — CERRADA v0.16.0 (2026-06-15)
 
 **Hito de internacionalización**: 47 commits coordinados en 7 sub-fases (F1-F6 + F5.d) llevan el surface user-facing del compilador (CLI, LSP, errors), test assertions internas y comentarios del grammar TextMate de español a inglés. `grep "esperaba|esperaban" src/` → 0 ocurrencias post-cierre.

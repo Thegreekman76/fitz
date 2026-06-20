@@ -12276,3 +12276,174 @@ fn main() => 0\n";
         bin_name
     );
 }
+
+#[test]
+fn cron_in_imported_module_is_spawned_b19() {
+    // B19 (post-fitzwatch sesión 2, v0.18.2) — `@cron("expr") fn ...`
+    // declarado en un módulo importado (no en el archivo main) era
+    // silenciosamente dropeado por el codegen: el [ready] banner del
+    // usuario aparecía pero ningún `tokio::spawn(__fitz_run_cron_job(...))`
+    // se emitía, así que el scheduler nunca arrancaba el job.
+    //
+    // **Fix**: `LoadedModule` suma `cron_fn_stmts: Vec<Stmt>` (paralelo a
+    // W16 `http_fn_stmts` y 10.8.6 `ws_fn_stmts`). `generate_project`
+    // populate `cron_jobs_info` también desde `loader.modules`, marcando
+    // `module_path: Some(mod_name)`. `emit_cron_job_spawns` emite
+    // `crate::<mod_name>::<fn_name>` cuando `module_path.is_some()`.
+    //
+    // Repro mínimo: módulo `tasks.fitz` con `@cron`; main solo `import tasks`.
+    // El binario nativo debe compilar y, al inspeccionar main.rs generado,
+    // debe contener `tokio::spawn(__fitz_run_cron_job(...))`.
+    let stem = "cron_cross_module_b19";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // tasks.fitz — módulo con `@cron` async fn.
+    std::fs::write(
+        dir.join("tasks.fitz"),
+        "@cron(\"*/30 * * * * *\")\n\
+         async fn ping() -> Null {\n  \
+             sleep(10).await\n  \
+             return null\n\
+         }\n",
+    )
+    .expect("escribir tasks.fitz");
+
+    // main.fitz — solo `import tasks` + @server.
+    let main_src = "\
+import tasks\n\
+\n\
+@server(43922)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B19):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+
+    // Run the binary briefly and check stderr for the scheduler
+    // banner that `emit_cron_job_spawns` prints when at least one
+    // cron job is registered:
+    //   "🕐 Fitz scheduler arrancado con N job(s) cron"
+    //   "   @cron  ping (*/30 * * * * *)"
+    //
+    // Pre-B19 the cross-module `@cron` was silently dropped, so the
+    // banner never appeared (cron_jobs_info was empty).
+    let bin_path = dir.join(&bin_name);
+    let mut child = std::process::Command::new(&bin_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn fitzwatch test binary");
+    // Wait ~2s so the cron banner has time to print at boot.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("wait child");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Fitz scheduler arrancado con 1 job(s) cron"),
+        "expected `Fitz scheduler arrancado con 1 job(s) cron` in stderr (B19 — cross-module @cron), stderr was: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("ping"),
+        "expected the @cron fn name `ping` in stderr banner, stderr was: {}",
+        stderr
+    );
+}
+
+#[test]
+fn cron_with_persistent_store_in_imported_module_b19_derived() {
+    // B19 bug derivado (post-fitzwatch sesión 2, v0.18.2) —
+    // `@cron("expr", store=db) async fn ...` declarado en un
+    // módulo importado emitía el spawn cross-module con
+    // `store: (&db).into_store()` (correcto), pero el preludio
+    // `__FitzCronOptions` se emitía en su shape simple (sin field
+    // `store`) porque `program_has_persistent_cron(program)` solo
+    // miraba el AST del archivo main, no los módulos. Resultado:
+    // `error[E0560] struct \`__FitzCronOptions\` has no field named
+    // \`store\``.
+    //
+    // **Fix**: `program_or_modules_has_persistent_cron(program,
+    // &loader)` consulta también `loader.modules[i].cron_fn_stmts`
+    // antes de decidir qué shape del struct emitir.
+    let stem = "cron_persistent_cross_module_b19";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("tasks.fitz"),
+        "@cron(\"*/30 * * * * *\", store=db, retry={\n    \
+                 max: 2,\n    \
+                 backoff: \"exponential\",\n    \
+                 initial_secs: 1,\n    \
+                 max_secs: 10,\n\
+             })\n\
+         async fn nightly() -> Result<Null> {\n  \
+             let conn = db.connect(\"postgres://x@h/d\").await?\n  \
+             return Ok(null)\n\
+         }\n",
+    )
+    .expect("escribir tasks.fitz");
+
+    // El `let db = db.connect(...).await` top-level lo necesitamos
+    // para que el spawn cross-module `(&db).into_store()` resuelva:
+    // el codegen necesita un `Ident` en scope llamado `db`. Para el
+    // test el host/db son ficticios — `fitz build` solo emite el
+    // Rust y delega a `cargo build`, NO ejecuta nada. La conexión
+    // falla en runtime pero no toca el test.
+    let main_src = "\
+import tasks\n\
+\n\
+let db = db.connect(\"postgres://x@h/d\").await\n\
+\n\
+@server(43924)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B19 bug derivado):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+}

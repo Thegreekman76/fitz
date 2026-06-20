@@ -2,6 +2,39 @@
 
 ---
 
+## Codegen — B19 (`@cron` cross-module no se spawnea) ✅ CERRADO v0.18.2 (2026-06-20)
+
+**Hito**: cosecha post-fitzwatch sesión 2 (segundo bug del codegen descubierto al arrancar el deploy real). **Sin sintaxis nueva** — fix interno paralelo a W16 (HTTP handlers cross-module) y 10.8.6 (WS handlers cross-module) para que `@cron` también funcione cross-module.
+
+**El bug**: `@cron("expr") async fn ...` declarado en un módulo importado era silenciosamente dropeado. El [ready] banner aparecía (es solo un `print(...)` del usuario), pero ningún `tokio::spawn(__fitz_run_cron_job(...))` se emitía en el main.rs. Sin error visible — imposible de detectar sin inspeccionar el código generado o esperar que el cron no dispare.
+
+**El fix** (`src/codegen.rs`):
+1. `LoadedModule` suma `cron_fn_stmts: Vec<Stmt>` paralelo a `http_fn_stmts`/`ws_fn_stmts`.
+2. `load_module_inner` walka el `module_program` capturando fns con decorator `@cron`.
+3. `CronJobInfo` suma `module_path: Option<String>` que indica el path Rust del módulo origen.
+4. `generate_project` populate `cron_jobs_info` desde `p.cron_fns` (local con `module_path: None`) Y desde `loader.modules` (cross-module con `module_path: Some(mod_name)`).
+5. `emit_cron_job_spawns` prefixa el fn call con `crate::<mod_name>::` cuando `module_path.is_some()`.
+
+**Bug derivado** (mismo release): al smoke-testear fitzwatch descubrí que `program_has_persistent_cron(program)` solo miraba el AST del main. `@cron(store=X)` cross-module → preludio emitía shape simple (sin field `store`), pero spawn emitía con `store: ...` → E0560. Fix: nueva fn `program_or_modules_has_persistent_cron(program, &loader)` que consulta también `loader.modules[i].cron_fn_stmts` + helper `stmt_is_persistent_cron`. Aplicada en 3 call sites.
+
+**Caso edge no cubierto** (deuda B20 documentada): cross-module `store=X` resolution cuando el binding también vive en el módulo importado (no en main). Requiere soporte para state vars async-init en módulos (~200-300 LoC). Workaround canónico pattern TaskHub: declarar todo en main; el módulo solo exporta helpers async sin decorator.
+
+**Verificación pre-bump v0.18.2**:
+- `cargo test --lib` → **3171/3171** ✓
+- `cargo clippy --lib --tests --bins -- -D warnings` ✓
+- `cargo fmt --all --check` ✓
+- `cargo test --test compile_e2e cron_in_imported_module_is_spawned_b19` → **1/1** ✓
+- `cargo test --test compile_e2e cron_with_persistent_store_in_imported_module_b19_derived` → **1/1** ✓
+- Smoke fitzwatch real (post-refactor pattern canónico): `scheduler.tick due=N` cada 10s + `check.down http=503` + `incident.opened` automático + tablas `fitz_cron_jobs`/`fitz_cron_runs` auto-creadas con `last_status: 'ok'` ✓
+
+**Estado fitzwatch al cierre v0.18.2**: scheduler ejecuta cron cada 10s + persistencia + retry. Smoke local end-to-end VERDE.
+
+**Próximo norte**: re-verificación full (compile_e2e + smoke GUIDE_EXAMPLES_COMPILE ~290 ejemplos guía+curso+TaskHub) + tag + GHCR build + deploy al VPS.
+
+Detalle release-style en [`CHANGELOG.md`](../CHANGELOG.md) → v0.18.2.
+
+---
+
 ## Codegen — B17 (`for x in <List<T>>` con `.await` rompe Send) ✅ CERRADO v0.18.1 (2026-06-20)
 
 **Hito**: cosecha post-fitzwatch sesión 2. Cierra el último bug del codegen que bloqueaba `fitz build` de fitzwatch. **Sin sintaxis nueva** — fix interno transparente para programas existentes.

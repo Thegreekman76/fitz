@@ -9,6 +9,81 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.18.2] — 2026-06-20 — Codegen: B19 (`@cron` en módulo importado no se spawnea)
+
+Cosecha post-fitzwatch sesión 2, segundo bug del codegen descubierto al
+arrancar el deploy real de fitzwatch (status page open-source en Fitz
+puro). **Sin sintaxis nueva** — fix interno transparente para programas
+con `@cron` declarado en el archivo main; agrega soporte real para el
+caso cross-module que antes fallaba silenciosamente.
+
+**El bug**: cuando `@cron("expr") async fn ...` vivía en un módulo
+importado (caso canónico: `scheduler.fitz` con `import scheduler` desde
+`main.fitz`), el codegen lo **dropeaba silenciosamente**. El usuario
+veía el `print("[ready] cron...")` banner (un literal del usuario), pero
+ningún `tokio::spawn(__fitz_run_cron_job(...))` se emitía en el `main.rs`
+generado. Resultado: el server arrancaba, los endpoints respondían, pero
+el scheduler nunca ejecutaba el job — sin error visible en stderr,
+imposible de detectar sin inspeccionar el main.rs o esperar que el
+trabajo del cron pase y no llegar nunca.
+
+`partition_program_stmts(program)` solo procesa el AST del archivo main,
+así que las fns `@cron` de módulos importados nunca aterrizaban en
+`cron_jobs_info`.
+
+**El fix**: paralelo a W16 (HTTP handlers cross-module) y 10.8.6 (WS
+handlers cross-module):
+1. `LoadedModule` suma `cron_fn_stmts: Vec<Stmt>`, populated al cargar
+   cada módulo.
+2. `CronJobInfo` suma `module_path: Option<String>` que indica el path
+   Rust del módulo origen.
+3. `generate_project` después de popular `cron_jobs_info` desde
+   `p.cron_fns` (local), ITERA sobre `loader.modules` y suma los crons
+   de cada uno con `module_path: Some(mod_name)`.
+4. `emit_cron_job_spawns` cuando `module_path.is_some()` emite
+   `crate::<mod_name>::<fn_name>` en lugar de bare `<fn_name>`.
+
+**Bug derivado** (mismo release): al smoke-testear el fix con fitzwatch,
+descubrí que `program_has_persistent_cron(program)` solo miraba el AST
+del main, así que un `@cron(..., store=X)` declarado solo en un módulo
+emitía el preludio del struct `__FitzCronOptions` en su shape simple
+(sin field `store`), pero el spawn cross-module sí emitía con
+`store: ...` → `error[E0560] struct '__FitzCronOptions' has no field
+named 'store'`. **Fix**: nueva fn `program_or_modules_has_persistent_cron(program, &loader)`
+que consulta también `loader.modules[i].cron_fn_stmts`; aplicada en
+los 3 call sites (cargo_toml_for de main, decisión cross-module de
+uses_db, emit_jobs_prelude). Helper privado `stmt_is_persistent_cron`
+extraído para evitar duplicar la lógica.
+
+**Caso edge no cubierto en v0.18.2** (documentado como deuda B20):
+cross-module `store=X` resolution cuando el binding `let X = db.connect(...)`
+también vive en el módulo importado. Requiere soporte para state vars
+async-init en módulos (~200-300 LoC del codegen). Workaround canónico
+pattern TaskHub: declarar `let X = ...` + `@cron(store=X)` en main.fitz;
+módulo solo exporta la fn helper. Detalle completo en
+`docs/deudas-post-5b.md` → "🟡 B20".
+
+**Tests al cierre v0.18.2**: 3171 unit lib + 2 nuevos E2E
+(`cron_in_imported_module_is_spawned_b19` que valida runtime via
+stderr del binario nativo + `cron_with_persistent_store_in_imported_module_b19_derived`
+que valida que el shape del preludio matchea el spawn cross-module
+con `store=db`) — ambos verdes. fmt + clippy `--lib --tests --bins -- -D
+warnings` limpios.
+
+**Estado fitzwatch al cierre v0.18.2**: el scheduler ejecuta el cron
+cada 10s + persistencia en `fitz_cron_jobs` + retry exponencial.
+Smoke local end-to-end VERDE: HTTP login + crear monitor + cron tick
+chequea el target (`check.down` con `http=503` esperado de httpbin) +
+`incident.opened` automático + tabla `fitz_cron_jobs` con
+`last_status: 'ok'`. fitzwatch refactoreado al pattern canónico TaskHub
+(commit propio del repo fitzwatch): `let db = db.connect(db_url()).await`
++ `@cron(store=db)` en `main.fitz`, scheduler.fitz exporta solo la fn
+helper async.
+
+Próximo norte: tag + GHCR build + deploy fitzwatch al VPS.
+
+---
+
 ## [v0.18.1] — 2026-06-20 — Codegen: B17 (`for x in <List<T>>` con `.await` en body rompe Send)
 
 Cosecha post-fitzwatch sesión 2. Cierra el último bug del codegen que

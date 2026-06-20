@@ -260,7 +260,7 @@ pub fn generate_project(
     // schema/migrations). We add `m.uses_db`, which invokes
     // `program_uses_db` over the full module_program.
     let uses_db = program_uses_db(program)
-        || program_has_persistent_cron(program)
+        || program_or_modules_has_persistent_cron(program, &loader)
         || loader
             .modules
             .iter()
@@ -1578,7 +1578,28 @@ fn collect_idents_in_expr(e: &Expr, out: &mut std::collections::HashSet<String>)
 /// link the db driver (uses_db = true) because the scheduler's SQL
 /// helpers use `Arc<__FitzDbConn>`.
 fn program_has_persistent_cron(program: &Program) -> bool {
-    program.iter().any(|s| match s {
+    program.iter().any(stmt_is_persistent_cron)
+}
+
+/// B19 (v0.18.2) — paralelo a `program_has_persistent_cron` pero
+/// considera además los `@cron(..., store=<ident>)` declarados en
+/// módulos importados (via `LoadedModule.cron_fn_stmts`). Necesario
+/// porque `emit_jobs_prelude` decide qué shape del struct
+/// `__FitzCronOptions` emitir; sin esto, un cron persistente
+/// declarado solo en un módulo (`scheduler.fitz`) emite el shape
+/// simple (sin field `store`), pero el spawn cross-module emite con
+/// `store: ...` → error E0560 `__FitzCronOptions does not have this
+/// field`.
+fn program_or_modules_has_persistent_cron(program: &Program, loader: &ModuleLoader) -> bool {
+    program_has_persistent_cron(program)
+        || loader
+            .modules
+            .iter()
+            .any(|m| m.cron_fn_stmts.iter().any(stmt_is_persistent_cron))
+}
+
+fn stmt_is_persistent_cron(s: &Stmt) -> bool {
+    match s {
         Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| {
             d.name == "cron"
                 && d.kwargs
@@ -1586,7 +1607,7 @@ fn program_has_persistent_cron(program: &Program) -> bool {
                     .any(|(k, v)| k == "store" && matches!(v, Expr::Ident(_, _)))
         }),
         _ => false,
-    })
+    }
 }
 
 fn program_uses_db(program: &Program) -> bool {
@@ -3721,6 +3742,17 @@ struct LoadedModule {
     /// axum::routing::any(crate::<mod>::__ws_handler_<name>))` and
     /// to feed the cross-module AsyncAPI schema.
     ws_fn_stmts: Vec<Stmt>,
+    /// B19 (v0.18.2, cosecha post-fitzwatch sesión 2) — parallel to
+    /// `http_fn_stmts`: the FnDef stmts with the `@cron("expr", ...)`
+    /// decorator declared in the module. The main uses these to
+    /// register the cron jobs in the scheduler at boot, calling
+    /// `crate::<mod>::<fn>` instead of the bare `<fn>` (which only
+    /// works when the @cron lives in the main file). Without this
+    /// the module's @cron decorators were silently dropped: the
+    /// generator emitted nothing, the scheduler never spawned them,
+    /// and the user saw the [ready] banner (a user `print(...)`) but
+    /// no actual cron activity.
+    cron_fn_stmts: Vec<Stmt>,
     /// Mini-fase HTTP client (2026-06-18) —
     /// `program_uses_http_client(module_program)`. The main ORs it
     /// with its own flag so the `__fitz_http_*` prelude lives in the
@@ -4261,6 +4293,9 @@ impl ModuleLoader {
         // axum::routing::any(crate::<mod>::__ws_handler_<name>))`)
         // and to feed the cross-module AsyncAPI schema.
         let mut module_ws_fn_stmts: Vec<Stmt> = Vec::new();
+        // B19 (v0.18.2) — parallel to W16/10.8.6: capture FnDef stmts
+        // with `@cron(...)` so main can register them in the scheduler.
+        let mut module_cron_fn_stmts: Vec<Stmt> = Vec::new();
         for stmt in &module_program {
             if let Stmt::FnDef { decorators, .. } = stmt {
                 let is_http = decorators
@@ -4272,6 +4307,10 @@ impl ModuleLoader {
                 let is_ws = decorators.iter().any(|d| d.name == "ws");
                 if is_ws {
                     module_ws_fn_stmts.push(stmt.clone());
+                }
+                let is_cron = decorators.iter().any(|d| d.name == "cron");
+                if is_cron {
+                    module_cron_fn_stmts.push(stmt.clone());
                 }
             }
         }
@@ -4301,6 +4340,7 @@ impl ModuleLoader {
             auth_provider_fn: module_auth_provider_fn,
             http_fn_stmts: module_http_fn_stmts,
             ws_fn_stmts: module_ws_fn_stmts,
+            cron_fn_stmts: module_cron_fn_stmts,
             uses_http_client: module_uses_http_client,
             uses_smtp: module_uses_smtp,
         });
@@ -5624,7 +5664,7 @@ fn generate_main_rs(
     // W11 (v0.10.7) — besides table_metadata, also consider
     // `m.uses_db` (db.connect/query/exec without @table).
     let uses_db = program_uses_db(program)
-        || program_has_persistent_cron(program)
+        || program_or_modules_has_persistent_cron(program, loader)
         || loader
             .modules
             .iter()
@@ -6180,7 +6220,13 @@ fn emit_main_rs_body(
     // 9.w.3.iter2.d — detects `any_persistent` from the AST because
     // `cron_jobs_info` is only populated later in
     // `partition_program_stmts`.
-    let any_persistent_cron = program_has_persistent_cron(program);
+    // B19 (v0.18.2) — also considers `@cron(store=...)` declared in
+    // imported modules so the prelude shape (simple vs persistent)
+    // matches the spawn emission cross-module. Without this, a cron
+    // persistent declared ONLY in `scheduler.fitz` (typical case)
+    // emits the simple struct shape but the spawn emits with
+    // `store: ...` → E0560.
+    let any_persistent_cron = program_or_modules_has_persistent_cron(program, loader);
     ctx.emit_jobs_prelude(any_persistent_cron);
     // Phase 12.3.a.3 — structured logging prelude: enum
     // `__FitzLogValue` + `__fitz_log_init/info/warn/error/debug`. Only
@@ -6303,6 +6349,15 @@ fn emit_main_rs_body(
     // 9.w.3.iter2.d — parses the `@cron(...)` kwargs: `tz`, `retry`,
     // `catch_up`, `store`. Defaults equivalent to the MVP (UTC, no
     // retry, no catch_up, no store).
+    //
+    // B19 (v0.18.2) — also populates from imported modules'
+    // `cron_fn_stmts` (`@cron` declared in `scheduler.fitz` and friends),
+    // setting `module_path: Some(mod_name)` so the emit prefixes the
+    // call with `crate::<mod_name>::`. Pre-B19, modules' @cron decorators
+    // were silently dropped: nothing emitted, scheduler never spawned
+    // them, and the user only saw the [ready] banner (a `print(...)`)
+    // but no actual cron activity. Symptom in fitzwatch: monitors never
+    // got checked despite the boot log claiming so.
     for stmt in &p.cron_fns {
         if let Stmt::FnDef {
             name,
@@ -6321,9 +6376,43 @@ fn emit_main_rs_body(
                         retry: None,
                         catch_up: false,
                         store_var: None,
+                        module_path: None,
                     };
                     parse_cron_kwargs_into_info(&deco.kwargs, name, &mut info)?;
                     ctx.cron_jobs_info.push(info);
+                }
+            }
+        }
+    }
+    // B19 — cross-module @cron registration. Each loaded module's
+    // `cron_fn_stmts` is walked; the resulting CronJobInfos carry
+    // `module_path: Some(mod_name)` so `emit_cron_job_spawns` emits
+    // `crate::<mod_name>::<fn_name>` instead of bare `<fn_name>`.
+    for module in &loader.modules {
+        let mod_name = module.mod_name.clone();
+        for stmt in &module.cron_fn_stmts {
+            if let Stmt::FnDef {
+                name,
+                decorators,
+                is_async,
+                ..
+            } = stmt
+            {
+                if let Some(deco) = decorators.iter().find(|d| d.name == "cron") {
+                    if let Some(Expr::Str(expr, _)) = deco.args.first() {
+                        let mut info = CronJobInfo {
+                            fn_name: name.clone(),
+                            expr: expr.clone(),
+                            is_async: *is_async,
+                            tz_name: "UTC".to_string(),
+                            retry: None,
+                            catch_up: false,
+                            store_var: None,
+                            module_path: Some(mod_name.clone()),
+                        };
+                        parse_cron_kwargs_into_info(&deco.kwargs, name, &mut info)?;
+                        ctx.cron_jobs_info.push(info);
+                    }
                 }
             }
         }
@@ -6598,6 +6687,11 @@ struct CronJobInfo {
     /// `Some(var_name)` if `store=<ident>`. The codegen emits
     /// `var_name.clone()` to pass the `Arc<__FitzDbConn>` to the spawn.
     store_var: Option<String>,
+    /// B19 (v0.18.2) — `Some(mod_name)` if the @cron lives in an
+    /// imported module (e.g., `scheduler.fitz` → `Some("scheduler")`).
+    /// The emit prefixes the fn call with `crate::<mod_name>::`. `None`
+    /// when the @cron is local to the main file (bare `<fn_name>` call).
+    module_path: Option<String>,
 }
 
 /// 9.w.3.iter2.d — build-time parallel of the interpreter runtime's
@@ -9040,15 +9134,23 @@ impl<'a> CodegenCtx<'a> {
             } else {
                 String::new()
             };
+            // B19 (v0.18.2) — if the @cron lives in an imported module,
+            // prefix the fn call with `crate::<mod_name>::` so the
+            // dispatch resolves cross-module. Bare `<fn_name>` only
+            // works when @cron is declared in the main file.
+            let fn_call_path = match &job.module_path {
+                Some(mod_name) => format!("crate::{}::{}", mod_name, job.fn_name),
+                None => job.fn_name.clone(),
+            };
             let invoke_body = if job.is_async {
                 format!(
                     "{{ use crate::__FitzCronReturn; {}().await.into_result() }}",
-                    job.fn_name
+                    fn_call_path
                 )
             } else {
                 format!(
                     "{{ use crate::__FitzCronReturn; {}().into_result() }}",
-                    job.fn_name
+                    fn_call_path
                 )
             };
             self.emit(&format!(
