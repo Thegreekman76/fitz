@@ -131,7 +131,7 @@ match run().await {
 
 **Conclusión**: NO es bug — la regla 5.3.3 es deliberada (el `?` huérfano sería runtime error inevitable). El workaround es el patrón canónico para tooling HTTP client desde un script CLI. Documentado en el cap 17.X de la guía.
 
-### 2. `for x in <List<Str>>` con `.await` adentro de `@cron` rompe Send
+### 2. `for x in <List<Str>>` con `.await` adentro de `@cron` rompe Send — **CERRADO 2026-06-20 (v0.18.1, cosecha post-fitzwatch sesión 2)**
 
 **Síntoma**: el codegen del binario nativo rompe con error de tipos del estilo "future is not Send" cuando un body de `@cron` itera una lista y hace `.await` por iteración:
 
@@ -147,19 +147,33 @@ async fn check_all_endpoints() -> Result<Null> {
 }
 ```
 
-**Causa**: el codegen del `for in` sobre `List<T>` toma `MutexGuard` del `Arc<Mutex<Vec<T>>>` y lo mantiene activo durante todo el body del loop. Cuando hay `.await` adentro, el `MutexGuard` cross-await rompe el bound `Send + 'static` que axum/tokio exigen para tasks spawneadas.
+**Causa**: el codegen del `for in` sobre `List<T>` tomaba `MutexGuard` del `Arc<Mutex<Vec<T>>>` y lo mantenía activo durante todo el body del loop. Cuando había `.await` adentro, el `MutexGuard` cross-await rompía el bound `Send + 'static` que axum/tokio exigen para tasks spawneadas.
 
-**Workaround idiomático** (documentado en `17h`):
+**Fix v0.18.1**: el codegen emite ahora un bloque acotado con `let __for_snap` previo al `for`:
 
-```fitz
-// En lugar del loop, calls explícitas (la lista es estática del MVP):
-let r1 = http.head("https://a.com").await?
-log.info("status", url: "https://a.com", status: r1.status)
-let r2 = http.head("https://b.com").await?
-log.info("status", url: "https://b.com", status: r2.status)
+```rust
+{
+    let __for_snap = (xs).lock().unwrap().clone();
+    for mut x in __for_snap.into_iter() {
+        // body — el MutexGuard YA no sobrevive cross-await
+    }
+}
 ```
 
-**Fix futuro** (refinable post-MVP): el codegen del `for in <List<T>>` con detección de `.await` adentro podría hacer snapshot via `borrow().clone().into_iter()` (paralelo a lo que YA hace para listas no-await), liberando el `MutexGuard` antes del loop body. ~30 LoC en `gen_for_in`.
+El `let __for_snap = ...;` libera el `MutexGuard` temporal al `;`, dejando solo el `Vec<T>` owned para el loop. Aplicable a List<T>, List<Tuple> destructuring, Map<K,V> destructuring y Map con wildcard `_`. Cambios en `src/codegen.rs::gen_for_loop` (los 4 sitios del lock chain). Test E2E nuevo `for_over_list_with_await_in_body_does_not_break_send_b17` en `tests/compile_e2e.rs`.
+
+Patrón canónico que estaba bloqueado (descubierto en fitzwatch v0.18.0):
+
+```fitz
+async fn dispatch_all(channels: List<NotificationChannel>, payload: Map<Str, Str>) -> Null {
+    for ch in channels {
+        let _ = dispatch_channel(ch, payload).await  // ← ANTES rompía
+    }
+    return null
+}
+```
+
+Ahora compila bit-a-bit con `fitz build`. Cap 17h y otros ejemplos guía que tenían workarounds documentados pueden refactorearse al patrón canónico (deuda menor, cosmética).
 
 ### 3. Map literal heterogéneo (Bool + Str) en `return <status> { ... }` rompe el codegen
 

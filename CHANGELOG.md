@@ -9,6 +9,56 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.18.1] — 2026-06-20 — Codegen: B17 (`for x in <List<T>>` con `.await` en body rompe Send)
+
+Cosecha post-fitzwatch sesión 2. Cierra el último bug del codegen que
+quedaba bloqueando `fitz build` de fitzwatch (status page open-source
+en Fitz puro). **Sin sintaxis nueva, sin keyword nueva, sin decorator
+nuevo** — cambio interno del codegen transparente para programas
+existentes (los ~290 ejemplos del smoke `GUIDE_EXAMPLES_COMPILE`
+compilan bit-a-bit idéntico).
+
+**El bug**: `for x in <List<T>>` con `.await` adentro del body en
+handler `async` rompía Send. El codegen emitía
+`for x in (xs).lock().unwrap().clone().into_iter() { ... }`, donde el
+`MutexGuard` temporal (resultado de `.lock().unwrap()`) vive hasta el
+final del statement del `for`. Cualquier `.await` adentro del body lo
+cruzaba. `axum::Handler` exige `Future + Send`, y `MutexGuard` no es
+`Send` → falla compilación con `error: future cannot be sent between
+threads safely`.
+
+**El fix**: emitir un bloque acotado con `let __for_snap` previo:
+```rust
+{
+    let __for_snap = (xs).lock().unwrap().clone();
+    for mut x in __for_snap.into_iter() {
+        // body — el guard YA NO sobrevive cross-await
+    }
+}
+```
+El `let __for_snap = ...;` libera el `MutexGuard` al `;`, dejando solo
+el `Vec<T>` owned. Aplicable a List<T>, List<Tuple> destructuring,
+Map<K,V> destructuring y Map con wildcard `_`. Cambios en
+`src/codegen.rs` (`gen_for_loop`, los 4 sitios del lock chain).
+
+**Tests al cierre v0.18.1**: **3171 unit + 365/368 compile_e2e
+(+1 nuevo `for_over_list_with_await_in_body_does_not_break_send_b17`;
+3 fallas pre-existentes documentadas: `hidden_decorator` file lock
+Windows + `http_coverage_metodos` routing 404 + `orm_w17_eager_loaded`
+codegen drift #7 — heredadas de v0.16.0, cero regresiones por B17 fix)
++ 3 openapi**. Test viejo `for_over_list_generates_snapshot_iter`
+actualizado al shape nuevo (snapshot binding + body itera el snap).
+Smoke `GUIDE_EXAMPLES_COMPILE` verde ~290 ejemplos en 525s
+(~8.7 min). fmt + clippy `--lib --tests --bins -- -D warnings` limpios.
+
+**Estado fitzwatch al cierre v0.18.1**: TODOS los bugs B1-B17 cerrados.
+`fitz build` de fitzwatch produce binario nativo end-to-end (validación
+manual pendiente en deploy).
+
+Próximo norte: **deploy de fitzwatch al VPS** (el blocker está cerrado).
+
+---
+
 ## [v0.18.0] — 2026-06-19 — Mini-tanda SMTP builtin CERRADA + cosecha codegen post-fitzwatch CERRADA
 
 Release coordinado de dos hitos en 1 día: (1) cosecha codegen post-fitzwatch (14 de 15 bugs cerrados, B15 el bloqueante incluido) y (2) mini-tanda SMTP builtin entera (8 sub-bloques). Cierra dos deudas explícitas heredadas del desarrollo de fitzwatch (status page open-source en Fitz puro, pausada el 2026-06-18 esperando ambas).

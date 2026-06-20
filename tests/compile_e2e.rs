@@ -12206,3 +12206,73 @@ fn cross_module_orm_preload_nullable_fk_b15() {
         bin_name
     );
 }
+
+#[test]
+fn for_over_list_with_await_in_body_does_not_break_send_b17() {
+    // B17 (post-fitzwatch cosecha) — `for x in <List<T>>` con `.await`
+    // adentro del body en un handler `async` rompía Send porque el
+    // codegen emitía `(xs.clone()).lock().unwrap().clone().into_iter()`
+    // como expresión inline del `for`, manteniendo el MutexGuard temporal
+    // vivo cross-await.
+    //
+    // **Fix**: emitir
+    // `{ let __for_snap = (xs).lock().unwrap().clone(); for x in __for_snap.into_iter() { ... } }`
+    // — el `let` libera el guard al `;` y el for itera sobre el Vec
+    // owned. Aplicable a List<T>, List<Tuple>, Map<K,V> y Map wildcard.
+    //
+    // Repro mínimo: fn async helper que itera `List<Int>` y hace `.await`
+    // en cada iteración. Encapsulada por handler HTTP `async` que dispara
+    // tokio::spawn (axum::Handler exige + Send).
+    let stem = "for_await_send_b17";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let src = "\
+async fn one_step(ms: Int) -> Int {\n  \
+    sleep(ms).await\n  \
+    return ms\n\
+}\n\
+\n\
+async fn process_all(items: List<Int>) -> Int {\n  \
+    let total: Int = 0\n  \
+    for it in items {\n    \
+        let n = one_step(it).await\n    \
+        total = total + n\n  \
+    }\n  \
+    return total\n\
+}\n\
+\n\
+@get(\"/sum\")\n\
+async fn sum_endpoint() -> Int {\n  \
+    return process_all([1, 2, 3]).await\n\
+}\n\
+\n\
+@server(43921)\n\
+fn main() => 0\n";
+
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B17):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+}

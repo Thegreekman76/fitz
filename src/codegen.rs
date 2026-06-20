@@ -14438,10 +14438,23 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 format!("{prefix}{name}")
                             })
                             .collect();
+                        // B17 fix: wrap with a block + bind the clone to a
+                        // local. Releases the MutexGuard temporary BEFORE
+                        // the `for` body runs, so `.await` inside the body
+                        // does not capture the guard cross-await (Send).
+                        self.emit_indent();
+                        self.emit("{\n");
+                        self.indent += 1;
                         self.emit_indent();
                         writeln!(
                             &mut self.output,
-                            "{label_prefix}for ({}) in ({iter_code}).lock().unwrap().clone().into_iter() {{",
+                            "let __for_snap = ({iter_code}).lock().unwrap().clone();"
+                        )
+                        .unwrap();
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "{label_prefix}for ({}) in __for_snap.into_iter() {{",
                             parts.join(", ")
                         )
                         .unwrap();
@@ -14459,16 +14472,29 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         self.indent -= 1;
                         self.emit_indent();
                         self.emit("}\n");
+                        self.indent -= 1;
+                        self.emit_indent();
+                        self.emit("}\n");
                         return Ok(());
                     }
                 }
                 let (binding, declared) = pattern_to_simple_binding(var, &elem_ty)
                     .map_err(|msg| self.err_at(iter.span(), msg))?;
                 let mut_prefix = if binding == "_" { "" } else { "mut " };
+                // B17 fix: see comment above.
+                self.emit_indent();
+                self.emit("{\n");
+                self.indent += 1;
                 self.emit_indent();
                 writeln!(
                     &mut self.output,
-                    "{label_prefix}for {mut_prefix}{binding} in ({iter_code}).lock().unwrap().clone().into_iter() {{"
+                    "let __for_snap = ({iter_code}).lock().unwrap().clone();"
+                )
+                .unwrap();
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "{label_prefix}for {mut_prefix}{binding} in __for_snap.into_iter() {{"
                 )
                 .unwrap();
                 self.indent += 1;
@@ -14480,6 +14506,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     self.gen_stmt_in_fn(s, ret_expected)?;
                 }
                 self.pop_scope();
+                self.indent -= 1;
+                self.emit_indent();
+                self.emit("}\n");
                 self.indent -= 1;
             }
             Type::Map(k_ty, v_ty) => {
@@ -14504,10 +14533,20 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         // Detect wildcards and omit the `mut`.
                         let k_prefix = if kname == "_" { "" } else { "mut " };
                         let v_prefix = if vname == "_" { "" } else { "mut " };
+                        // B17 fix: see comment above on the List branch.
+                        self.emit_indent();
+                        self.emit("{\n");
+                        self.indent += 1;
                         self.emit_indent();
                         writeln!(
                             &mut self.output,
-                            "{label_prefix}for ({k_prefix}{kname}, {v_prefix}{vname}) in ({iter_code}).lock().unwrap().clone().into_iter() {{"
+                            "let __for_snap = ({iter_code}).lock().unwrap().clone();"
+                        )
+                        .unwrap();
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "{label_prefix}for ({k_prefix}{kname}, {v_prefix}{vname}) in __for_snap.into_iter() {{"
                         )
                         .unwrap();
                         self.indent += 1;
@@ -14520,12 +14559,25 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         }
                         self.pop_scope();
                         self.indent -= 1;
+                        self.emit_indent();
+                        self.emit("}\n");
+                        self.indent -= 1;
                     }
                     Pattern::Wildcard => {
+                        // B17 fix: see comment above on the List branch.
+                        self.emit_indent();
+                        self.emit("{\n");
+                        self.indent += 1;
                         self.emit_indent();
                         writeln!(
                             &mut self.output,
-                            "{label_prefix}for _ in ({iter_code}).lock().unwrap().clone().into_iter() {{"
+                            "let __for_snap = ({iter_code}).lock().unwrap().clone();"
+                        )
+                        .unwrap();
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "{label_prefix}for _ in __for_snap.into_iter() {{"
                         )
                         .unwrap();
                         self.indent += 1;
@@ -14534,6 +14586,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             self.gen_stmt_in_fn(s, ret_expected)?;
                         }
                         self.pop_scope();
+                        self.indent -= 1;
+                        self.emit_indent();
+                        self.emit("}\n");
                         self.indent -= 1;
                     }
                     _ => {
@@ -39932,24 +39987,24 @@ mod tests {
 
     #[test]
     fn for_over_list_generates_snapshot_iter() {
-        // `for v in xs` → snapshot via `lock().unwrap().clone().into_iter()`
-        // (avoids re-entrancy if the body mutates `xs`). Post-F17.4b
-        // the lock replaces the old RefCell borrow.
-        let file = ast_test::parse(
-            &gen("let xs: List<Int> = [1, 2, 3]\nfor v in xs { print(v) }").unwrap(),
-        );
-        let stmts = ast_test::main_block_stmts(&file);
-        let fl = ast_test::find_for_loop(stmts).expect("missing for loop");
-        // The iterable is a method chain: receiver → lock → unwrap →
-        // clone → into_iter. The structural inspection ignores
-        // parens and formatting.
-        let chain = ast_test::method_chain_names(&fl.expr);
+        // `for v in xs` → snapshot via `let __for_snap = xs.lock().unwrap().clone();`
+        // ANTES del for + `for v in __for_snap.into_iter()`. Post-B17 fix
+        // (cosecha post-fitzwatch): bindear el clone a una variable local
+        // libera el MutexGuard temporal antes de que el body corra, evitando
+        // que el guard sobreviva cross-await (rompía Send en handlers async
+        // que iteraban listas).
+        let code = gen("let xs: List<Int> = [1, 2, 3]\nfor v in xs { print(v) }").unwrap();
+        // The textual output must contain the snapshot pattern AND the
+        // body must iterate over the snapshot (not the original lock chain).
         assert!(
-            chain
-                .windows(3)
-                .any(|w| w == ["unwrap", "clone", "into_iter"]),
-            "expected chain `lock().unwrap().clone().into_iter()` in the for, was: {:?}",
-            chain
+            code.contains("let __for_snap = ") && code.contains(".lock().unwrap().clone();"),
+            "expected `let __for_snap = ... .lock().unwrap().clone();` snapshot binding before the for, code was:\n{}",
+            code
+        );
+        assert!(
+            code.contains("for mut v in __for_snap.into_iter()"),
+            "expected `for v in __for_snap.into_iter()` body iteration, code was:\n{}",
+            code
         );
     }
 

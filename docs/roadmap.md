@@ -2,6 +2,39 @@
 
 ---
 
+## Codegen — B17 (`for x in <List<T>>` con `.await` rompe Send) ✅ CERRADO v0.18.1 (2026-06-20)
+
+**Hito**: cosecha post-fitzwatch sesión 2. Cierra el último bug del codegen que bloqueaba `fitz build` de fitzwatch. **Sin sintaxis nueva** — fix interno transparente para programas existentes.
+
+**El bug**: `for x in <List<T>>` con `.await` adentro del body en handler `async` rompía Send. El codegen emitía `for x in (xs).lock().unwrap().clone().into_iter() { ... }`, donde el `MutexGuard` temporal vivía hasta el final del statement del `for`. Cualquier `.await` adentro del body lo cruzaba, y `axum::Handler` exige `Future + Send` → fallaba.
+
+**El fix**: emitir un bloque acotado con `let __for_snap` previo:
+
+```rust
+{
+    let __for_snap = (xs).lock().unwrap().clone();
+    for mut x in __for_snap.into_iter() {
+        // body — el guard YA NO sobrevive cross-await
+    }
+}
+```
+
+El `let __for_snap = ...;` libera el `MutexGuard` al `;`, dejando solo el `Vec<T>` owned. Aplicable a List<T>, List<Tuple> destructuring, Map<K,V> destructuring y Map con wildcard `_`. Cambios en `src/codegen.rs::gen_for_loop` (los 4 sitios del lock chain).
+
+**Verificación pre-bump v0.18.1**:
+- `cargo test --lib` → **3171/3171** ✓
+- `cargo clippy --lib --tests --bins -- -D warnings` ✓
+- `cargo fmt --all --check` ✓
+- `cargo test --test compile_e2e for_over_list_with_await_in_body_does_not_break_send_b17` → **1/1** ✓ (test nuevo del bug específico)
+- `cargo test --release --test compile_e2e` → **365/368** ✓ (3 fallas pre-existentes documentadas: `hidden_decorator` file lock Windows + `http_coverage` routing 404 + `orm_w17_eager_loaded` codegen drift #7; cero regresiones por el fix B17)
+- `smoke_ejemplos_guia_compilables_compilan` → **1/1, ~290 ejemplos guide+curso+TaskHub verdes** ✓ (525s)
+
+**Próximo norte**: retomar **fitzwatch deploy** — TODOS los bugs B1-B17 cerrados.
+
+Detalle release-style en [`CHANGELOG.md`](../CHANGELOG.md) → v0.18.1.
+
+---
+
 ## Cosecha codegen post-fitzwatch ✅ CERRADA ENTERA (2026-06-19, [Sin publicar])
 
 **Hito**: 14 de los 15 bugs del codegen descubiertos durante el desarrollo de **fitzwatch** (status page open-source en Fitz puro, pausado el 2026-06-18 esperando estos fixes) cerrados en 6 sub-pasos a lo largo de 2 días. **`fitz check` y `fitz run` nunca estuvieron afectados** — todos los bugs eran específicos del path codegen → cargo build. B13 no reprodujo en v0.17.0 (W18 lo había cerrado); B16 abierto como deuda separada porque el fix vive en el checker (no es mecánico).
