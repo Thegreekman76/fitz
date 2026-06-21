@@ -4,14 +4,58 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🔴 PRIORIDAD MÁXIMA — `Response { ... }` built-in: 3 bugs del Bloque 3.c detectados en fitzwatch (2026-06-21, post v0.19.0)
+## 🟢 `Response { ... }` built-in: 3 bugs del Bloque 3.c detectados en fitzwatch (CERRADO v0.19.1, 2026-06-21)
 
-> **Atacar en la próxima sesión del repo del lenguaje ANTES de
-> cualquier otra cosa.** Bloquea el caso integrador real (fitzwatch
+> **CERRADO ENTERO** en el release v0.19.1 (junio 2026, mismo día
+> del descubrimiento). Bug 1 (cross-module imports) + Bug 2
+> (signature mismatch en `Result<Response>` con `?` propagation)
+> + Bug 3 (`metrics::*` not found, era incidental al Bug 1) los 3
+> fixeados + 3 E2E tests nuevos cubren cada caso. Detalle abajo
+> preservado para referencia futura.
+
+**Resumen del cierre (2026-06-21)**:
+
+- **Bug 1 fix**: nuevo walker `program_uses_response_builtin(program)`
+  en `src/codegen.rs` (~140 LoC, paralelo a `program_uses_db` /
+  `program_uses_http_client`); en `generate_module_rs_with_bindings`
+  se agrega bloque condicional que emite
+  `use crate::{Response, ResponseData};` cuando el módulo los
+  necesita (paralelo a W11 DB / W16 `__FitzResponse` / HTTP client).
+- **Bug 2 fix**: `gen_top_fn` (~13436) ahora consulta
+  `detect_response_builtin_kind(&effective_ret, env)` (helper de
+  Bloque 3.b ya existente) antes de computar `has_return_status`.
+  Si el handler retorna Response built-in, `body_has_try` NO
+  activa `response_mode` — la user-fn conserva su signature
+  natural (`-> Result<Arc<Mutex<ResponseData>>, String>` o
+  `-> Arc<Mutex<ResponseData>>`) y `gen_try` usa el `?` nativo
+  Rust (válido porque el container ES Result).
+- **Bug 3**: cerrado automático con Bug 1 — era el mismo error
+  rustc cross-module enmascarando los demás. El test E2E lo
+  verifica.
+- **3 E2E tests nuevos** en `tests/compile_e2e.rs`:
+  `v019_response_cross_module_emits_imports`,
+  `v019_response_in_result_ok_signature_matches_wrapper`,
+  `v019_response_with_auth_db_ws_observability` + helpers
+  `build_expect_ok` y `build_expect_ok_multi` (validan build
+  success sin invocar el binario, útil para HTTP servers).
+- **Verificación pre-bump completa**: 3200 lib tests + 98 cli_e2e
+  + 3 openapi_e2e + smoke 370+ ejemplos guía + 5 boilerplates
+  representativos (api-orm-full-fullstack multi-file incluido) +
+  fmt + clippy (default + lsp) — todo verde, sin regresiones.
+
+**Próximo norte**: notificar al autor para retomar fitzwatch
+Fase F.d (30 min). Detalle completo en CHANGELOG v0.19.1.
+
+---
+
+### Detalle histórico de los 3 bugs (preservado para referencia)
+
+> **Contexto del descubrimiento (2026-06-21)** (pre-cierre):
+> Bloqueaba el caso integrador real (fitzwatch
 > Fase F.d) que estresa el feature con auth + DB + WS + observability
 > + cross-module. El ejemplo `examples/guide/17l-response-custom.fitz`
 > compila OK porque es CLI HTTP simple standalone — los 3 bugs solo
-> aparecen al usar Response built-in en proyectos reales.
+> aparecían al usar Response built-in en proyectos reales.
 
 **Contexto del descubrimiento (2026-06-21)**: fitzwatch (producto del
 autor, status page open-source — repo PRIVADO en

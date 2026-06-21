@@ -1961,6 +1961,155 @@ fn program_uses_smtp(program: &Program) -> bool {
     program.iter().any(stmt_uses_smtp)
 }
 
+/// v0.19.1 (post-fitzwatch Bug 1) — `true` if the program references
+/// the `Response` built-in (v0.19.0): either via `Expr::StructLit` for
+/// `Response { ... }` literals, or via `TypeExpr` for fn signatures
+/// (`-> Response`, `-> Result<Response>`, param `r: Response`, let
+/// `r: Response = ...`). Triggers `use crate::{Response, ResponseData};`
+/// in the cross-module prelude of `generate_module_rs_with_bindings`
+/// — without these imports, modules that declare handlers returning
+/// the Response built-in fail with rustc E0425/E0422.
+///
+/// Pattern: recursive walk parallel to `program_uses_db` /
+/// `program_uses_http_client`, plus TypeExpr scan over Stmt::FnDef +
+/// Stmt::TypeDef + Stmt::Assign annotations.
+fn program_uses_response_builtin(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn type_expr_uses_response(t: &TypeExpr) -> bool {
+        match t {
+            TypeExpr::Named(name) => name == "Response",
+            TypeExpr::Generic { name, args } => {
+                name == "Response" || args.iter().any(type_expr_uses_response)
+            }
+            TypeExpr::Nullable(inner) => type_expr_uses_response(inner),
+            TypeExpr::Function { params, ret } => {
+                params.iter().any(type_expr_uses_response) || type_expr_uses_response(ret)
+            }
+            TypeExpr::Tuple(items) => items.iter().any(type_expr_uses_response),
+        }
+    }
+    fn expr_uses_response(e: &Expr) -> bool {
+        match e {
+            Expr::StructLit {
+                type_name, fields, ..
+            } => type_name == "Response" || fields.iter().any(|(_, v)| expr_uses_response(v)),
+            Expr::Call { callee, args, .. } => {
+                expr_uses_response(callee) || args.iter().any(expr_uses_response)
+            }
+            Expr::BinOp { left, right, .. } => {
+                expr_uses_response(left) || expr_uses_response(right)
+            }
+            Expr::UnaryOp { operand, .. } => expr_uses_response(operand),
+            Expr::Field { object, .. } => expr_uses_response(object),
+            Expr::Index { object, index, .. } => {
+                expr_uses_response(object) || expr_uses_response(index)
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_response(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_response(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_response(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_response(start) || expr_uses_response(end),
+            Expr::List(items, _) | Expr::Tuple(items, _) => items.iter().any(expr_uses_response),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_response(expr)
+                    || expr_uses_response(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_response(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_response(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_response(key)
+                    || expr_uses_response(value)
+                    || expr_uses_response(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_response(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_response(f))
+            }
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_response(k) || expr_uses_response(v)),
+            Expr::TupleField { tuple, .. } => expr_uses_response(tuple),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_response(condition)
+                    || then.iter().any(stmt_uses_response)
+                    || else_
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(stmt_uses_response))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_response(value)
+                    || arms.iter().any(|a| a.body.iter().any(stmt_uses_response))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_response),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Lit(_) => false,
+                StrPart::Expr(inner, _) => expr_uses_response(inner),
+            }),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_response),
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_response(inner),
+            Expr::NamedArg { value, .. } => expr_uses_response(value),
+            _ => false,
+        }
+    }
+    fn stmt_uses_response(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
+                params.iter().any(|p| {
+                    p.type_.as_ref().is_some_and(type_expr_uses_response)
+                        || p.default.as_ref().is_some_and(expr_uses_response)
+                }) || return_type.as_ref().is_some_and(type_expr_uses_response)
+                    || body.iter().any(stmt_uses_response)
+            }
+            Stmt::TypeDef { fields, .. } => {
+                fields.iter().any(|f| type_expr_uses_response(&f.type_))
+            }
+            Stmt::Assign { type_, value, .. } => {
+                type_.as_ref().is_some_and(type_expr_uses_response) || expr_uses_response(value)
+            }
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => expr_uses_response(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_response(status) || body.as_ref().is_some_and(expr_uses_response)
+            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_response(condition) || body.iter().any(stmt_uses_response),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_response),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_response(iter) || body.iter().any(stmt_uses_response)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_response)
+}
+
 /// Phase 6.6: True if the program uses async — any user-declared
 /// `async fn`, any `Expr::Await` somewhere, or a call to the `sleep`
 /// builtin. Codegen consults this flag to decide three things:
@@ -4914,6 +5063,28 @@ fn generate_module_rs_with_bindings(
              use crate::{SmtpResult, SmtpResultData};\n\
              #[allow(unused_imports)]\n\
              use crate::{__fitz_smtp_send, __FitzSmtpSendOpts};\n\n",
+        );
+    }
+
+    // v0.19.1 (post-fitzwatch Bug 1, 2026-06-21) — When the module
+    // references the `Response` built-in (v0.19.0) — either via
+    // `Response { ... }` struct literals, fn return types (`-> Response`,
+    // `-> Result<Response>`), param types, or let bindings — emit
+    // `use crate::{Response, ResponseData};` so the emitted
+    // `<mod>.rs` resolves the type alias + struct that live in
+    // main.rs's HTTP prelude (see line ~31419-31427). Without this
+    // import, rustc fails with E0425 (`cannot find type Response`) +
+    // E0422 (`cannot find struct ResponseData`). Pattern parallel
+    // to W11 (DB), W16 (`__FitzResponse`), and the HTTP client
+    // block above. The `__allow(unused_imports)` covers the case
+    // where the user references Response only in a fn signature
+    // that the codegen later turns into the wrapper's contract
+    // (the user-fn body might not literally name them).
+    let module_uses_response_builtin_local = program_uses_response_builtin(program);
+    if module_uses_response_builtin_local {
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{Response, ResponseData};\n\n",
         );
     }
 
@@ -13290,6 +13461,45 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // Response).
         let is_middleware_post = self.middleware_post_fn_names.contains(name);
         let has_return_status_inner = contains_return_status_stmts(body);
+
+        // sig has to be fetched BEFORE computing `has_return_status`
+        // so we can consult `response_builtin_kind` derived from
+        // `sig.ret` (Bug 2 fix, see below).
+        let sig = self
+            .fn_sigs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| self.err(format!("fn `{}` no estaba pre-registrada", name)))?;
+
+        // v0.19.1 (post-fitzwatch Bug 2, 2026-06-21) — Detect Response
+        // built-in in the handler's effective return type. If the fn
+        // returns `Response` (Direct) or `Result<Response>` (InResultOk),
+        // the wrapper's `emit_response_builtin_dispatch` expects the
+        // user-fn to keep its natural Rust signature (`-> Result<
+        // Arc<Mutex<ResponseData>>, String>` or `-> Arc<Mutex<
+        // ResponseData>>`) so the `match __result { Ok(__resp_arc) =>
+        // ..., Err(__e) => ... }` dispatch resolves. Without this
+        // check, `body_has_try` (handler uses `?`) would force
+        // `has_return_status = true` below, which makes the user-fn
+        // emit `-> __FitzResponse` and `gen_try` lower `?` to an
+        // inline `match` returning `__FitzResponse { status: 500, ...
+        // }`, breaking the wrapper's contract with E0308. Detected
+        // bit-for-bit with `detect_response_builtin_kind` (Block 3.b
+        // helper), the same predicate used in `resolve_handler_signature`.
+        let effective_ret = if *is_async {
+            match &sig.ret {
+                Type::Future(inner) => (**inner).clone(),
+                other => other.clone(),
+            }
+        } else {
+            sig.ret.clone()
+        };
+        let returns_response_builtin = is_http_handler
+            && !matches!(
+                detect_response_builtin_kind(&effective_ret, self.env),
+                ResponseBuiltinKind::None
+            );
+
         // W13 (v0.10.9) — HTTP handler that uses `?` in any
         // sub-expression of the body also enters response_mode.
         // The runtime already converts propagated `Err` into 500
@@ -13305,18 +13515,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // with `?` are not in scope (their return type is
         // Option<__FitzResponse>; `?` needs a different
         // mechanism; visible debt if pressure appears).
+        //
+        // v0.19.1: skip the `body_has_try` activation when the
+        // handler returns Response built-in — the native Rust `?`
+        // works naturally because `sig.ret` IS `Result<Response,
+        // String>`, no synthetic 500-wrapping needed.
         let body_has_try = body_uses_try(body);
         let has_return_status = (is_http_handler || is_middleware || is_middleware_post)
-            && (has_return_status_inner || (is_http_handler && body_has_try));
+            && (has_return_status_inner
+                || (is_http_handler && body_has_try && !returns_response_builtin));
         if has_return_status && is_http_handler {
             self.http_handlers_returning_response.insert(name.clone());
         }
-
-        let sig = self
-            .fn_sigs
-            .get(name)
-            .cloned()
-            .ok_or_else(|| self.err(format!("fn `{}` no estaba pre-registrada", name)))?;
 
         // Header: fn <name>(p1: T1, p2: T2, ...) -> Ret {
         // Phase 6.6: Fitz `async fn` → Rust `pub async fn`.

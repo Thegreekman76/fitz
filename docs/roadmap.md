@@ -2,6 +2,37 @@
 
 ---
 
+## v0.19.1 — Bugfix `Response { ... }` built-in: 3 bugs Bloque 3.c detectados en fitzwatch ✅ CERRADO ENTERO (2026-06-21)
+
+**Hito**: bugfix release del feature `Response { ... }` built-in cerrado en v0.19.0. Los 3 bugs solo aparecían al estresar el feature en proyectos reales (cross-module + `?` propagation + auth + DB + WS + observability combinados). El ejemplo oficial `examples/guide/17l-response-custom.fitz` y los 3 E2E `v019_block3d_*` de v0.19.0 seguían verdes — los bugs no estaban cubiertos por la suite.
+
+**Descubrimiento (2026-06-21)**: fitzwatch (status page del autor, repo PRIVADO) tenía Fase F.d (RSS feed por slug) bloqueada por la deuda HTTP Content-Type. Esa deuda se cerró con v0.19.0; al retomar F.d con la sintaxis nueva, salieron 3 bugs del codegen.
+
+**Los 3 bugs**:
+1. **Cross-module imports faltantes** — handler `-> Response` o `-> Result<Response>` declarado en módulo importado emitía `src/<mod>.rs` referenciando `Response`/`ResponseData` sin `use crate::{Response, ResponseData};` correspondiente. Rustc abortaba con E0425/E0422.
+2. **Signature mismatch en `Result<Response>`** — cuando handler declara `-> Result<Response>` Y usa `?` propagation, el codegen forzaba la user-fn a emitir `-> __FitzResponse` (path legacy W13 para `?` con returns no-Result). Pero el wrapper axum del Bloque 3.c espera `Result<Arc<Mutex<ResponseData>>, String>`. E0308 mismatched types.
+3. **`metrics::counter!`/`histogram!` not found** — en programa con auth + DB + WS + observability + cross-module + Response. **Era incidental al Bug 1** — el primer error rustc cross-module enmascaraba los demás. Con Bug 1 cerrado, Bug 3 desaparece automáticamente.
+
+**Fixes**:
+- **Bug 1**: walker nuevo `program_uses_response_builtin(program)` en `src/codegen.rs` (~140 LoC paralelo a `program_uses_db` / `program_uses_http_client`), detecta `Response` en TypeExpr (fn signatures + let bindings + type fields + params) y `Response { ... }` struct literals. En `generate_module_rs_with_bindings` bloque condicional emite `use crate::{Response, ResponseData};` cuando el módulo los necesita.
+- **Bug 2**: `gen_top_fn` (~13436) ahora consulta `detect_response_builtin_kind(&effective_ret, env)` (helper del Bloque 3.b ya existente) ANTES de computar `has_return_status`. Si retorna Response built-in (Direct o InResultOk), `body_has_try` NO activa `response_mode` — la user-fn conserva su signature natural (`-> Result<Arc<Mutex<ResponseData>>, String>` o `-> Arc<Mutex<ResponseData>>`) y `gen_try` usa el `?` nativo Rust (válido porque el container ES Result).
+- **Bug 3**: cerrado automático con Bug 1, no requiere código adicional. El test E2E lo verifica.
+
+**3 E2E tests nuevos** en `tests/compile_e2e.rs`:
+- `v019_response_cross_module_emits_imports`: handler `-> Response` en módulo importado + inspección del emitted `feed.rs` confirmando `use crate::{Response, ResponseData};`.
+- `v019_response_in_result_ok_signature_matches_wrapper`: handler single-file `-> Result<Response>` + `?` propagation que ahora compila bit-a-bit.
+- `v019_response_with_auth_db_ws_observability`: cross-module con auth + DB + WS + observability + Response (paralelo a fitzwatch), compila end-to-end.
+
+**Helpers nuevos en `tests/compile_e2e.rs`**: `build_expect_ok` y `build_expect_ok_multi` validan que `fitz build` succeed sin invocar el binario (necesarios para HTTP servers que nunca exitían bajo `output()`).
+
+**Tests al cierre v0.19.1**: 3200 lib + 98 cli_e2e + 376 compile_e2e (+3 nuevos `v019_response_*`) + 3 openapi_e2e. fmt + clippy (default + lsp) `-D warnings` limpios. Validación pre-bump: smoke `GUIDE_EXAMPLES_COMPILE` 370+ ejemplos guía+curso+TaskHub verde (~9.5 min), 5 boilerplates representativos (api-simple, api-orm-full, api-orm-full-fullstack multi-file, api-websocket, api-middleware-cors crítico porque usa `Response` opaque marker en middlewares post `next: Fn() -> Response`) verde.
+
+**Bump**: Cargo.toml `0.19.0` → `0.19.1` + extensión VSCode `0.19.0` → `0.19.1` + `.vsix` regenerado (`editors/vscode/fitz-language-win32-x64-0.19.1.vsix`, 1.81 MB con `server/fitz-lsp.exe` 4.36 MB bundleado fresh).
+
+**Próximo norte tras v0.19.1**: notificar al autor para retomar fitzwatch Fase F.d (30 min de trabajo: bump `FITZ_TAG` en `d:\fitzwatch\.env`, descomentar handler `slug_incidents_rss` en `src/public.fitz`, `docker compose up -d --build app`, smoke con `curl -i http://localhost:8002/p/<slug>/incidents.rss` + pegarlo a Feedly/Inoreader). La deuda 🔴 PRIORIDAD MÁXIMA cierra entera con este release.
+
+---
+
 ## v0.19.0 — `Response { ... }` built-in ✅ CERRADO ENTERO (2026-06-21)
 
 **Hito**: type built-in `Response` con 5 fields (`status: Int = 200` / `content_type: Str = "application/json"` / `headers: Map<Str, Str> = {}` / `body: Str = ""` / `body_bytes: Bytes? = null`) que habilita respuestas HTTP non-JSON (RSS, Atom, plain text, HTML estático, CSV, SVG, PDF binarios, ZIP) con paridad bit-a-bit `fitz run` ↔ `fitz build` y schema OpenAPI 3.1 auto-documentado. Cierra deuda residual identificada el 2026-06-21 al implementar RSS feed en un proyecto downstream.

@@ -12691,3 +12691,222 @@ fn rss_feed() -> Response => Response {
         stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// v0.19.1 — 3 bugs of the Block 3.c (Response built-in) detected in fitzwatch
+// ---------------------------------------------------------------------------
+//
+// The 3 bugs only show up when `Response { ... }` built-in is used in
+// real-world programs (cross-module, with `?` propagation, mixed with
+// auth + DB + WS + observability). The single-file v019_block3d_* tests
+// pass because they exercise the simple path; these 3 tests stress the
+// integrator real and reproduce what fitzwatch hit. Detailed plan in
+// `docs/deudas-post-5b.md` → "🔴 PRIORIDAD MÁXIMA".
+
+/// Builds a single-file program with `fitz build` and asserts the build
+/// succeeded WITHOUT invoking the binary. Useful for HTTP server programs
+/// that would never exit on `output()`.
+fn build_expect_ok(test_name: &str, src: &str) {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+}
+
+/// Like `build_and_run_multi` but does NOT invoke the binary — asserts
+/// build success only. Returns the temp dir so callers can inspect the
+/// generated `target/fitz-build/<stem>/src/*.rs` for additional asserts.
+fn build_expect_ok_multi(
+    test_name: &str,
+    main_src: &str,
+    extra_files: &[(&str, &str)],
+) -> std::path::PathBuf {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, main_src).expect("escribir .fitz");
+    for (name, content) in extra_files {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).expect("crear subdir");
+        }
+        std::fs::write(&p, content).expect("escribir extra .fitz");
+    }
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+    dir
+}
+
+#[test]
+fn v019_response_cross_module_emits_imports() {
+    // Bug 1 — `Response`/`ResponseData` not imported in modules that
+    // declare handlers returning the Response built-in. The emitted
+    // `src/<mod>.rs` references the type aliases without `use
+    // crate::{Response, ResponseData};` and rustc tirars E0425/E0422.
+    //
+    // Repro: handler `-> Response` declared in an imported module +
+    // `from <mod> import handler` in main. The handler is registered
+    // by the main's @get route declaration, and the wrapper lives in
+    // the module (W16 pattern post-v0.10.12).
+    let main = "\
+from feed import rss_feed
+@server(43922) fn main() => 0
+";
+    let feed = "\
+@get(\"/feed.rss\")
+fn rss_feed() -> Response => Response {
+    content_type: \"application/rss+xml\",
+    body: \"<rss/>\",
+}
+";
+    let _dir = build_expect_ok_multi("v019-response-cross-module", main, &[("feed.fitz", feed)]);
+    // Inspect the emitted src/feed.rs to assert the imports are
+    // present. `fitz build` writes to `target/fitz-build/<stem>/src/`
+    // relative to the CWD (the project root, where `cargo test`
+    // was invoked from), NOT relative to the temp dir.
+    let stem = sanitize_stem("v019-response-cross-module");
+    let feed_rs = std::path::PathBuf::from("target")
+        .join("fitz-build")
+        .join(&stem)
+        .join("src")
+        .join("feed.rs");
+    assert!(
+        feed_rs.exists(),
+        "emitted feed.rs not found at {}",
+        feed_rs.display()
+    );
+    let emitted = std::fs::read_to_string(&feed_rs).expect("read feed.rs");
+    assert!(
+        emitted.contains("use crate::{Response, ResponseData};")
+            || emitted.contains("use crate::Response;")
+                && emitted.contains("use crate::ResponseData;"),
+        "expected `use crate::{{Response, ResponseData}};` in emitted feed.rs, got:\n{}",
+        emitted
+    );
+}
+
+#[test]
+fn v019_response_in_result_ok_signature_matches_wrapper() {
+    // Bug 2 — When the user-fn returns `Result<Response>` and uses
+    // `?` propagation, the codegen falls into the legacy `response_mode`
+    // path (because `body_has_try` triggers `has_return_status`) and
+    // emits `-> __FitzResponse`. The wrapper of Block 3.c (InResultOk)
+    // expects the user-fn to return `Result<Arc<Mutex<ResponseData>>,
+    // String>` and emits `match __result { Ok(__resp_arc) => ..., Err(__e)
+    // => ... }`. The mismatch produces E0308.
+    //
+    // Repro single-file: helper that returns Result<Int, Str> + handler
+    // `-> Result<Response>` that uses `?` to propagate the Err, then
+    // builds the Response.
+    let src = "\
+fn lookup(id: Int) -> Result<Int, Str> {
+    if (id == 0) {
+        return Err(\"not found\")
+    }
+    return Ok(id * 2)
+}
+
+@get(\"/items/{id}\")
+fn item(id: Int) -> Result<Response> {
+    let user_id = lookup(id)?
+    return Ok(Response {
+        content_type: \"text/plain\",
+        body: \"id={user_id}\",
+    })
+}
+
+@server(43923) fn main() => 0
+";
+    build_expect_ok("v019-response-in-result-ok-signature", src);
+}
+
+#[test]
+fn v019_response_with_auth_db_ws_observability() {
+    // Bug 3 — `metrics::counter!`/`histogram!` not found when Response
+    // built-in is mixed with auth + DB + WS + observability +
+    // cross-module. fitzwatch's base program (without RSS handler)
+    // compiles OK; adding the handler in an imported module triggers
+    // E0433. Observability is default ON.
+    //
+    // Repro: cross-module — main has @auth_provider + db.connect() +
+    // @ws(); imported module declares the @get handler returning
+    // `Response` built-in. The combination strange dispatches preludes
+    // in an order that breaks `metrics::*` macro resolution.
+    let main = "\
+from feed import rss_feed
+
+type User { id: Int, role: Str }
+
+@auth_provider
+async fn provider(headers: Map<Str, Str>) -> Result<User> {
+    return Ok(User { id: 1, role: \"admin\" })
+}
+
+async fn db_ping() -> Result<Null> {
+    let conn = db.connect(\"postgres://x:y@localhost/z\").await?
+    return Ok(null)
+}
+
+@authenticated
+@get(\"/profile\")
+fn profile(user: User) -> User => user
+
+@ws(\"/chat\")
+async fn chat(conn: WsConn<Str>) -> Null {
+    return null
+}
+
+@server(43924) fn main() => 0
+";
+    let feed = "\
+@get(\"/feed.rss\")
+fn rss_feed() -> Response => Response {
+    content_type: \"application/rss+xml\",
+    body: \"<rss/>\",
+}
+";
+    let _dir = build_expect_ok_multi(
+        "v019-response-with-auth-db-ws-observability",
+        main,
+        &[("feed.fitz", feed)],
+    );
+}
