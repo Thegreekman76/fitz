@@ -70,6 +70,41 @@ pub struct OpenApiRouteInfo {
     /// `components.securitySchemes.bearerAuth` scheme is emitted when
     /// at least one route has `auth != None`.
     pub auth: crate::http::AuthSpec,
+    /// v0.19.0 Block 4 — kind of `Response` built-in content_type
+    /// detected in the handler's body (when the handler returns
+    /// `Response` or `Result<Response>` and the body is a literal
+    /// `Response { content_type: "X", body_bytes: ... }` struct lit
+    /// at the last return). Drives the schema's 200.content key
+    /// (custom media type instead of "application/json") and the
+    /// `format: binary` marker for binary payloads.
+    ///
+    /// `None` = handler does NOT return `Response` built-in (or
+    /// returns one but indirectly through a helper) → schema falls
+    /// back to "application/json" path (legacy behaviour).
+    pub response_content_type: Option<ResponseContentTypeKind>,
+}
+
+/// v0.19.0 Block 4 — shape of the `Response` built-in detected
+/// statically in the handler's body. Populated by
+/// `detect_response_content_type_kind` walking the AST.
+///
+/// Variants:
+///   - `Static { media_type, is_binary }`: the body's last return
+///     is a literal `Response { content_type: "<str_literal>",
+///     body_bytes: <expr|null> }` struct lit (directly or wrapped
+///     in `Ok(...)` for `Result<Response>`). The schema emits
+///     `200.content.<media_type>` with `format: binary` when
+///     `is_binary == true`.
+///   - `Dynamic`: handler returns Response built-in but the
+///     content_type is NOT statically inferable (ident, call,
+///     branching with different content_type per arm). The schema
+///     defaults to `application/octet-stream` (catch-all "any
+///     binary or text" — preserves the contract that the response
+///     is NOT JSON, but cannot pin the exact media type).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseContentTypeKind {
+    Static { media_type: String, is_binary: bool },
+    Dynamic,
 }
 
 /// Adapter: from runtime registry to lightweight views.
@@ -117,6 +152,101 @@ fn route_info_from_spec(
         },
         // Phase 9.w.1.e — propagate the route's auth policy.
         auth: s.auth,
+        // v0.19.0 Block 4 — detect `Response` built-in content_type
+        // from the handler's body (same walker used by the codegen
+        // path `pseudo_routes_from_ast`).
+        response_content_type: match &s.handler {
+            crate::value::Value::Function { body, .. } => detect_response_content_type_kind(body),
+            _ => None,
+        },
+    }
+}
+
+/// v0.19.0 Block 4 — walks a handler's body looking for a literal
+/// `Response { content_type: "X", body_bytes: ... }` struct lit at
+/// the last return, and returns the corresponding
+/// `ResponseContentTypeKind`. Used by both runtime
+/// (`routes_from_registry`) and codegen build-time
+/// (`pseudo_routes_from_ast`) paths so the emitted OpenAPI schema
+/// is bit-by-bit identical.
+///
+/// Heuristic (covers the 90% case):
+///   1. Look at the body's last `Stmt::Return(expr, _)`.
+///   2. Unwrap `Ok(...)` if present (Result<Response> case).
+///   3. If `expr` is `Expr::StructLit("Response", fields, _)`,
+///      extract `content_type` and `body_bytes` from the fields.
+///   4. `content_type`:
+///      - Str literal → `Static { media_type, ... }`.
+///      - Not provided (default applies) → `Static { media_type:
+///        "application/json", ... }` (canonical default of the
+///        built-in).
+///      - Other expr (Ident, Call) → `Dynamic`.
+///   5. `body_bytes`:
+///      - Not provided or `Null` literal → `is_binary = false`.
+///      - Any other expr → `is_binary = true` (the user opted
+///        into the binary path).
+///   6. Anything else (helper fn returning Response, branching
+///      with multiple Response { ... } per arm, etc.) → `None`
+///      (the schema falls back to "application/json" — the legacy
+///      behaviour).
+///
+/// Multi-arm bodies (if/match returning different `Response { ... }`
+/// in each arm) are NOT handled in MVP — they keep the legacy
+/// `application/json` path. Documented as minor debt for iter 2.
+pub fn detect_response_content_type_kind(
+    body: &[crate::ast::Stmt],
+) -> Option<ResponseContentTypeKind> {
+    use crate::ast::{Expr, Stmt};
+    // Look at the last statement; ignore trailing empty stmts.
+    let last = body
+        .iter()
+        .rev()
+        .find(|s| !matches!(s, Stmt::Expr(Expr::Null(_), _)))?;
+    let Stmt::Return(expr, _) = last else {
+        return None;
+    };
+    // Unwrap `Ok(...)` wrapper for Result<Response>. `Ok(...)` is
+    // a dedicated AST variant (NOT a Call), so we match it
+    // directly.
+    let inner: &Expr = match expr {
+        Expr::Ok(boxed, _) => boxed.as_ref(),
+        other => other,
+    };
+    let Expr::StructLit {
+        type_name, fields, ..
+    } = inner
+    else {
+        return None;
+    };
+    if type_name != "Response" {
+        return None;
+    }
+    let mut content_type_kind: Option<String> = None;
+    let mut dynamic_content_type = false;
+    let mut is_binary = false;
+    for (name, value) in fields {
+        match name.as_str() {
+            "content_type" => match value {
+                Expr::Str(s, _) => content_type_kind = Some(s.clone()),
+                _ => dynamic_content_type = true,
+            },
+            "body_bytes" if !matches!(value, Expr::Null(_)) => {
+                is_binary = true;
+            }
+            _ => {}
+        }
+    }
+    if dynamic_content_type {
+        Some(ResponseContentTypeKind::Dynamic)
+    } else {
+        // Default content_type when not supplied is the built-in's
+        // canonical default (matches `builtin_default_for("Response",
+        // "content_type")` in codegen.rs).
+        let media_type = content_type_kind.unwrap_or_else(|| "application/json".to_string());
+        Some(ResponseContentTypeKind::Static {
+            media_type,
+            is_binary,
+        })
     }
 }
 
@@ -485,6 +615,10 @@ pub fn pseudo_routes_from_program_and_modules(
                 .iter()
                 .map(|p| (p.name.clone(), p.type_.clone()))
                 .collect();
+            // v0.19.0 Block 4 — detect `Response` built-in
+            // content_type from the handler's AST body (same walker
+            // used in `route_info_from_spec` runtime path).
+            let response_content_type = detect_response_content_type_kind(body);
             out.push(OpenApiRouteInfo {
                 method,
                 path: template.path,
@@ -499,6 +633,7 @@ pub fn pseudo_routes_from_program_and_modules(
                 // OAPI: resolve Idents pointing to top-level consts.
                 custom_status_codes: collect_status_codes_with_consts(body, &consts),
                 auth,
+                response_content_type,
             });
         }
     }
@@ -629,6 +764,7 @@ fn build_operation(route: &OpenApiRouteInfo) -> Value {
             &route.return_type_expr,
             &route.custom_status_codes,
             route.auth,
+            route.response_content_type.as_ref(),
         ),
     );
     Value::Object(op)
@@ -699,6 +835,7 @@ fn build_responses(return_type: &Option<TypeExpr>, custom_status_codes: &[u16]) 
         return_type,
         custom_status_codes,
         crate::http::AuthSpec::None,
+        None,
     )
 }
 
@@ -711,18 +848,49 @@ fn build_responses_with_auth(
     return_type: &Option<TypeExpr>,
     custom_status_codes: &[u16],
     auth: crate::http::AuthSpec,
+    response_content_type: Option<&ResponseContentTypeKind>,
 ) -> Value {
     let mut resp: Map<String, Value> = Map::new();
-    match return_type {
-        Some(TypeExpr::Generic { name, args }) if name == "Result" && args.len() == 1 => {
-            resp.insert("200".into(), success_response(Some(&args[0])));
+    // v0.19.0 Block 4 — Response built-in shortcut. When the
+    // handler returns `Response` (or `Result<Response>` with the
+    // Ok arm being a literal `Response { ... }`), the 200 response
+    // uses the custom content_type (or "application/octet-stream"
+    // when dynamic) instead of the legacy "application/json" path.
+    // The Err arm of `Result<Response>` still emits 500 with JSON
+    // body (parallel to the codegen wrapper of Block 3.c).
+    if let Some(kind) = response_content_type {
+        let (media_type, is_binary) = match kind {
+            ResponseContentTypeKind::Static {
+                media_type,
+                is_binary,
+            } => (media_type.as_str(), *is_binary),
+            ResponseContentTypeKind::Dynamic => ("application/octet-stream", true),
+        };
+        resp.insert(
+            "200".into(),
+            response_built_in_success(media_type, is_binary),
+        );
+        // Preserve 500 when the return type is `Result<Response>`
+        // (the Err arm goes through the legacy 500 + JSON error).
+        if matches!(
+            return_type,
+            Some(TypeExpr::Generic { name, args })
+                if name == "Result" && args.len() == 1
+        ) {
             resp.insert("500".into(), error_response());
         }
-        Some(other) => {
-            resp.insert("200".into(), success_response(Some(other)));
-        }
-        None => {
-            resp.insert("200".into(), success_response(None));
+    } else {
+        match return_type {
+            Some(TypeExpr::Generic { name, args }) if name == "Result" && args.len() == 1 => {
+                resp.insert("200".into(), success_response(Some(&args[0])));
+                resp.insert("500".into(), error_response());
+            }
+            Some(other) => {
+                resp.insert("200".into(), success_response(Some(other)));
+            }
+            None => {
+                resp.insert("200".into(), success_response(None));
+            }
         }
     }
     // Phase 9.w.1.e — add 401 (auth) and 403 (admin). The body is
@@ -825,6 +993,31 @@ fn success_response(t: Option<&TypeExpr>) -> Value {
         "content": {
             "application/json": {
                 "schema": type_expr_to_schema_or_any(t),
+            },
+        },
+    })
+}
+
+/// v0.19.0 Block 4 — 200 response when the handler returns the
+/// `Response` built-in. The content key is the user-supplied
+/// media_type (or "application/octet-stream" when dynamic). The
+/// schema is `{"type":"string","format":"binary"}` for binary
+/// payloads (body_bytes set) and `{"type":"string"}` for text
+/// payloads (body Str). The text variant is intentionally loose
+/// — XML / HTML / CSV / plain text are all "strings" from JSON
+/// Schema's point of view; pinning a finer schema would lie about
+/// the contract (the user controls the bytes verbatim).
+fn response_built_in_success(media_type: &str, is_binary: bool) -> Value {
+    let schema = if is_binary {
+        json!({ "type": "string", "format": "binary" })
+    } else {
+        json!({ "type": "string" })
+    };
+    json!({
+        "description": "OK",
+        "content": {
+            media_type: {
+                "schema": schema,
             },
         },
     })
@@ -1761,5 +1954,185 @@ fn x() -> Str => \"ok\"\n\
             schema["components"].get("securitySchemes").is_none(),
             "programs without auth should NOT emit securitySchemes",
         );
+    }
+
+    // ---- v0.19.0 Block 4 — Response built-in in OpenAPI schema ----
+    //
+    // Tests that handlers returning `Response { content_type: "X",
+    // body: ... }` (or `body_bytes: ...` for binary) generate the
+    // 200 response with the user-supplied media_type and schema
+    // (`format: binary` when applicable) instead of the legacy
+    // application/json + schema-from-T path.
+
+    #[test]
+    fn v019_block4_response_with_static_content_type_emits_custom_media_type() {
+        // `fn rss() => Response { content_type: "application/rss+xml",
+        //   body: "<rss/>" }`: schema 200 must list the custom media
+        // type, NOT application/json.
+        let src = "\
+@get(\"/feed.rss\")
+fn rss_feed() => Response {
+    content_type: \"application/rss+xml; charset=utf-8\",
+    body: \"<rss/>\",
+}
+";
+        let schema = schema_for(src);
+        let resp_200 = &schema["paths"]["/feed.rss"]["get"]["responses"]["200"];
+        let content = &resp_200["content"];
+        assert!(
+            content.get("application/rss+xml; charset=utf-8").is_some(),
+            "expected `application/rss+xml; charset=utf-8` key, was: {}",
+            content
+        );
+        assert!(
+            content.get("application/json").is_none(),
+            "must NOT emit application/json for Response built-in"
+        );
+        // Schema should be a Str body (NOT binary, since body_bytes
+        // wasn't supplied).
+        let schema_obj = &content["application/rss+xml; charset=utf-8"]["schema"];
+        assert_eq!(schema_obj["type"], json!("string"));
+        assert!(
+            schema_obj.get("format").is_none(),
+            "non-binary schema must NOT have format key, was: {}",
+            schema_obj
+        );
+    }
+
+    #[test]
+    fn v019_block4_response_with_body_bytes_emits_format_binary() {
+        // `body_bytes: bytes(...)` set → schema marks `format: binary`.
+        let src = "\
+@get(\"/pdf\")
+fn pdf() => Response {
+    content_type: \"application/pdf\",
+    body_bytes: bytes(\"%PDF-1.7 ...\"),
+}
+";
+        let schema = schema_for(src);
+        let resp_200 = &schema["paths"]["/pdf"]["get"]["responses"]["200"];
+        let content = &resp_200["content"];
+        let pdf_content = &content["application/pdf"];
+        let schema_obj = &pdf_content["schema"];
+        assert_eq!(schema_obj["type"], json!("string"));
+        assert_eq!(schema_obj["format"], json!("binary"));
+    }
+
+    #[test]
+    fn v019_block4_response_with_default_content_type_emits_application_json() {
+        // `Response { body: "X" }` (no content_type supplied) defaults
+        // to "application/json" (the built-in's canonical default,
+        // matches `builtin_default_for`). This case is rare but should
+        // be predictable.
+        let src = "\
+@get(\"/x\")
+fn x() => Response { body: \"hi\" }
+";
+        let schema = schema_for(src);
+        let content = &schema["paths"]["/x"]["get"]["responses"]["200"]["content"];
+        assert!(content.get("application/json").is_some());
+        let schema_obj = &content["application/json"]["schema"];
+        // Note: type is `string` (the Response body field, a Str),
+        // NOT a serialization of the Instance — that would be the
+        // legacy `__to_fitz_json()` path. The Response built-in
+        // shortcut wins.
+        assert_eq!(schema_obj["type"], json!("string"));
+    }
+
+    #[test]
+    fn v019_block4_result_response_keeps_500_for_err_arm() {
+        // `fn h() -> Result<Response>`: 200 uses Response built-in
+        // shortcut; 500 still uses the legacy JSON error_response
+        // (parallel to the codegen Err arm).
+        let src = "\
+@get(\"/feed.rss\")
+fn rss_feed() -> Result<Response> => Ok(Response {
+    content_type: \"application/rss+xml\",
+    body: \"<rss/>\",
+})
+";
+        let schema = schema_for(src);
+        let responses = &schema["paths"]["/feed.rss"]["get"]["responses"];
+        assert!(responses["200"]["content"]["application/rss+xml"].is_object());
+        // 500 must still be present.
+        let resp_500 = &responses["500"];
+        assert!(
+            resp_500["content"]["application/json"].is_object(),
+            "500 must keep application/json error body, was: {}",
+            resp_500
+        );
+    }
+
+    #[test]
+    fn v019_block4_normal_handler_keeps_legacy_application_json() {
+        // Handlers that do NOT return Response built-in must keep
+        // the legacy application/json + schema-from-T path intact.
+        let src = "\
+@get(\"/users\")
+fn list_users() -> List<Str> => [\"alice\", \"bob\"]
+";
+        let schema = schema_for(src);
+        let content = &schema["paths"]["/users"]["get"]["responses"]["200"]["content"];
+        assert!(content.get("application/json").is_some());
+        let schema_obj = &content["application/json"]["schema"];
+        assert_eq!(schema_obj["type"], json!("array"));
+        assert_eq!(schema_obj["items"]["type"], json!("string"));
+    }
+
+    #[test]
+    fn v019_block4_detect_helper_unit_tests() {
+        // Direct unit tests on `detect_response_content_type_kind`
+        // covering the heuristic's edge cases without going through
+        // the schema_for pipeline.
+        use crate::ast::{Expr, Span, Stmt};
+        let str_body_resp = Stmt::Return(
+            Expr::StructLit {
+                type_name: "Response".into(),
+                fields: vec![
+                    (
+                        "content_type".into(),
+                        Expr::Str("text/html".into(), Span::ZERO),
+                    ),
+                    ("body".into(), Expr::Str("<h1/>".into(), Span::ZERO)),
+                ],
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        );
+        assert_eq!(
+            detect_response_content_type_kind(&[str_body_resp]),
+            Some(ResponseContentTypeKind::Static {
+                media_type: "text/html".into(),
+                is_binary: false,
+            }),
+        );
+        // Dynamic content_type (ident).
+        let dynamic_ct = Stmt::Return(
+            Expr::StructLit {
+                type_name: "Response".into(),
+                fields: vec![(
+                    "content_type".into(),
+                    Expr::Ident("ct_var".into(), Span::ZERO),
+                )],
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        );
+        assert_eq!(
+            detect_response_content_type_kind(&[dynamic_ct]),
+            Some(ResponseContentTypeKind::Dynamic),
+        );
+        // Non-Response struct lit → None.
+        let other = Stmt::Return(
+            Expr::StructLit {
+                type_name: "User".into(),
+                fields: vec![],
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        );
+        assert_eq!(detect_response_content_type_kind(&[other]), None);
+        // Empty body → None.
+        assert_eq!(detect_response_content_type_kind(&[]), None);
     }
 }
