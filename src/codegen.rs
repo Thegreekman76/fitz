@@ -5533,10 +5533,7 @@ pub(crate) enum ResponseBuiltinKind {
 /// checker pre-registers `Response` as a built-in in
 /// `register_http_builtin_types` (paralelo a `Request` / `File`
 /// / `HttpClientResponse`).
-pub(crate) fn detect_response_builtin_kind(
-    ret: &Type,
-    env: &TypeEnv,
-) -> ResponseBuiltinKind {
+pub(crate) fn detect_response_builtin_kind(ret: &Type, env: &TypeEnv) -> ResponseBuiltinKind {
     fn is_nominal_response(t: &Type, env: &TypeEnv) -> bool {
         match t {
             Type::Nominal(id) => env.info(*id).name == "Response",
@@ -28943,9 +28940,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // path: handlers that produce a `Response { ... }` literal
         // as the body's final expression dispatch via Block 3.c's
         // dedicated branch, regardless of explicit annotation.
-        if matches!(response_builtin_kind, ResponseBuiltinKind::None)
-            && return_type.is_none()
-        {
+        if matches!(response_builtin_kind, ResponseBuiltinKind::None) && return_type.is_none() {
             if let Some(Stmt::Return(expr, _)) = body.last() {
                 if let Some(ty) = self.type_info.type_at(expr.span()) {
                     response_builtin_kind = detect_response_builtin_kind(ty, self.env);
@@ -29350,10 +29345,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     /// middlewares (`@middleware(post_fn)` of 2 args) is detected
     /// — combinación de borde MVP, deuda menor documentada para
     /// iteración 2.
-    fn emit_handler_dispatch_and_response(
-        &mut self,
-        sig: &HandlerSig,
-    ) -> Result<(), FitzError> {
+    fn emit_handler_dispatch_and_response(&mut self, sig: &HandlerSig) -> Result<(), FitzError> {
         // Call to the original fn. If the Fitz handler is
         // `async fn`, its Rust signature (`pub async fn`)
         // returns a `Future`; the wrapper awaits on the fly to
@@ -29697,8 +29689,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     self.emit("            } else {\n");
                     self.emit("                let __msg = format!(\"invalid status code in Err: {} (must be in 100..1000)\", __raw_status);\n");
                     self.emit("                (\n");
-                    self.emit("                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
-                    self.emit("                    axum::Json(serde_json::json!({\"error\": __msg})),\n");
+                    self.emit(
+                        "                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n",
+                    );
+                    self.emit(
+                        "                    axum::Json(serde_json::json!({\"error\": __msg})),\n",
+                    );
                     self.emit("                ).into_response()\n");
                     self.emit("            }\n");
                     self.emit("        }\n");
@@ -29892,11 +29888,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("        let __body_axum = match __bbytes { Some(bs) => axum::body::Body::from(bs), None => axum::body::Body::from(__body) };\n");
         self.emit("        let mut __builder = axum::response::Response::builder().status(__status_code);\n");
         self.emit("        let __ct_value = axum::http::HeaderValue::try_from(__ct.as_str()).unwrap_or_else(|_| axum::http::HeaderValue::from_static(\"application/octet-stream\"));\n");
-        self.emit("        __builder = __builder.header(axum::http::header::CONTENT_TYPE, __ct_value);\n");
+        self.emit(
+            "        __builder = __builder.header(axum::http::header::CONTENT_TYPE, __ct_value);\n",
+        );
         self.emit("        {\n");
         self.emit("            let __hlock = __headers.lock().unwrap();\n");
         self.emit("            for (__k, __v) in __hlock.iter() {\n");
-        self.emit("                if let Ok(__hn) = axum::http::HeaderName::try_from(__k.as_str()) {\n");
+        self.emit(
+            "                if let Ok(__hn) = axum::http::HeaderName::try_from(__k.as_str()) {\n",
+        );
         self.emit("                    if let Ok(__hv) = axum::http::HeaderValue::try_from(__v.as_str()) {\n");
         self.emit("                        __builder = __builder.header(__hn, __hv);\n");
         self.emit("                    }\n");
@@ -48417,7 +48417,10 @@ mod tests {
             code.contains("headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,"),
             "missing field `headers: Arc<Mutex<Vec<...>>>`"
         );
-        assert!(code.contains("body: String,"), "missing field `body: String`");
+        assert!(
+            code.contains("body: String,"),
+            "missing field `body: String`"
+        );
         assert!(
             code.contains("body_bytes: Option<Vec<u8>>,"),
             "missing field `body_bytes: Option<Vec<u8>>`"
@@ -48609,11 +48612,9 @@ mod tests {
         // body's last `Stmt::Return` by consulting `TypeInfo`. The
         // wrapper still routes to the Block 3.c branch (parity with
         // the runtime peek of the interpreter).
-        let code = gen(
-            "@get(\"/feed\")\n\
+        let code = gen("@get(\"/feed\")\n\
              fn h() => Response { content_type: \"application/rss+xml\", body: \"<rss/>\" }\n\
-             @server(3000) fn main() => 0",
-        )
+             @server(3000) fn main() => 0")
         .unwrap();
         // Direct path markers (the inference resolved to Direct).
         assert!(
@@ -48638,11 +48639,9 @@ mod tests {
     fn v019_block3e_response_with_literal_body_and_body_bytes_is_build_error() {
         // The user accidentally sets both `body` (non-empty
         // literal) and `body_bytes`. Build-time error with hint.
-        let err = gen(
-            "@get(\"/x\")\n\
+        let err = gen("@get(\"/x\")\n\
              fn h() => Response { body: \"hi\", body_bytes: bytes(\"abc\") }\n\
-             @server(3000) fn main() => 0",
-        )
+             @server(3000) fn main() => 0")
         .expect_err("expected build-time XOR error");
         let lower = err.message.to_lowercase();
         assert!(
@@ -48662,11 +48661,9 @@ mod tests {
         // Body literal empty + body_bytes set is OK (the user is
         // explicitly opting into the binary path; the empty body
         // is a no-op runtime).
-        let code = gen(
-            "@get(\"/x\")\n\
+        let code = gen("@get(\"/x\")\n\
              fn h() => Response { body: \"\", body_bytes: bytes(\"abc\") }\n\
-             @server(3000) fn main() => 0",
-        )
+             @server(3000) fn main() => 0")
         .expect("expected build OK");
         // Sanity: the wrapper still emits the Response built-in
         // dispatch branch (extracts the 5 fields).
@@ -48676,11 +48673,9 @@ mod tests {
     #[test]
     fn v019_block3e_response_with_body_and_null_body_bytes_compiles_ok() {
         // body_bytes explicitly null + body literal is OK.
-        let code = gen(
-            "@get(\"/x\")\n\
+        let code = gen("@get(\"/x\")\n\
              fn h() => Response { body: \"hi\", body_bytes: null }\n\
-             @server(3000) fn main() => 0",
-        )
+             @server(3000) fn main() => 0")
         .expect("expected build OK with body_bytes null");
         assert!(code.contains("let (__status, __ct, __headers, __body, __bbytes)"));
     }
@@ -48691,11 +48686,9 @@ mod tests {
         // must NOT emit the dedicated branch (no `__resp_arc`,
         // no `(__status, __ct, ...)` destructure). It falls through
         // to the existing JSON dispatch (`__to_fitz_json()`).
-        let code = gen(
-            "@get(\"/n\")\n\
+        let code = gen("@get(\"/n\")\n\
              fn h() -> Int => 42\n\
-             @server(3000) fn main() => 0",
-        )
+             @server(3000) fn main() => 0")
         .unwrap();
         assert!(
             !code.contains("let __resp_arc = __result;"),
