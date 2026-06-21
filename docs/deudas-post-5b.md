@@ -4,6 +4,236 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🔴 PRIORIDAD MÁXIMA — `Response { ... }` built-in: 3 bugs del Bloque 3.c detectados en fitzwatch (2026-06-21, post v0.19.0)
+
+> **Atacar en la próxima sesión del repo del lenguaje ANTES de
+> cualquier otra cosa.** Bloquea el caso integrador real (fitzwatch
+> Fase F.d) que estresa el feature con auth + DB + WS + observability
+> + cross-module. El ejemplo `examples/guide/17l-response-custom.fitz`
+> compila OK porque es CLI HTTP simple standalone — los 3 bugs solo
+> aparecen al usar Response built-in en proyectos reales.
+
+**Contexto del descubrimiento (2026-06-21)**: fitzwatch (producto del
+autor, status page open-source — repo PRIVADO en
+`github.com/Thegreekman76/fitzwatch`) tenía Fase F.d (RSS feed por
+slug) bloqueada por la deuda HTTP HandlerOutcome.content_type. Esa
+deuda se cerró con v0.19.0 (`Response { ... }` built-in). Al intentar
+retomar F.d con la sintaxis nueva, detectamos 3 bugs del Bloque 3.c
+del codegen que NO están cubiertos por los E2E del release. fitzwatch
+es el primer stress test real del feature.
+
+**Estado en fitzwatch**:
+- Código F.d entero implementado (helpers `escape_xml`,
+  `fetch_rss_items`, `build_rss_xml`, type `RssItem`, handler
+  `slug_incidents_rss` con shape idiomatic `-> Result<Response>` + `?`,
+  frontend RSS link + JS wire). Handler comentado en
+  `d:\fitzwatch\src\public.fitz` hasta que estos 3 bugs cierren.
+- Container actual `fitzwatch-app` corre con `FITZ_TAG=v0.18.2`
+  (stable, F.d off — handler ausente).
+- Cuando los 3 bugs cierren: bump `FITZ_TAG` en `.env`, descomentar
+  handler, `docker compose up -d --build app`, smoke con curl + RSS
+  reader. 30min de trabajo.
+
+### Bug 1 — Cross-module: `Response`/`ResponseData` no se importan en módulos hijos
+
+**Síntoma**: handler con `-> Response` o `-> Result<Response>` declarado
+en un módulo importado (`public.fitz`) genera `src/public.rs`
+referenciando `Response` y `ResponseData` (líneas tipo
+`<Response as __ToFitzJson>::__to_fitz_json(&(Arc::new(Mutex::new(ResponseData { ... }))))`)
+pero NO emite `use crate::Response; use crate::ResponseData;` en el
+preludio del módulo.
+
+**Error rustc**:
+```
+error[E0425]: cannot find type `Response` in this scope
+  --> src/public.rs:671:53
+  |
+  = help: consider importing this type alias: use crate::Response;
+
+error[E0422]: cannot find struct, variant or union type `ResponseData` in this scope
+  --> src/public.rs:671:117
+  |
+  = help: consider importing this struct: use crate::ResponseData;
+```
+
+**Causa probable**: el preludio HTTP del codegen
+(`emit_helpers_for_imported_types`/equivalente en `src/codegen.rs`)
+emite `use crate::{...}` para tipos detectados como ORM virtual fields
+(W17), `__FitzResponse`, `__ToFitzJson`, etc. pero **no para `Response`
+ni `ResponseData`** cuando el módulo importado los usa.
+
+**Fix esperado**: paralelo bit-a-bit al patrón W17 ORM cross-module.
+Detectar si el módulo importado usa el Response built-in (
+`stmt_uses_response_builtin` walker análogo a `stmt_uses_python`/
+`stmt_uses_cron` que ya existen) y agregar
+`use crate::{Response, ResponseData};` al preludio del módulo.
+
+### Bug 2 — Signature mismatch en `Result<Response>` (path InResultOk del Bloque 3.c)
+
+**Síntoma**: el wrapper axum del handler detecta el Response built-in
+y emite el dispatch nuevo (Bloque 3.c) esperando que la user-fn devuelva
+`Result<Arc<Mutex<ResponseData>>, String>` (mirror de `Result<Response>`
+Fitz). Pero la user-fn se emite con shape LEGACY que devuelve
+`__FitzResponse` directo. Inconsistencia interna del codegen.
+
+**Código emitido (capturado en `d:\fitzwatch\target\fitz-build\main\src\main.rs:5665-5727`)**:
+
+```rust
+// User-fn — shape LEGACY (E I R R Ó N E O)
+async fn slug_incidents_rss(mut slug: String) -> __FitzResponse {
+    let mut user_id: i64 = (match ((slug_to_user_id(slug.clone())).await) {
+        Ok(__v) => __v,
+        Err(__e) => return __FitzResponse {
+            status: 500,
+            body: serde_json::json!({"error": __e}),
+        },
+    });
+    if (user_id == 0i64) {
+        return __FitzResponse {
+            status: 200,  // ⚠️ EMITE 200 con body JSON del Response
+            body: <Response as __ToFitzJson>::__to_fitz_json(&(Arc::new(Mutex::new(ResponseData {
+                status: 404i64,
+                content_type: String::from("text/plain; charset=utf-8"),
+                headers: Arc::new(Mutex::new(Vec::new())),
+                body: String::from("slug not found"),
+                body_bytes: None
+            }))))
+        };
+    };
+    // ... etc, todos los returns siguen el shape legacy ...
+}
+
+// Wrapper axum — shape NUEVO (CORRECTO según Bloque 3.c, espera Result<Response>)
+async fn __handler_slug_incidents_rss(...) -> axum::response::Response {
+    let __result = slug_incidents_rss(slug).catch_unwind().await;
+    let __built = match __result {
+        Ok(__resp_arc) => {
+            // extract status/ct/headers/body/body_bytes del Arc<Mutex<ResponseData>>
+            let (__status, __ct, __headers, __body, __bbytes) = {
+                let __g = __resp_arc.lock().unwrap();
+                (__g.status, __g.content_type.clone(), ...)
+            };
+            // axum builder con Content-Type custom + headers + body|body_bytes
+            ...
+        },
+        Err(__e) => (INTERNAL_SERVER_ERROR, Json({"error": __e})).into_response(),
+    };
+    ...
+}
+```
+
+**Error rustc**:
+```
+error[E0308]: mismatched types
+    --> src/main.rs:5739:9
+     |
+5738 |     let __built = match __result {
+     |                         -------- this expression has type `__FitzResponse`
+5739 |         Ok(__resp_arc) => {
+     |         ^^^^^^^^^^^^^^ expected `__FitzResponse`, found `Result<_, _>`
+```
+
+**Causa probable**: el codegen tiene DOS lugares que deciden el shape
+del Response built-in:
+1. **Wrapper** (`emit_handler_dispatch_and_response` con su helper
+   `emit_response_builtin_dispatch`) — funciona correcto.
+2. **User-fn** (`gen_top_fn` / wherever the body of the user fn is
+   emitted) — NO consulta `HandlerSig.response_builtin_kind` y cae
+   a path legacy (emite `-> __FitzResponse` con `__ToFitzJson`).
+
+**Fix esperado**: cuando `HandlerSig.response_builtin_kind ==
+ResponseBuiltinKind::InResultOk` (o `Direct`), la user-fn debe
+emitirse con signature `-> Result<Arc<Mutex<ResponseData>>, String>`
+(o `-> Arc<Mutex<ResponseData>>` para Direct), y los returns deben
+emitir `Ok(Arc::new(Mutex::new(ResponseData { ... })))` /
+`Err(format!(...))` paralelo al evaluador del intérprete.
+
+### Bug 3 — `metrics::counter!`/`histogram!` not found con mezcla Response + auth + DB + WS + observability
+
+**Síntoma**: handler `-> Response` direct (path Direct del Bloque 3.c)
+en programa con auth + DB + WS + observability rompe con `E0433 cannot
+find counter in metrics` sobre las líneas del access log del wrapper
+HTTP que emite el codegen automático (Fase 12.3.b):
+
+```rust
+metrics::counter!("http_requests_total", &__labels).increment(1);
+metrics::histogram!("http_request_duration_seconds", &__labels).record(__duration_secs);
+```
+
+**Lo extraño**:
+- `Cargo.toml` emitido tiene `metrics = "0.24"`.
+- Verificado en `~/.cargo/registry/src/.../metrics-0.24.6/src/macros.rs`:
+  `counter!` y `histogram!` están `#[macro_export]` (accesibles como
+  `metrics::counter!`).
+- **Ejemplo oficial v0.19.0** `examples/guide/17l-response-custom.fitz`
+  (CLI HTTP simple standalone con Response built-in) compila OK con
+  ese mismo Cargo.toml + macros.
+- **fitzwatch BASE** (sin handler RSS) compila OK con v0.19.0.
+- **Aparece SOLO** al sumar handler Response built-in al programa
+  con auth + DB + WS + observability. El programa entero queda con
+  E0433.
+
+**Causa por investigar**: interacción de paths del codegen. Hipótesis
+candidatas:
+- El preludio HTTP se emite DUPLICADO cuando hay módulos importados +
+  Response built-in, y la segunda emisión shadowea algo del `metrics`.
+- Algún `use crate::*` glob importa un símbolo `metrics` (variable
+  o módulo) que collisiona con la crate dep.
+- Bug del macro resolver de rustc con tokio multi-thread + features
+  específicos.
+
+**Repro mínimo recomendado** (sumar al test suite del lenguaje): handler
+`-> Response` direct en programa con `@auth_provider` + `db.connect` +
+`@ws("/x")` + `@server(observability=true)` (default). Build debe
+emitir todas las macros `metrics::*` resolubles.
+
+### Plan de fix sugerido para los 3 bugs
+
+1. **Reproducir aislado en `tests/compile_e2e.rs`** los 3 casos con
+   programas mínimos:
+   - `v019_response_cross_module_emits_imports`: Response builtin en
+     módulo importado con `from main import` + handler en módulo + el
+     emitted `src/<mod>.rs` debe tener `use crate::{Response, ResponseData};`.
+   - `v019_response_in_result_ok_signature_matches_wrapper`: handler
+     `-> Result<Response>` en single-file. La user-fn DEBE compilar
+     contra el wrapper. (Caso integrador del Bloque 3 que no estaba.)
+   - `v019_response_with_auth_db_ws_observability`: handler
+     `-> Response` direct mezclado con auth + DB + WS + observability.
+     Reproduce Bug 3.
+2. **Fix Bug 1**: walker `stmt_uses_response_builtin` análogo a
+   `stmt_uses_python`/`stmt_uses_cron`. Preludio cross-module emite
+   `use crate::{Response, ResponseData};` cuando aplica.
+3. **Fix Bug 2**: actualizar el codegen de la user-fn (signature +
+   return wrap) cuando `HandlerSig.response_builtin_kind != None`.
+   Paralelo bit-a-bit a lo que ya hace el wrapper en Bloque 3.c.
+4. **Investigar Bug 3**: revisar el emitted Rust de fitzwatch para
+   identificar la causa raíz. Si es interacción del codegen,
+   probablemente fix incidental con Bug 1/2. Si no, gating o reorden
+   del preludio.
+5. **Release `v0.19.1`** con los 3 fixes + 3 E2E nuevos. Documentar
+   en CHANGELOG + cierre acá. Bump CHANGELOG/roadmap/CLAUDE.md/extensión.
+6. **Notificar al autor** para retomar fitzwatch Fase F.d (30min de
+   trabajo: bump `FITZ_TAG` en `.env`, descomentar handler en
+   `public.fitz`, `docker compose up -d --build app`, smoke con curl +
+   RSS reader externo como Feedly).
+
+### Referencias
+
+- Repo del producto bloqueado:
+  `d:\fitzwatch\src\public.fitz` (handler comentado al final del
+  archivo) + `d:\fitzwatch\ROADMAP.md` (sección Fase F.d) +
+  `d:\fitzwatch\NEXT-SESSION.md`.
+- Emitted Rust con los 3 bugs reproducidos:
+  `d:\fitzwatch\target\fitz-build\main\src\main.rs:5665-5810` (caso
+  Direct sin cross-module — Bug 2 + Bug 3 visibles) +
+  `d:\fitzwatch\target\fitz-build\main\src\public.rs:662-689` (caso
+  cross-module con `Result<Response>` — Bug 1 + Bug 2 visibles, fix
+  del Bug 1 deja Bug 2 expuesto).
+- Ejemplo oficial que NO triggea los bugs (confirma que el feature
+  funciona para casos simples): `examples/guide/17l-response-custom.fitz`.
+
+---
+
 ## 🟢 HTTP `Response { ... }` built-in (CERRADO v0.19.0, 2026-06-21)
 
 **Cerrado entero** en el release v0.19.0 (junio 2026). El type built-in
