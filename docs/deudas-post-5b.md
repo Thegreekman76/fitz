@@ -4,19 +4,50 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🟡 HTTP HandlerOutcome `content_type` configurable desde el handler (deuda futura, 2026-06-21)
+## 🟢 HTTP `Response { ... }` built-in (CERRADO v0.19.0, 2026-06-21)
 
-**Detectada al implementar RSS feed XML en un proyecto downstream**. El runtime HTTP de Fitz (`src/http.rs` → `pub struct HandlerOutcome { content_type: &'static str, ... }` + `impl HandlerOutcome { pub fn json(...) -> Self { ... content_type: "application/json", ... } }`) hardcodea el Content-Type del response a `application/json`. No hay forma desde el código user (handler `@get`/`@post`/etc) de devolver un body con Content-Type distinto. Esto bloquea:
+**Cerrado entero** en el release v0.19.0 (junio 2026). El type built-in
+`Response` con 5 fields (`status` / `content_type` / `headers` / `body` /
+`body_bytes`) habilita respuestas non-JSON desde el handler:
 
-- **RSS feeds** (`application/rss+xml; charset=utf-8`) — caso canónico de status pages, blogs, dashboards.
-- **Atom feeds** (`application/atom+xml`).
-- **Sitemaps** (`application/xml`).
-- **Plain text** (`text/plain; charset=utf-8`) — logs, robots.txt, healthchecks human-readable.
-- **CSV exports** (`text/csv`).
-- **iCal feeds** (`text/calendar`).
-- **SVG generadas dinámicamente** (`image/svg+xml`) — bagdes tipo shields.io.
+```fitz
+@get("/feed.rss")
+fn rss_feed() => Response {
+    content_type: "application/rss+xml; charset=utf-8",
+    body: "<?xml version=\"1.0\"?><rss/>",
+}
+```
 
-**Por qué importa**: el comentario del propio struct (`src/http.rs:1183`) dice "Today always `application/json`; ready for `text/plain` or others when needed." → el diseño YA contempla el extension point. Solo falta exponerlo desde el handler.
+**5 bloques coordinados**: (1) intérprete con `HandlerOutcome` extendido
++ helper `response_instance_to_outcome` con validación XOR + status
+range; (2) opt-in binary path `body_bytes: Bytes?`; (3) codegen paridad
+bit-a-bit con `ResponseBuiltinKind` detection en `resolve_handler_signature`
++ rama dedicada en `emit_handler_dispatch_and_response` + validación XOR
+build-time; (4) integración OpenAPI 3.1 con `ResponseContentTypeKind` +
+helper `detect_response_content_type_kind` walker AST + schema
+`200.content.<media_type>` con `format: binary` cuando aplica; (5) docs
++ ejemplo runnable + LSP + extensión VSCode v0.19.0. Detalle en
+`CHANGELOG.md` v0.19.0.
+
+**Tests al cierre**: 11 unit http intérprete (Bloques 1+2) + 12 unit
+codegen (Bloque 3) + 6 unit openapi (Bloque 4) + 2 unit LSP (Bloque 5)
++ 3 E2E `tests/compile_e2e.rs::v019_block3d_*` + smoke
+`GUIDE_EXAMPLES_COMPILE` con `examples/guide/17l-response-custom.fitz`
+sumado + validación bit-a-bit a mano con curl sobre los 4 casos
+canónicos.
+
+**Deudas residuales derivadas** (NO bloquean uso real):
+
+- Multi-arm bodies (if/match retornando distintos `Response { ... }`
+  por arm) no se detectan en compile-time — el schema cae al path
+  legacy `application/json` para esos handlers. El runtime funciona
+  correcto (peek dinámico). Refinable post-MVP.
+- Response built-in + post middleware (`@middleware(fn)` con 2 args)
+  no soportado — el post-mw recibe `__FitzResponse` JSON-wrapped que
+  pierde content_type / body_bytes. Workaround documentado: usar
+  `return <status> { ... }` o remover el post-mw.
+- Helpers Bytes adicionales si aparece demanda real:
+  `bytes_from_b64`, `bytes_from_hex`, etc.
 
 **Workarounds actuales (todos malos)**:
 - Devolver el XML como `Value::Str` → axum lo serializa JSON-quoted: `"<rss>..."` (no parseable como RSS).

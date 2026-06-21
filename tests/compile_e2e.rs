@@ -2845,6 +2845,10 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "17i-smtp-basico.fitz",
     "17j-smtp-errores.fitz",
     "17k-smtp-magic-link.fitz",
+    // v0.19.0 — Response built-in (Bloques 1+2+3+4): cap 17
+    // sub-sección "Respuestas con Content-Type custom". Cubre RSS
+    // XML + robots.txt + SVG + PDF binario en un solo programa.
+    "17l-response-custom.fitz",
     "18-docs.fitz",
     "19-async.fitz",
     "19b-paralelismo.fitz",

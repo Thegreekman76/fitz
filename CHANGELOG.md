@@ -9,6 +9,115 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.19.0] — 2026-06-21 — `Response { ... }` built-in (Content-Type custom + body crudo + OpenAPI auto)
+
+Type built-in `Response` con 5 fields (`status` / `content_type` /
+`headers` / `body` / `body_bytes`) que cubre el caso entero de
+respuestas HTTP non-JSON: RSS, Atom, plain text, HTML estático, CSV,
+SVG, PDF binario, ZIP. Cierra la deuda residual documentada como
+"workaround manual + sintaxis hipotética no implementada todavía" en
+cap M4.C5 del curso, y como "🟡 HTTP HandlerOutcome content_type
+configurable" en `docs/deudas-post-5b.md`.
+
+**Pitch**:
+
+```fitz
+@get("/feed.rss")
+fn rss_feed() => Response {
+    content_type: "application/rss+xml; charset=utf-8",
+    body: "<?xml version=\"1.0\"?><rss/>",
+}
+
+// HTTP/1.1 200 OK
+// content-type: application/rss+xml; charset=utf-8     ← custom ✓
+// <?xml version="1.0"?><rss/>                          ← body crudo ✓
+```
+
+**5 diferenciales**:
+
+1. **Built-in del lenguaje, no lib externa**. Validado por el checker
+   estático. Cero `pip install` / `npm install` / `import`.
+2. **Paridad bit-a-bit `fitz run` ↔ `fitz build`**. Validado a mano
+   con `curl` + `xxd` sobre los 4 casos canónicos (RSS / text /
+   SVG / PDF binario). Headers custom (Cache-Control,
+   Content-Disposition) preservados en ambos paths.
+3. **OpenAPI 3.1 auto-documentado**. Schema 200 emite
+   `responses.200.content.<media_type>` automático con `format: binary`
+   cuando hay `body_bytes`. Cero esfuerzo del user.
+4. **Tipo built-in con 5 fields explícitos**. Sin builders ni mutable
+   state; un struct literal cubre todo el caso.
+5. **Validación XOR build-time**. Si seteás `body` literal no-vacío +
+   `body_bytes`, el codegen aborta `fitz build` antes del runtime con
+   mensaje claro citando workarounds. UX mejor que esperar el 500.
+
+**5 bloques coordinados (un release coordinado)**:
+
+- **Bloque 1**: `Value::Type` de `Response` registrado en
+  `evaluator::register_builtins` + 5 fields en `register_http_builtin_types`
+  del checker. `HandlerOutcome` runtime gana `body_bytes: Option<Vec<u8>>`
+  + `content_type: String`. Helper `response_instance_to_outcome` con
+  validación XOR + status range. axum builder `outcome_to_response` con
+  branch text/binary.
+- **Bloque 2**: opt-in binary path con `body_bytes: Bytes?`. Detección
+  `Result::Ok(Response { ... })` además del Direct case. 11 unit tests
+  `http::tests::v019_*`.
+- **Bloque 3**: codegen paridad bit-a-bit. `ResponseData` empty marker
+  refactorizado a struct con 5 fields. Enum `ResponseBuiltinKind`
+  detectado en `resolve_handler_signature`, con fallback inferido por
+  `TypeInfo` (consulta del último `Stmt::Return` cuando no hay
+  anotación `-> Response`). Rama dedicada en
+  `emit_handler_dispatch_and_response` (helper privado
+  `emit_response_builtin_dispatch`) que emite axum response con
+  Content-Type custom + headers + body|body_bytes. Validación XOR
+  build-time. Rechazo de Response + post middleware (combinación de
+  borde MVP) con mensaje claro. 12 unit tests `codegen::tests::v019_block3*`
+  + 3 E2E `tests/compile_e2e.rs::v019_block3d_*`.
+- **Bloque 4**: integración OpenAPI 3.1. Nuevo enum
+  `ResponseContentTypeKind { Static, Dynamic }` + helper público
+  `detect_response_content_type_kind` walker del AST usado por ambos
+  caminos (runtime `route_info_from_spec` + codegen
+  `pseudo_routes_from_ast`). `build_responses_with_auth` emite
+  `200.content.<media_type>` con `{"type":"string","format":"binary"}`
+  cuando aplique. Result<Response> preserva 500 + JSON error legacy.
+  Validación bit-a-bit `fitz openapi` ↔ `/openapi.json` del binario.
+  6 unit tests `openapi::tests::v019_block4_*`.
+- **Bloque 5**: docs + LSP + extensión + cierre formal. Cap 17
+  sub-sección nueva "Respuestas con Content-Type custom" en
+  `docs/guide.md` con tabla comparativa vs FastAPI/Express/Flask/Spring
+  + ejemplos por caso. Ejemplo runnable
+  `examples/guide/17l-response-custom.fitz` con los 4 casos canónicos
+  + endpoint /health JSON normal para regresión. Cap M4.C5 del curso
+  refrescado (sección "Hoy: workaround manual + sintaxis hipotética
+  no implementada todavía" reemplazada por "Cerrado en v0.19.0"). LSP
+  completions: after-dot sobre Instance Response lista los 5 fields
+  como FIELD kind (via path nominal genérico). 2 unit tests
+  `lsp::tests::v019_block5_*`. Extensión VSCode v0.19.0 con `.vsix`
+  regenerado.
+
+**Tests al cierre v0.19.0**: 3202 lib (+8 neto vs 3194 pre-Bloque-3:
+11 http intérprete previos a 3.a + 12 codegen (3+2+4+3) + 6 openapi +
+2 LSP — 26 nuevos, varios viejos refactorizados) + 98 cli_e2e + 373
+compile_e2e (+3 nuevos v019_block3d_*) + 3 openapi_e2e + 56 openapi
+unit. `cargo fmt --all --check` + `cargo clippy --all-targets -- -D
+warnings` limpios. Smoke `GUIDE_EXAMPLES_COMPILE` con
+`17l-response-custom.fitz` sumado. Validación bit-a-bit a mano con
+curl sobre los 4 casos canónicos + `/openapi.json` del binario.
+
+**Deudas residuales derivadas** (NO bloquean uso real):
+
+- Multi-arm bodies (if/match retornando distintos `Response { ... }`
+  por arm) no se detectan en compile-time — el schema cae al path
+  legacy `application/json` para esos handlers. El runtime funciona
+  correcto (peek dinámico). Refinable post-MVP.
+- Response built-in + post middleware (`@middleware(fn)` con 2 args)
+  no soportado — el post-mw recibe `__FitzResponse` JSON-wrapped que
+  pierde content_type / body_bytes. Workaround documentado: usar
+  `return <status> { ... }` o remover el post-mw.
+- Helper Bytes: `bytes(str)` convierte Str → Bytes para `body_bytes`;
+  para leer de archivos / DB el valor llega como Bytes directo. Si
+  aparece presión real, podemos sumar `bytes_from_b64`,
+  `bytes_from_hex`, etc.
+
 ## [v0.18.2] — 2026-06-20 — Codegen: B19 (`@cron` en módulo importado no se spawnea)
 
 Cosecha post-fitzwatch sesión 2, segundo bug del codegen descubierto al

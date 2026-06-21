@@ -402,40 +402,77 @@ status consistentes.
   `multipart/form-data` o **415 Unsupported Media Type**
   (cubierto en M4.C2).
 - **Emite siempre `Content-Type: application/json`** en
-  responses normales.
+  responses normales del path `T` o `Result<T>`.
 - **Si tu handler devuelve `Str`, lo serializa como JSON string**
   (entre comillas dobles).
 
-### Si necesitás XML / texto plano / binario
+### Si necesitás XML / texto plano / binario → `Response { ... }`
 
-Hoy: workaround manual. Tu handler retorna `Str` o `Bytes` con el
-formato deseado, pero el `Content-Type` de salida sigue siendo
-`application/json`:
+> ✅ **Cerrado en v0.19.0 (junio 2026).** Antes era deuda residual;
+> hoy Fitz tiene un type built-in `Response` con 5 fields que cubre
+> el caso entero — XML, RSS, plain text, HTML estático, CSV, SVG,
+> PDF binario y ZIP. Paridad bit-a-bit `fitz run` ↔ `fitz build` con
+> schema OpenAPI auto-documentado. Detalle exhaustivo en
+> [docs/guide.md cap 17 → "Respuestas con Content-Type custom"](../../guide.md#respuestas-con-content-type-custom-response--).
+
+El built-in:
+
+```fitz
+type Response {
+    status: Int = 200
+    content_type: Str = "application/json"
+    headers: Map<Str, Str> = {}
+    body: Str = ""
+    body_bytes: Bytes? = null
+}
+```
+
+El handler retorna `Response { ... }` directamente. El wrapper
+detecta el tipo estática y emite la response axum con el
+`Content-Type` custom + headers + body crudo (sin JSON-wrap):
 
 ```fitz
 @get("/data.xml")
-fn data_xml() -> Str {
-    return "<root><item>1</item></root>"
+fn data_xml() => Response {
+    content_type: "application/xml; charset=utf-8",
+    body: "<root><item>1</item></root>",
 }
 // HTTP/1.1 200 OK
-// content-type: application/json     ← desafortunadamente
-// "<root><item>1</item></root>"      ← string JSON con XML adentro
+// content-type: application/xml; charset=utf-8     ← custom ✓
+// <root><item>1</item></root>                      ← body crudo ✓
 ```
 
-Esto es **deuda residual**. Cuando aterrice "control de
-Content-Type del response" (sub-paso futuro), vas a poder hacer:
+Para PDF / ZIP / imágenes (payloads NO UTF-8), usás `body_bytes`
+en lugar de `body`:
 
 ```fitz
-// Sintaxis hipotética (no implementada todavía)
-@get("/data.xml")
-fn data_xml() -> Response {
-    return response(200, "<root>...</root>", "application/xml")
+@get("/report.pdf")
+fn report() => Response {
+    content_type: "application/pdf",
+    body_bytes: bytes("%PDF-1.7 ..."),
+    headers: {"Content-Disposition": "attachment; filename=report.pdf"},
 }
 ```
 
-**Por ahora**: si vas a necesitar non-JSON content negotiation
-seriamente, Fitz HTTP no es la mejor opción. Para 99% de APIs
-modernas (REST + JSON), va perfecto.
+`Response` también compone con `Result<T>`:
+
+```fitz
+fn data_xml() -> Result<Response, FeedError> {
+    let xml = fetch_feed().await?
+    return Ok(Response { content_type: "application/xml", body: xml })
+}
+```
+
+Ok arm pasa por el path Content-Type custom; Err arm cae al 500
++ JSON error legacy (mismo manejo que `Result<T>` del cap 14).
+
+**Schema OpenAPI**: automático. `fitz openapi` + `/openapi.json`
+emiten `responses.200.content.<media_type>` con `format: binary`
+cuando hay `body_bytes`. Cero esfuerzo del user. Documentación
+de APIs heterogéneas (mix JSON + RSS + PDF) sin glue manual.
+
+Ejemplo runnable end-to-end con los 4 casos canónicos en
+[`examples/guide/17l-response-custom.fitz`](../../../examples/guide/17l-response-custom.fitz).
 
 ---
 

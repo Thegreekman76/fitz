@@ -5709,6 +5709,54 @@ mod tests {
     }
 
     #[test]
+    fn v019_block5_after_dot_on_response_built_in_lists_5_fields() {
+        // v0.19.0 — `Response` built-in is pre-registered in the
+        // checker with 5 fields (status / content_type / headers /
+        // body / body_bytes). The LSP after-dot completion path
+        // for Nominals handles it without dedicated dispatch — the
+        // shared nominal mechanism reads `env.info(id).fields`.
+        // This test pins the contract.
+        let src = "@get(\"/x\")\n\
+                   fn h() => Response { content_type: \"X\", body: \"y\" }\n\
+                   let r = Response { content_type: \"a\", body: \"b\" }\n\
+                   r.\n\
+                   @server(3000) fn main() => 0\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor at line 3, col 2 (0-based LSP), right after `r.`.
+        let items = completion_at_position(src, &program, &type_info, &env, 3, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["status", "content_type", "headers", "body", "body_bytes"] {
+            assert!(
+                labels.contains(&expected),
+                "missing field `{expected}` of Response built-in: {labels:?}"
+            );
+        }
+        // All 5 should be FIELD kind.
+        let status = items.iter().find(|i| i.label == "status").unwrap();
+        assert_eq!(status.kind, Some(CompletionItemKind::FIELD));
+    }
+
+    #[test]
+    fn v019_block5_scope_level_lists_response_built_in_as_class() {
+        // `Response` ya estaba listado pre-v0.19.0 como CLASS para
+        // los middlewares (`Fn() -> Response`). v0.19.0 lo upgrade a
+        // type instanciable con 5 fields, pero la presentación en
+        // completion sigue siendo CLASS para mantener compatibilidad
+        // con el flujo usual (CompletionItemKind::CLASS aparece en
+        // VSCode con icono de tipo).
+        let src = "let a = 1\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Response"),
+            "missing built-in type `Response`: {labels:?}"
+        );
+        let response_item = items.iter().find(|i| i.label == "Response").unwrap();
+        assert_eq!(response_item.kind, Some(CompletionItemKind::CLASS));
+    }
+
+    #[test]
     fn scope_level_lists_smtp_module() {
         // At scope-level (no `.`), the user should see the `smtp`
         // module alongside `http`/`jwt`/`hash`/`log`/`db`.

@@ -2,6 +2,24 @@
 
 ---
 
+## v0.19.0 — `Response { ... }` built-in ✅ CERRADO ENTERO (2026-06-21)
+
+**Hito**: type built-in `Response` con 5 fields (`status: Int = 200` / `content_type: Str = "application/json"` / `headers: Map<Str, Str> = {}` / `body: Str = ""` / `body_bytes: Bytes? = null`) que habilita respuestas HTTP non-JSON (RSS, Atom, plain text, HTML estático, CSV, SVG, PDF binarios, ZIP) con paridad bit-a-bit `fitz run` ↔ `fitz build` y schema OpenAPI 3.1 auto-documentado. Cierra deuda residual identificada el 2026-06-21 al implementar RSS feed en un proyecto downstream.
+
+**5 bloques coordinados** (un solo release, sin entradas intermedias en CHANGELOG):
+
+- **Bloque 1** (intérprete) — `Value::Type` del `Response` registrado paralelo a `Request`/`File`/`HttpClientResponse`/`SmtpResult`; 5 fields en `register_http_builtin_types` del checker; `HandlerOutcome` runtime extendido con `body_bytes: Option<Vec<u8>>` + `content_type: String`; helper `response_instance_to_outcome` con validación XOR + status range; `outcome_to_response` axum builder con branch text/binary; 11 unit tests `http::tests::v019_*`.
+- **Bloque 2** (opt-in binary path) — `body_bytes: Bytes?` field + detección runtime que peek-ea `Result::Ok(Response { ... })` además del Direct case.
+- **Bloque 3** (codegen paridad bit-a-bit, ~440 LoC netas) — `ResponseData` empty marker MW.1 refactorizado a struct con 5 fields (`impl PartialEq` manual paralelo a `HttpClientResponseData` post-F17); enum `ResponseBuiltinKind { None, Direct, InResultOk }` detectado en `resolve_handler_signature` con fallback inferido por `TypeInfo` (habilita patrón ergonómico `fn rss() => Response { ... }` sin anotación explícita); rama dedicada en `emit_handler_dispatch_and_response` con helpers privados; validación XOR build-time; rechazo Response + post middleware con mensaje claro; helper libre `builtin_default_for(builtin, field_name)` provee defaults canónicos a la pre-registración; 12 unit tests `codegen::tests::v019_block3*` + 3 E2E `compile_e2e::v019_block3d_*`.
+- **Bloque 4** (OpenAPI 3.1 integration, ~200 LoC netas) — Enum público `ResponseContentTypeKind { Static { media_type, is_binary }, Dynamic }` + helper público `detect_response_content_type_kind` walker AST usado por ambos caminos (runtime `route_info_from_spec` + codegen `pseudo_routes_from_ast`); `OpenApiRouteInfo` suma `response_content_type`; `build_responses_with_auth` emite `200.content.<media_type>` con `format: binary` cuando aplica; Result<Response> preserva 500 + JSON error legacy; 6 unit tests `openapi::tests::v019_block4_*`; validación bit-a-bit `fitz openapi` ↔ `/openapi.json` del binario.
+- **Bloque 5** (docs + LSP + extensión + cierre formal) — Cap 17 sub-sección nueva "Respuestas con Content-Type custom" en `docs/guide.md` con tabla comparativa vs FastAPI/Express/Flask/Spring + ejemplos por caso; ejemplo runnable `examples/guide/17l-response-custom.fitz` con 4 casos canónicos sumado al smoke `GUIDE_EXAMPLES_COMPILE`; cap M4.C5 del curso refrescado (deuda CERRADA); LSP after-dot lista 5 fields como FIELD kind via path nominal genérico; 2 unit tests `lsp::tests::v019_block5_*`; extensión VSCode v0.19.0 + `.vsix` regenerado; CHANGELOG + deudas marcadas 🟢; bump Cargo.toml 0.18.2 → 0.19.0.
+
+**Tests al cierre**: 3202 lib (+8 neto) + 98 cli_e2e + 373 compile_e2e (+3) + 3 openapi_e2e. fmt + clippy `-D warnings` limpios. Validación bit-a-bit `fitz run` ↔ binario nativo con curl + xxd sobre los 4 casos canónicos. `fitz check` los 11 boilerplates verde. `fitz build` 4 representativos verde (incluido api-middleware-cors que usa `Response` opaque marker en middlewares `next: Fn() -> Response`).
+
+**Deudas residuales derivadas** (NO bloquean uso real): multi-arm bodies (if/match con distintos `Response { ... }` por arm) caen al path legacy `application/json` para el schema, runtime peek dinámico funciona; Response built-in + post middleware (`@middleware(fn)` con 2 args) no soportado, workaround `return <status> { ... }`; helpers Bytes adicionales (`bytes_from_b64`/`bytes_from_hex`) si aparece demanda real.
+
+---
+
 ## Codegen — B19 (`@cron` cross-module no se spawnea) ✅ CERRADO v0.18.2 (2026-06-20)
 
 **Hito**: cosecha post-fitzwatch sesión 2 (segundo bug del codegen descubierto al arrancar el deploy real). **Sin sintaxis nueva** — fix interno paralelo a W16 (HTTP handlers cross-module) y 10.8.6 (WS handlers cross-module) para que `@cron` también funcione cross-module.

@@ -1,0 +1,64 @@
+// Cap 17, sub-sección "Respuestas con Content-Type custom".
+//
+// Demuestra el `Response` built-in (v0.19.0) cubriendo los 4 casos
+// canónicos: RSS XML, robots.txt con headers de cache, SVG inline,
+// PDF binario con Content-Disposition.
+//
+// Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+//
+// Para validar:
+//   fitz run examples/guide/17l-response-custom.fitz
+//   curl -i http://127.0.0.1:43950/feed.rss
+//   curl -i http://127.0.0.1:43950/robots.txt
+//   curl -i http://127.0.0.1:43950/badge.svg
+//   curl -i http://127.0.0.1:43950/report.pdf
+//   curl http://127.0.0.1:43950/openapi.json    # schema con media_types custom
+
+// --- Caso 1: RSS XML (text path) ---
+
+@get("/feed.rss")
+fn rss_feed() => Response {
+    content_type: "application/rss+xml; charset=utf-8",
+    body: "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>Fitz Guide</title><item><title>Hola</title></item></channel></rss>",
+}
+
+// --- Caso 2: robots.txt con headers de cache ---
+
+@get("/robots.txt")
+fn robots() => Response {
+    content_type: "text/plain; charset=utf-8",
+    headers: {"Cache-Control": "public, max-age=86400"},
+    body: "User-agent: *\nDisallow: /api/private/",
+}
+
+// --- Caso 3: SVG inline (text-like, mismo path que XML) ---
+
+@get("/badge.svg")
+fn badge() => Response {
+    content_type: "image/svg+xml",
+    body: "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"20\"><text x=\"5\" y=\"15\">Fitz</text></svg>",
+}
+
+// --- Caso 4: PDF binario con Content-Disposition (body_bytes) ---
+//
+// En un escenario real, `body_bytes` vendría de un Bytes leído de
+// la DB / archivo / generación dinámica. Acá lo construímos a mano
+// con `bytes(str)` para que el ejemplo corra standalone.
+
+@get("/report.pdf")
+fn report() => Response {
+    content_type: "application/pdf",
+    body_bytes: bytes("%PDF-1.7\n(fake PDF body for the guide example)"),
+    headers: {"Content-Disposition": "attachment; filename=report.pdf"},
+}
+
+// --- Default handler para regresión: sigue siendo JSON ---
+//
+// El path `application/json` legacy queda intacto para los handlers
+// que no usan Response built-in. Esto confirma que `Response` es
+// opt-in — no afecta el resto de la API.
+
+@get("/health")
+fn health() -> Map<Str, Str> => {"status": "ok"}
+
+@server(43950) fn main() => 0

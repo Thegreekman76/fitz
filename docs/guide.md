@@ -7258,6 +7258,183 @@ un cálculo o un argumento del handler **no** se resuelven al schema
 `return Err({status: NOT_FOUND, ...})` (con un `type` propio para
 errores), ver cap 18.
 
+### Respuestas con Content-Type custom (`Response { ... }`)
+
+Hasta acá los handlers devuelven valores que el wrapper de Fitz
+serializa a JSON con `Content-Type: application/json`. Para RSS,
+Atom, plain text, HTML estático, CSV, SVG, PDF o ZIP necesitamos
+control sobre el `Content-Type` y el body crudo (sin JSON-wrap).
+
+El panorama vecino:
+
+| Lenguaje / framework | API | Trade-off |
+|---|---|---|
+| **FastAPI** (Python) | `Response(content="<rss/>", media_type="application/rss+xml")` | Runtime, sin tipo estático del `Response`. |
+| **Express** (Node) | `res.type("application/rss+xml").send(xml)` | Encadenamiento mutable, sin tipo. |
+| **Flask** (Python) | `Response("<rss/>", mimetype="application/rss+xml")` | Igual que FastAPI. |
+| **Spring** (Java) | `ResponseEntity.ok().contentType(...).body(xml)` | Builder verbose, tipado pero rígido. |
+| **Fitz v0.19.0** | `Response { content_type: "...", body: "...", headers: {...} }` | Built-in del lenguaje, paridad bit-a-bit `fitz run` ↔ `fitz build`, OpenAPI auto. |
+
+**Diferenciales de Fitz**:
+
+1. **Built-in del lenguaje, no lib externa**. `Response` está en el
+   core, validado por el checker estático. Cero `pip install`,
+   cero `npm install`, cero `import`.
+2. **Paridad bit-a-bit `fitz run` ↔ `fitz build`**. El binario
+   nativo emite los mismos bytes que el intérprete (verificado con
+   curl + `xxd` para payloads binarios).
+3. **OpenAPI auto-documentado**. El schema 3.1 emite
+   `responses.200.content.<media_type>` automático y marca
+   `format: binary` cuando hay `body_bytes`. Cero esfuerzo del user.
+4. **Tipo built-in con 5 fields explícitos**. Sin builders ni
+   mutable state; un struct literal cubre todo el caso.
+5. **Validación XOR build-time**. Si seteás `body` literal no-vacío
+   + `body_bytes`, el codegen aborta `fitz build` antes del runtime
+   con mensaje claro. UX mejor que esperar el 500.
+
+El built-in:
+
+```fitz
+type Response {
+    status: Int = 200
+    content_type: Str = "application/json"
+    headers: Map<Str, Str> = {}
+    body: Str = ""
+    body_bytes: Bytes? = null
+}
+```
+
+Todos los fields tienen default sensato, así que solo declarás
+los que importan.
+
+**Caso 1: RSS feed (text/xml)**
+
+```fitz
+@get("/feed.rss")
+fn rss_feed() => Response {
+    content_type: "application/rss+xml; charset=utf-8",
+    body: "<?xml version=\"1.0\"?><rss version=\"2.0\">...</rss>",
+}
+```
+
+```
+HTTP/1.1 200 OK
+content-type: application/rss+xml; charset=utf-8
+content-length: 91
+
+<?xml version="1.0"?><rss version="2.0">...</rss>
+```
+
+**Caso 2: robots.txt + headers de cache**
+
+```fitz
+@get("/cached.txt")
+fn cached() => Response {
+    content_type: "text/plain",
+    headers: {"Cache-Control": "public, max-age=3600"},
+    body: "cached payload",
+}
+```
+
+Los `headers` se inyectan en la response real además del
+`Content-Type` (que tiene su propio field dedicado). Si el user
+pone `Content-Type` adentro de `headers`, el `content_type` field
+gana.
+
+**Caso 3: PDF binario (`body_bytes`)**
+
+Para payloads NO UTF-8 (PDF, ZIP, imágenes), usá `body_bytes` en
+lugar de `body`:
+
+```fitz
+@get("/report.pdf")
+fn report() => Response {
+    content_type: "application/pdf",
+    body_bytes: bytes("%PDF-1.7 ..."),
+    headers: {"Content-Disposition": "attachment; filename=report.pdf"},
+}
+```
+
+`bytes(str)` convierte un Str a un `Bytes`. Para contenido leído
+de archivos / DB, ese valor llega como `Bytes` directo. El wrapper
+emite los bytes literales en la response (no JSON-wrap del array
+de u8) con el `Content-Type` correcto.
+
+**XOR de `body` y `body_bytes`**: solo uno de los dos. Si seteás
+ambos no-vacío:
+
+```fitz
+// ⛔️ ERROR de codegen (fitz build):
+// `Response`: both `body` (non-empty literal) and `body_bytes`
+// are set; specify only one.
+@get("/x")
+fn x() => Response {
+    content_type: "application/pdf",
+    body: "no",
+    body_bytes: bytes("yes"),
+}
+```
+
+Para `body` literal vacío + `body_bytes` set (caso intencional —
+opt-in explícito al binary path) **sí compila** sin warn. Para
+casos dinámicos (`body` viene de var o call), el codegen no puede
+inferir en build-time y deja la validación al runtime (responde
+500 con mensaje claro si ambos llegan no-vacíos).
+
+**Schema OpenAPI auto**:
+
+`fitz openapi server.fitz` y el endpoint `/openapi.json` del
+binario emiten:
+
+```json
+{
+  "/feed.rss": {
+    "get": {
+      "operationId": "rss_feed",
+      "responses": {
+        "200": {
+          "content": {
+            "application/rss+xml; charset=utf-8": {
+              "schema": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Para handlers con `body_bytes`, el schema marca
+`{"type":"string","format":"binary"}`. Para handlers con
+`content_type` dinámico (var/call), el schema default a
+`application/octet-stream` con `format: binary`. Documentación de
+APIs heterogéneas (mix JSON + RSS + PDF + ZIP) **sin esfuerzo del
+user** — herramientas como Scalar / Swagger UI rendean los
+endpoints con sus media types reales.
+
+**Combinación con `Result<Response>`**:
+
+```fitz
+type FeedError { code: Str }
+
+@get("/feed.rss")
+fn rss_feed() -> Result<Response, FeedError> {
+    let xml = fetch_feed().await?
+    return Ok(Response {
+        content_type: "application/rss+xml",
+        body: xml,
+    })
+}
+```
+
+El Ok arm pasa por el dispatch dedicado (Content-Type custom).
+El Err arm cae al path 500 + JSON error legacy (paralelo al
+manejo de Result<T> normal del cap 14).
+
+Ejemplo runnable end-to-end (RSS + robots.txt + SVG + PDF
+binario): [`examples/guide/17l-response-custom.fitz`](../examples/guide/17l-response-custom.fitz).
+
 ### Query params
 
 Para recibir parámetros de la query string (`?limit=10&offset=20`),
