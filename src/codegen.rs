@@ -30927,26 +30927,97 @@ impl __ToFitzJson for RequestData {
     }
 }
 
-/// `Response` (MW.1) — opaque nominal usable as the
-/// annotation `-> Response?` in middlewares; the real value
-/// is produced by `return <status> { ... }` (=
-/// `__FitzResponse` wrapped in `Some(...)`). The struct is
-/// empty by construction and not instantiated: exists only so
-/// the annotation types.
+/// `Response` (MW.1 + v0.19.0 Blocks 1+2) — built-in nominal
+/// with 5 fields for custom HTTP responses. The handler returns
+/// `Response { status: 200, content_type: "application/rss+xml",
+/// body: rss_xml }` and the wrapper detects the return type and
+/// emits an axum Response with the user-supplied Content-Type +
+/// headers + body (text path) or body_bytes (binary path) instead
+/// of the default `application/json`. Parity with the interpreter
+/// path `http::value_to_outcome` + `response_instance_to_outcome`.
+///
+/// Field order MUST mirror `types::register_http_builtin_types`
+/// and `evaluator::register_builtins`. Mixing them up would let
+/// the checker pass while the runtime / generated code misread.
+///
+/// Defaults:
+///   - status: 200
+///   - content_type: "application/json"
+///   - headers: {}
+///   - body: ""
+///   - body_bytes: null
 #[derive(Clone, PartialEq)]
 #[allow(dead_code)]
-struct ResponseData;
+struct ResponseData {
+    status: i64,
+    content_type: String,
+    headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    body: String,
+    body_bytes: Option<Vec<u8>>,
+}
+#[allow(dead_code)]
 type Response = std::sync::Arc<std::sync::Mutex<ResponseData>>;
 
 impl std::fmt::Display for ResponseData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "<response>")
+        // Canonical format parallel to `Value::Instance` in the
+        // interpreter (`value.rs`): `Response { status: 200,
+        // content_type: "application/json", headers: {...},
+        // body: "x", body_bytes: null }`. body_bytes shown as
+        // `<bytes:N>` when present (parallel to FileData.content).
+        let body_bytes_str = match &self.body_bytes {
+            Some(bs) => __fitz_fmt_bytes(bs),
+            None => "null".to_string(),
+        };
+        let headers_lock = self.headers.lock().unwrap();
+        let mut headers_str = String::from("{");
+        for (i, (k, v)) in headers_lock.iter().enumerate() {
+            if i > 0 {
+                headers_str.push_str(", ");
+            }
+            headers_str.push_str(&format!("\"{}\": \"{}\"", k, v));
+        }
+        headers_str.push('}');
+        write!(
+            f,
+            "Response {{ status: {}, content_type: \"{}\", headers: {}, body: \"{}\", body_bytes: {} }}",
+            self.status, self.content_type, headers_str, self.body, body_bytes_str,
+        )
     }
 }
 
 impl __ToFitzJson for ResponseData {
     fn __to_fitz_json(&self) -> serde_json::Value {
-        serde_json::Value::Null
+        // Fallback path: when a `Response` value reaches a JSON
+        // serialization site that is NOT the dedicated wrapper
+        // branch (rare — eg. nested in another Instance), emit
+        // an object with the 5 fields. The wrapper of an HTTP
+        // handler that returns `Response` goes through a
+        // dedicated branch and never hits this impl.
+        let mut obj = serde_json::Map::new();
+        obj.insert("status".to_string(), serde_json::Value::from(self.status));
+        obj.insert(
+            "content_type".to_string(),
+            serde_json::Value::String(self.content_type.clone()),
+        );
+        let headers_lock = self.headers.lock().unwrap();
+        let mut headers_obj = serde_json::Map::new();
+        for (k, v) in headers_lock.iter() {
+            headers_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+        obj.insert("headers".to_string(), serde_json::Value::Object(headers_obj));
+        obj.insert("body".to_string(), serde_json::Value::String(self.body.clone()));
+        match &self.body_bytes {
+            Some(bs) => {
+                let arr: Vec<serde_json::Value> =
+                    bs.iter().map(|b| serde_json::Value::from(*b)).collect();
+                obj.insert("body_bytes".to_string(), serde_json::Value::Array(arr));
+            }
+            None => {
+                obj.insert("body_bytes".to_string(), serde_json::Value::Null);
+            }
+        }
+        serde_json::Value::Object(obj)
     }
 }
 
@@ -47830,6 +47901,116 @@ mod tests {
         assert!(
             r.contains(" AND ") && r.contains(" OR "),
             "missing AND/OR: {r}"
+        );
+    }
+
+    // ---- v0.19.0 Block 3.a — Response built-in prelude ----
+    //
+    // Tests that the `ResponseData` struct emitted in
+    // `HTTP_RUNTIME_PRELUDE` carries the 5 fields of the user-facing
+    // `Response` built-in (status / content_type / headers / body /
+    // body_bytes), with the `Display` impl matching the interpreter's
+    // canonical format (parity bit-by-bit with `Value::Instance`),
+    // and the `__ToFitzJson` fallback emitting an object with the 5
+    // fields. These tests do NOT exercise the handler dispatch (that
+    // is 3.c) — only that the prelude struct is correctly shaped.
+
+    #[test]
+    fn v019_block3a_response_data_struct_emits_5_fields_when_http_active() {
+        // A minimal HTTP program emits HTTP_RUNTIME_PRELUDE that
+        // contains the new `ResponseData` struct with the 5 fields.
+        // No real `Response { ... }` usage required — the prelude
+        // emits unconditionally when HTTP is detected.
+        let code = gen("@get(\"/\") fn root() => 0\n@server(3000) fn main() => 0").unwrap();
+        assert!(
+            code.contains("struct ResponseData {"),
+            "expected `struct ResponseData {{` in HTTP prelude"
+        );
+        assert!(code.contains("status: i64,"), "missing field `status: i64`");
+        assert!(
+            code.contains("content_type: String,"),
+            "missing field `content_type: String`"
+        );
+        assert!(
+            code.contains("headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,"),
+            "missing field `headers: Arc<Mutex<Vec<...>>>`"
+        );
+        assert!(code.contains("body: String,"), "missing field `body: String`");
+        assert!(
+            code.contains("body_bytes: Option<Vec<u8>>,"),
+            "missing field `body_bytes: Option<Vec<u8>>`"
+        );
+        // The alias still points to the same shape.
+        assert!(
+            code.contains("type Response = std::sync::Arc<std::sync::Mutex<ResponseData>>;"),
+            "missing `type Response = Arc<Mutex<ResponseData>>;` alias"
+        );
+    }
+
+    #[test]
+    fn v019_block3a_response_data_display_emits_canonical_format_parallel_to_interpreter() {
+        // The `Display` impl of `ResponseData` MUST emit the same
+        // shape as `Value::Instance` in the interpreter
+        // (`value.rs`): `Response { status: N, content_type: "X",
+        // headers: {...}, body: "Y", body_bytes: null|<bytes:N> }`.
+        // We assert on the format-string fragments to lock the
+        // contract in.
+        let code = gen("@get(\"/\") fn root() => 0\n@server(3000) fn main() => 0").unwrap();
+        // Display impl must exist.
+        assert!(
+            code.contains("impl std::fmt::Display for ResponseData"),
+            "missing Display impl for ResponseData"
+        );
+        // The format string declares the 5 fields in order with the
+        // canonical labels (parallel to Instance Display).
+        assert!(
+            code.contains("Response {{ status: {}, content_type: \\\"{}\\\", headers: {}, body: \\\"{}\\\", body_bytes: {} }}"),
+            "missing canonical format string (parity with Value::Instance Display)"
+        );
+        // body_bytes uses `__fitz_fmt_bytes` when Some, "null"
+        // otherwise (parity with how the interpreter Display of a
+        // nullable Bytes field renders).
+        assert!(
+            code.contains("Some(bs) => __fitz_fmt_bytes(bs),"),
+            "missing __fitz_fmt_bytes call for Some bytes in Display"
+        );
+    }
+
+    #[test]
+    fn v019_block3a_response_data_to_fitz_json_fallback_emits_5_field_object() {
+        // The `__ToFitzJson` fallback (used when a Response value
+        // reaches a JSON serialization site outside the dedicated
+        // wrapper branch — rare, eg. nested in another Instance)
+        // emits an object with the 5 fields. The wrapper of an HTTP
+        // handler that returns `Response` goes through a dedicated
+        // branch (Block 3.c) and never hits this impl.
+        let code = gen("@get(\"/\") fn root() => 0\n@server(3000) fn main() => 0").unwrap();
+        assert!(
+            code.contains("impl __ToFitzJson for ResponseData"),
+            "missing __ToFitzJson impl for ResponseData"
+        );
+        // Each of the 5 keys must be inserted.
+        for needle in [
+            "obj.insert(\"status\"",
+            "obj.insert(\"content_type\"",
+            "obj.insert(\"headers\"",
+            "obj.insert(\"body\"",
+            "obj.insert(\"body_bytes\"",
+        ] {
+            assert!(
+                code.contains(needle),
+                "missing `{}` in __ToFitzJson fallback",
+                needle
+            );
+        }
+        // body_bytes Some(bs) → JSON array of u8 values.
+        assert!(
+            code.contains("Some(bs) => {"),
+            "missing Some(bs) branch in body_bytes serialization"
+        );
+        assert!(
+            code.contains("serde_json::Value::Array(arr)"),
+            "missing serde_json::Value::Array(arr) for body_bytes Some"
         );
     }
 }
