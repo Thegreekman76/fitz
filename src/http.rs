@@ -1175,16 +1175,33 @@ fn is_simple_ident(s: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandlerOutcome {
     pub status: u16,
-    /// JSON already serialized, ready to send as body. Empty for 204
-    /// (unused in 4.2; reserved).
+    /// Serialized body for the text path, ready to send. For the
+    /// default JSON dispatch this is the JSON string of the value.
+    /// For a custom `Response { body: ... }` (v0.19.0 block 1) it
+    /// is the raw `body` field value (no JSON-encoding wrap).
+    /// Empty for 204 (reserved) and also when `body_bytes` carries
+    /// the payload (binary path).
     pub body: String,
-    /// Body content-type. Today always `application/json`; ready for
-    /// `text/plain` or others when needed.
-    pub content_type: &'static str,
-    /// Extra headers to emit with the response (mini-phase MW.2).
-    /// Populated at the end of `handle_task` when the route has
-    /// `RouteSpec.cors`: the `Access-Control-Allow-*` injection lives
-    /// here. Empty for normal non-CORS responses.
+    /// v0.19.0 block 2 — opt-in binary body. When `Some(bytes)`,
+    /// `body` is ignored and the response ships `bytes` as the
+    /// raw binary payload (PDF, ZIP, images, etc). Populated only
+    /// by the `Response { body_bytes: ... }` built-in path; all
+    /// other constructors leave it `None`.
+    pub body_bytes: Option<Vec<u8>>,
+    /// Body content-type. Default is `application/json` for the
+    /// normal serialisation path. The built-in `Response` type lets
+    /// the handler override this to any other value
+    /// (`application/rss+xml`, `text/plain`, `image/svg+xml`,
+    /// `application/pdf`, etc.). Stored as `String` (not
+    /// `&'static str`) so user-supplied content types fit; the
+    /// alloc cost is negligible compared to the body alloc.
+    pub content_type: String,
+    /// Extra headers to emit with the response. Populated by
+    /// middlewares (mini-phase MW.2: CORS `Access-Control-Allow-*`)
+    /// and by the `Response { headers: { ... } }` built-in
+    /// (v0.19.0) so handlers can set `Cache-Control`, `ETag`,
+    /// `Last-Modified`, etc. Empty for normal non-customised
+    /// responses.
     pub extra_headers: Vec<(String, String)>,
 }
 
@@ -1193,8 +1210,48 @@ impl HandlerOutcome {
         HandlerOutcome {
             status,
             body: body.to_string(),
-            content_type: "application/json",
+            body_bytes: None,
+            content_type: "application/json".to_string(),
             extra_headers: Vec::new(),
+        }
+    }
+
+    /// v0.19.0 — outcome with custom content-type and headers,
+    /// product of a handler returning a `Response { ... }` value
+    /// with `body: Str` set. The body is passed as-is (raw text,
+    /// not JSON-encoded).
+    pub fn custom(
+        status: u16,
+        body: String,
+        content_type: String,
+        extra_headers: Vec<(String, String)>,
+    ) -> Self {
+        HandlerOutcome {
+            status,
+            body,
+            body_bytes: None,
+            content_type,
+            extra_headers,
+        }
+    }
+
+    /// v0.19.0 block 2 — outcome with binary payload, product of a
+    /// `Response { body_bytes: bytes(...), ... }` return. The
+    /// content_type and headers come from the same `Response`
+    /// fields; the body string stays empty (axum builder reads
+    /// `body_bytes` first).
+    pub fn custom_binary(
+        status: u16,
+        body_bytes: Vec<u8>,
+        content_type: String,
+        extra_headers: Vec<(String, String)>,
+    ) -> Self {
+        HandlerOutcome {
+            status,
+            body: String::new(),
+            body_bytes: Some(body_bytes),
+            content_type,
+            extra_headers,
         }
     }
 
@@ -1241,7 +1298,155 @@ pub async fn await_if_future(value: Value) -> crate::error::FitzResult<Value> {
 ///     `Result` and return `Str`, `Int`, `Instance`, etc.
 ///   - Non-serializable types (Function, Builtin, Type, Module,
 ///     Range) → status 500, `{"error": "value not serializable: <type>"}`.
+// v0.19.0 — Maps a `Value::Instance` of the built-in `Response`
+// type to a `HandlerOutcome` with custom content_type and headers.
+// The evaluator already populated missing fields with defaults
+// (`status: 200`, `content_type: "application/json"`,
+// `headers: {}`, `body: ""`) so all four are guaranteed present.
+// Validation is shape-only here — the checker would catch type
+// mismatches statically, but `fitz run --no-typecheck` and tests
+// that bypass it could still leak a bad shape, so we defend with
+// 500s citing the offending field.
+fn response_instance_to_outcome(
+    fields: &crate::value::Shared<Vec<(String, Value)>>,
+) -> HandlerOutcome {
+    let g = fields.lock();
+    let mut status: Option<i64> = None;
+    let mut content_type: Option<String> = None;
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut body: Option<String> = None;
+    let mut body_bytes: Option<Vec<u8>> = None;
+    for (name, value) in g.iter() {
+        match (name.as_str(), value) {
+            ("status", Value::Int(n)) => status = Some(*n),
+            ("status", other) => {
+                return HandlerOutcome::internal_error(format!(
+                    "Response.status must be Int, found {}",
+                    other.type_name()
+                ));
+            }
+            ("content_type", Value::Str(s)) => content_type = Some(s.clone()),
+            ("content_type", other) => {
+                return HandlerOutcome::internal_error(format!(
+                    "Response.content_type must be Str, found {}",
+                    other.type_name()
+                ));
+            }
+            ("headers", Value::Map(pairs)) => {
+                for (k, v) in pairs.lock().iter() {
+                    match (k, v) {
+                        (Value::Str(kk), Value::Str(vv)) => {
+                            headers.push((kk.clone(), vv.clone()));
+                        }
+                        _ => {
+                            return HandlerOutcome::internal_error(
+                                "Response.headers must be Map<Str, Str> — keys and values \
+                                 must both be Str"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            ("headers", other) => {
+                return HandlerOutcome::internal_error(format!(
+                    "Response.headers must be Map<Str, Str>, found {}",
+                    other.type_name()
+                ));
+            }
+            ("body", Value::Str(s)) => body = Some(s.clone()),
+            ("body", other) => {
+                return HandlerOutcome::internal_error(format!(
+                    "Response.body must be Str, found {}",
+                    other.type_name()
+                ));
+            }
+            // v0.19.0 block 2 — opt-in binary payload. Null means
+            // "use the text body"; Bytes means "use the bytes
+            // directly". Anything else fails 500 (only Bytes or
+            // Null are allowed by the checker, but defend at
+            // runtime in case `--no-typecheck` slipped a bad
+            // value through).
+            ("body_bytes", Value::Null) => { /* default — text path */ }
+            ("body_bytes", Value::Bytes(bs)) => body_bytes = Some(bs.clone()),
+            ("body_bytes", other) => {
+                return HandlerOutcome::internal_error(format!(
+                    "Response.body_bytes must be Bytes? (null or Bytes), found {}",
+                    other.type_name()
+                ));
+            }
+            _ => {
+                // Field not part of the built-in shape — silently
+                // ignored. Future field additions will use this
+                // same arm during the transition; the checker
+                // tells the user at registration time which fields
+                // are valid.
+            }
+        }
+    }
+    drop(g);
+
+    let status_i64 = status.unwrap_or(200);
+    if !(100..1000).contains(&status_i64) {
+        return HandlerOutcome::internal_error(format!(
+            "Response.status out of range: {} (must be in 100..1000)",
+            status_i64
+        ));
+    }
+    let resolved_ct = content_type.unwrap_or_else(|| "application/json".to_string());
+    // v0.19.0 block 2 — setting both `body` (non-empty) and
+    // `body_bytes` (non-null) is a programming error. We do NOT
+    // pick one silently — that would hide bugs (mismatched payload
+    // shipped). 500 with a clear message instead.
+    let body_str = body.unwrap_or_default();
+    match body_bytes {
+        Some(bytes) => {
+            if !body_str.is_empty() {
+                return HandlerOutcome::internal_error(
+                    "Response: cannot set both `body` and `body_bytes` — pick one. \
+                     For binary payloads (PDF/ZIP/images), use `body_bytes` and leave \
+                     `body` at its default empty string."
+                        .to_string(),
+                );
+            }
+            HandlerOutcome::custom_binary(status_i64 as u16, bytes, resolved_ct, headers)
+        }
+        None => HandlerOutcome::custom(status_i64 as u16, body_str, resolved_ct, headers),
+    }
+}
+
 pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
+    // v0.19.0 — `Response { ... }` built-in instance. The handler
+    // built it explicitly to control `content_type`, `headers`, and
+    // the raw text `body`. We extract the four fields by name, map
+    // them to a `HandlerOutcome::custom`, and skip the JSON
+    // serialisation path entirely. Validation: `status` must be a
+    // valid HTTP status in `[100, 1000)`; `content_type` must be
+    // `Str`; `headers` must be `Map<Str, Str>`; `body` must be
+    // `Str`. Any shape mismatch produces a 500 with a clear
+    // message citing the field name. Field absence is impossible
+    // here — the evaluator's struct-lit pass already filled
+    // missing fields with their defaults (`200`,
+    // `"application/json"`, `{}`, `""`).
+    //
+    // We also peek through `Result::Ok(Response { ... })` for
+    // handlers that propagate errors with `?`. `Err(Response)` is
+    // NOT specially handled — the user wanting a custom-content
+    // error response can return `Response { status: 500, ... }`
+    // directly without wrapping in Result.
+    let unwrapped: &Value = match value {
+        Value::Result(ResultVariant::Ok(inner)) => inner.as_ref(),
+        other => other,
+    };
+    if let Value::Instance {
+        type_name, fields, ..
+    } = unwrapped
+    {
+        if type_name == "Response" {
+            return response_instance_to_outcome(fields);
+        }
+    }
+
     // Custom status code (spec): the handler did `return 401 { ... }`
     // and the evaluator emitted `Value::HttpResponse`. Direct
     // mapping: the status goes to the outcome, the body (if any) is
@@ -3127,13 +3332,27 @@ async fn dispatch_request(
 /// malformed header to panicking on a request. In practice the CORS
 /// headers we emit are valid by construction.
 fn outcome_to_response(outcome: HandlerOutcome) -> Response {
-    let mut resp = Response::new(Body::from(outcome.body));
+    // v0.19.0 block 2 — binary path: `body_bytes` wins over `body`.
+    // Built when the user returns `Response { body_bytes: bytes(...) }`
+    // for PDF, ZIP, images, etc. Text path stays default.
+    let body = match outcome.body_bytes {
+        Some(bytes) => Body::from(bytes),
+        None => Body::from(outcome.body),
+    };
+    let mut resp = Response::new(body);
     *resp.status_mut() =
         StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static(outcome.content_type),
-    );
+    // v0.19.0 — content_type is now a runtime String (from
+    // `Response { content_type: ... }` or default
+    // `application/json`). If the user supplied an invalid value
+    // (chars outside ASCII visible range, etc.), `try_from` fails
+    // and we fall back to `application/octet-stream` so the
+    // response still ships with a valid header. Silent fallback
+    // matches the behaviour of `extra_headers` below.
+    let ct_value = HeaderValue::try_from(outcome.content_type.as_str())
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    resp.headers_mut()
+        .insert(axum::http::header::CONTENT_TYPE, ct_value);
     for (name, value) in outcome.extra_headers {
         let parsed_name = axum::http::HeaderName::try_from(name);
         let parsed_value = HeaderValue::try_from(value);
@@ -7285,6 +7504,222 @@ mod tests {
     fn hc1_err_with_status_1500_is_out_of_range() {
         let outcome = value_to_outcome(&err_instance_with_status(1500));
         assert_eq!(outcome.status, 500);
+    }
+
+    // ---- v0.19.0 — Response built-in custom content_type + headers ----
+
+    fn response_instance(
+        status: i64,
+        content_type: &str,
+        headers: Vec<(&str, &str)>,
+        body: &str,
+    ) -> Value {
+        let headers_pairs: Vec<(Value, Value)> = headers
+            .into_iter()
+            .map(|(k, v)| (Value::Str(k.into()), Value::Str(v.into())))
+            .collect();
+        Value::new_instance(
+            "Response".to_string(),
+            vec![
+                ("status".into(), Value::Int(status)),
+                ("content_type".into(), Value::Str(content_type.into())),
+                ("headers".into(), Value::Map(shared(headers_pairs))),
+                ("body".into(), Value::Str(body.into())),
+            ],
+        )
+    }
+
+    #[test]
+    fn v019_response_rss_feed_emite_outcome_con_content_type_custom_y_body_crudo() {
+        let rss = "<?xml version=\"1.0\"?><rss/>";
+        let outcome = value_to_outcome(&response_instance(
+            200,
+            "application/rss+xml; charset=utf-8",
+            vec![],
+            rss,
+        ));
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.content_type, "application/rss+xml; charset=utf-8");
+        assert_eq!(outcome.body, rss);
+        assert!(outcome.extra_headers.is_empty());
+    }
+
+    #[test]
+    fn v019_response_plain_text_emite_text_plain_sin_json_wrap() {
+        let outcome = value_to_outcome(&response_instance(
+            200,
+            "text/plain; charset=utf-8",
+            vec![],
+            "User-agent: *\nDisallow: /",
+        ));
+        assert_eq!(outcome.content_type, "text/plain; charset=utf-8");
+        // Critical: body must NOT be JSON-quoted.
+        assert_eq!(outcome.body, "User-agent: *\nDisallow: /");
+        assert!(
+            !outcome.body.starts_with('"'),
+            "el body de plain text no debe ir envuelto en comillas JSON"
+        );
+    }
+
+    #[test]
+    fn v019_response_headers_se_propagan_a_extra_headers_en_orden() {
+        let outcome = value_to_outcome(&response_instance(
+            200,
+            "text/plain",
+            vec![
+                ("Cache-Control", "public, max-age=3600"),
+                ("X-Custom", "smoke"),
+            ],
+            "payload",
+        ));
+        let names: Vec<&str> = outcome
+            .extra_headers
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert!(names.contains(&"Cache-Control"));
+        assert!(names.contains(&"X-Custom"));
+        assert_eq!(outcome.extra_headers.len(), 2);
+    }
+
+    #[test]
+    fn v019_response_status_fuera_de_rango_devuelve_500_con_mensaje() {
+        let outcome = value_to_outcome(&response_instance(999_999, "text/plain", vec![], "x"));
+        assert_eq!(outcome.status, 500);
+        assert!(outcome.body.contains("out of range"));
+    }
+
+    #[test]
+    fn v019_response_dentro_de_result_ok_tambien_dispatchea_custom() {
+        // `fn f() -> Result<Response> { Ok(Response { ... }) }` con
+        // `?` propagation. El path Ok(Response) tambien debe activar
+        // el dispatch custom.
+        let resp = response_instance(200, "image/svg+xml", vec![], "<svg/>");
+        let result_ok = Value::Result(ResultVariant::Ok(Box::new(resp)));
+        let outcome = value_to_outcome(&result_ok);
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.content_type, "image/svg+xml");
+        assert_eq!(outcome.body, "<svg/>");
+    }
+
+    #[test]
+    fn v019_response_shape_invalida_status_no_int_devuelve_500_con_mensaje() {
+        let bad = Value::new_instance(
+            "Response".to_string(),
+            vec![
+                ("status".into(), Value::Str("doscientos".into())),
+                ("content_type".into(), Value::Str("text/plain".into())),
+                ("headers".into(), Value::Map(shared(vec![]))),
+                ("body".into(), Value::Str("x".into())),
+            ],
+        );
+        let outcome = value_to_outcome(&bad);
+        assert_eq!(outcome.status, 500);
+        assert!(outcome.body.contains("status must be Int"));
+    }
+
+    #[test]
+    fn v019_response_normal_handler_sigue_emitiendo_application_json() {
+        // Regresion: un handler que no usa Response sigue devolviendo
+        // application/json por default.
+        let val = Value::new_instance(
+            "User".to_string(),
+            vec![
+                ("id".into(), Value::Int(1)),
+                ("name".into(), Value::Str("ada".into())),
+            ],
+        );
+        let outcome = value_to_outcome(&val);
+        assert_eq!(outcome.content_type, "application/json");
+        assert!(outcome.body.starts_with('{'));
+    }
+
+    // ---- v0.19.0 Block 2 — Response body_bytes (binary path) ----
+
+    fn response_binary_instance(status: i64, content_type: &str, body_bytes: Vec<u8>) -> Value {
+        Value::new_instance(
+            "Response".to_string(),
+            vec![
+                ("status".into(), Value::Int(status)),
+                ("content_type".into(), Value::Str(content_type.into())),
+                ("headers".into(), Value::Map(shared(vec![]))),
+                ("body".into(), Value::Str(String::new())),
+                ("body_bytes".into(), Value::Bytes(body_bytes)),
+            ],
+        )
+    }
+
+    #[test]
+    fn v019_block2_body_bytes_seteado_dispara_path_binario_y_oculta_body_str() {
+        let pdf_bytes = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+        let outcome = value_to_outcome(&response_binary_instance(
+            200,
+            "application/pdf",
+            pdf_bytes.clone(),
+        ));
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.content_type, "application/pdf");
+        assert_eq!(outcome.body_bytes.as_deref(), Some(pdf_bytes.as_slice()));
+        assert!(outcome.body.is_empty());
+    }
+
+    #[test]
+    fn v019_block2_body_bytes_null_path_texto_normal() {
+        // Default Response { body: "x" } sin body_bytes (null) sigue
+        // por el path de texto. Es lo que validan los smokes de
+        // Block 1 — replica acá explícitamente con body_bytes: null.
+        let mut inst = response_instance(200, "text/plain", vec![], "hola");
+        if let Value::Instance { fields, .. } = &inst {
+            fields.lock().push(("body_bytes".into(), Value::Null));
+        }
+        let outcome = value_to_outcome(&inst);
+        assert_eq!(outcome.body, "hola");
+        assert!(outcome.body_bytes.is_none());
+        // Make sure clippy-fixed assertion is hit.
+        let _ = &mut inst;
+    }
+
+    #[test]
+    fn v019_block2_body_y_body_bytes_ambos_seteados_devuelve_500() {
+        // Programming error: el user setea body con texto Y body_bytes
+        // con un Bytes. No elegimos uno silentemente — 500 con mensaje
+        // claro.
+        let bad = Value::new_instance(
+            "Response".to_string(),
+            vec![
+                ("status".into(), Value::Int(200)),
+                ("content_type".into(), Value::Str("text/plain".into())),
+                ("headers".into(), Value::Map(shared(vec![]))),
+                ("body".into(), Value::Str("texto".into())),
+                ("body_bytes".into(), Value::Bytes(b"binario".to_vec())),
+            ],
+        );
+        let outcome = value_to_outcome(&bad);
+        assert_eq!(outcome.status, 500);
+        assert!(
+            outcome.body.contains("cannot set both"),
+            "el mensaje debe mencionar que body y body_bytes son XOR: {}",
+            outcome.body
+        );
+    }
+
+    #[test]
+    fn v019_block2_body_bytes_shape_invalida_devuelve_500_con_mensaje() {
+        // body_bytes debe ser Bytes o Null. Si llega un Int (por
+        // ejemplo de --no-typecheck), 500 con mensaje claro.
+        let bad = Value::new_instance(
+            "Response".to_string(),
+            vec![
+                ("status".into(), Value::Int(200)),
+                ("content_type".into(), Value::Str("text/plain".into())),
+                ("headers".into(), Value::Map(shared(vec![]))),
+                ("body".into(), Value::Str(String::new())),
+                ("body_bytes".into(), Value::Int(42)),
+            ],
+        );
+        let outcome = value_to_outcome(&bad);
+        assert_eq!(outcome.status, 500);
+        assert!(outcome.body.contains("body_bytes must be Bytes?"));
     }
 
     // ---- Mini-batch Hpx.1 — Content-Type validation ----

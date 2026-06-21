@@ -27,7 +27,7 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Decorator, Expr, Param, Pattern, Program, Span, Stmt, StrPart,
+    AssignTarget, BinOpKind, Decorator, Expr, Field, Param, Pattern, Program, Span, Stmt, StrPart,
     TypeExpr, UnaryOpKind,
 };
 use crate::env::{EnvRef, Environment};
@@ -11739,6 +11739,76 @@ fn register_builtins(env: &EnvRef) {
         Value::Module {
             name: "Uuid".into(),
             env: uuid_env,
+        },
+    );
+
+    // v0.19.0 — `Response`: built-in type for custom HTTP responses
+    // with configurable Content-Type and headers. The handler returns
+    // `Response { status: 200, content_type: "application/rss+xml",
+    // body: rss_xml }` and the runtime in `http::value_to_outcome`
+    // detects the type_name and emits a `HandlerOutcome` with the
+    // user-supplied content_type instead of the default
+    // `application/json`. All fields have sensible defaults so the
+    // user can omit any.
+    //
+    // The field order MUST mirror `types::register_http_builtin_types`
+    // (the checker registers the nominal with the same field order).
+    // Mixing them up would let the checker pass while the runtime
+    // misreads.
+    //
+    // Field defaults:
+    //   - status: 200
+    //   - content_type: "application/json"
+    //   - headers: {}
+    //   - body: ""
+    let response_fields = vec![
+        Field {
+            name: "status".into(),
+            type_: TypeExpr::Named("Int".into()),
+            default: Some(Expr::Int(200, Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "content_type".into(),
+            type_: TypeExpr::Named("Str".into()),
+            default: Some(Expr::Str("application/json".into(), Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "headers".into(),
+            type_: TypeExpr::Generic {
+                name: "Map".into(),
+                args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+            },
+            default: Some(Expr::Map(vec![], Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "body".into(),
+            type_: TypeExpr::Named("Str".into()),
+            default: Some(Expr::Str(String::new(), Span::ZERO)),
+            decorators: vec![],
+        },
+        // v0.19.0 Block 2 — opt-in binary body. Default `null`. When
+        // the user sets it to a `Bytes` value, the runtime emits a
+        // binary response (PDF/ZIP/image/etc) and ignores `body`.
+        // Setting both `body` (non-empty) and `body_bytes` (non-null)
+        // is rejected at runtime with a 500.
+        Field {
+            name: "body_bytes".into(),
+            type_: TypeExpr::Nullable(Box::new(TypeExpr::Named("Bytes".into()))),
+            default: Some(Expr::Null(Span::ZERO)),
+            decorators: vec![],
+        },
+    ];
+    env.lock().define(
+        "Response",
+        Value::Type {
+            name: "Response".into(),
+            fields: response_fields,
+            resolved_defaults: Vec::new(),
+            methods: Vec::new(),
+            table_metadata: None,
         },
     );
 }

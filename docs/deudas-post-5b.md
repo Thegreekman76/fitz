@@ -4,6 +4,38 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 HTTP HandlerOutcome `content_type` configurable desde el handler (deuda futura, 2026-06-21)
+
+**Detectada al implementar RSS feed XML en un proyecto downstream**. El runtime HTTP de Fitz (`src/http.rs` → `pub struct HandlerOutcome { content_type: &'static str, ... }` + `impl HandlerOutcome { pub fn json(...) -> Self { ... content_type: "application/json", ... } }`) hardcodea el Content-Type del response a `application/json`. No hay forma desde el código user (handler `@get`/`@post`/etc) de devolver un body con Content-Type distinto. Esto bloquea:
+
+- **RSS feeds** (`application/rss+xml; charset=utf-8`) — caso canónico de status pages, blogs, dashboards.
+- **Atom feeds** (`application/atom+xml`).
+- **Sitemaps** (`application/xml`).
+- **Plain text** (`text/plain; charset=utf-8`) — logs, robots.txt, healthchecks human-readable.
+- **CSV exports** (`text/csv`).
+- **iCal feeds** (`text/calendar`).
+- **SVG generadas dinámicamente** (`image/svg+xml`) — bagdes tipo shields.io.
+
+**Por qué importa**: el comentario del propio struct (`src/http.rs:1183`) dice "Today always `application/json`; ready for `text/plain` or others when needed." → el diseño YA contempla el extension point. Solo falta exponerlo desde el handler.
+
+**Workarounds actuales (todos malos)**:
+- Devolver el XML como `Value::Str` → axum lo serializa JSON-quoted: `"<rss>..."` (no parseable como RSS).
+- Devolver `{"xml": "<rss>..."}` JSON wrapper → el cliente tendría que des-envolver con JS antes de pasar a RSS reader (no estándar).
+- Servir el XML estático via nginx desde un archivo escrito por un `@cron` periódico (requiere arquitectura adicional, no responsivo a cambios live).
+
+**Propuesta de solución (alta nivel, sin implementar)**:
+- Opción A: nuevo type built-in `Response { status: Int, content_type: Str, body: Str }` que el handler puede retornar directamente. El wrapper async detecta el `Value::Response` y arma `HandlerOutcome` con `content_type` propio.
+- Opción B: extender la sintaxis del status response, `return 200 "<rss>..." content_type="application/rss+xml"` (más invasivo al parser).
+- Opción C: builtin `response.with_content_type(body, ct)` que retorna un wrapper `Value::Response`. Más simple del lado parser, requiere builtin nuevo.
+
+**Decisión recomendada**: A (type built-in `Response { status, content_type, body }`). Coherente con `Request`/`Response`/`File` ya built-in. Mantiene la paridad `fitz run` ↔ `fitz build`.
+
+**Impacto si se cierra**: cualquier proyecto downstream que necesite RSS / Atom / Sitemap / CSV exports / SVG badges / etc, sin recurrir a workarounds. Caso bloqueado documentado: status page de un user de Fitz que necesitaba feed RSS por cada workspace y tuvo que diferir la feature.
+
+**Test E2E que validaría el cierre**: handler que retorna `Response { status: 200, content_type: "application/rss+xml", body: "<?xml..." }` → `curl -I` ve el Content-Type correcto y el body es el XML sin JSON-quoting. Paralelo `fitz run` ↔ `fitz build` bit-a-bit.
+
+---
+
 ## 🟡 B20 — `@cron(store=X)` cross-module no resuelve binding del módulo origen (deuda futura, 2026-06-20)
 
 **Detectada al destrabar fitzwatch** después de cerrar B19 (cron cross-module no spawneaba). Caso edge no soportado por el codegen: `@cron(..., store=X)` declarado en un módulo importado (e.g., `scheduler.fitz`) referencia un binding `X` que debería resolver al `let X = db.connect(...).await` también declarado en el módulo. Hoy el spawn cross-module emite `(&X).into_store()` en `fn main()` del crate root, donde `X` no está en scope → `error[E0425] cannot find value 'X' in this scope`.

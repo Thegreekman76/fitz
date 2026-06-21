@@ -1312,14 +1312,50 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
         ],
     );
 
-    // `Response`: opaque nominal without fields. The user does not instantiate
-    // it with struct lit (`Response { ... }` would error: any field missing
-    // — but since it has none, struct lit with `{}` passes; documented).
-    // The expected use is as a marker in signatures: `fn auth(req) -> Response?`.
+    // `Response`: instantiable built-in for custom HTTP responses
+    // (v0.19.0). Previously was an opaque marker without fields,
+    // used only as the return type annotation of middlewares
+    // (`fn auth(req) -> Response?`). Now carries `status`,
+    // `content_type`, `headers`, and `body` so handlers can return
+    // `Response { content_type: "application/rss+xml", body: rss }`
+    // for cases where the default JSON serialisation does not fit
+    // (RSS feeds, sitemaps, plain text, CSV exports, SVG badges,
+    // etc.). The field order MUST mirror the runtime registration
+    // in `evaluator::register_builtins` (Response section) — the
+    // evaluator's struct literal validation reorders to declaration
+    // order, but having both in sync avoids confusion.
     let resp_id = env
         .declare_nominal("Response".to_string())
         .expect("Response is the second nominal — cannot collide");
-    env.set_fields(resp_id, vec![]);
+    env.set_fields(
+        resp_id,
+        vec![
+            ResolvedField {
+                name: "status".into(),
+                type_: Type::Int,
+            },
+            ResolvedField {
+                name: "content_type".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "headers".into(),
+                type_: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
+            },
+            ResolvedField {
+                name: "body".into(),
+                type_: Type::Str,
+            },
+            // v0.19.0 Block 2 — opt-in binary body. When set (non-null),
+            // it wins over `body`. Setting BOTH at runtime triggers a
+            // 500 with a clear message (programming error). Used for
+            // PDF, ZIP, images, anything that is not UTF-8 text.
+            ResolvedField {
+                name: "body_bytes".into(),
+                type_: Type::Nullable(Box::new(Type::Bytes)),
+            },
+        ],
+    );
 
     // Mini-batch MP2 + File.content Bytes — `File`: built-in nominal
     // to represent files from multipart/form-data bodies. The
