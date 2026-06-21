@@ -26865,6 +26865,40 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
         }
 
+        // v0.19.0 Block 3.e — XOR body/body_bytes build-time check
+        // for the `Response` built-in. The runtime + emitted codegen
+        // already guard with a 500 + clear error message (Block 1
+        // in `http.rs::response_instance_to_outcome` + Block 3.c in
+        // the emitted wrapper); detecting the literal case at build
+        // time gives a much better UX (catch the typo before the
+        // server boots). We only fire when BOTH fields are provided
+        // AND `body` is a non-empty Str literal (the other shapes —
+        // ident, call, dynamic expr — could resolve to "" at
+        // runtime so we leave them to the runtime check to avoid
+        // false positives). `body_bytes` provided as `Expr::Null`
+        // is treated as "not set" (canonical default literal).
+        if type_name == "Response" {
+            let body_expr = provided.iter().find(|(n, _)| n == "body").map(|(_, e)| e);
+            let bbytes_expr = provided
+                .iter()
+                .find(|(n, _)| n == "body_bytes")
+                .map(|(_, e)| e);
+            if let (Some(body_e), Some(bb_e)) = (body_expr, bbytes_expr) {
+                let body_literal_nonempty = matches!(body_e, Expr::Str(s, _) if !s.is_empty());
+                let bbytes_not_null = !matches!(bb_e, Expr::Null(_));
+                if body_literal_nonempty && bbytes_not_null {
+                    return Err(self.err_at(
+                        struct_span,
+                        "`Response`: both `body` (non-empty literal) and `body_bytes` are set; specify only one. \
+                         The runtime would reject this with 500 at request time. Use `body` for text \
+                         payloads (XML/HTML/CSV/plain text/JSON) and `body_bytes` for binary payloads \
+                         (PDF/ZIP/images)."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
         // PreF8.3: if the type comes from a `from foo import T`,
         // defaults are materialized via module helper fns
         // (`foo::__default_T_<field>()`). That avoids resolving
@@ -48590,6 +48624,65 @@ mod tests {
             code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
             "inferred dispatch must extract the 5 fields"
         );
+    }
+
+    // ---- v0.19.0 Block 3.e — XOR body/body_bytes build-time ----
+    //
+    // The codegen rejects `Response { body: "literal", body_bytes:
+    // <expr distinto de null> }` at build time with a clear
+    // message and a UX hint. Runtime check (Block 1 + Block 3.c)
+    // covers the dynamic cases (idents/calls that could be ""
+    // or null at runtime).
+
+    #[test]
+    fn v019_block3e_response_with_literal_body_and_body_bytes_is_build_error() {
+        // The user accidentally sets both `body` (non-empty
+        // literal) and `body_bytes`. Build-time error with hint.
+        let err = gen(
+            "@get(\"/x\")\n\
+             fn h() => Response { body: \"hi\", body_bytes: bytes(\"abc\") }\n\
+             @server(3000) fn main() => 0",
+        )
+        .expect_err("expected build-time XOR error");
+        let lower = err.message.to_lowercase();
+        assert!(
+            lower.contains("body") && lower.contains("body_bytes"),
+            "error must mention both fields: {}",
+            err.message
+        );
+        assert!(
+            lower.contains("specify only one"),
+            "error must hint to specify only one: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v019_block3e_response_with_empty_body_and_body_bytes_compiles_ok() {
+        // Body literal empty + body_bytes set is OK (the user is
+        // explicitly opting into the binary path; the empty body
+        // is a no-op runtime).
+        let code = gen(
+            "@get(\"/x\")\n\
+             fn h() => Response { body: \"\", body_bytes: bytes(\"abc\") }\n\
+             @server(3000) fn main() => 0",
+        )
+        .expect("expected build OK");
+        // Sanity: the wrapper still emits the Response built-in
+        // dispatch branch (extracts the 5 fields).
+        assert!(code.contains("let (__status, __ct, __headers, __body, __bbytes)"));
+    }
+
+    #[test]
+    fn v019_block3e_response_with_body_and_null_body_bytes_compiles_ok() {
+        // body_bytes explicitly null + body literal is OK.
+        let code = gen(
+            "@get(\"/x\")\n\
+             fn h() => Response { body: \"hi\", body_bytes: null }\n\
+             @server(3000) fn main() => 0",
+        )
+        .expect("expected build OK with body_bytes null");
+        assert!(code.contains("let (__status, __ct, __headers, __body, __bbytes)"));
     }
 
     #[test]
