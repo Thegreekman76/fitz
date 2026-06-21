@@ -12447,3 +12447,243 @@ fn main() => 0\n\
         bin_name
     );
 }
+
+// ---------------------------------------------------------------------------
+// v0.19.0 Block 3.d — smoke E2E del `Response` built-in (paridad fitz build
+// vs. fitz run validada bit-a-bit a mano en el desarrollo del bloque).
+// Acá probamos que el binario compilado por `fitz build`:
+//   - emite el Content-Type custom + headers + body crudo (text path),
+//   - emite bytes binarios sin JSON-wrap (binary path),
+//   - rechaza la combinación post-middleware + Response built-in con un
+//     mensaje claro citando workarounds.
+// ---------------------------------------------------------------------------
+
+/// Variant de `build_spawn_request_raw_with_headers` que devuelve también
+/// el body crudo en bytes (los helpers existentes devuelven solo headers).
+/// Necesario para verificar binary path donde el body NO es UTF-8 (PDF,
+/// ZIP, imágenes). Construye + spawnea el server, hace la request, mata
+/// el server, parsea la response cruda en `(status, headers_string,
+/// body_bytes)`.
+fn build_spawn_request_raw_full(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+) -> (u16, String, Vec<u8>) {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server did not open port {} within 3s", port);
+    }
+
+    use std::io::{Read, Write};
+    let request = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        method, path, addr
+    );
+    let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok();
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Parse: status line + headers + \r\n\r\n + body (raw bytes).
+    let header_terminator = b"\r\n\r\n";
+    let split_at = buf
+        .windows(4)
+        .position(|w| w == header_terminator)
+        .unwrap_or(buf.len());
+    let headers_bytes = &buf[..split_at];
+    let body_bytes = if split_at + 4 <= buf.len() {
+        buf[split_at + 4..].to_vec()
+    } else {
+        Vec::new()
+    };
+    let headers_string = String::from_utf8_lossy(headers_bytes).into_owned();
+    let status_line = headers_string.lines().next().unwrap_or("").to_string();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    (status, headers_string, body_bytes)
+}
+
+#[test]
+fn v019_block3d_response_text_path_emits_custom_content_type_and_raw_body() {
+    // Smoke text path: el handler retorna `Response { content_type:
+    // "application/rss+xml", body: "<rss/>" }` y el binario compilado
+    // emite Content-Type custom + body XML crudo (sin JSON-wrap), con
+    // headers custom inyectados. Paralelo bit-a-bit a `fitz run`.
+    let src = "\
+@get(\"/feed.rss\")
+fn rss_feed() => Response {
+    content_type: \"application/rss+xml; charset=utf-8\",
+    body: \"<?xml version=\\\"1.0\\\"?><rss/>\",
+}
+
+@get(\"/cached.txt\")
+fn cached() => Response {
+    content_type: \"text/plain\",
+    headers: {\"Cache-Control\": \"public, max-age=3600\", \"X-Custom\": \"smoke\"},
+    body: \"cached payload\",
+}
+
+@server(43919) fn main() => 0
+";
+    // /feed.rss: Content-Type custom + body crudo.
+    let (status_rss, headers_rss, body_rss) =
+        build_spawn_request_raw_full("v019-block3d-text", src, 43919, "GET", "/feed.rss");
+    assert_eq!(status_rss, 200);
+    let headers_lower = headers_rss.to_lowercase();
+    assert!(
+        headers_lower.contains("content-type: application/rss+xml; charset=utf-8"),
+        "headers: {}",
+        headers_rss
+    );
+    let body_str = String::from_utf8_lossy(&body_rss);
+    assert_eq!(
+        body_str, "<?xml version=\"1.0\"?><rss/>",
+        "body XML crudo (sin JSON wrap)"
+    );
+    // /cached.txt: Content-Type text/plain + headers custom.
+    let (status_c, headers_c, body_c) =
+        build_spawn_request_raw_full("v019-block3d-text-cached", src, 43919, "GET", "/cached.txt");
+    assert_eq!(status_c, 200);
+    let headers_c_lower = headers_c.to_lowercase();
+    assert!(
+        headers_c_lower.contains("content-type: text/plain"),
+        "headers: {}",
+        headers_c
+    );
+    assert!(
+        headers_c_lower.contains("cache-control: public, max-age=3600"),
+        "headers: {}",
+        headers_c
+    );
+    assert!(
+        headers_c_lower.contains("x-custom: smoke"),
+        "headers: {}",
+        headers_c
+    );
+    assert_eq!(String::from_utf8_lossy(&body_c), "cached payload");
+}
+
+#[test]
+fn v019_block3d_response_binary_path_emits_bytes_and_content_disposition() {
+    // Smoke binary path: el handler retorna `Response { body_bytes:
+    // bytes("..."), content_type: "application/pdf" }` y el binario
+    // compilado emite los bytes literales (no JSON-wrap del array de
+    // u8) con el Content-Type correcto, headers custom (incluido
+    // Content-Disposition).
+    let src = "\
+@get(\"/pdf-fake\")
+fn pdf_fake() => Response {
+    content_type: \"application/pdf\",
+    body_bytes: bytes(\"%PDF-1.7 (smoke fake PDF body)\"),
+    headers: {\"Content-Disposition\": \"attachment; filename=test.pdf\"},
+}
+
+@server(43920) fn main() => 0
+";
+    let (status, headers, body) =
+        build_spawn_request_raw_full("v019-block3d-binary", src, 43920, "GET", "/pdf-fake");
+    assert_eq!(status, 200);
+    let headers_lower = headers.to_lowercase();
+    assert!(
+        headers_lower.contains("content-type: application/pdf"),
+        "headers: {}",
+        headers
+    );
+    assert!(
+        headers_lower.contains("content-disposition: attachment; filename=test.pdf"),
+        "headers: {}",
+        headers
+    );
+    // Body bytes: el contenido literal de bytes(...) sin coerción JSON.
+    assert_eq!(body, b"%PDF-1.7 (smoke fake PDF body)".to_vec());
+}
+
+#[test]
+fn v019_block3d_response_built_in_with_post_middleware_aborts_build_with_clear_message() {
+    // El codegen rechaza la combinación `Response { ... }` + post
+    // middleware con 2 args con un mensaje claro citando workarounds
+    // (`return <status> { ... }` o remover el middleware). Deuda menor
+    // documentada para iter 2.
+    let src = "\
+fn touch(req: Request, resp: Response) -> Response => resp
+
+@middleware(touch)
+@get(\"/feed.rss\")
+fn rss_feed() -> Response => Response {
+    content_type: \"application/rss+xml\",
+    body: \"<rss/>\",
+}
+
+@server(43921) fn main() => 0
+";
+    let stderr = build_expect_fail("v019-block3d-postmw-reject", src);
+    let stderr_lower = stderr.to_lowercase();
+    assert!(
+        stderr_lower.contains("response") && stderr_lower.contains("post middleware"),
+        "expected error mentioning Response + post middleware, got: {}",
+        stderr
+    );
+    // Mensaje debe citar al menos un workaround.
+    assert!(
+        stderr_lower.contains("return <status>")
+            || stderr_lower.contains("remove the post middleware"),
+        "expected workaround mention, got: {}",
+        stderr
+    );
+}
