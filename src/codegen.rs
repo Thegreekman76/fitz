@@ -5554,6 +5554,38 @@ pub(crate) fn detect_response_builtin_kind(
     ResponseBuiltinKind::None
 }
 
+/// v0.19.0 Block 3.c — canonical defaults for fields of HTTP
+/// built-in types (`Response` for now; `Request` / `File` /
+/// `HttpClientResponse` have all-required fields with no
+/// defaults from the runtime side either). Mirrors the AST
+/// defaults that `evaluator::register_builtins` sets when
+/// creating the `Value::Type` of `Response`. Returns `None` for
+/// any (builtin, field) combination without a canonical default
+/// — the user must supply it (the codegen will reject with the
+/// existing "missing field" error).
+///
+/// Without this, `Response { content_type: "X", body: "Y" }`
+/// aborts the codegen with `missing field status` because the
+/// built-in registration in `pre_register_types` sets each
+/// field's `default` to `None`. The runtime works because the
+/// evaluator inlines defaults via `Value::Type.fields` (with
+/// the AST defaults from `register_builtins`).
+fn builtin_default_for(builtin: &str, field_name: &str) -> Option<Expr> {
+    use crate::ast::Span;
+    if builtin == "Response" {
+        match field_name {
+            "status" => Some(Expr::Int(200, Span::ZERO)),
+            "content_type" => Some(Expr::Str("application/json".into(), Span::ZERO)),
+            "headers" => Some(Expr::Map(vec![], Span::ZERO)),
+            "body" => Some(Expr::Str(String::new(), Span::ZERO)),
+            "body_bytes" => Some(Expr::Null(Span::ZERO)),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
 fn is_const_eval_expr(e: &Expr) -> bool {
     match e {
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::Null(_) => true,
@@ -7855,12 +7887,6 @@ struct HandlerSig {
     /// NOT to be confused with `http_handlers_returning_response`
     /// (the MW.3 path of `return <status> { ... }` →
     /// `__FitzResponse`), which is a different mechanism.
-    ///
-    /// The `#[allow(dead_code)]` is transitional — the field is
-    /// populated by `resolve_handler_signature` in 3.b and
-    /// consumed by `emit_handler_dispatch_and_response` in 3.c.
-    /// Removed once 3.c lands.
-    #[allow(dead_code)]
     response_builtin_kind: ResponseBuiltinKind,
 }
 
@@ -11820,7 +11846,17 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     .map(|r| TypeSigField {
                         name: r.name.clone(),
                         type_: r.type_.clone(),
-                        default: None,
+                        // v0.19.0 Block 3.c — built-ins with optional
+                        // fields need their canonical defaults
+                        // surfaced to the codegen. Otherwise `Response
+                        // { content_type: "X", body: "Y" }` aborts
+                        // with `missing field status` since the
+                        // checker pre-registration of the built-in
+                        // does NOT carry defaults (it only registers
+                        // names+types). Parallel to the defaults that
+                        // `evaluator::register_builtins` sets when
+                        // creating `Value::Type` of `Response`.
+                        default: builtin_default_for(builtin, &r.name),
                         hidden: false,
                     })
                     .collect();
@@ -27985,7 +28021,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // AuthSpec::None`.
         self.emit_auth_check(&sig);
         self.emit_param_coercions(&sig)?;
-        self.emit_handler_dispatch_and_response(&sig);
+        self.emit_handler_dispatch_and_response(&sig)?;
         if observability {
             // Phase 12.3.b.4 — close the async move closure +
             // access log + metrics + close the outer fn.
@@ -28549,6 +28585,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             decorators,
             return_type,
             is_async,
+            body,
             ..
         } = stmt
         else {
@@ -28859,7 +28896,28 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // (Block 3.c) routes Direct / InResultOk to a dedicated branch
         // that emits an axum response with custom content_type /
         // headers / body / body_bytes instead of the default JSON.
-        let response_builtin_kind = detect_response_builtin_kind(&resolved_ret, self.env);
+        let mut response_builtin_kind = detect_response_builtin_kind(&resolved_ret, self.env);
+        // v0.19.0 Block 3.c — inference fallback when the handler
+        // does NOT annotate its return type (the canonical case in
+        // `examples/guide/`: `fn rss() => Response { ... }`).
+        // Without anotation, `return_type` is `None`, `resolved_ret`
+        // defaults to `Type::Null`, and the runtime peek of the
+        // interpreter would still dispatch correctly — but the
+        // codegen needs static info. We consult the `TypeInfo`
+        // populated by the checker for the body's last `Stmt::Return`
+        // and re-run the classifier. Parity with the interpreter
+        // path: handlers that produce a `Response { ... }` literal
+        // as the body's final expression dispatch via Block 3.c's
+        // dedicated branch, regardless of explicit annotation.
+        if matches!(response_builtin_kind, ResponseBuiltinKind::None)
+            && return_type.is_none()
+        {
+            if let Some(Stmt::Return(expr, _)) = body.last() {
+                if let Some(ty) = self.type_info.type_at(expr.span()) {
+                    response_builtin_kind = detect_response_builtin_kind(ty, self.env);
+                }
+            }
+        }
 
         Ok(HandlerSig {
             name: name.clone(),
@@ -29240,12 +29298,28 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     }
 
     /// Call to the original Fitz handler and conversion of the
-    /// result to a response. Three paths: (1) the fn returns
-    /// `__FitzResponse` (custom status codes); (2) the fn
-    /// returns `Result<T, String>`: Ok→200, Err→500; (3) any
-    /// other type: 200 with serialized body. Closes the
-    /// wrapper body with `}\n\n`.
-    fn emit_handler_dispatch_and_response(&mut self, sig: &HandlerSig) {
+    /// result to a response. Four paths:
+    ///   (0) v0.19.0 Block 3.c — `Response` built-in: the handler
+    ///       returns `Response` or `Result<Response>`; the wrapper
+    ///       locks the inner data, validates status + XOR
+    ///       body/body_bytes, and emits an axum response with
+    ///       custom Content-Type / headers / body|body_bytes
+    ///       (parallel bit-by-bit to `response_instance_to_outcome`
+    ///       + `outcome_to_response` in `http.rs`).
+    ///   (1) the fn returns `__FitzResponse` (custom status codes,
+    ///       MW.3 path of `return <status> { ... }`);
+    ///   (2) the fn returns `Result<T, String>`: Ok→200, Err→500;
+    ///   (3) any other type: 200 with serialized body.
+    /// Closes the wrapper body with `}\n\n`.
+    ///
+    /// Returns `Err` if the combination Response built-in + post
+    /// middlewares (`@middleware(post_fn)` of 2 args) is detected
+    /// — combinación de borde MVP, deuda menor documentada para
+    /// iteración 2.
+    fn emit_handler_dispatch_and_response(
+        &mut self,
+        sig: &HandlerSig,
+    ) -> Result<(), FitzError> {
         // Call to the original fn. If the Fitz handler is
         // `async fn`, its Rust signature (`pub async fn`)
         // returns a `Future`; the wrapper awaits on the fly to
@@ -29330,6 +29404,32 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             "None".to_string()
         };
         let has_post_mws = !sig.mw_user_fns_post.is_empty();
+
+        // v0.19.0 Block 3.c — Response built-in dispatch (path 0).
+        // Detected by `sig.response_builtin_kind` (set in
+        // `resolve_handler_signature`, Block 3.b). Direct routes
+        // straight to the dedicated branch; InResultOk wraps it in
+        // a `match __result { Ok(__resp_arc) => ..., Err(__e) =>
+        // ... }` that preserves the existing Err semantics.
+        //
+        // Post middlewares (`@middleware(post_fn)` with 2 args) are
+        // not supported in MVP — the post-mw signature takes a
+        // `__FitzResponse` (JSON-wrapped) which loses the
+        // content_type / body_bytes information of the Response
+        // built-in. Combinación de borde, deuda menor para
+        // iteración 2.
+        if !matches!(sig.response_builtin_kind, ResponseBuiltinKind::None) {
+            if has_post_mws {
+                let msg = format!(
+                    "handler `{}` returns `Response` built-in AND declares post middlewares (`@middleware(fn)` with 2 args); the combination is not supported in MVP because the post-mw signature receives a JSON-wrapped `__FitzResponse` that loses content_type / body_bytes. Workarounds: (a) remove the post middleware, or (b) use `return <status> {{ ... }}` instead of `Response {{ ... }}`.",
+                    sig.name,
+                );
+                return Err(self.err(msg));
+            }
+            self.emit_response_builtin_dispatch(sig, &cors_arg);
+            return Ok(());
+        }
+
         if returns_response {
             self.emit("    let mut __resp: __FitzResponse = __result;\n");
             // Mini-batch P1 (Mw.next codegen) — emit post-mw
@@ -29512,6 +29612,265 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // __handler_<name>(...)`; with the wrap, we first close
         // the closure's async move + emit access log + metrics,
         // and only then close the fn.
+        Ok(())
+    }
+
+    /// v0.19.0 Block 3.c — emits the dedicated dispatch for the
+    /// `Response` built-in. Parallel bit-by-bit to
+    /// `response_instance_to_outcome` + `outcome_to_response` in
+    /// `http.rs`:
+    ///   1. Lock the `Arc<Mutex<ResponseData>>` and extract the 5
+    ///      fields.
+    ///   2. Validate XOR `body` / `body_bytes` (both set → 500 with
+    ///      clear msg).
+    ///   3. Validate status in [100, 1000) (out of range → 500).
+    ///   4. Build axum response: `Body::from(bytes)` if
+    ///      `body_bytes` is Some, else `Body::from(body)`.
+    ///   5. Set Content-Type header from `content_type` (fallback
+    ///      to `application/octet-stream` on parse error, parallel
+    ///      to the runtime).
+    ///   6. Inject custom headers (silently skip invalid name/value
+    ///      pairs, parallel to the runtime).
+    ///   7. Apply CORS headers via `__apply_cors_and_respond`.
+    ///
+    /// Branches on `sig.response_builtin_kind`:
+    ///   - `Direct`: `__result` is `Arc<Mutex<ResponseData>>`
+    ///     directly. Emits the 7-step dispatch inline.
+    ///   - `InResultOk`: `__result` is `Result<Arc<Mutex<...>>,
+    ///     E>`. Emits `match __result { Ok(__resp_arc) => { /*
+    ///     7-step dispatch */ }, Err(__e) => { /* err path */ } }`.
+    ///     The Err path mirrors the existing `returns_result` flow
+    ///     (with or without `err_has_status_field`).
+    ///   - `None`: this helper is never called (the caller checks).
+    fn emit_response_builtin_dispatch(&mut self, sig: &HandlerSig, cors_arg: &str) {
+        match sig.response_builtin_kind {
+            ResponseBuiltinKind::Direct => {
+                self.emit("    let __resp_arc = __result;\n");
+                self.emit_response_builtin_axum_build(cors_arg);
+            }
+            ResponseBuiltinKind::InResultOk => {
+                self.emit("    let __built = match __result {\n");
+                self.emit("        Ok(__resp_arc) => {\n");
+                self.emit_response_builtin_axum_build_inline(8);
+                self.emit("        }\n");
+                if sig.err_has_status_field {
+                    self.emit("        Err(__e) => {\n");
+                    self.emit("            let __raw_status = __e.lock().unwrap().status;\n");
+                    self.emit("            if (100i64..1000i64).contains(&__raw_status) {\n");
+                    self.emit("                let __status_code = axum::http::StatusCode::from_u16(__raw_status as u16)\n");
+                    self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);\n");
+                    self.emit("                (__status_code, axum::Json(__e.__to_fitz_json())).into_response()\n");
+                    self.emit("            } else {\n");
+                    self.emit("                let __msg = format!(\"invalid status code in Err: {} (must be in 100..1000)\", __raw_status);\n");
+                    self.emit("                (\n");
+                    self.emit("                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
+                    self.emit("                    axum::Json(serde_json::json!({\"error\": __msg})),\n");
+                    self.emit("                ).into_response()\n");
+                    self.emit("            }\n");
+                    self.emit("        }\n");
+                } else {
+                    self.emit("        Err(__e) => (\n");
+                    self.emit("            axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
+                    self.emit("            axum::Json(serde_json::json!({\"error\": __e})),\n");
+                    self.emit("        ).into_response(),\n");
+                }
+                self.emit("    };\n");
+                writeln!(
+                    &mut self.output,
+                    "    __apply_cors_and_respond(__built, {})",
+                    cors_arg
+                )
+                .unwrap();
+                self.emit("\n");
+            }
+            ResponseBuiltinKind::None => {
+                // Defensive: should never be called when None.
+                // Caller in `emit_handler_dispatch_and_response`
+                // guards with `if !matches!(...None)`.
+                unreachable!(
+                    "emit_response_builtin_dispatch called with ResponseBuiltinKind::None"
+                );
+            }
+        }
+    }
+
+    /// Emits the 7-step axum response build for the `Response`
+    /// built-in (Direct path: top-level `let __built = ...`).
+    /// Wraps with `__apply_cors_and_respond(__built, cors_arg)`.
+    /// The `__resp_arc` variable must be bound by the caller
+    /// (`let __resp_arc = __result;`).
+    fn emit_response_builtin_axum_build(&mut self, cors_arg: &str) {
+        // Lock the Arc<Mutex<ResponseData>> and extract the 5
+        // fields into local vars so the lock guard drops before
+        // we await/return (paralelo a la convención del codegen
+        // post-F17: lock scope mínimo + clone-out).
+        self.emit("    let (__status, __ct, __headers, __body, __bbytes) = {\n");
+        self.emit("        let __g = __resp_arc.lock().unwrap();\n");
+        self.emit("        (__g.status, __g.content_type.clone(), __g.headers.clone(), __g.body.clone(), __g.body_bytes.clone())\n");
+        self.emit("    };\n");
+        // XOR body/body_bytes + status validation + axum build.
+        self.emit_response_builtin_axum_build_core();
+        writeln!(
+            &mut self.output,
+            "    __apply_cors_and_respond(__built, {})",
+            cors_arg,
+        )
+        .unwrap();
+        self.emit("\n");
+    }
+
+    /// Inline variant for the Ok arm of a `match __result` in
+    /// the InResultOk path. Indents every line with `pad` spaces
+    /// (so the emitted block is nested correctly inside the
+    /// `Ok(__resp_arc) => { ... }` arm). Returns the
+    /// `axum::response::Response` directly (no
+    /// `__apply_cors_and_respond` here — the wrapping is applied
+    /// once at the end of the `let __built = match ...` block).
+    fn emit_response_builtin_axum_build_inline(&mut self, pad: usize) {
+        let p = " ".repeat(pad);
+        writeln!(
+            &mut self.output,
+            "{p}let (__status, __ct, __headers, __body, __bbytes) = {{",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    let __g = __resp_arc.lock().unwrap();",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    (__g.status, __g.content_type.clone(), __g.headers.clone(), __g.body.clone(), __g.body_bytes.clone())",
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{p}}};").unwrap();
+        // Inline core: we cannot reuse the core helper directly
+        // because the indentation differs; emit a compact version
+        // sufficient for the match arm.
+        writeln!(
+            &mut self.output,
+            "{p}if !__body.is_empty() && __bbytes.is_some() {{",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    let __msg = \"Response: both `body` and `body_bytes` are set; specify only one\";",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({{\"error\": __msg}}))).into_response()",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}}} else if !(100i64..1000i64).contains(&__status) {{",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    let __msg = format!(\"invalid status code in Response: {{}} (must be in 100..1000)\", __status);",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({{\"error\": __msg}}))).into_response()",
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{p}}} else {{").unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    let __status_code = axum::http::StatusCode::from_u16(__status as u16).unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    let __body_axum = match __bbytes {{ Some(bs) => axum::body::Body::from(bs), None => axum::body::Body::from(__body) }};",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    let mut __builder = axum::response::Response::builder().status(__status_code);",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    let __ct_value = axum::http::HeaderValue::try_from(__ct.as_str()).unwrap_or_else(|_| axum::http::HeaderValue::from_static(\"application/octet-stream\"));",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    __builder = __builder.header(axum::http::header::CONTENT_TYPE, __ct_value);",
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{p}    {{").unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}        let __hlock = __headers.lock().unwrap();",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}        for (__k, __v) in __hlock.iter() {{",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}            if let Ok(__hn) = axum::http::HeaderName::try_from(__k.as_str()) {{",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}                if let Ok(__hv) = axum::http::HeaderValue::try_from(__v.as_str()) {{",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}                    __builder = __builder.header(__hn, __hv);",
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{p}                }}").unwrap();
+        writeln!(&mut self.output, "{p}            }}").unwrap();
+        writeln!(&mut self.output, "{p}        }}").unwrap();
+        writeln!(&mut self.output, "{p}    }}").unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}    __builder.body(__body_axum).unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({{\"error\": \"failed to build response\"}}))).into_response())",
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{p}}}").unwrap();
+    }
+
+    /// Core of the Direct path: XOR + status range + axum build,
+    /// emitting `let __built = if ... else if ... else { ... };`.
+    /// Caller is responsible for binding `__status`, `__ct`,
+    /// `__headers`, `__body`, `__bbytes` and applying
+    /// `__apply_cors_and_respond(__built, cors_arg)` after.
+    fn emit_response_builtin_axum_build_core(&mut self) {
+        self.emit("    let __built = if !__body.is_empty() && __bbytes.is_some() {\n");
+        self.emit("        let __msg = \"Response: both `body` and `body_bytes` are set; specify only one\";\n");
+        self.emit("        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({\"error\": __msg}))).into_response()\n");
+        self.emit("    } else if !(100i64..1000i64).contains(&__status) {\n");
+        self.emit("        let __msg = format!(\"invalid status code in Response: {} (must be in 100..1000)\", __status);\n");
+        self.emit("        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({\"error\": __msg}))).into_response()\n");
+        self.emit("    } else {\n");
+        self.emit("        let __status_code = axum::http::StatusCode::from_u16(__status as u16).unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);\n");
+        self.emit("        let __body_axum = match __bbytes { Some(bs) => axum::body::Body::from(bs), None => axum::body::Body::from(__body) };\n");
+        self.emit("        let mut __builder = axum::response::Response::builder().status(__status_code);\n");
+        self.emit("        let __ct_value = axum::http::HeaderValue::try_from(__ct.as_str()).unwrap_or_else(|_| axum::http::HeaderValue::from_static(\"application/octet-stream\"));\n");
+        self.emit("        __builder = __builder.header(axum::http::header::CONTENT_TYPE, __ct_value);\n");
+        self.emit("        {\n");
+        self.emit("            let __hlock = __headers.lock().unwrap();\n");
+        self.emit("            for (__k, __v) in __hlock.iter() {\n");
+        self.emit("                if let Ok(__hn) = axum::http::HeaderName::try_from(__k.as_str()) {\n");
+        self.emit("                    if let Ok(__hv) = axum::http::HeaderValue::try_from(__v.as_str()) {\n");
+        self.emit("                        __builder = __builder.header(__hn, __hv);\n");
+        self.emit("                    }\n");
+        self.emit("                }\n");
+        self.emit("            }\n");
+        self.emit("        }\n");
+        self.emit("        __builder.body(__body_axum).unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({\"error\": \"failed to build response\"}))).into_response())\n");
+        self.emit("    };\n");
     }
 
     /// Q.3: if the route declares `cors(...)`, emits the fn
@@ -31021,7 +31380,7 @@ impl __ToFitzJson for RequestData {
 ///   - headers: {}
 ///   - body: ""
 ///   - body_bytes: null
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 #[allow(dead_code)]
 struct ResponseData {
     status: i64,
@@ -31032,6 +31391,20 @@ struct ResponseData {
 }
 #[allow(dead_code)]
 type Response = std::sync::Arc<std::sync::Mutex<ResponseData>>;
+
+impl PartialEq for ResponseData {
+    fn eq(&self, other: &Self) -> bool {
+        // The `headers` field carries Arc<Mutex<...>>; compare by
+        // content (ptr_eq shortcut + lock+deref) parallel to
+        // nominal types emitted by `gen_type_def` (post-F17).
+        self.status == other.status
+            && self.content_type == other.content_type
+            && self.body == other.body
+            && self.body_bytes == other.body_bytes
+            && (std::sync::Arc::ptr_eq(&self.headers, &other.headers)
+                || *self.headers.lock().unwrap() == *other.headers.lock().unwrap())
+    }
+}
 
 impl std::fmt::Display for ResponseData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -48086,6 +48459,163 @@ mod tests {
         assert_eq!(
             detect_response_builtin_kind(&ret, &env),
             ResponseBuiltinKind::Direct,
+        );
+    }
+
+    // ---- v0.19.0 Block 3.c — wrapper dispatch ----
+    //
+    // Tests that the wrapper of an HTTP handler returning `Response`
+    // built-in emits the dedicated branch (Block 3.c) instead of the
+    // legacy JSON dispatch. The emitted Rust must:
+    //   - bind `__resp_arc` to `__result` (Direct) or unwrap via
+    //     `match __result { Ok(__resp_arc) => ..., Err(__e) => ... }`
+    //     (InResultOk),
+    //   - extract the 5 fields under a lock guard,
+    //   - validate XOR body/body_bytes + status range,
+    //   - build the axum response with the user-supplied
+    //     content_type + headers + body|body_bytes,
+    //   - wrap in `__apply_cors_and_respond`.
+    //
+    // Handlers that do NOT return Response built-in must fall through
+    // to the existing JSON path (`__to_fitz_json()`).
+
+    #[test]
+    fn v019_block3c_handler_with_explicit_response_return_emits_dedicated_branch() {
+        // `fn h() -> Response => Response { ... }`: explicit annotation.
+        // The wrapper binds `__resp_arc = __result;` and emits the
+        // axum build inline (Direct path).
+        let code = gen(
+            "@get(\"/feed\")\n\
+             fn h() -> Response => Response { content_type: \"application/rss+xml\", body: \"<rss/>\" }\n\
+             @server(3000) fn main() => 0",
+        )
+        .unwrap();
+        assert!(
+            code.contains("let __resp_arc = __result;"),
+            "missing `let __resp_arc = __result;` in Direct dispatch"
+        );
+        // Lock + extract the 5 fields.
+        assert!(
+            code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            "missing 5-field destructure under lock guard"
+        );
+        // Body branch text/binary (binary wins when body_bytes Some).
+        assert!(
+            code.contains("Some(bs) => axum::body::Body::from(bs)"),
+            "missing binary body branch"
+        );
+        assert!(
+            code.contains("None => axum::body::Body::from(__body)"),
+            "missing text body branch"
+        );
+        // Custom Content-Type header.
+        assert!(
+            code.contains("axum::http::HeaderValue::try_from(__ct.as_str())"),
+            "missing Content-Type from __ct"
+        );
+        // Headers iteration.
+        assert!(
+            code.contains("for (__k, __v) in __hlock.iter()"),
+            "missing headers iteration"
+        );
+        // XOR + status range validations.
+        assert!(
+            code.contains("if !__body.is_empty() && __bbytes.is_some()"),
+            "missing XOR body/body_bytes guard"
+        );
+        assert!(
+            code.contains("else if !(100i64..1000i64).contains(&__status)"),
+            "missing status range guard"
+        );
+        // CORS wrap at the end (cors_arg = None when no `@middleware(cors())`).
+        assert!(
+            code.contains("__apply_cors_and_respond(__built, None)"),
+            "missing __apply_cors_and_respond wrap"
+        );
+    }
+
+    #[test]
+    fn v019_block3c_handler_with_result_response_emits_match_ok_err_branches() {
+        // `fn h() -> Result<Response>`: InResultOk path. The wrapper
+        // emits `let __built = match __result { Ok(__resp_arc) => {
+        // <axum build> } Err(__e) => <500 with err> };`.
+        let code = gen(
+            "@get(\"/feed\")\n\
+             fn h() -> Result<Response> => Ok(Response { content_type: \"application/rss+xml\", body: \"<rss/>\" })\n\
+             @server(3000) fn main() => 0",
+        )
+        .unwrap();
+        assert!(
+            code.contains("let __built = match __result {"),
+            "missing `let __built = match __result {{` in InResultOk dispatch"
+        );
+        assert!(
+            code.contains("Ok(__resp_arc) =>"),
+            "missing Ok(__resp_arc) arm"
+        );
+        // Inline Ok arm extracts the 5 fields under a lock.
+        assert!(
+            code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            "missing 5-field destructure in Ok arm"
+        );
+        // Err arm without `status` field: historical 500 path.
+        assert!(
+            code.contains("Err(__e) => ("),
+            "missing Err(__e) arm (no status field) emits 500 tuple"
+        );
+        assert!(
+            code.contains("axum::http::StatusCode::INTERNAL_SERVER_ERROR,"),
+            "missing 500 status code in Err arm"
+        );
+    }
+
+    #[test]
+    fn v019_block3c_inference_without_annotation_detects_response_from_body_last_return() {
+        // No `-> Response` annotation. The codegen infers from the
+        // body's last `Stmt::Return` by consulting `TypeInfo`. The
+        // wrapper still routes to the Block 3.c branch (parity with
+        // the runtime peek of the interpreter).
+        let code = gen(
+            "@get(\"/feed\")\n\
+             fn h() => Response { content_type: \"application/rss+xml\", body: \"<rss/>\" }\n\
+             @server(3000) fn main() => 0",
+        )
+        .unwrap();
+        // Direct path markers (the inference resolved to Direct).
+        assert!(
+            code.contains("let __resp_arc = __result;"),
+            "inference without annotation must still emit Direct dispatch"
+        );
+        assert!(
+            code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            "inferred dispatch must extract the 5 fields"
+        );
+    }
+
+    #[test]
+    fn v019_block3c_handler_returning_non_response_keeps_default_json_dispatch() {
+        // `fn h() -> Int => 42`: not a Response built-in. The wrapper
+        // must NOT emit the dedicated branch (no `__resp_arc`,
+        // no `(__status, __ct, ...)` destructure). It falls through
+        // to the existing JSON dispatch (`__to_fitz_json()`).
+        let code = gen(
+            "@get(\"/n\")\n\
+             fn h() -> Int => 42\n\
+             @server(3000) fn main() => 0",
+        )
+        .unwrap();
+        assert!(
+            !code.contains("let __resp_arc = __result;"),
+            "non-Response handler must NOT bind __resp_arc"
+        );
+        assert!(
+            !code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            "non-Response handler must NOT extract the 5 fields"
+        );
+        // Sanity: the default JSON dispatch path emits __to_fitz_json.
+        assert!(
+            code.contains("__to_fitz_json()"),
+            "non-Response handler must use the legacy JSON dispatch"
         );
     }
 
