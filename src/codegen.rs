@@ -5503,6 +5503,57 @@ fn err_type_has_status_field(ty: &Type, env: &TypeEnv) -> bool {
         .any(|f| f.name == "status" && matches!(f.type_, Type::Int))
 }
 
+/// v0.19.0 Block 3.b — kind of `Response` built-in in a handler's
+/// return type, used by the wrapper to dispatch to the dedicated
+/// branch (Block 3.c) that emits an axum response with the custom
+/// `content_type` / `headers` / `body` / `body_bytes` instead of
+/// the default JSON path.
+///
+/// Variants:
+///   - `None`: not a Response built-in (default JSON dispatch).
+///   - `Direct`: the handler returns `Response` directly
+///     (`fn h() -> Response`).
+///   - `InResultOk`: the handler returns `Result<Response>` —
+///     the wrapper unwraps Ok and dispatches the inner Response
+///     to the dedicated branch; Err falls through the existing
+///     500/`err_has_status_field` paths to preserve compat with
+///     handlers that return `Result<Response, NominalErr>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponseBuiltinKind {
+    None,
+    Direct,
+    InResultOk,
+}
+
+/// v0.19.0 Block 3.b — returns the `ResponseBuiltinKind` for a
+/// handler's declared return type. Matches `Type::Nominal(id)`
+/// where `env.info(id).name == "Response"`, both directly and
+/// nested inside `Result<Response>` Ok. The check is by the
+/// canonical built-in name; users CANNOT shadow it because the
+/// checker pre-registers `Response` as a built-in in
+/// `register_http_builtin_types` (paralelo a `Request` / `File`
+/// / `HttpClientResponse`).
+pub(crate) fn detect_response_builtin_kind(
+    ret: &Type,
+    env: &TypeEnv,
+) -> ResponseBuiltinKind {
+    fn is_nominal_response(t: &Type, env: &TypeEnv) -> bool {
+        match t {
+            Type::Nominal(id) => env.info(*id).name == "Response",
+            _ => false,
+        }
+    }
+    if is_nominal_response(ret, env) {
+        return ResponseBuiltinKind::Direct;
+    }
+    if let Type::Result { ok, .. } = ret {
+        if is_nominal_response(ok.as_ref(), env) {
+            return ResponseBuiltinKind::InResultOk;
+        }
+    }
+    ResponseBuiltinKind::None
+}
+
 fn is_const_eval_expr(e: &Expr) -> bool {
     match e {
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::Null(_) => true,
@@ -7794,6 +7845,23 @@ struct HandlerSig {
     /// The wrapper emits an early check that returns 404 if the flag
     /// is off (parallel to the interpreter's `dispatch_request`).
     flag_name: Option<String>,
+    /// v0.19.0 Block 3.b — kind of `Response` built-in detected in
+    /// the handler's return type. `None` for the default JSON
+    /// dispatch path; `Direct` or `InResultOk` route to the
+    /// dedicated branch in `emit_handler_dispatch_and_response`
+    /// (Block 3.c) that emits an axum response with custom
+    /// content_type / headers / body / body_bytes.
+    ///
+    /// NOT to be confused with `http_handlers_returning_response`
+    /// (the MW.3 path of `return <status> { ... }` →
+    /// `__FitzResponse`), which is a different mechanism.
+    ///
+    /// The `#[allow(dead_code)]` is transitional — the field is
+    /// populated by `resolve_handler_signature` in 3.b and
+    /// consumed by `emit_handler_dispatch_and_response` in 3.c.
+    /// Removed once 3.c lands.
+    #[allow(dead_code)]
+    response_builtin_kind: ResponseBuiltinKind,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -28786,6 +28854,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             Type::Result { err, .. } => err_type_has_status_field(err, self.env),
             _ => false,
         };
+        // v0.19.0 Block 3.b — detect `Response` built-in in the
+        // return type. The dispatch in `emit_handler_dispatch_and_response`
+        // (Block 3.c) routes Direct / InResultOk to a dedicated branch
+        // that emits an axum response with custom content_type /
+        // headers / body / body_bytes instead of the default JSON.
+        let response_builtin_kind = detect_response_builtin_kind(&resolved_ret, self.env);
 
         Ok(HandlerSig {
             name: name.clone(),
@@ -28808,6 +28882,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             required_roles,
             auth_user_param_name,
             flag_name,
+            response_builtin_kind,
         })
     }
 
@@ -47973,6 +48048,80 @@ mod tests {
         assert!(
             code.contains("Some(bs) => __fitz_fmt_bytes(bs),"),
             "missing __fitz_fmt_bytes call for Some bytes in Display"
+        );
+    }
+
+    // ---- v0.19.0 Block 3.b — detect_response_builtin_kind ----
+    //
+    // Tests of the helper `detect_response_builtin_kind` that
+    // classifies the return type of a handler as None / Direct /
+    // InResultOk. Drives the dispatch branch in
+    // `emit_handler_dispatch_and_response` (Block 3.c).
+
+    /// Helper: builds a minimal `TypeEnv` with the `Response`
+    /// built-in registered (paralelo a how `CheckCtx::new`
+    /// pre-registers HTTP built-ins). Returns the `(env, response_id)`
+    /// for tests to construct `Type::Nominal` referencing the right
+    /// nominal.
+    fn test_env_with_response() -> (TypeEnv, crate::types::TypeId) {
+        // Empty program → run the checker to get a populated env
+        // (which includes the `Response` HTTP built-in).
+        let tokens = tokenize("").expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (env, _types, _defs, _errors) = check_program(&program);
+        // Look up the canonical `Response` nominal id (the
+        // checker pre-registers HTTP built-ins via
+        // `register_http_builtin_types`).
+        let resp_id = env
+            .lookup("Response")
+            .expect("Response built-in nominal must be pre-registered by the checker");
+        (env, resp_id)
+    }
+
+    #[test]
+    fn v019_block3b_detect_direct_response_return_type() {
+        // `fn h() -> Response { ... }` ⇒ Direct.
+        let (env, resp_id) = test_env_with_response();
+        let ret = Type::Nominal(resp_id);
+        assert_eq!(
+            detect_response_builtin_kind(&ret, &env),
+            ResponseBuiltinKind::Direct,
+        );
+    }
+
+    #[test]
+    fn v019_block3b_detect_result_response_ok_returns_in_result_ok() {
+        // `fn h() -> Result<Response> { ... }` ⇒ InResultOk.
+        // Err side is irrelevant for the classification (here Str,
+        // the default). Also tests that the dispatch in 3.c
+        // preserves the Err path through the existing
+        // err_has_status_field machinery.
+        let (env, resp_id) = test_env_with_response();
+        let ret = Type::Result {
+            ok: Box::new(Type::Nominal(resp_id)),
+            err: Box::new(Type::Str),
+        };
+        assert_eq!(
+            detect_response_builtin_kind(&ret, &env),
+            ResponseBuiltinKind::InResultOk,
+        );
+        // Sanity: plain types do NOT classify as Direct/InResultOk.
+        assert_eq!(
+            detect_response_builtin_kind(&Type::Int, &env),
+            ResponseBuiltinKind::None,
+        );
+        assert_eq!(
+            detect_response_builtin_kind(&Type::Str, &env),
+            ResponseBuiltinKind::None,
+        );
+        // Result<Int> is NOT a Response carrier.
+        let result_int = Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Str),
+        };
+        assert_eq!(
+            detect_response_builtin_kind(&result_int, &env),
+            ResponseBuiltinKind::None,
         );
     }
 
