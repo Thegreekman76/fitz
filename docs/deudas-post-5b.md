@@ -4,6 +4,95 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🔴 URGENTE — `spawn(<cross_module_@background_fn>(...))` silent drop (codegen) — 2026-06-22
+
+**Síntoma**: cuando `spawn(...)` recibe un call a una fn `@background`
+**declarada en otro módulo** (importada vía `from foo import bar`), el
+runtime acepta la línea pero **NUNCA invoca la fn**. Sin error, sin
+panic, sin log — silent drop.
+
+**Repro mínimo**:
+
+`worker.fitz`:
+```fitz
+@background
+async fn do_work(monitor_id: Int) -> Null {
+    log.info("worker.start mid={monitor_id}")
+    // ... body
+    return null
+}
+```
+
+`main.fitz`:
+```fitz
+from worker import do_work
+
+@get("/trigger/{id}")
+async fn trigger(id: Int) -> Result<Str> {
+    let _ = spawn(do_work(id))   // ← no dispara `worker.start` en logs
+    return Ok("dispatched")
+}
+```
+
+**Esperado**: `do_work` corre en background, vemos `worker.start` en logs.
+**Real**: no aparece nada. La fn no ejecuta. El `tokio::spawn` interno
+emite la task pero el body de la fn cross-module no se invoca.
+
+**Mismo módulo funciona OK**: si `do_work` se mueve a `main.fitz` (misma
+unidad de compilación que el caller), `spawn(do_work(id))` ejecuta
+normal. El bug está específicamente en el path cross-module.
+
+**Workaround actual**: `.await` directo en lugar de `spawn`. Pierde el
+fire-and-forget — el caller se bloquea hasta que `do_work` termina —
+pero la fn al menos se ejecuta y los logs/efectos aparecen.
+
+```fitz
+// En lugar de:
+let _ = spawn(do_work(id))   // ← no dispara
+// Workaround:
+let _ = do_work(id).await    // ← bloquea pero ejecuta
+```
+
+**Trade-off del workaround**: handler / check loop / scheduler se
+queda bloqueado el tiempo total que tarde la fn. Para fns rápidas (<1s)
+es aceptable; para fns que hacen bulk SMTP / HTTP outbound a múltiples
+recipients puede agregar segundos al response.
+
+**Hipótesis del bug** (sin verificar todavía):
+- Caso (a): el checker resuelve el `@background` marker cross-module
+  pero el codegen NO propaga la fn al spawn point. Posible que el
+  spawn emita un closure que llama una fn vacía / stub porque al
+  resolver el callee no encuentra la implementación importada.
+- Caso (b): el codegen emite `tokio::spawn` con el call correcto, pero
+  el linker drop-ea la fn cross-module por algún path de optimización.
+- Caso (c): el codegen requiere que `@background` esté declarado en el
+  módulo del SPAWN para que la conversión a task funcione. Cross-module
+  el marker `@background` se pierde en el codegen.
+
+**Test mínimo a sumar**: `tests/compile_e2e.rs` con dos archivos —
+`worker.fitz` declarando `@background async fn do_work(...)` con un
+log, y `main.fitz` haciendo `spawn(do_work(...))`. Verificar que el
+log aparece en stdout del binario corrido.
+
+**Hallado durante**: integración real con un proyecto que usa
+`@background` cross-module para bulk SMTP. La fn aparecía en el código
+y compilaba limpio, pero los emails nunca se enviaban. El workaround
+`.await` directo destrabó el flow.
+
+**LSP también afectado**: el LSP de fitz-lsp marca el spawn con error
+`"spawn: fn X is not declared with @background"` en el `import`-er
+module aunque la fn SÍ esté marcada en el origen. False positive
+paralelo al bug del runtime — sugiere que la propagación del
+`@background` marker cross-module es la causa raíz de ambos.
+
+**Por qué urgente**: rompe silenciosamente cualquier proyecto que use
+`@background` cross-module. La feature está documentada en cap 30 de
+la guía como ciudadana de primera, pero solo funciona si la fn vive
+en el archivo del caller. Sin fix, el patrón canónico de "bulk async
+helpers en módulo dedicado" (que es el caso 90% real) no funciona.
+
+---
+
 ## 🟢 `Response { ... }` built-in: 3 bugs del Bloque 3.c detectados en fitzwatch (CERRADO v0.19.1, 2026-06-21)
 
 > **CERRADO ENTERO** en el release v0.19.1 (junio 2026, mismo día
