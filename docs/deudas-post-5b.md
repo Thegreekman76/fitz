@@ -4,6 +4,108 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 LSP false positive: `@auth_provider` cross-module no se resuelve (descubierta 2026-06-23)
+
+> **Descubierta** durante el smoke real del fix v0.19.2 sobre fitzwatch.
+> NO bloquea producción (la build real con `fitz check`/`fitz build`/`fitz run`
+> resuelve correctamente vía W12); afecta solo al developer experience
+> dentro del editor.
+
+**Síntoma**: cuando un módulo importa un `@auth_provider` declarado en
+OTRO módulo (patrón W12 cross-module), el LSP emite el diagnostic:
+
+```
+@authenticated on fn 'X': no `@auth_provider` registered in the program.
+Declare a fn with `@auth_provider\nfn name(headers: Map<Str, Str>) -> Result<User> { ... }`.
+```
+
+aunque el `@auth_provider` SÍ existe en el grafo de imports y el binario
+compila + ejecuta sin issues. Ejemplo canónico en fitzwatch:
+
+```
+// auth.fitz
+@auth_provider
+async fn current_user(headers: Map<Str, Str>) -> Result<User> { ... }
+
+// incidents.fitz
+import auth      // ← el LSP sabe que esto importa el módulo
+
+@authenticated  // ← pero NO encuentra `@auth_provider` cross-module
+@put("/api/incidents/{id}/status")
+async fn update_incident_status(...) -> Result<IncidentUpdated> { ... }
+```
+
+El binario producido por `fitz build` corre OK porque el codegen
+(`src/codegen.rs::collect_module_sigs` + `program_uses_auth`) walka los
+módulos importados y resuelve el provider correctamente. Mismo path
+para `fitz run` en el intérprete (`src/evaluator.rs::register_auth_provider`).
+
+**Causa raíz (probable)**: el pipeline del LSP (`src/lsp.rs::check_source_with_types`)
+corre el checker (`src/types.rs::check_program`) sobre el módulo abierto
+en aislamiento, sin cargar el grafo completo de imports. El checker
+local NO ve el `@auth_provider` declarado en `auth.fitz` y emite el
+diagnostic falso. El codegen y el intérprete sí cargan el grafo entero
+(`ModuleLoader`), por eso la build real anda.
+
+**Casos afectados**:
+
+- `@authenticated` cross-module (caso más común — handler en módulo
+  por feature + provider en `auth.fitz`).
+- `@admin` cross-module (mismo flow, regla extra de role).
+- `@requires("role")` cross-module (Fase 9.w.1.iter2.a — mismo patrón).
+- Probable también: `@ws(...)` + `@authenticated` apilados cuando el
+  provider vive en otro módulo (no validado, pero la patología es la misma).
+
+**Workaround actual**: ignorar el diagnostic del LSP — `fitz check` desde
+CLI (o el smoke real) confirma que no hay error. No hay forma de silenciar
+solo este diagnostic sin perder el resto.
+
+**Plan de fix (estimación ~100-300 LoC + tests)**:
+
+1. **Refactor del LSP pipeline** para cargar el grafo de imports al
+   chequear (`check_source_with_types` debería instanciar un
+   `ModuleLoader` con el `base_dir` del documento abierto, walkear los
+   `Stmt::Import`/`Stmt::FromImport` y resolver módulos transitivos).
+   - Esto ya existe del lado del codegen (`src/codegen.rs::ModuleLoader`).
+     La oportunidad es reutilizar la misma estructura.
+   - Trade-off: el LSP tiene que ser rápido (cada keystroke dispara
+     re-check). Cargar N módulos transitivos por cada cambio puede
+     impactar latencia. Posible mitigación: cache de módulos resueltos
+     con invalidación por modtime + watch sobre los archivos del grafo.
+
+2. **Extender `TypeEnv`/`CheckCtx`** para aceptar un registry de
+   `@auth_provider` resueltos del grafo entero (no solo del módulo
+   actual). Hoy el checker tiene `auth_provider: Option<...>` local;
+   la versión cross-module necesita un slot que se popule desde el
+   loader del LSP antes del walk del módulo abierto.
+
+3. **Tests del LSP** que validen el caso multi-archivo:
+   - `auth.fitz` con `@auth_provider` + `handlers.fitz` con
+     `@authenticated` + `import auth` → check_source debería NO emitir
+     el diagnostic falso.
+   - Variante con `@admin` (regla extra `role: Str`).
+   - Variante con `@requires("role")`.
+
+**Por qué no se ataca ahora**: fix dedicado del repo del LENGUAJE, no
+se mezcla con el commit de fitzwatch que cerró v0.19.2 (otro bug,
+otro contexto). Cuando se ataque, conviene combinarlo con un sweep
+general del LSP pipeline (cross-module también probable deuda para
+`@cron(store=X)` cross-module — ver B20 más abajo, y otros decoradores
+que necesitan visibility cross-archivo).
+
+**Referencias**:
+
+- Reportado en sesión 2026-06-23 durante smoke real del fix v0.19.2
+  sobre fitzwatch (apps multi-módulo).
+- `src/lsp.rs::check_source_with_types`
+- `src/types.rs::check_program` (camino aislado del LSP)
+- `src/codegen.rs::collect_module_sigs` + `program_uses_auth` (path
+  cross-module que sí funciona — referencia de implementación).
+- `src/evaluator.rs::register_auth_provider` (path intérprete que
+  también funciona cross-module).
+
+---
+
 ## 🟢 `spawn(<cross_module_@background_async_fn>(...))` silent drop — **CERRADO v0.19.2 (2026-06-23)**
 
 > **CERRADO** en el release v0.19.2 (mismo día del cierre técnico).
