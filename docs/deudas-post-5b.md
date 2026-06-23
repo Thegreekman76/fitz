@@ -4,6 +4,245 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🔴 URGENTE — `http.request({...headers: Map<Str, Str>, body: Map...})` desde `async fn` rompe Send cuando se llama vía `spawn(...)` (descubierta 2026-06-23)
+
+> **PRIORIDAD MÁXIMA**. Bloquea producción real (fitzwatch.com,
+> deploy 2026-06-23). El refactor planificado para reemplazar
+> `smtp.send` por `http.request` POST a Resend API (workaround del
+> bloqueo SMTP outbound de DigitalOcean) **no se puede aplicar**
+> hasta cerrar esto. Workaround user-land = ninguno: el patrón
+> Map literal en `headers`/`body` es la única forma documentada de
+> pasar headers custom (Authorization Bearer en este caso), y se
+> espera del contrato del builtin que el codegen emita código Send.
+
+### Síntoma (3 errors rustc en `fitz build`)
+
+```text
+error: future cannot be sent between threads safely
+  --> src/checks.rs:353:95
+   |
+353 | = tokio::spawn(async move {
+       notify_subscribers_incident_opened(monitor.clone(), 0i64, ...).await
+     });
+                ^^^^^^^^^^^^^ future created by async block is not `Send`
+   |
+   = help: within `{async block@src/checks.rs:353:...}`, the trait
+           `std::marker::Send` is not implemented for
+           `std::sync::MutexGuard<'_, Vec<(String, String)>>`
+
+note: future is not `Send` as this value is used across an await
+  --> src/subscriptions.rs:384:982
+   |
+384 | ... ((Arc::new(Mutex::new(vec![
+        (String::from("Authorization"), format!("Bearer {}", api_key.clone())),
+        (String::from("Content-Type"), String::from("application/json"))
+       ]))).lock().unwrap().clone()), body_bytes: { ... }, ... }).await ...
+   |       ----------------------------- has type
+                   `MutexGuard<Vec<(String, String)>>` which is not `Send`
+                   ... ^^^^^ await occurs here, with
+                   `(...).lock().unwrap()` maybe used later
+```
+
+3 errors derivados de la misma raíz:
+
+1. `src/checks.rs:353` — `spawn(notify_subscribers_incident_opened(...))` rompe Send.
+2. `src/incidents.rs:332` — `spawn(notify_subscribers_incident_closed(...))` rompe Send.
+3. `src/main.rs:6395` (E0277) — `__handler_subscribe` no implementa `axum::Handler`
+   porque su future (que indirectamente llama a `send_email_to`) deja de ser Send.
+
+### Repro mínima
+
+```fitz
+// modulo: emails.fitz
+async fn send_email(to: Str, api_key: Str) -> Result<Bool> {
+    let resp = http.request({
+        "url": "https://api.example.com/emails",
+        "method": "POST",
+        "headers": {
+            "Authorization": "Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        "body": {
+            "to": to,
+            "subject": "test",
+            "html": "<p>hi</p>"
+        }
+    }).await?
+    return Ok(true)
+}
+
+// modulo: notify.fitz
+from emails import send_email
+
+@background
+async fn notify(to: Str) -> Null {
+    let _ = send_email(to, "re_xxx").await
+    return null
+}
+
+// modulo: main.fitz
+from notify import notify
+
+@get("/test/{to}")
+async fn trigger(to: Str) -> Result<Null> {
+    spawn(notify(to))
+    return Ok(null)
+}
+
+@server(3000)
+fn main() => 0
+```
+
+`fitz build` → `error: future cannot be sent between threads safely` con el
+mismo MutexGuard cross-await que en producción.
+
+### Causa raíz
+
+El codegen, al ver un Map literal `{"Authorization": "Bearer {key}", ...}` en
+el kwarg `headers` (o `body` Map) de `http.request(opts)`, emite:
+
+```rust
+(Arc::new(Mutex::new(vec![
+    (String::from("Authorization"), format!("Bearer {}", api_key.clone())),
+    (String::from("Content-Type"), String::from("application/json"))
+])))
+.lock()             // ← MutexGuard nace acá
+.unwrap()
+.clone()            // ← clone OK pero el guard sigue vivo hasta `;` del stmt
+```
+
+El stmt envolvente es el field assignment del struct literal del request
+(`__FitzHttpRequestOpts { headers: <expr>, body: <expr>, ... }`), y el
+`.await` del request ocurre DENTRO del mismo statement. Resultado: el
+MutexGuard atraviesa el await point → el future generado no es Send →
+`tokio::spawn(...)` rechaza.
+
+El bug **no es de `http.request` per se** — es del patrón general "Map
+literal en kwarg de builtin async dentro de async fn que será spawneada".
+La estructura del codegen para Maps siempre genera `Arc<Mutex<Vec<...>>>`,
+y `.lock().unwrap().clone()` para extraer el valor mantiene el guard vivo.
+
+### Patología análoga (precedente cerrado)
+
+Bug cerrado en **v0.18.1** (cosecha post-fitzwatch sesión 2, 2026-06-20):
+"`for x in <List<Str>>` con `.await` adentro de `@cron` rompe Send" —
+mismo problema raíz (MutexGuard del lock de `List<Str>` cross-await en
+context que después se spawnea). La solución fue extraer el guard a un
+binding intermedio que se dropea antes del await:
+
+```rust
+// Antes (rompía Send):
+for __x in (xs.clone()).lock().unwrap().iter() { ... .await ... }
+
+// Después (Send OK):
+let __snapshot: Vec<_> = (xs.clone()).lock().unwrap().clone();
+for __x in __snapshot.iter() { ... .await ... }
+```
+
+Este bug nuevo es el caso análogo para **Map literal** en kwargs de
+builtin async.
+
+### Fix propuesto del codegen
+
+Cuando el codegen emite código que extrae valor de un `Arc<Mutex<...>>`
+para pasarlo como argumento a una expresión que contiene `.await`, debe
+clonar a una variable local intermedia que termine ANTES del await:
+
+```rust
+// Patrón actual (rompe Send):
+__fitz_http_request(__FitzHttpRequestOpts {
+    headers: (Arc::new(Mutex::new(...))).lock().unwrap().clone(),
+    body: ...
+}).await
+
+// Patrón correcto (Send OK):
+let __headers_snap = {
+    let __h = Arc::new(Mutex::new(vec![...]));
+    let __g = __h.lock().unwrap();
+    __g.clone()
+};   // ← guard se dropea acá
+__fitz_http_request(__FitzHttpRequestOpts {
+    headers: __headers_snap,
+    body: ...
+}).await
+```
+
+El bloque interior `{ let __g = ...; __g.clone() }` garantiza que el
+`MutexGuard` se dropea al cierre del bloque (antes de que la expresión
+participe en el `.await`).
+
+Aplicación: cualquier `Map literal` o `List literal` que se emita como
+argumento de una llamada async (o como field de un struct literal cuyo
+container es argumento de una llamada async). Probable que también aplique
+a `body` Map (no solo `headers`).
+
+### Tests sugeridos al fixear
+
+1. `tests/compile_e2e.rs::http_request_with_headers_map_spawn_compila` —
+   repro mínima de arriba, validar que compila sin errors.
+2. `tests/compile_e2e.rs::http_request_with_body_map_spawn_compila` —
+   mismo pero con body Map heterogéneo en lugar de headers.
+3. `tests/compile_e2e.rs::http_request_anidado_en_async_fn_cross_module_spawn` —
+   variante con `send_email` declarada en módulo importado (matchea
+   fitzwatch real).
+4. Regression sobre el case análogo de `for x in List<Str>` con `.await`
+   en `@cron` (v0.18.1) — asegurar no se rompe.
+
+### Workaround user-land (NO funciona, documentado para claridad)
+
+Probados sin éxito:
+
+- Bindear `let opts = {...}` antes del `http.request(opts)` — el codegen
+  inline-a igual y el guard sigue cross-await.
+- Bindear cada Map por separado (`let headers = {...}; let body = {...}`)
+  — mismo resultado.
+- Construir el body como Str JSON manual + `http.post(url, body_str)` —
+  evita el body Map pero **NO permite headers custom** (Resend exige
+  Authorization Bearer header).
+- Eliminar el spawn del caller y volver a `.await` directo — funciona
+  el build pero pierde fire-and-forget (handler bloquea hasta que la
+  llamada HTTP completa).
+
+**No hay forma de pasar Authorization header custom a Resend sin Map
+literal en `headers` desde Fitz user-land**. Cualquier alternativa
+require que el codegen del lenguaje cierre este bug.
+
+### Impacto en producción
+
+- **fitzwatch (deploy 2026-06-23)**: subscribers públicos persisten en DB
+  pero NO reciben welcome email. La UI dice "Listo! Revisá tu inbox" y
+  el email nunca llega. Misma situación para notify de incidents — los
+  webhooks funcionan, los emails no.
+- **Cualquier proyecto Fitz que necesite HTTP outbound con auth Bearer**
+  (la mayoría de APIs REST modernas) desde un context spawned. Cubre
+  prácticamente todo: Stripe, Twilio, SendGrid, Mailgun, OpenAI, etc.
+- **Trigger del descubrimiento**: bloqueo SMTP outbound de DigitalOcean
+  obligó migrar de `smtp.send` builtin (que NO usa Map literal pesado
+  en spawn — su codegen ya cierra el guard inmediatamente) a
+  `http.request(opts)` REST. Probable que muchos providers tengan
+  bloqueo SMTP por default y este path sea el único viable.
+
+### Referencias del descubrimiento
+
+- Sesión 2026-06-23: deploy de fitzwatch.com en VPS DigitalOcean
+  (droplet shared con citai/syndesi).
+- DigitalOcean bloquea outbound a smtp.resend.com:587/465/2587/2465
+  (confirmado con `nc -zv` — timeout en todos los puertos SMTP, port
+  443 HTTPS OK).
+- Refactor de `subscriptions.fitz::send_email_to` para usar Resend HTTP
+  API REST (`https://api.resend.com/emails`) con Bearer auth → `fitz
+  check` pasa OK pero `fitz build` falla con los 3 errors de arriba.
+
+### Cierre estimado
+
+Fix probable en `src/codegen.rs` — funciones que emiten args para
+builtins async (`gen_http_request_call`, `gen_http_post_call`,
+`gen_smtp_send`, `gen_jwt_encode`, posiblemente otros). Patrón uniforme:
+wrappear `.lock().unwrap().clone()` en bloque que drop el guard. Estimado
+~50-100 LoC + 4 tests E2E. Compatible con la solución de v0.18.1.
+
+---
+
 ## 🟢 LSP false positive: `@auth_provider` cross-module no se resuelve — **CERRADO 2026-06-23**
 
 > **CERRADO** el mismo día del descubrimiento (sesión 2026-06-23, smoke
