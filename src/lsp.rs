@@ -8,8 +8,11 @@
 use crate::ast::{Expr, Program, Span, Stmt};
 use crate::error::FitzError;
 use crate::lexer::tokenize;
-use crate::parser::parse_with_recovery;
-use crate::types::{check_program, DefinitionInfo, Type, TypeEnv, TypeInfo};
+use crate::parser::{parse as parse_strict, parse_with_recovery};
+use crate::types::{
+    check_program, check_with_env, extract_auth_provider_signature, extract_background_fn_names,
+    resolve_program_with_env, DefinitionInfo, Type, TypeEnv, TypeInfo,
+};
 
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, Documentation, Hover,
@@ -43,8 +46,61 @@ pub fn check_source(source: &str) -> Vec<FitzError> {
 ///
 /// If the pipeline aborts before the checker (lexer error), Program
 /// is empty and so are the side-tables.
+///
+/// **Single-file mode**: this entry point does NOT load the import
+/// graph. For a cross-module-aware variant that resolves
+/// `@auth_provider`/`@background` declared in imported `.fitz`
+/// modules, use `check_source_with_types_and_base_dir` (the LSP bin
+/// uses it with the open document's URI).
 pub fn check_source_with_types(
     source: &str,
+) -> (Program, TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
+    check_source_with_types_and_base_dir(source, None)
+}
+
+/// LSP-style pipeline that ALSO walks the import graph of the open
+/// document (single-level, parallel to
+/// `main.rs::pre_scan_imported_auth_provider`/`pre_scan_imported_background_fns`).
+///
+/// **Why**: without this, the LSP runs the checker on the open module
+/// in isolation and emits false positives for cross-module decorators
+/// — `@authenticated`/`@admin`/`@requires("role")` against an
+/// `@auth_provider` declared in `auth.fitz`, or `spawn(<imp_fn>(...))`
+/// against an `@background` fn declared in a sibling module. The
+/// codegen and the interpreter both load the import graph and resolve
+/// these correctly; the LSP needs to do the same to match their
+/// diagnostics.
+///
+/// **Scope**: when `base_dir` is `Some`, walks each `Stmt::Import` /
+/// `Stmt::FromImport` of the open module, resolves the corresponding
+/// `.fitz` file relative to `base_dir`, parses it, extracts the
+/// cross-module signal via
+/// `types::extract_auth_provider_signature` /
+/// `types::extract_background_fn_names`, and feeds it into the
+/// `TypeEnv` via `set_imported_auth_provider` /
+/// `add_imported_background_fns` BEFORE running `check_with_env`. The
+/// checker's existing fallbacks (`collect_auth_provider` /
+/// `collect_background_fns`) then resolve cross-module references
+/// without emitting false positives.
+///
+/// **Error policy**: module read/parse errors are silenced (silent
+/// fallback — parallel to `pre_scan_imported_auth_provider` in
+/// `main.rs`). The LSP's job is to enrich the env, not to validate
+/// imports — that responsibility lives in the codegen/runtime loader.
+///
+/// **Single level of depth**: parallel to W12/B10 in main.rs, this
+/// does NOT recurse into transitive imports. The 90% case
+/// (handler-per-feature + provider in `auth.fitz`) is covered;
+/// transitive resolution lives as documented residual debt.
+///
+/// **Dependencies**: this variant does NOT consult `dep_registry`
+/// (the LSP doesn't have access to the manifest). For LSP users with
+/// path deps from `fitz.toml`, the workaround is to declare imports
+/// with relative paths in the open document. Same limitation as the
+/// existing `resolve_cross_module_definition` / `from_import_completions`.
+pub fn check_source_with_types_and_base_dir(
+    source: &str,
+    base_dir: Option<&std::path::Path>,
 ) -> (Program, TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
     let tokens = match tokenize(source) {
         Ok(t) => t,
@@ -59,9 +115,159 @@ pub fn check_source_with_types(
         }
     };
     let (program, mut errors) = parse_with_recovery(tokens);
-    let (env, type_info, def_info, mut type_errors) = check_program(&program);
-    errors.append(&mut type_errors);
-    (program, env, type_info, def_info, errors)
+
+    // When the caller knows where the open document lives on disk,
+    // pre-scan its direct imports for cross-module `@auth_provider`
+    // and `@background` fns, then enrich the TypeEnv via the same
+    // setters used by `main.rs::check_program_with_pyi_stubs_and_deps`.
+    // Falls back to the single-file path when `base_dir` is `None`
+    // (REPL, unit tests, callers without file context).
+    if let Some(bd) = base_dir {
+        let (mut env, resolve_errors) =
+            resolve_program_with_env(&program, TypeEnv::new(), Vec::new());
+        if let Some(provider) = pre_scan_imported_auth_provider_lsp(&program, bd) {
+            env.set_imported_auth_provider(provider);
+        }
+        let bg_names = pre_scan_imported_background_fns_lsp(&program, bd);
+        if !bg_names.is_empty() {
+            env.add_imported_background_fns(bg_names);
+        }
+        let (env, type_info, def_info, mut type_errors) =
+            check_with_env(&program, env, resolve_errors);
+        errors.append(&mut type_errors);
+        (program, env, type_info, def_info, errors)
+    } else {
+        let (env, type_info, def_info, mut type_errors) = check_program(&program);
+        errors.append(&mut type_errors);
+        (program, env, type_info, def_info, errors)
+    }
+}
+
+/// LSP variant of `main.rs::pre_scan_imported_auth_provider` (W12).
+/// Walks `Stmt::Import` / `Stmt::FromImport`, resolves each module
+/// to a `.fitz` file relative to `base_dir`, parses it strictly
+/// (since the imported module is read off-disk and we only care
+/// about extracting the provider signature — recoverable errors
+/// inside it are not the local checker's concern), and returns the
+/// first `@auth_provider` found.
+///
+/// Returns `None` if no imported module declares a provider OR if
+/// reading/parsing failed silently (deliberate — see
+/// `check_source_with_types_and_base_dir` for the error policy).
+fn pre_scan_imported_auth_provider_lsp(
+    program: &Program,
+    base_dir: &std::path::Path,
+) -> Option<crate::types::ImportedAuthProvider> {
+    for stmt in program {
+        let (path_segments, module_binding_name) = match stmt {
+            Stmt::Import { path, alias, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                let binding = alias
+                    .clone()
+                    .or_else(|| path.last().cloned())
+                    .unwrap_or_default();
+                (path.clone(), binding)
+            }
+            Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                let binding = path.last().cloned().unwrap_or_default();
+                (path.clone(), binding)
+            }
+            _ => continue,
+        };
+        let Some(file_path) = resolve_import_file_path_lsp(&path_segments, base_dir) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(tokens) = tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = parse_strict(tokens) else {
+            continue;
+        };
+        if let Some(provider) =
+            extract_auth_provider_signature(&module_program, &module_binding_name)
+        {
+            return Some(provider);
+        }
+    }
+    None
+}
+
+/// LSP variant of `main.rs::pre_scan_imported_background_fns` (B10).
+/// Walks direct imports and collects the names of top-level `@background`
+/// fns declared in each imported module. Silent fallback on
+/// read/parse errors (same policy as `pre_scan_imported_auth_provider_lsp`).
+fn pre_scan_imported_background_fns_lsp(
+    program: &Program,
+    base_dir: &std::path::Path,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for stmt in program {
+        let path_segments = match stmt {
+            Stmt::Import { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) = resolve_import_file_path_lsp(&path_segments, base_dir) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(tokens) = tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = parse_strict(tokens) else {
+            continue;
+        };
+        out.extend(extract_background_fn_names(&module_program));
+    }
+    out
+}
+
+/// LSP-only resolver: maps the segments of an `import`/`from`
+/// statement to a `.fitz` file path relative to `base_dir`. Mirror
+/// of `main.rs::resolve_import_file_path` minus the `dep_registry`
+/// resolution — the LSP doesn't have access to the project manifest
+/// (parallel to existing `resolve_cross_module_definition` /
+/// `from_import_completions`). Returns `None` if the candidate path
+/// doesn't exist on disk.
+fn resolve_import_file_path_lsp(
+    segments: &[String],
+    base_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if segments.is_empty() {
+        return None;
+    }
+    let mut candidate = base_dir.to_path_buf();
+    for seg in &segments[..segments.len().saturating_sub(1)] {
+        candidate.push(seg);
+    }
+    if let Some(last) = segments.last() {
+        candidate.push(format!("{}.fitz", last));
+    }
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 /// Converts a list of `FitzError` into LSP `Diagnostic`s. Pure
@@ -5781,5 +5987,229 @@ mod tests {
             detail.contains("SMTP_HOST") || detail.contains("env vars"),
             "expected env vars hint in detail, was: {detail}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-module pre-scan: `@auth_provider` / `@background` resolved
+    // through the LSP's `check_source_with_types_and_base_dir`. Cierra
+    // the deuda "LSP false positive: @auth_provider cross-module no se
+    // resuelve" (2026-06-23).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn cross_module_auth_provider_resuelve_via_base_dir_sin_diagnostic_falso() {
+        // Setup: tmpdir with `auth.fitz` declaring `@auth_provider`
+        // + `incidents.fitz` with `@authenticated` handler. Without
+        // base_dir, the checker emits "no `@auth_provider` registered"
+        // (false positive). With base_dir, the pre-scan resolves the
+        // provider cross-module and the diagnostic disappears.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let auth_path = tmp.path().join("auth.fitz");
+        let incidents_path = tmp.path().join("incidents.fitz");
+        std::fs::write(
+            &auth_path,
+            "type User { id: Int, name: Str }\n\
+             @auth_provider\n\
+             async fn current_user(headers: Map<Str, Str>) -> Result<User> {\n\
+                 return Ok(User { id: 1, name: \"alice\" })\n\
+             }\n",
+        )
+        .unwrap();
+        let incidents_src = "from auth import User\n\
+             import auth\n\
+             @authenticated\n\
+             @put(\"/api/incidents/{id}/status\")\n\
+             async fn update_incident(id: Int, user: User) -> Result<Str> {\n\
+                 return Ok(\"updated\")\n\
+             }\n";
+        std::fs::write(&incidents_path, incidents_src).unwrap();
+
+        // Without base_dir: the false positive shows up.
+        let errors_no_base = check_source(incidents_src);
+        assert!(
+            errors_no_base.iter().any(|e| e
+                .message
+                .contains("no `@auth_provider` registered in the program")),
+            "expected `no @auth_provider registered` false positive without base_dir, got: {:?}",
+            errors_no_base
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+
+        // With base_dir: the pre-scan resolves the provider, the
+        // diagnostic disappears.
+        let (_program, _env, _ti, _di, errors_with_base) =
+            check_source_with_types_and_base_dir(incidents_src, Some(tmp.path()));
+        assert!(
+            !errors_with_base.iter().any(|e| e
+                .message
+                .contains("no `@auth_provider` registered in the program")),
+            "expected false positive to disappear with base_dir, got: {:?}",
+            errors_with_base
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cross_module_admin_decorator_resuelve_via_base_dir() {
+        // Variant with `@admin`: the provider needs `role: Str` in
+        // the User type. The pre-scan extracts `has_role_field`
+        // from the source module (via `extract_auth_provider_signature`).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let auth_path = tmp.path().join("auth.fitz");
+        let admin_path = tmp.path().join("admin_handlers.fitz");
+        std::fs::write(
+            &auth_path,
+            "type User { id: Int, role: Str }\n\
+             @auth_provider\n\
+             async fn current_user(headers: Map<Str, Str>) -> Result<User> {\n\
+                 return Ok(User { id: 1, role: \"admin\" })\n\
+             }\n",
+        )
+        .unwrap();
+        let admin_src = "from auth import User\n\
+             import auth\n\
+             @admin\n\
+             @get(\"/api/admin/stats\")\n\
+             async fn stats(user: User) -> Result<Str> {\n\
+                 return Ok(\"ok\")\n\
+             }\n";
+        std::fs::write(&admin_path, admin_src).unwrap();
+
+        let (_program, _env, _ti, _di, errors) =
+            check_source_with_types_and_base_dir(admin_src, Some(tmp.path()));
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.message.contains("no `@auth_provider`")),
+            "expected no false positive for @admin cross-module, got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // The User type does have `role: Str` → `@admin` should
+        // not complain about the missing field either.
+        assert!(
+            !errors.iter().any(|e| e.message.contains("`role: Str`")),
+            "expected `role` check to pass cross-module, got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cross_module_requires_decorator_resuelve_via_base_dir() {
+        // Variant with `@requires("role")` (Phase 9.w.1.iter2.a):
+        // shares the validation logic with `@admin` — requires
+        // `role: Str` in the User type — but expressed with a
+        // configurable arg.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let auth_path = tmp.path().join("auth.fitz");
+        let editor_path = tmp.path().join("editor.fitz");
+        std::fs::write(
+            &auth_path,
+            "type User { id: Int, role: Str }\n\
+             @auth_provider\n\
+             async fn current_user(headers: Map<Str, Str>) -> Result<User> {\n\
+                 return Ok(User { id: 1, role: \"editor\" })\n\
+             }\n",
+        )
+        .unwrap();
+        let editor_src = "from auth import User\n\
+             import auth\n\
+             @requires(\"editor\")\n\
+             @post(\"/api/articles\")\n\
+             async fn create_article(user: User) -> Result<Str> {\n\
+                 return Ok(\"created\")\n\
+             }\n";
+        std::fs::write(&editor_path, editor_src).unwrap();
+
+        let (_program, _env, _ti, _di, errors) =
+            check_source_with_types_and_base_dir(editor_src, Some(tmp.path()));
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.message.contains("no `@auth_provider`")),
+            "expected no false positive for @requires cross-module, got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cross_module_background_spawn_resuelve_via_base_dir() {
+        // Variant with `@background` + `spawn(<imported_fn>(...))`
+        // (B10 / v0.19.2). Without pre-scan: the checker complains
+        // `spawn: fn ... is not declared with @background`. With
+        // pre-scan: the imported `@background` is registered and
+        // the spawn passes the static validation.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worker_path = tmp.path().join("worker.fitz");
+        let main_path = tmp.path().join("main.fitz");
+        std::fs::write(
+            &worker_path,
+            "@background\n\
+             async fn do_work(id: Int) -> Null {\n\
+                 return null\n\
+             }\n",
+        )
+        .unwrap();
+        let main_src = "from worker import do_work\n\
+             async fn trigger() -> Null {\n\
+                 spawn(do_work(42))\n\
+                 return null\n\
+             }\n";
+        std::fs::write(&main_path, main_src).unwrap();
+
+        // Without base_dir: the spawn false positive shows up.
+        let errors_no_base = check_source(main_src);
+        assert!(
+            errors_no_base
+                .iter()
+                .any(|e| e.message.contains("is not declared with `@background`")),
+            "expected `not declared with @background` false positive without base_dir, got: {:?}",
+            errors_no_base
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+
+        // With base_dir: the pre-scan registers the imported
+        // `@background` and the spawn passes.
+        let (_program, _env, _ti, _di, errors_with_base) =
+            check_source_with_types_and_base_dir(main_src, Some(tmp.path()));
+        assert!(
+            !errors_with_base
+                .iter()
+                .any(|e| e.message.contains("is not declared with `@background`")),
+            "expected `@background` false positive to disappear with base_dir, got: {:?}",
+            errors_with_base
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cross_module_pre_scan_silent_fallback_on_missing_module() {
+        // Robustness: if the imported module doesn't exist on disk,
+        // the pre-scan silently skips it (the codegen/runtime loader
+        // owns the "module not found" diagnostic — duplicating it
+        // here would be noise). The local checker still runs and
+        // emits whatever local errors it finds.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = "from no_existe import User\n\
+             let x: Int = 1\n";
+        let (_program, _env, _ti, _di, errors) =
+            check_source_with_types_and_base_dir(src, Some(tmp.path()));
+        // Should NOT panic, should NOT include errors about reading
+        // `no_existe.fitz` from us (silent fallback). Local checker
+        // is allowed to warn about unresolved imports.
+        for e in &errors {
+            assert!(
+                !e.message.contains("error reading no_existe"),
+                "the pre-scan should not surface module read errors, got: {}",
+                e.message
+            );
+        }
     }
 }

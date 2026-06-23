@@ -33,7 +33,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use fitz::ast::Program;
 use fitz::lsp::{
-    check_source_with_types, completion_at_position_with_uri, definition_for_position,
+    check_source_with_types_and_base_dir, completion_at_position_with_uri, definition_for_position,
     fitz_errors_to_diagnostics_with_source, hover_for_position,
     make_definition_location_with_source, make_hover_with_range, resolve_cross_module_definition,
     signature_help_at_position, utf16_to_unicode_char,
@@ -74,8 +74,22 @@ impl Backend {
     /// Runs the LSP-style pipeline over `text`, persists the result
     /// in `documents`, and publishes the diagnostics. Returns
     /// nothing — the notification is fire-and-forget.
+    ///
+    /// Threads the open document's directory as `base_dir` so the
+    /// pipeline can pre-scan direct imports for cross-module
+    /// `@auth_provider` / `@background` (parallel to
+    /// `main.rs::pre_scan_imported_auth_provider`). Without it, the
+    /// LSP would emit false positives like
+    /// `@authenticated on fn 'X': no @auth_provider registered ...`
+    /// for handlers whose provider lives in `auth.fitz`. When the
+    /// URI is not `file://` (rare), falls back to single-file mode.
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
-        let (program, type_env, type_info, def_info, errors) = check_source_with_types(&text);
+        let base_dir = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let (program, type_env, type_info, def_info, errors) =
+            check_source_with_types_and_base_dir(&text, base_dir.as_deref());
         // LSPy — diagnostics with the exact Range of the symbol
         // under the cursor (no 1-char dummy). Requires the source
         // to extract the ident at each position.

@@ -9710,6 +9710,18 @@ Fitz tiene su propio **Language Server Protocol** (LSP) y una
   Pipeline: tokenize → parser tolerante a buffer en construcción
   → type checker. Severity `ERROR`, source `"fitz"` (visible en
   el Problems panel de VSCode).
+  Desde v0.19.3, el pipeline también pre-scanea las imports
+  directas del archivo abierto para resolver decoradores
+  cross-module: `@authenticated`/`@admin`/`@requires("role")`
+  contra un `@auth_provider` declarado en `auth.fitz` (importado
+  vía `import auth` o `from auth import current_user`), y
+  `spawn(<imp_fn>(...))` contra `@background` fns declaradas en
+  módulos hermanos. Paridad bit-a-bit con `fitz check`/`build`/
+  `run` — ya no aparecen falsos positivos del estilo
+  `no @auth_provider registered in the program` en apps
+  multi-archivo. Alcance MVP: un nivel de profundidad (la misma
+  política W12/B10 del CLI); transitive imports queda como deuda
+  refinable si aparece demanda.
 - **Hover con tipos** — pasás el mouse sobre una variable o
   expresión y aparece su tipo en un tooltip (renderizado como
   bloque de código Fitz, con syntax highlighting). El símbolo bajo

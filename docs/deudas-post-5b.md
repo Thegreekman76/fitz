@@ -4,19 +4,23 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🟡 LSP false positive: `@auth_provider` cross-module no se resuelve (descubierta 2026-06-23)
+## 🟢 LSP false positive: `@auth_provider` cross-module no se resuelve — **CERRADO 2026-06-23**
 
-> **Descubierta** durante el smoke real del fix v0.19.2 sobre fitzwatch.
-> NO bloquea producción (la build real con `fitz check`/`fitz build`/`fitz run`
-> resuelve correctamente vía W12); afecta solo al developer experience
-> dentro del editor.
+> **CERRADO** el mismo día del descubrimiento (sesión 2026-06-23, smoke
+> real del fix v0.19.2 sobre fitzwatch). Fix ~280 LoC netos en
+> `src/lsp.rs` + `src/bin/fitz-lsp.rs` + 5 unit tests nuevos en
+> `lsp::tests::cross_module_*`. Sin cambio de comportamiento del
+> lenguaje — el binario producido por `fitz build` / `fitz check` /
+> `fitz run` ya resolvían cross-module via W12 (auth_provider) y B10
+> (background fns); este fix replica esa misma pre-scan en el LSP path
+> que corría aislado.
 
-**Síntoma**: cuando un módulo importa un `@auth_provider` declarado en
-OTRO módulo (patrón W12 cross-module), el LSP emite el diagnostic:
+**Síntoma original (pre-fix)**: cuando un módulo importa un
+`@auth_provider` declarado en OTRO módulo (patrón W12 cross-module), el
+LSP emite el diagnostic:
 
 ```
 @authenticated on fn 'X': no `@auth_provider` registered in the program.
-Declare a fn with `@auth_provider\nfn name(headers: Map<Str, Str>) -> Result<User> { ... }`.
 ```
 
 aunque el `@auth_provider` SÍ existe en el grafo de imports y el binario
@@ -28,81 +32,120 @@ compila + ejecuta sin issues. Ejemplo canónico en fitzwatch:
 async fn current_user(headers: Map<Str, Str>) -> Result<User> { ... }
 
 // incidents.fitz
-import auth      // ← el LSP sabe que esto importa el módulo
+from auth import User
+import auth
 
-@authenticated  // ← pero NO encuentra `@auth_provider` cross-module
+@authenticated  // ← pre-fix: el LSP emitía falso positivo
 @put("/api/incidents/{id}/status")
 async fn update_incident_status(...) -> Result<IncidentUpdated> { ... }
 ```
 
-El binario producido por `fitz build` corre OK porque el codegen
-(`src/codegen.rs::collect_module_sigs` + `program_uses_auth`) walka los
-módulos importados y resuelve el provider correctamente. Mismo path
-para `fitz run` en el intérprete (`src/evaluator.rs::register_auth_provider`).
+**Causa raíz (confirmada)**: `src/lsp.rs::check_source_with_types`
+corría `check_program(&program)` sobre el módulo abierto en aislamiento,
+sin cargar el grafo de imports. El checker local NO veía el
+`@auth_provider` declarado en `auth.fitz` y emitía el diagnostic falso.
+El codegen (`src/codegen.rs::pre_scan_imported_auth_provider_for_loader`)
+y el CLI (`src/main.rs::pre_scan_imported_auth_provider`) sí cargaban
+el grafo entero, por eso la build real andaba.
 
-**Causa raíz (probable)**: el pipeline del LSP (`src/lsp.rs::check_source_with_types`)
-corre el checker (`src/types.rs::check_program`) sobre el módulo abierto
-en aislamiento, sin cargar el grafo completo de imports. El checker
-local NO ve el `@auth_provider` declarado en `auth.fitz` y emite el
-diagnostic falso. El codegen y el intérprete sí cargan el grafo entero
-(`ModuleLoader`), por eso la build real anda.
-
-**Casos afectados**:
+**Casos cerrados con este fix**:
 
 - `@authenticated` cross-module (caso más común — handler en módulo
   por feature + provider en `auth.fitz`).
-- `@admin` cross-module (mismo flow, regla extra de role).
-- `@requires("role")` cross-module (Fase 9.w.1.iter2.a — mismo patrón).
-- Probable también: `@ws(...)` + `@authenticated` apilados cuando el
-  provider vive en otro módulo (no validado, pero la patología es la misma).
+- `@admin` cross-module (mismo flow, regla extra de `role: Str`).
+- `@requires("role")` cross-module (Fase 9.w.1.iter2.a, mismo patrón).
+- `spawn(<imp_fn>(...))` con `@background` cross-module (B10) —
+  el mismo path resolvía esto en el checker pero estaba inaccesible
+  desde el LSP; ahora el LSP lo pre-scanea también.
+- `@ws(...)` + `@authenticated` apilados (mismo path del checker —
+  cubierto por la misma fallback en `collect_auth_provider`).
 
-**Workaround actual**: ignorar el diagnostic del LSP — `fitz check` desde
-CLI (o el smoke real) confirma que no hay error. No hay forma de silenciar
-solo este diagnostic sin perder el resto.
+**Fix aplicado**:
 
-**Plan de fix (estimación ~100-300 LoC + tests)**:
+1. **`src/lsp.rs`** — wrapper nuevo
+   `check_source_with_types_and_base_dir(source, base_dir: Option<&Path>)`
+   con la firma de 5-tupla idéntica a `check_source_with_types`. Cuando
+   `base_dir` es `Some`:
+   - Corre `resolve_program_with_env` para pre-poblar nominales locales.
+   - Helper privado `pre_scan_imported_auth_provider_lsp` walks
+     `Stmt::Import` / `Stmt::FromImport`, resuelve cada módulo a un
+     `.fitz` relativo a `base_dir`, parsea, invoca
+     `types::extract_auth_provider_signature` (la misma API pública
+     usada por W12 en main.rs/codegen.rs) y popula
+     `env.set_imported_auth_provider`.
+   - Helper análogo `pre_scan_imported_background_fns_lsp` invoca
+     `types::extract_background_fn_names` (B10) y popula
+     `env.add_imported_background_fns`.
+   - Llama a `types::check_with_env` con el env enriquecido.
+   - El `check_source_with_types(source)` legacy queda como wrapper
+     que pasa `None` (compat con callers sin file context: REPL,
+     unit tests internos).
+2. **`src/bin/fitz-lsp.rs::check_and_publish`** — deriva `base_dir`
+   del open document via `uri.to_file_path().parent()` y lo pasa al
+   nuevo wrapper. Fallback transparente a single-file mode cuando
+   la URI no es `file://`.
+3. **Política de error**: silent fallback sobre módulos que fallan
+   lectura/parse (paralelo a `pyi_loader::load_stubs` y W12 en
+   main.rs). El LSP enriquece el env; el codegen/runtime loader es
+   quien reporta los errores reales.
+4. **Alcance del MVP**: un nivel de profundidad (sin recursión sobre
+   transitive imports), paralelo a W12/B10. Cubre el 90% del caso
+   (handler-per-feature + provider en `auth.fitz`). No consulta
+   `dep_registry` (el LSP no tiene acceso al manifest, paralelo
+   limitación de `resolve_cross_module_definition` y
+   `from_import_completions`).
 
-1. **Refactor del LSP pipeline** para cargar el grafo de imports al
-   chequear (`check_source_with_types` debería instanciar un
-   `ModuleLoader` con el `base_dir` del documento abierto, walkear los
-   `Stmt::Import`/`Stmt::FromImport` y resolver módulos transitivos).
-   - Esto ya existe del lado del codegen (`src/codegen.rs::ModuleLoader`).
-     La oportunidad es reutilizar la misma estructura.
-   - Trade-off: el LSP tiene que ser rápido (cada keystroke dispara
-     re-check). Cargar N módulos transitivos por cada cambio puede
-     impactar latencia. Posible mitigación: cache de módulos resueltos
-     con invalidación por modtime + watch sobre los archivos del grafo.
+**Tests nuevos** (5, en `lsp::tests::cross_module_*`, feature `lsp`):
 
-2. **Extender `TypeEnv`/`CheckCtx`** para aceptar un registry de
-   `@auth_provider` resueltos del grafo entero (no solo del módulo
-   actual). Hoy el checker tiene `auth_provider: Option<...>` local;
-   la versión cross-module necesita un slot que se popule desde el
-   loader del LSP antes del walk del módulo abierto.
+- `cross_module_auth_provider_resuelve_via_base_dir_sin_diagnostic_falso`
+  — canónico: SIN `base_dir` aparece el falso positivo, CON `base_dir`
+  desaparece.
+- `cross_module_admin_decorator_resuelve_via_base_dir` — variante
+  `@admin` con `role: Str` extraído del módulo origen vía
+  `has_role_field`.
+- `cross_module_requires_decorator_resuelve_via_base_dir` — variante
+  `@requires("role")` (Fase 9.w.1.iter2.a).
+- `cross_module_background_spawn_resuelve_via_base_dir` — variante
+  `@background` + `spawn(<imp>(...))` (B10), confirma que el mismo
+  pipeline cierra ambos diagnostics.
+- `cross_module_pre_scan_silent_fallback_on_missing_module` — robustez:
+  si el módulo importado no existe en disco, el pre-scan skipea
+  silencioso sin contaminar la lista de errores.
 
-3. **Tests del LSP** que validen el caso multi-archivo:
-   - `auth.fitz` con `@auth_provider` + `handlers.fitz` con
-     `@authenticated` + `import auth` → check_source debería NO emitir
-     el diagnostic falso.
-   - Variante con `@admin` (regla extra `role: Str`).
-   - Variante con `@requires("role")`.
+**Verificación pre-bump**: `cargo fmt --all` limpio; `cargo clippy
+--lib --tests --bins --features lsp -- -D warnings` limpio; suite LSP
+completa 131/131 verde; full lib suite 3331/3331 verde.
 
-**Por qué no se ataca ahora**: fix dedicado del repo del LENGUAJE, no
-se mezcla con el commit de fitzwatch que cerró v0.19.2 (otro bug,
-otro contexto). Cuando se ataque, conviene combinarlo con un sweep
-general del LSP pipeline (cross-module también probable deuda para
-`@cron(store=X)` cross-module — ver B20 más abajo, y otros decoradores
-que necesitan visibility cross-archivo).
+**Deudas residuales derivadas** (NO bloquean):
+
+- **Imports transitivos**: si `posts.fitz` importa `lib.fitz` que a
+  su vez importa el provider de `auth.fitz`, el LSP no lo encuentra
+  (recursión un nivel solo). Misma limitación que W12 en main.rs.
+  Refinable si aparece demanda real.
+- **Dep registry**: imports vía `[dependencies]` de `fitz.toml` no
+  resuelven en el LSP (path deps con relative paths sí). Mismo gap
+  que `from_import_completions`. Cuando se cierre, ataca los tres
+  consumidores juntos.
+- **Cache**: cada keystroke re-parsea TODOS los módulos importados
+  del grafo. Acceptable para programas chicos (<10 imports). Si
+  presión real aparece sobre proyectos grandes, agregar cache con
+  invalidación por modtime.
+- **B20 — `@cron(store=X)` cross-module en LSP**: tiene la misma
+  patología (referencia a var declarada en otro módulo). Sale del
+  scope del fix actual — ataque cuando se cierre B20 entero.
 
 **Referencias**:
 
 - Reportado en sesión 2026-06-23 durante smoke real del fix v0.19.2
   sobre fitzwatch (apps multi-módulo).
-- `src/lsp.rs::check_source_with_types`
-- `src/types.rs::check_program` (camino aislado del LSP)
-- `src/codegen.rs::collect_module_sigs` + `program_uses_auth` (path
-  cross-module que sí funciona — referencia de implementación).
-- `src/evaluator.rs::register_auth_provider` (path intérprete que
-  también funciona cross-module).
+- `src/lsp.rs::check_source_with_types_and_base_dir` (entry nuevo).
+- `src/lsp.rs::pre_scan_imported_auth_provider_lsp` /
+  `pre_scan_imported_background_fns_lsp` (helpers nuevos).
+- `src/bin/fitz-lsp.rs::check_and_publish` (consumer del nuevo entry).
+- Paridad con: `src/main.rs::pre_scan_imported_auth_provider` (W12) /
+  `pre_scan_imported_background_fns` (B10).
+- Cap 22 de `docs/guide.md` actualizado con el bullet "Diagnostics
+  en vivo" mencionando la pre-scan cross-module.
 
 ---
 

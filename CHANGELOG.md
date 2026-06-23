@@ -9,6 +9,114 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.19.3] — 2026-06-23 — Bugfix LSP: `@auth_provider` / `@background` cross-module no se resuelven
+
+Bugfix release que cierra una deuda 🟡 descubierta el mismo 2026-06-23
+durante el smoke real del fix v0.19.2 sobre fitzwatch (apps
+multi-módulo). El LSP corría el checker sobre el archivo abierto en
+aislamiento y emitía **falsos positivos** del estilo
+`@authenticated on fn 'X': no @auth_provider registered in the program`
+cuando el provider vivía en otro módulo (patrón W12 cross-module),
+aunque la build real (`fitz check`/`fitz build`/`fitz run`) ya
+resolvía correctamente vía el pre-scan de W12/B10. Misma patología
+también para `spawn(<imp_fn>(...))` contra `@background` declarado en
+módulos hermanos (B10).
+
+**Síntoma original (pre-fix)**: app multi-módulo (provider en
+`auth.fitz`, handlers protegidos en `incidents.fitz` / `posts.fitz`
+con `import auth`) abierta en VSCode mostraba squiggles rojos +
+mensajes `no @auth_provider registered ...` en cada handler decorated.
+El `fitz check` desde la terminal y el binario producido por
+`fitz build` corrían sin errores — la divergencia diagnostic /
+realidad confundía al developer.
+
+**Causa raíz**: `src/lsp.rs::check_source_with_types` llamaba a
+`check_program(&program)` directo, sin cargar el grafo de imports.
+El codegen (`pre_scan_imported_auth_provider_for_loader`) y el CLI
+(`main.rs::pre_scan_imported_auth_provider`) sí cargaban el grafo
+entero — el LSP era el único path aislado.
+
+**Fix** (~280 LoC netos, 4 archivos):
+
+1. **`src/lsp.rs`** — wrapper nuevo
+   `check_source_with_types_and_base_dir(source, base_dir: Option<&Path>)`
+   con firma de 5-tupla idéntica a `check_source_with_types`. Cuando
+   `base_dir` es `Some`, corre `resolve_program_with_env` para
+   pre-poblar nominales locales, pre-scanea las imports directas via
+   nuevos helpers privados `pre_scan_imported_auth_provider_lsp` /
+   `pre_scan_imported_background_fns_lsp` (paralelos bit-a-bit a los
+   de `main.rs`), enriquece el `TypeEnv` via
+   `set_imported_auth_provider` + `add_imported_background_fns`, y
+   llama a `check_with_env`. El `check_source_with_types(source)`
+   legacy queda como wrapper que pasa `None` (compat con REPL +
+   unit tests internos sin file context).
+2. **`src/bin/fitz-lsp.rs`** — `check_and_publish` deriva `base_dir`
+   del open document URI via `uri.to_file_path().parent()` y lo pasa
+   al nuevo wrapper. Fallback transparente a single-file mode cuando
+   la URI no es `file://`.
+3. **`docs/deudas-post-5b.md`** — deuda 🟡 original reescrita como
+   🟢 CERRADO 2026-06-23 con detalle del fix + 5 tests + deudas
+   residuales derivadas (transitive imports un nivel solo, sin
+   `dep_registry`, sin cache de módulos resueltos, B20 cross-module
+   `@cron(store=X)`).
+4. **`docs/guide.md` cap 22** — bullet "Diagnostics en vivo" suma
+   nota sobre la pre-scan cross-module desde v0.19.3, citando los 4
+   patterns cubiertos (auth provider + @admin + @requires +
+   @background+spawn) y la limitación MVP (un nivel de profundidad,
+   paralelo W12/B10).
+
+**5 unit tests nuevos** en `lsp::tests::cross_module_*` (feature `lsp`):
+- `cross_module_auth_provider_resuelve_via_base_dir_sin_diagnostic_falso`
+  — canónico: SIN `base_dir` aparece el falso positivo, CON `base_dir`
+  desaparece.
+- `cross_module_admin_decorator_resuelve_via_base_dir` — `@admin`
+  con `role: Str` extraído del módulo origen vía `has_role_field`.
+- `cross_module_requires_decorator_resuelve_via_base_dir` —
+  `@requires("role")` (Fase 9.w.1.iter2.a).
+- `cross_module_background_spawn_resuelve_via_base_dir` —
+  `@background` + `spawn(<imp>(...))` (B10), mismo pipeline cierra
+  ambos diagnostics.
+- `cross_module_pre_scan_silent_fallback_on_missing_module` —
+  robustez: módulo importado que no existe en disco no contamina
+  errors (el codegen/runtime loader es quien reporta).
+
+**Decisiones técnicas del MVP**:
+- **Política de error**: silent fallback sobre módulos que fallan
+  lectura/parse (paralelo a `pyi_loader::load_stubs` y W12 en
+  main.rs). El LSP enriquece el env; el codegen/runtime loader es
+  quien reporta errores reales — duplicar mensajes sería ruido.
+- **Alcance MVP**: un nivel de profundidad (sin recursión transitiva),
+  paralelo a W12/B10. Cubre el 90% del caso (handler-per-feature +
+  provider en `auth.fitz`).
+- **Sin dep_registry**: el LSP no tiene acceso al manifest
+  (`fitz.toml`); resuelve solo paths relativos (misma limitación
+  que `resolve_cross_module_definition` y `from_import_completions`
+  ya existentes).
+- **Sin cache**: cada keystroke re-parsea los módulos importados.
+  Acceptable para programas chicos (<10 imports). Si presión real
+  aparece sobre proyectos grandes, agregar cache con invalidación
+  por modtime es deuda menor.
+
+**Bonus paralelos en VSCode 0.19.3**: extensión bumpeada (sin cambios
+al grammar TextMate ni al runtime del LSP más allá del fix) +
+`.vsix` regenerado bundleando el `fitz-lsp.exe` fresh con el fix
+incluido. Sin la regeneración, el bundle del `.vsix` de 0.19.2
+quedaba pre-fix y los usuarios que instalan via Marketplace o
+download del release no recibían la corrección.
+
+**Tests al cierre v0.19.3**: 3331 unit lib con feature `lsp` (sin
+cambios numéricos respecto a v0.19.2 — los 5 tests nuevos quedan
+adentro del bloque LSP que ya existía + 1 viejo desplazado). `cargo
+fmt --all --check` + `cargo clippy --lib --tests --bins --features
+lsp -- -D warnings` limpios.
+
+**Próximo norte tras v0.19.3**: ningún ítem crítico abierto.
+Candidatos: transitive imports en el LSP (refinamiento del MVP),
+cache de módulos resueltos para proyectos grandes, integración con
+`dep_registry` para imports declarados en `fitz.toml`. Sin presión
+real al cierre — el feedback de fitzwatch (que disparó tanto v0.19.2
+como v0.19.3) está integrado.
+
 ## [v0.19.2] — 2026-06-23 — Bugfix urgente: `spawn(<cross_module_@background_async_fn>(...))` silent drop
 
 Bugfix release que cierra una deuda 🔴 URGENTE descubierta el
