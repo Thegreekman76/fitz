@@ -9,6 +9,79 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.19.2] — 2026-06-23 — Bugfix urgente: `spawn(<cross_module_@background_async_fn>(...))` silent drop
+
+Bugfix release que cierra una deuda 🔴 URGENTE descubierta el
+2026-06-22 al integrar un proyecto real del autor con bulk SMTP
+outbound vía `@background` cross-module. Sintoma: el handler aceptaba
+`spawn(do_work(id))` donde `do_work` vivía en otro módulo
+(`from worker import do_work`), compilaba limpio, pero la fn nunca
+ejecutaba. Sin error, sin panic, sin log — **silent drop**. Workaround
+temporal: `let _ = do_work(id).await` directo (perdía
+fire-and-forget, bloqueaba el handler).
+
+**Causa raíz**: `collect_module_sigs` (`src/codegen.rs:5561-5566`)
+registraba el `ret` de fns importadas sin envolver en
+`Type::Future(...)` cuando `is_async = true`. `gen_spawn_call` veía
+`sig.ret = Type::Null` (no `Type::Future(Null)`) y emitía
+`tokio::spawn(async move { do_work(id) })` SIN `.await` adentro del
+closure — el `async move {}` construía un Future y lo dropeaba sin
+pollarlo. Mismo módulo funcionaba OK porque `pre_register_fn_signatures`
+ya hacía el wrap (Fase 6.6) — el path cross-module simplemente no
+replicaba esa lógica.
+
+**Fix** (`src/codegen.rs:5536-5570`, ~10 LoC netas): replicar el wrap
+async/Future en `collect_module_sigs`. `Stmt::FnDef` desestructura
+`is_async`, renombra `ret` → `inner_ret`, aplica wrap condicional
+`Type::Future(Box::new(inner_ret))` cuando `is_async`. Paralelo
+bit-a-bit al path local.
+
+**Test E2E nuevo** (`tests/compile_e2e.rs::cross_module_spawn_async_background_emits_await_no_silent_drop`):
+build a 2 archivos (`worker.fitz` + main) + inspección del Rust
+emitido en `target/fitz-build/<stem>/src/main.rs`. Valida que el
+closure contiene `do_work(id).await` y NO bare `do_work(id)`.
+
+**LSP**: el false positive paralelo en LSP (mensaje
+`"spawn: fn X is not declared with @background"` en módulos
+importadores) ya estaba cerrado por **B10** (cosecha post-fitzwatch
+2026-06-19, `extract_background_fn_names` +
+`TypeEnv::add_imported_background_fns`). Ese fix cubría el path del
+checker; v0.19.2 cierra el path del runtime/codegen. Ambos paths
+quedan consistentes.
+
+**Validación sin regresiones** (memoria `feedback_pre_release_verification`):
+- `cargo test --lib --release`: **3200/3200 verde**.
+- `cargo test --test compile_e2e --release smoke_ejemplos_guia_compilables_compilan`:
+  **~370 ejemplos guía+curso+TaskHub verde** (~14 min).
+- `fitz check` sobre los 10 boilerplates (`api-simple`,
+  `api-middleware-cors`, `api-multi-tenant`, `api-postgres-fitz`,
+  `api-postgres-python`, `api-websocket`, `api-orm-full`,
+  `api-orm-full-fullstack`, `api-fullstack-postgres`, `cli-tool`,
+  `taskhub`): **10/10 verde** (api-orm-full + taskhub usan
+  `@background+spawn` en el MISMO módulo, no afectados por el bug;
+  resto sin uso de spawn).
+- `cargo fmt --all --check`: limpio.
+- `cargo clippy --lib --tests --bins -- -D warnings`: limpio.
+- Smoke real bit-a-bit `fitz run` ↔ binario nativo: el log
+  estructurado `{"msg":"worker.start id=42"}` aparece en stderr
+  inmediatamente después del response `200 dispatched` (pre-fix
+  nunca aparecía).
+
+**Bump**: `Cargo.toml` `0.19.1` → `0.19.2` + extensión VSCode `0.19.1`
+→ `0.19.2` (sin cambios de grammar TextMate ni LSP; `.vsix` regenerado
+para mantener paridad de versiones).
+
+**Próximo norte tras v0.19.2**: la deuda 🔴 URGENTE de `@background`
+cross-module queda cerrada entera. fitzwatch (proyecto privado del
+autor) puede destrabar sus flows fire-and-forget de email/webhook
+con la sintaxis canónica `spawn(<imported_fn>(args))` sin workaround
+de `.await`. Ningún otro ítem crítico abierto del stack web — el
+paquete completo (HTTP server + client + WS + auth + SMTP + Response
+built-in + OpenAPI auto + observability + jobs cron/background) cubre
+el caso 99% de proyectos reales.
+
+---
+
 ## [v0.19.1] — 2026-06-21 — Bugfix: 3 bugs del Bloque 3.c (`Response { ... }`) detectados en fitzwatch
 
 Bugfix release del feature `Response { ... }` built-in cerrado en

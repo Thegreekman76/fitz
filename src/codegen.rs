@@ -5537,6 +5537,7 @@ fn collect_module_sigs(
                 name,
                 params,
                 return_type,
+                is_async,
                 ..
             } => {
                 let mut ps: Vec<Type> = Vec::with_capacity(params.len());
@@ -5558,11 +5559,25 @@ fn collect_module_sigs(
                     };
                     ps.push(t);
                 }
-                let ret = match return_type {
+                let inner_ret = match return_type {
                     Some(te) => resolve_type_expr(te, env).map_err(|e| {
                         loader_err(format!("module fn `{}`: return type: {}", name, e.message))
                     })?,
                     None => Type::Null,
+                };
+                // 🔴 URGENT bug fix (2026-06-23) — for cross-module `async
+                // fn`, wrap the registered ret in `Type::Future(...)`,
+                // parallel to what `pre_register_fn_signatures` does for
+                // local fns (Phase 6.6). Without this, `gen_spawn_call`
+                // over an imported `@background async fn` does NOT add
+                // `.await` to the inner call, the closure
+                // `tokio::spawn(async move { do_work(id) })` creates a
+                // Future and drops it without polling → silent drop,
+                // the body never executes.
+                let ret = if *is_async {
+                    Type::Future(Box::new(inner_ret))
+                } else {
+                    inner_ret
                 };
                 let defaults: Vec<Option<Expr>> =
                     params.iter().map(|p| p.default.clone()).collect();

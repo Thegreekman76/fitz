@@ -4,21 +4,25 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🔴 URGENTE — `spawn(<cross_module_@background_fn>(...))` silent drop (codegen) — 2026-06-22
+## 🟢 `spawn(<cross_module_@background_async_fn>(...))` silent drop — **CERRADO v0.19.2 (2026-06-23)**
 
-**Síntoma**: cuando `spawn(...)` recibe un call a una fn `@background`
-**declarada en otro módulo** (importada vía `from foo import bar`), el
-runtime acepta la línea pero **NUNCA invoca la fn**. Sin error, sin
-panic, sin log — silent drop.
+> **CERRADO** en el release v0.19.2 (mismo día del cierre técnico).
+> Fix mínimo (~10 LoC) en `collect_module_sigs` + 1 E2E test nuevo
+> que candea la regresión inspeccionando el Rust emitido. Detalle
+> abajo preservado para referencia futura.
 
-**Repro mínimo**:
+**Síntoma original (pre-fix)**: cuando `spawn(...)` recibía un call a
+una fn `@background` **declarada en otro módulo** (importada vía
+`from foo import bar`), el runtime aceptaba la línea pero **nunca**
+invocaba la fn. Sin error, sin panic, sin log — silent drop.
+
+**Repro mínima validada**:
 
 `worker.fitz`:
 ```fitz
 @background
-async fn do_work(monitor_id: Int) -> Null {
-    log.info("worker.start mid={monitor_id}")
-    // ... body
+async fn do_work(id: Int) -> Null {
+    log.info("worker.start id={id}")
     return null
 }
 ```
@@ -29,67 +33,77 @@ from worker import do_work
 
 @get("/trigger/{id}")
 async fn trigger(id: Int) -> Result<Str> {
-    let _ = spawn(do_work(id))   // ← no dispara `worker.start` en logs
+    let _ = spawn(do_work(id))   // pre-fix: NO disparaba el log
     return Ok("dispatched")
 }
 ```
 
-**Esperado**: `do_work` corre en background, vemos `worker.start` en logs.
-**Real**: no aparece nada. La fn no ejecuta. El `tokio::spawn` interno
-emite la task pero el body de la fn cross-module no se invoca.
+**Causa raíz** (descubierta al inspeccionar el Rust emitido en
+`target/fitz-build/<bin>/src/main.rs`): el closure de `tokio::spawn`
+se emitía SIN `.await`:
 
-**Mismo módulo funciona OK**: si `do_work` se mueve a `main.fitz` (misma
-unidad de compilación que el caller), `spawn(do_work(id))` ejecuta
-normal. El bug está específicamente en el path cross-module.
-
-**Workaround actual**: `.await` directo en lugar de `spawn`. Pierde el
-fire-and-forget — el caller se bloquea hasta que `do_work` termina —
-pero la fn al menos se ejecuta y los logs/efectos aparecen.
-
-```fitz
-// En lugar de:
-let _ = spawn(do_work(id))   // ← no dispara
-// Workaround:
-let _ = do_work(id).await    // ← bloquea pero ejecuta
+```rust
+let __jh = tokio::spawn(async move { do_work(id) }); // ← sin .await
 ```
 
-**Trade-off del workaround**: handler / check loop / scheduler se
-queda bloqueado el tiempo total que tarde la fn. Para fns rápidas (<1s)
-es aceptable; para fns que hacen bulk SMTP / HTTP outbound a múltiples
-recipients puede agregar segundos al response.
+`do_work` es async → `do_work(id)` devuelve un `Pin<Box<dyn Future>>`
+que el `async move {}` envuelve y dropea sin pollar. **Silent drop**.
 
-**Hipótesis del bug** (sin verificar todavía):
-- Caso (a): el checker resuelve el `@background` marker cross-module
-  pero el codegen NO propaga la fn al spawn point. Posible que el
-  spawn emita un closure que llama una fn vacía / stub porque al
-  resolver el callee no encuentra la implementación importada.
-- Caso (b): el codegen emite `tokio::spawn` con el call correcto, pero
-  el linker drop-ea la fn cross-module por algún path de optimización.
-- Caso (c): el codegen requiere que `@background` esté declarado en el
-  módulo del SPAWN para que la conversión a task funcione. Cross-module
-  el marker `@background` se pierde en el codegen.
+**Por qué solo cross-module**: el path local en `pre_register_fn_signatures`
+(Fase 6.6, `src/codegen.rs:12423-12427`) YA envolvía el `ret` en
+`Type::Future(...)` cuando `is_async = true`. El path cross-module en
+`collect_module_sigs` (`src/codegen.rs:5561-5566`) no replicaba ese
+wrap. `gen_spawn_call` decide si emite `.await` con
+`matches!(target_ret, Type::Future(_))` — para cross-module veía
+`sig.ret = Type::Null` (no `Type::Future(Null)`) y omitía el `.await`.
 
-**Test mínimo a sumar**: `tests/compile_e2e.rs` con dos archivos —
-`worker.fitz` declarando `@background async fn do_work(...)` con un
-log, y `main.fitz` haciendo `spawn(do_work(...))`. Verificar que el
-log aparece en stdout del binario corrido.
+**Fix** (`src/codegen.rs:5536-5570`, ~10 LoC netas):
+- `Stmt::FnDef` desestructura `is_async` además de los otros campos.
+- Variable renombrada `ret` → `inner_ret`.
+- Wrap aplicado cuando `is_async = true`:
+  ```rust
+  let ret = if *is_async {
+      Type::Future(Box::new(inner_ret))
+  } else {
+      inner_ret
+  };
+  ```
+- Comment explica el paralelismo con `pre_register_fn_signatures` y
+  el modo en que el bug se manifiesta (silent drop).
 
-**Hallado durante**: integración real con un proyecto que usa
-`@background` cross-module para bulk SMTP. La fn aparecía en el código
-y compilaba limpio, pero los emails nunca se enviaban. El workaround
-`.await` directo destrabó el flow.
+**Test E2E nuevo** (`tests/compile_e2e.rs::cross_module_spawn_async_background_emits_await_no_silent_drop`):
+build a 2 archivos + inspección directa del Rust emitido en
+`<workspace>/target/fitz-build/<stem>/src/main.rs`. Confirma que
+contiene `do_work(id).await` y NO `tokio::spawn(async move { do_work(id) })`
+bare.
 
-**LSP también afectado**: el LSP de fitz-lsp marca el spawn con error
-`"spawn: fn X is not declared with @background"` en el `import`-er
-module aunque la fn SÍ esté marcada en el origen. False positive
-paralelo al bug del runtime — sugiere que la propagación del
-`@background` marker cross-module es la causa raíz de ambos.
+**Smoke real validado bit-a-bit** (curl al binario nativo): el log
+estructurado `{"msg":"worker.start id=42"}` aparece en stderr
+inmediatamente después del response `200 dispatched`. Pre-fix el log
+nunca aparecía.
 
-**Por qué urgente**: rompe silenciosamente cualquier proyecto que use
-`@background` cross-module. La feature está documentada en cap 30 de
-la guía como ciudadana de primera, pero solo funciona si la fn vive
-en el archivo del caller. Sin fix, el patrón canónico de "bulk async
-helpers en módulo dedicado" (que es el caso 90% real) no funciona.
+**Validación sin regresiones**:
+- `cargo test --lib --release` 3200/3200 verde.
+- Smoke `GUIDE_EXAMPLES_COMPILE` ~370 ejemplos guía+curso+TaskHub
+  verde (~14 min).
+- `fitz check` sobre los 10 boilerplates verde.
+- `cargo fmt --all --check` limpio.
+- `cargo clippy --lib --tests --bins -- -D warnings` limpio.
+
+**LSP**: el false positive paralelo en el LSP (mensaje `"spawn: fn X
+is not declared with @background"` en imports) ya estaba cerrado
+por **B10** (sub-paso 5 de la cosecha post-fitzwatch 2026-06-19,
+`extract_background_fn_names` + `TypeEnv::add_imported_background_fns`).
+Ese fix cerró el path del checker; v0.19.2 cierra el path del
+runtime/codegen. Los dos paths reportaban síntomas distintos del
+mismo gap: el checker bloqueaba `fitz check`/`fitz build`, el
+codegen dropeaba silently. Ambos paths quedan paralelos y consistentes.
+
+**Hallado durante**: integración real con un proyecto del autor que
+usaba `@background` cross-module para bulk SMTP. La fn aparecía en
+el código, compilaba limpio, pero los emails nunca se enviaban. El
+workaround temporal era `.await` directo (perdía fire-and-forget,
+bloqueaba el handler) hasta que cerró v0.19.2.
 
 ---
 

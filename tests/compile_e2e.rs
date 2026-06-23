@@ -12142,6 +12142,85 @@ boot().await\n";
     );
 }
 
+/// 🔴 URGENTE (2026-06-23) — `spawn(<imported @background async fn>(args))`
+/// no debe sufrir silent-drop: el `do_work(id)` adentro de
+/// `tokio::spawn(async move { ... })` debe emitirse CON `.await` aunque
+/// la fn target viva en otro módulo. Antes del fix,
+/// `collect_module_sigs` registraba el sig de la fn cross-module sin
+/// envolver el `ret` en `Type::Future(...)` cuando `is_async = true`,
+/// entonces `gen_spawn_call` no agregaba `.await` y el closure
+/// dropeaba el Future sin pollearlo — el body nunca corría, sin error,
+/// sin panic. Mismo módulo funcionaba OK (path local sí wrappeaba).
+#[test]
+fn cross_module_spawn_async_background_emits_await_no_silent_drop() {
+    let stem = "cross_module_spawn_async_background_emits_await";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("worker.fitz"),
+        "@background\n\
+         async fn do_work(id: Int) -> Null {\n  \
+            log.info(\"worker.start id={id}\")\n  \
+            return null\n\
+         }\n",
+    )
+    .expect("escribir worker.fitz");
+
+    let main_src = "from worker import do_work\n\
+\n\
+@get(\"/trigger/{id}\")\n\
+async fn trigger(id: Int) -> Result<Str> {\n  \
+    let _ = spawn(do_work(id))\n  \
+    return Ok(\"dispatched\")\n\
+}\n\
+\n\
+@server(43923)\n\
+fn main() => 0\n";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspect the emitted main.rs to confirm the closure contains
+    // `do_work(id).await` and NOT bare `do_work(id)` (silent drop).
+    // The build emits to `<cwd>/target/fitz-build/<stem>/src/main.rs`
+    // (relative to the cwd of the spawned process — which inherits
+    // from the test runner = workspace root, NOT the .fitz dir).
+    let emitted = std::path::PathBuf::from("target")
+        .join("fitz-build")
+        .join(stem)
+        .join("src")
+        .join("main.rs");
+    let src = std::fs::read_to_string(&emitted).unwrap_or_else(|e| {
+        panic!("read {}: {}", emitted.display(), e);
+    });
+    assert!(
+        src.contains("do_work(id).await"),
+        "expected `do_work(id).await` adentro del tokio::spawn closure, no apareció.\nEmitted main.rs (sample):\n{}",
+        // show only lines that mention do_work
+        src.lines()
+            .filter(|l| l.contains("do_work"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        !src.contains("tokio::spawn(async move { do_work(id) })"),
+        "regression: bare `tokio::spawn(async move {{ do_work(id) }})` SIN `.await` reapareció — silent-drop volvió."
+    );
+}
+
 /// B15 (sub-paso 6 cosecha post-fitzwatch, 2026-06-19) — `fitz build`
 /// pasa cuando `.preload("companion")` se hace sobre una relation
 /// `BelongsToCompanion` cuyo FK en el parent es `Int?` (Nullable).
