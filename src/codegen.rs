@@ -18566,7 +18566,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         ),
                     ));
                 }
-                format!("(({}).lock().unwrap().clone())", c)
+                // 2026-06-23 — 🟢 deuda 🔴 URGENTE de v0.19.3 cerrada:
+                // bind to a local in a block so the `MutexGuard` temp is
+                // dropped at the `;` before the outer struct literal
+                // participates in the surrounding `.await`. The previous
+                // `(expr).lock().unwrap().clone()` kept the guard alive
+                // across the await of `__fitz_http_request_full(...)`,
+                // breaking Send when the caller was a `spawn(async fn)`.
+                // Same root cause as v0.18.1's `for x in List<Str>` fix.
+                format!(
+                    "{{ let __headers_snap: Vec<(String, String)> = ({}).lock().unwrap().clone(); __headers_snap }}",
+                    c
+                )
             }
             None => "Vec::new()".to_string(),
         };
@@ -38708,6 +38719,55 @@ mod tests {
         assert!(
             code.contains("__FitzHttpRequestOpts {"),
             "expected struct literal __FitzHttpRequestOpts in the callsite"
+        );
+    }
+
+    #[test]
+    fn v019_4_http_request_headers_map_emits_snapshot_binding_for_send() {
+        // 2026-06-23 (deuda 🔴 URGENTE de v0.19.3 cerrada): `http.request`
+        // con `headers` Map literal debe emitir un binding intermedio
+        // `let __headers_snap: Vec<(String, String)> = ... .lock().unwrap().clone();`
+        // que dropea el `MutexGuard` ANTES del `.await` del request, para
+        // que el `Future` sea `Send` cuando el caller es `spawn(async fn)`.
+        // El patrón viejo `(...).lock().unwrap().clone()` inline mantenía
+        // el guard vivo cross-await. Análogo al fix de v0.18.1 para
+        // `for x in List<Str>` adentro de `@cron`.
+        let src = "async fn call(u: Str, key: Str) -> Result<Int> {\n\
+                       let r = http.request({\n\
+                           \"method\": \"POST\",\n\
+                           \"url\": u,\n\
+                           \"headers\": {\n\
+                               \"Authorization\": \"Bearer x\",\n\
+                               \"Content-Type\": \"application/json\"\n\
+                           }\n\
+                       }).await?\n\
+                       return Ok(r.status)\n\
+                   }\n";
+        let code = gen(src).expect("codegen ok");
+        assert!(
+            code.contains("let __headers_snap: Vec<(String, String)>"),
+            "expected `let __headers_snap: Vec<(String, String)>` binding that drops the MutexGuard before the await; \
+             without it the future is not Send and `spawn(...)` rejects.\n\
+             Generated code did not contain the binding."
+        );
+        // Regression: the OLD pattern `(({...}).lock().unwrap().clone())`
+        // appearing INSIDE the `__FitzHttpRequestOpts { headers: ... }`
+        // callsite field would mean we kept the guard cross-await.
+        // Anchor to the struct literal callsite (NOT the struct
+        // declaration in the prelude — both contain `headers:`).
+        let callsite_at = code
+            .find("__FitzHttpRequestOpts { method:")
+            .expect("__FitzHttpRequestOpts callsite present");
+        let after = &code[callsite_at..];
+        // The struct literal is on a single line; first 600 chars are
+        // enough to cover all fields.
+        let snippet = &after[..after.len().min(600)];
+        assert!(
+            snippet.contains("headers: { let __headers_snap"),
+            "the `headers` field of `__FitzHttpRequestOpts {{ ... }}` callsite must use the \
+             `__headers_snap` block binding (the guard must be dropped before the await); \
+             snippet was:\n{}",
+            snippet
         );
     }
 

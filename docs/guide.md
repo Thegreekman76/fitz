@@ -7859,6 +7859,39 @@ async fn ping() -> Null {
 }
 ```
 
+**Auth Bearer + `spawn(...)` — patrón canónico** (Stripe / Resend /
+OpenAI / Mailgun / etc.). Desde v0.19.4 el codegen emite el snapshot
+correcto del `headers: Map` para que el future generado sea `Send` y
+`tokio::spawn(...)` lo acepte:
+
+```fitz
+@background
+async fn notify(to: Str, key: Str) -> Null {
+    let _ = http.request({
+        "method": "POST",
+        "url": "https://api.example.com/emails",
+        "headers": {
+            "Authorization": "Bearer {key}",
+            "Content-Type": "application/json"
+        },
+        "body": "<p>hello</p>"
+    }).await
+    return null
+}
+
+@post("/subscribe")
+fn subscribe(input: SubscribeInput) {
+    spawn(notify(input.email, "re_xxx"))
+    return 202 {"status": "queued"}
+}
+```
+
+Pre-fix (≤ v0.19.3), el `MutexGuard` del Map literal de `headers`
+cruzaba el await del request adentro del `spawn(...)` y `fitz build`
+abortaba con `future cannot be sent between threads safely`. Mismo
+patrón análogo al de `for x in List<Str>` con `.await` adentro de
+`@cron` que cerró v0.18.1.
+
 #### Limitaciones del MVP
 
 Documentadas para entender qué SÍ entra al MVP y qué se queda como

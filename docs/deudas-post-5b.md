@@ -4,16 +4,17 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🔴 URGENTE — `http.request({...headers: Map<Str, Str>, body: Map...})` desde `async fn` rompe Send cuando se llama vía `spawn(...)` (descubierta 2026-06-23)
+## 🟢 `http.request({...headers: Map<Str, Str>, body: Map...})` desde `async fn` rompía Send via `spawn(...)` — **CERRADO v0.19.4 (2026-06-23)**
 
-> **PRIORIDAD MÁXIMA**. Bloquea producción real (fitzwatch.com,
-> deploy 2026-06-23). El refactor planificado para reemplazar
-> `smtp.send` por `http.request` POST a Resend API (workaround del
-> bloqueo SMTP outbound de DigitalOcean) **no se puede aplicar**
-> hasta cerrar esto. Workaround user-land = ninguno: el patrón
-> Map literal en `headers`/`body` es la única forma documentada de
-> pasar headers custom (Authorization Bearer en este caso), y se
-> espera del contrato del builtin que el codegen emita código Send.
+> **CERRADO** el mismo día del descubrimiento. Fix mínimo en
+> `src/codegen.rs::gen_http_request_opts` (~10 LoC del format!
+> snippet del field `headers`) + 1 unit test + 4 E2E tests cubriendo
+> los 4 casos sugeridos (headers Map + body Map + cross-module +
+> regression v0.18.1). Sin cambio del contrato del builtin —
+> programas existentes compilan bit-a-bit. fitzwatch deploy
+> 2026-06-23 puede activar el refactor `smtp.send → http.request`
+> Resend REST y destrabar welcome email + incident notify outbound.
+> Detalle abajo preservado para referencia futura.
 
 ### Síntoma (3 errors rustc en `fitz build`)
 
@@ -233,13 +234,77 @@ require que el codegen del lenguaje cierre este bug.
   API REST (`https://api.resend.com/emails`) con Bearer auth → `fitz
   check` pasa OK pero `fitz build` falla con los 3 errors de arriba.
 
-### Cierre estimado
+### Cierre estimado (pre-fix)
 
 Fix probable en `src/codegen.rs` — funciones que emiten args para
 builtins async (`gen_http_request_call`, `gen_http_post_call`,
 `gen_smtp_send`, `gen_jwt_encode`, posiblemente otros). Patrón uniforme:
 wrappear `.lock().unwrap().clone()` en bloque que drop el guard. Estimado
 ~50-100 LoC + 4 tests E2E. Compatible con la solución de v0.18.1.
+
+### Fix aplicado (v0.19.4, 2026-06-23)
+
+Auditoría del codegen reveló que el bug estaba acotado a UN solo sitio:
+`src/codegen.rs::gen_http_request_opts` field `headers` línea 18569. Los
+otros builtins async pasaron auditoría limpia:
+
+- **`gen_smtp_send_opts`** (smtp.send): el opts struct emitido lleva solo
+  fields `Option<String>` (to/from/subject/body_text/body_html). Sin
+  Map. Sin `.lock().unwrap().clone()` inline. ✓
+- **`gen_http_body_marshal` (body Map<Str, Str>)**: `body_code` se pasa
+  como `Arc<Mutex<Vec<...>>>` al helper `__fitz_http_body_from_map_str_str`
+  que toma ownership, lockea internamente y dropea el guard antes de
+  retornar `(Option<Vec<u8>>, Option<&'static str>)`. El guard NO cruza
+  el await. ✓
+- **`gen_http_body_marshal` (Type::Bytes)**: representación es `Vec<u8>`
+  plano (no Arc<Mutex>). `.clone()` produce Vec sin guard. ✓
+- **Resto del codegen del lenguaje**: TODAS las apariciones de
+  `.lock().unwrap().clone()` (1 inline restante en comprehension chain
+  + ~40 en `let __X = ... .clone();` patterns) usan binding intermedio
+  que dropea el guard en el `;`. ✓
+
+**Cambio mínimo del fix**: `format!("(({}).lock().unwrap().clone())", c)`
+→ `format!("{{ let __headers_snap: Vec<(String, String)> = ({}).lock().unwrap().clone(); __headers_snap }}", c)`.
+El `let` statement drop el `MutexGuard` temp en el `;` antes de que el
+block return el `Vec`, mismo patrón que `let __for_snap = xs.lock().
+unwrap().clone();` del fix de v0.18.1 para `for x in List<Str>` adentro
+de `@cron`.
+
+**Tests nuevos**:
+
+- `src/codegen.rs::tests::v019_4_http_request_headers_map_emits_snapshot_binding_for_send`
+  — unit test sobre el snippet emitido en el callsite del struct literal
+  `__FitzHttpRequestOpts { ... }`. Asegura presencia del `let __headers_snap:
+  Vec<(String, String)>` en el field `headers:` del struct.
+- `tests/compile_e2e.rs::v019_4_http_request_with_headers_map_spawn_compila`
+  — repro mínima single-file: `@background async fn` + `http.request`
+  con headers Map literal + handler que hace `spawn(notify(...))`.
+  Pre-fix: `fitz build` abortaba con `MutexGuard<Vec<(String, String)>>
+  not Send`.
+- `tests/compile_e2e.rs::v019_4_http_request_with_body_map_spawn_compila`
+  — mismo case pero con `body` Map<Str, Str>. Asegura que el path del
+  body marshaling (que ya cerraba el guard internamente vía
+  `__fitz_http_body_from_map_str_str`) no introdujo regresión bit-a-bit.
+- `tests/compile_e2e.rs::v019_4_http_request_cross_module_spawn_compila`
+  — variante con `send_email` declarada en módulo importado (matchea
+  el shape real de fitzwatch). Combinación del fix de v0.19.2 (cross-
+  module spawn emite .await) + v0.19.4 (headers Map no rompe Send).
+- `tests/compile_e2e.rs::v019_4_regression_v018_1_for_list_str_await_in_cron_no_send_break`
+  — regression sobre el case análogo de v0.18.1 (`for x in List<Str>`
+  con `.await` en `@cron`). Asegura que el nuevo fix no introduce
+  regresión en el patrón paralelo del for loop.
+
+**Deudas residuales derivadas** (NO bloquean uso real):
+
+- **`body` Map heterogéneo (Map<Str, Any>)**: el path solo soporta
+  `Map<Str, Str>` strict + Instance + Bytes. Heterogéneos requieren
+  `__FitzValue` integration (deuda mayor del codegen, paralelo a
+  `jwt.encode`). Para Resend API, todo el payload (to/subject/html)
+  es Str, así que NO afecta.
+- **`http.request` con `opts` como variable** (no Map literal): el MVP
+  exige Map literal en el callsite para validación estática shape. Pasar
+  `let opts = {...}; http.request(opts)` → error claro de codegen.
+  Refinable si entra demanda real.
 
 ---
 

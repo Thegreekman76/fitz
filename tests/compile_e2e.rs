@@ -12989,3 +12989,164 @@ fn rss_feed() -> Response => Response {
         &[("feed.fitz", feed)],
     );
 }
+
+// ---------------------------------------------------------------------
+// 🟢 v0.19.4 (2026-06-23) — cerró la deuda 🔴 URGENTE de v0.19.3:
+//
+// `http.request({...headers: Map<Str, Str>, body: Map...})` desde
+// `async fn` rompía Send cuando se llamaba vía `spawn(...)`. El
+// codegen del field `headers` emitía `(({Map literal}).lock().unwrap()
+// .clone())` INLINE adentro del struct literal `__FitzHttpRequestOpts {
+// ... }`, manteniendo el `MutexGuard` temporal vivo cross-await. El fix
+// envuelve el clone en un block `{ let __headers_snap: Vec<...> =
+// (...).lock().unwrap().clone(); __headers_snap }` que dropea el guard
+// en el `;` ANTES del await. Mismo patrón análogo a v0.18.1 (`for x in
+// List<Str>` adentro de `@cron`).
+//
+// Patrón canónico de Authorization Bearer header (Stripe, Resend,
+// OpenAI, Mailgun, etc.) vía `http.request` ahora compila desde context
+// que después se spawnea. Trigger del descubrimiento: bloqueo SMTP
+// outbound de DigitalOcean en fitzwatch.com (2026-06-23) obligó migrar
+// el welcome email + incident notify de `smtp.send` a `http.request`
+// REST a Resend API.
+
+#[test]
+fn v019_4_http_request_with_headers_map_spawn_compila() {
+    // Repro mínima de la deuda 🔴 URGENTE: handler HTTP que spawnea
+    // una @background async fn que llama a http.request con headers
+    // Map literal. Antes del fix, `tokio::spawn(...)` rechazaba con
+    // `MutexGuard<Vec<(String, String)>>` not Send.
+    let src = "\
+@background
+async fn notify(to: Str, key: Str) -> Null {
+    let _ = http.request({
+        \"method\": \"POST\",
+        \"url\": \"https://api.example.com/x\",
+        \"headers\": {
+            \"Authorization\": \"Bearer {key}\",
+            \"Content-Type\": \"application/json\"
+        },
+        \"body\": \"hello\"
+    }).await
+    return null
+}
+
+@get(\"/trigger/{to}\")
+async fn trigger(to: Str) -> Result<Null> {
+    spawn(notify(to, \"re_xxx\"))
+    return Ok(null)
+}
+
+@server(43941) fn main() => 0
+";
+    build_expect_ok("v019-4-http-request-headers-map-spawn", src);
+}
+
+#[test]
+fn v019_4_http_request_with_body_map_spawn_compila() {
+    // Mismo case canónico pero con body Map<Str, Str> (el path del
+    // body marshaling pasa por `__fitz_http_body_from_map_str_str` que
+    // ya cierra el guard internamente — este test asegura que sigue
+    // funcionando bit-a-bit incluso después del fix del headers).
+    let src = "\
+@background
+async fn notify(to: Str, key: Str) -> Null {
+    let _ = http.request({
+        \"method\": \"POST\",
+        \"url\": \"https://api.example.com/x\",
+        \"headers\": {
+            \"Authorization\": \"Bearer {key}\"
+        },
+        \"body\": {
+            \"to\": to,
+            \"subject\": \"hola\",
+            \"html\": \"<p>hi</p>\"
+        }
+    }).await
+    return null
+}
+
+@get(\"/notify/{to}\")
+async fn trigger(to: Str) -> Result<Null> {
+    spawn(notify(to, \"re_xxx\"))
+    return Ok(null)
+}
+
+@server(43942) fn main() => 0
+";
+    build_expect_ok("v019-4-http-request-body-map-spawn", src);
+}
+
+#[test]
+fn v019_4_http_request_cross_module_spawn_compila() {
+    // Variante con `send_email` declarada en módulo importado — matchea
+    // el shape real de fitzwatch (handlers en `subscriptions.fitz`,
+    // notify cross-module via `from emails import send_email`).
+    // Combinación de los fixes de v0.19.2 (`spawn(<cross_module>(...))`
+    // emite `.await` cross-module) + v0.19.4 (headers Map literal no
+    // rompe Send).
+    let emails = "\
+async fn send_email(to: Str, key: Str) -> Result<Bool> {
+    let r = http.request({
+        \"method\": \"POST\",
+        \"url\": \"https://api.example.com/emails\",
+        \"headers\": {
+            \"Authorization\": \"Bearer {key}\",
+            \"Content-Type\": \"application/json\"
+        },
+        \"body\": \"<p>hi</p>\"
+    }).await?
+    return Ok(true)
+}
+";
+    let notify = "\
+from emails import send_email
+
+@background
+async fn notify(to: Str) -> Null {
+    let _ = send_email(to, \"re_xxx\").await
+    return null
+}
+";
+    let main = "\
+from notify import notify
+
+@get(\"/test/{to}\")
+async fn trigger(to: Str) -> Result<Null> {
+    spawn(notify(to))
+    return Ok(null)
+}
+
+@server(43943) fn main() => 0
+";
+    let _dir = build_expect_ok_multi(
+        "v019-4-http-request-cross-module-spawn",
+        main,
+        &[("emails.fitz", emails), ("notify.fitz", notify)],
+    );
+}
+
+#[test]
+fn v019_4_regression_v018_1_for_list_str_await_in_cron_no_send_break() {
+    // Regression de v0.18.1: `for x in List<Str>` con `.await` adentro
+    // de `@cron` rompía Send (mismo root cause — MutexGuard cross-await
+    // del lock de `List<Str>`). Cerrado vía snapshot `let __for_snap =
+    // xs.lock().unwrap().clone();` ANTES del for. Este test asegura
+    // que el fix de v0.19.4 (snapshot binding para headers Map en
+    // http.request) no introduce regresión en el path análogo del for
+    // loop.
+    // Programa cron-only: el codegen sintetiza su propio `fn main()` con
+    // signal::ctrl_c().await — no agregamos `fn main()` del usuario para
+    // evitar colisión.
+    let src = "\
+@cron(\"*/10 * * * * *\")
+async fn poll() -> Null {
+    let endpoints = [\"https://a.example.com\", \"https://b.example.com\"]
+    for ep in endpoints {
+        let _ = http.head(ep).await
+    }
+    return null
+}
+";
+    build_expect_ok("v019-4-regression-for-list-str-await-cron", src);
+}

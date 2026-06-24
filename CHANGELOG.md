@@ -9,6 +9,112 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.19.4] — 2026-06-23 — Bugfix codegen: `http.request` con headers Map literal rompía Send en `spawn`
+
+Bugfix release que cierra una deuda 🔴 URGENTE descubierta el mismo
+2026-06-23 durante el deploy real de fitzwatch.com en VPS DigitalOcean.
+El bloqueo SMTP outbound del provider obligó migrar de `smtp.send`
+builtin a `http.request` POST a Resend API REST con Authorization
+Bearer header — el patrón canónico para HTTP outbound auth Bearer
+(Stripe, Resend, OpenAI, Mailgun, etc.). El refactor falla en `fitz
+build` con `MutexGuard<Vec<(String, String)>>` not `Send` cuando el
+caller es `spawn(async fn)`. Mismo root cause que el bug cerrado en
+v0.18.1 (`for x in List<Str>` con `.await` en `@cron`).
+
+**Síntoma original (pre-fix)**: `fitz build` sobre un handler que
+hace `spawn(notify(...))` donde `notify` es `@background async fn`
+que llama `http.request({ headers: { "Authorization": "Bearer x"
+}, ... }).await` aborta con 3 errors rustc del estilo
+`future cannot be sent between threads safely`. El `MutexGuard` del
+lock del Map literal de `headers` cruzaba el await del request porque
+el codegen emitía `.lock().unwrap().clone()` inline adentro del struct
+literal `__FitzHttpRequestOpts { ... }`. El stmt envolvente NO se
+cerraba antes del `.await`.
+
+**Causa raíz**: `src/codegen.rs::gen_http_request_opts` en línea 18569
+emitía el field `headers:` como expresión bare
+`(({Map literal}).lock().unwrap().clone())`. El `MutexGuard` temporal
+vive hasta el `;` del statement enclosing, que en este caso es el
+`async {}` block ENTERO (la struct_lit + await + retorno todo es UNA
+sola expresión). Mismo patrón de v0.18.1 antes del fix.
+
+**Fix** (~10 LoC del format!):
+
+`src/codegen.rs::gen_http_request_opts` cambia:
+
+```rust
+// pre-fix (rompía Send):
+format!("(({}).lock().unwrap().clone())", c)
+```
+
+por:
+
+```rust
+// post-fix (Send OK):
+format!(
+    "{{ let __headers_snap: Vec<(String, String)> = ({}).lock().unwrap().clone(); __headers_snap }}",
+    c
+)
+```
+
+El `let __headers_snap = ...;` dropea el `MutexGuard` temporal en el
+`;` antes de que el block return el clone. El `headers:` field queda
+con un `Vec<(String, String)>` puro — sin guard alive cuando el
+`.await` del request dispara. Mismo patrón análogo al `let __for_snap
+= xs.lock().unwrap().clone();` que cerró v0.18.1.
+
+**Auditoría paralela** (no se detectaron otros sitios afectados):
+
+- **`gen_smtp_send_opts` (smtp.send)**: opts struct lleva solo fields
+  `Option<String>`. Sin Map nested. ✓
+- **`gen_http_body_marshal` (body Map<Str, Str>)**: el helper
+  `__fitz_http_body_from_map_str_str` toma ownership del Arc, lockea
+  internamente y dropea el guard antes de retornar bytes. ✓
+- **`gen_http_body_marshal` (Bytes)**: representación es `Vec<u8>`
+  plano sin Mutex. ✓
+- **Resto del codegen**: las ~40 apariciones restantes de
+  `.lock().unwrap().clone()` usan binding `let __X = ...;` que dropea
+  el guard en el `;`. ✓
+
+**Tests nuevos** (5 — 1 unit + 4 E2E):
+
+- `codegen::tests::v019_4_http_request_headers_map_emits_snapshot_binding_for_send`
+  — unit del codegen: asegura `let __headers_snap: Vec<(String,
+  String)>` presente en el field `headers:` del callsite del struct
+  literal.
+- `compile_e2e::v019_4_http_request_with_headers_map_spawn_compila` —
+  repro mínima single-file: `@background` + `http.request(headers Map)`
+  + handler con `spawn(notify(...))`. Pre-fix: aborta build.
+- `compile_e2e::v019_4_http_request_with_body_map_spawn_compila` —
+  mismo case pero con `body: Map<Str, Str>`. Asegura paridad bit-a-bit
+  (el body Map ya cerraba el guard internamente; este test protege
+  contra regresión).
+- `compile_e2e::v019_4_http_request_cross_module_spawn_compila` —
+  variante con `send_email` declarado en módulo importado. Matchea
+  el shape real de fitzwatch (emails.fitz → notify.fitz → main.fitz).
+  Combinación del fix de v0.19.2 + v0.19.4.
+- `compile_e2e::v019_4_regression_v018_1_for_list_str_await_in_cron_no_send_break`
+  — regression sobre el case análogo de v0.18.1. Asegura que el nuevo
+  fix no introduce regresión en el path paralelo del for loop con
+  `.await`.
+
+**Verificación pre-bump** (zero regresión): `cargo fmt --all --check`
+limpio + `cargo clippy --lib --tests --bins -- -D warnings` limpio +
+`cargo clippy --lib --tests --bins --features lsp -- -D warnings`
+limpio + lib suite 3201/3201 verde + cli_e2e 98/98 verde + openapi_e2e
+3/3 verde + 4 E2E nuevos verde.
+
+**Impacto en producción**: fitzwatch deploy 2026-06-23 puede activar
+el refactor `smtp.send → http.request` Resend REST. Welcome emails +
+incident notify outbound destrabados sin workaround user-land. El
+patrón canónico de HTTP outbound con Authorization Bearer (caso 99% de
+APIs REST modernas) compila desde context spawned.
+
+**Bump Cargo.toml** `0.19.3` → `0.19.4` + extensión VSCode `0.19.3` →
+`0.19.4` + `.vsix` regenerado bundleando el `fitz-lsp.exe` fresh.
+Sin cambios al grammar TextMate ni completion del LSP (bug interno del
+codegen, cero impacto en surface de editing).
+
 ## [v0.19.3] — 2026-06-23 — Bugfix LSP: `@auth_provider` / `@background` cross-module no se resuelven
 
 Bugfix release que cierra una deuda 🟡 descubierta el mismo 2026-06-23

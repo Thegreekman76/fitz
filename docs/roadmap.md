@@ -2,6 +2,26 @@
 
 ---
 
+## v0.19.4 — Bugfix codegen: `http.request` con headers Map literal rompía Send en `spawn` ✅ CERRADO (2026-06-23)
+
+**Hito**: bugfix release que cierra la deuda 🔴 URGENTE descubierta durante el deploy real de fitzwatch.com en VPS DigitalOcean. El bloqueo SMTP outbound del provider obligó migrar de `smtp.send` builtin a `http.request` POST a Resend API REST con Authorization Bearer header — el patrón canónico de HTTP outbound con auth Bearer (Stripe, Resend, OpenAI, Mailgun, etc.). El refactor fallaba con `MutexGuard<Vec<(String, String)>>` not Send cuando el caller era `spawn(async fn)`. Mismo root cause que v0.18.1 (`for x in List<Str>` con `.await` en `@cron`).
+
+**Causa raíz**: `src/codegen.rs::gen_http_request_opts` línea 18569 emitía el field `headers:` como expresión bare `(({Map literal}).lock().unwrap().clone())`. El `MutexGuard` temporal vive hasta el `;` del statement enclosing — en el callsite del struct literal `__FitzHttpRequestOpts { ... }` era el `async {}` block ENTERO (struct_lit + await + retorno todo UNA sola expresión). Resultado: el `MutexGuard` cruzaba el `.await` del request → future no Send → `tokio::spawn(...)` rechazaba.
+
+**Fix** (~10 LoC del format!): cambia `format!("(({}).lock().unwrap().clone())", c)` por `format!("{{ let __headers_snap: Vec<(String, String)> = ({}).lock().unwrap().clone(); __headers_snap }}", c)`. El `let __headers_snap = ...;` dropea el `MutexGuard` temporal en el `;` antes de que el block return el clone. El `headers:` field queda con `Vec<(String, String)>` puro — sin guard alive cuando el `.await` dispara.
+
+**Auditoría paralela** (no se detectaron otros sitios afectados): `gen_smtp_send_opts` opts struct lleva solo fields `Option<String>` sin Map nested; `gen_http_body_marshal` para `body: Map<Str, Str>` el helper `__fitz_http_body_from_map_str_str` toma ownership del Arc, lockea internamente y dropea el guard antes de retornar bytes; `Bytes` body es `Vec<u8>` plano sin Mutex; las ~40 apariciones restantes de `.lock().unwrap().clone()` en el codegen usan binding `let __X = ...;` que dropea el guard en el `;`.
+
+**5 tests nuevos** (1 unit + 4 E2E): `codegen::tests::v019_4_http_request_headers_map_emits_snapshot_binding_for_send` (unit del codegen); `compile_e2e::v019_4_http_request_with_headers_map_spawn_compila` (repro mínima single-file); `compile_e2e::v019_4_http_request_with_body_map_spawn_compila` (paridad bit-a-bit body Map); `compile_e2e::v019_4_http_request_cross_module_spawn_compila` (variante cross-module matchea fitzwatch real); `compile_e2e::v019_4_regression_v018_1_for_list_str_await_in_cron_no_send_break` (regression del case análogo de v0.18.1).
+
+**Tests al cierre v0.19.4**: 3201 lib (+1 nuevo) + 98 cli_e2e + 381 compile_e2e (+4 nuevos `v019_4_*`) + 3 openapi_e2e. fmt + clippy (default + lsp) `-D warnings` limpios. **Verificación pre-bump completa**: lib suite 3201/3201 verde, cli_e2e 98/98 verde, openapi_e2e 3/3 verde, 4 E2E nuevos verde. Bump Cargo.toml `0.19.3` → `0.19.4` + extensión VSCode `0.19.3` → `0.19.4` + `.vsix` regenerado bundleando el `fitz-lsp.exe` fresh.
+
+**Impacto en producción**: fitzwatch deploy 2026-06-23 puede activar el refactor `smtp.send → http.request` Resend REST. Welcome emails + incident notify outbound destrabados sin workaround user-land. El patrón canónico de HTTP outbound con Authorization Bearer (caso 99% de APIs REST modernas) compila desde context spawned.
+
+**Próximo norte tras v0.19.4**: smoke real en fitzwatch (rebuild binario fresh + bump `FITZ_TAG` en `.env` del VPS + `docker compose up -d --build app` + smoke con subscriber test → Resend dashboard "Delivered" + Gmail inbox welcome desde `notifications@fitzwatch.com`). Ningún ítem crítico abierto del stack web.
+
+---
+
 ## v0.19.1 — Bugfix `Response { ... }` built-in: 3 bugs Bloque 3.c detectados en fitzwatch ✅ CERRADO ENTERO (2026-06-21)
 
 **Hito**: bugfix release del feature `Response { ... }` built-in cerrado en v0.19.0. Los 3 bugs solo aparecían al estresar el feature en proyectos reales (cross-module + `?` propagation + auth + DB + WS + observability combinados). El ejemplo oficial `examples/guide/17l-response-custom.fitz` y los 3 E2E `v019_block3d_*` de v0.19.0 seguían verdes — los bugs no estaban cubiertos por la suite.
