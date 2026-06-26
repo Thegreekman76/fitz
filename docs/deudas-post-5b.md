@@ -4,6 +4,209 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🔴 URGENTE — Cross-module `@middleware(fn)` + `Request` no funciona en codegen (descubierto 2026-06-26 en fitzwatch)
+
+> Patología en dos partes — la fn middleware está en módulo A, el
+> `@middleware(fn)` se aplica a un handler en módulo B. Ambas partes
+> rompen `fitz build`. Bloquea el patrón canónico "módulo dedicado a
+> rate limiting / auth / logging que provee middlewares reutilizables
+> cross-module". Workaround user-land posible pero verboso (inline en
+> cada handler) — encarece todo proyecto Fitz con HTTP de producción.
+
+### Síntoma 1 — Codegen rechaza fn middleware cross-module con `return <status>`
+
+Cuando una fn vive en módulo `rate_limit.fitz` con shape:
+
+```fitz
+async fn rate_limit_strict(req: Request) {
+    match check_rate_limit(req, "auth", 10).await {
+        Ok(_) => return null,
+        Err(_) => return 429 { "error": "rate limit exceeded" },
+    }
+}
+```
+
+…y se importa + aplica desde otro módulo:
+
+```fitz
+from rate_limit import rate_limit_strict
+
+@middleware(rate_limit_strict)
+@post("/auth/login")
+async fn login(...) -> Result<...> { ... }
+```
+
+`fitz build` (NO `fitz check`) aborta con:
+
+```
+✗ codegen: Error — module `rate_limit` has type errors:
+  `return <status> { ... }` is only allowed inside an HTTP handler
+  (`@get`/`@post`/`@put`/`@delete`) or a fn applied as `@middleware(...)`
+```
+
+El checker pasa limpio porque ve la fn como middleware-aplicable; el
+codegen aplica la regla "return status solo en handler/middleware del
+mismo crate root", y al procesar `rate_limit.fitz` aislado, no ve el
+`@middleware(rate_limit_strict)` que vive en `auth.fitz`.
+
+### Síntoma 2 — Codegen NO emite `Request`/`RequestData` en módulos importados
+
+Una vez workaround-eado el síntoma 1 (mover la fn middleware al
+mismo módulo del handler), si la fn middleware llama a otra fn del
+módulo origen que recibe `req: Request`:
+
+```fitz
+// rate_limit.fitz
+fn get_client_ip(req: Request) -> Str { ... }
+fn locale_from_req(req: Request) -> Str { ... }
+```
+
+`fitz build` aborta con docena de errores rustc:
+
+```
+error[E0425]: cannot find type `Request` in this scope
+   --> src/auth.rs:692:34
+error[E0422]: cannot find struct, variant or union type `RequestData` in this scope
+   --> src/rate_limit.rs:XX:YY
+```
+
+El codegen emite la struct `Request` + alias en `main.rs` cuando ve
+`@middleware` aplicado a algún handler, pero NO emite el `use crate::
+{Request, RequestData}` en los `.rs` de módulos importados que
+referencian el tipo. Tampoco emite la struct en esos módulos.
+
+### Repro mínima
+
+`a.fitz`:
+```fitz
+fn check_x(req: Request) -> Str {
+    return "ok"
+}
+
+async fn mw_strict(req: Request) {
+    return null
+}
+```
+
+`main.fitz`:
+```fitz
+from a import mw_strict
+
+@server(3000)
+fn main() => 0
+
+@middleware(mw_strict)
+@get("/")
+fn h() -> Str => "hello"
+```
+
+`fitz check` → verde. `fitz build` → falla con uno de los dos
+síntomas según orden de procesamiento.
+
+### Por qué bloquea fitzwatch / cualquier SaaS Fitz real
+
+El patrón canónico de un SaaS HTTP es:
+1. Un módulo `rate_limit.fitz` / `cors.fitz` / `audit.fitz` que
+   define los middlewares.
+2. Handlers en varios módulos (`auth.fitz`, `api.fitz`, etc.) que
+   aplican `@middleware(fn)`.
+
+Hoy ninguna pieza de eso compila. fitzwatch tuvo que:
+- Mover el shape `fn(req: Request) -> ...` al **mismo módulo** del
+  handler (duplicación de `get_client_ip` + `locale_from_req` en 2
+  módulos consumidores) — mitigaba síntoma 2.
+- Pero el síntoma 1 seguía vivo: el codegen rechazó las fns con
+  `return 429 {...}` definidas en `rate_limit.fitz` aunque solo
+  iban a usarse como middleware cross-module.
+
+Workaround final: **abandonar `@middleware` cross-module** y agregar
+el check inline en cada handler usando `@header(name="X-Real-IP")` +
+`@header(name="X-Forwarded-For")` + un helper que recibe `Str?, Str?`
+(sin tipo `Request`). Cuesta ~6 líneas de boilerplate por endpoint
+sensible × 7 endpoints = ~42 LoC duplicadas en fitzwatch.
+
+### Causa raíz (hipótesis del codegen)
+
+Análoga al W18 (cross-module observability, ya cerrado): cuando
+`@middleware` activa la emisión de built-ins (`Request`, `RequestData`,
+`__FitzResponse` para los status returns), el codegen los emite en
+**main.rs** y agrega `use crate::{...}` solo donde explícitamente sabe
+que se usan. Los módulos importados que también los referencian
+quedan sin import.
+
+Paralela también al W12 / W17 / B10 — toda la familia "el codegen
+procesa cada módulo aisladamente y no propaga decoradores / built-ins
+asociados cross-module".
+
+### Fix propuesto del codegen
+
+1. **Pre-scan cross-module de `@middleware` referenciado**: cuando el
+   codegen ve `@middleware(foo)` aplicado a un handler en módulo X,
+   resolver el módulo de origen de `foo` y marcar ese módulo como
+   `uses_middleware = true`. La regla "return status solo en
+   handler/middleware del mismo crate root" se relaja a "en handler
+   o en fn que está marcada como middleware (sea local o referenciada
+   cross-module)".
+
+2. **Emisión condicional de `Request` + `use crate::{...}` en módulos
+   hijos** (paralelo a W18 / W11 / W16): si `uses_middleware = true`,
+   emitir `use crate::{Request, RequestData}` al tope del `.rs` del
+   módulo + las helper fns siguen siendo accesibles.
+
+3. **Tests E2E nuevos** en `tests/compile_e2e.rs`:
+   - `cross_module_middleware_fn_compila_a_binario_nativo`
+   - `cross_module_middleware_fn_con_request_arg_compila`
+   - `cross_module_middleware_fn_con_return_status_compila`
+
+### Workaround user-land (FUNCIONA, pero verboso)
+
+Lo que hicimos en fitzwatch:
+1. `rate_limit.fitz` NO usa `Request` en ningún sig — solo `Str` /
+   `Str?` / `Int`. Helper `compute_client_ip(x_real: Str?, xff: Str?)
+   -> Str` recibe headers como params primitivos.
+2. Cada handler con rate limit acepta `@header(name="X-Real-IP",
+   into="x_real_ip")` + `@header(name="X-Forwarded-For", into=
+   "x_forwarded_for")` + computa la IP inline.
+3. Match sobre `check_rate_limit_by_ip(...).await`: `Err → return
+   429 { "error": "..." }`. El `return 429` vive en el handler
+   directo, no en un middleware aparte.
+
+Costo: 4 lineas extra de `@header` + 4 lineas de gate por handler.
+Verboso pero ships hoy.
+
+### Impacto
+
+- **fitzwatch**: 7 endpoints con boilerplate duplicado. Refactorable
+  a `@middleware` limpio cuando se cierre la deuda.
+- **Cualquier SaaS Fitz HTTP**: el patrón "módulo dedicado a
+  cross-cutting concerns" (rate limit, auth custom, audit log, etc.)
+  está vetado. Encarece sustancialmente el costo de mantener un
+  proyecto Fitz HTTP de producción.
+- **Sentido de fase**: este es probablemente el patrón #1 que la
+  guía sugiere implícitamente como "best practice" pero el codegen
+  no soporta. Es un blocker de adopción Fitz para SaaS reales.
+
+### Estimación de fix
+
+- Pre-scan `@middleware` cross-module + propagar marker: ~50 LoC en
+  `src/codegen.rs` paralelo a `pre_scan_imported_auth_provider`
+  (W12) + `extract_background_fn_names` (B10).
+- Emisión condicional de `Request` + `use crate::{...}` en módulos
+  hijos: ~30 LoC en `generate_module_rs_with_bindings` paralelo a
+  W11 / W16 / W18.
+- Tests E2E: ~3 tests nuevos × ~80 LoC c/u = ~240 LoC.
+- **Total estimado**: 1 día de trabajo + smoke en fitzwatch.
+
+### Referencias del descubrimiento
+
+- Fitzwatch sesión 2026-06-26 implementando "rate limiting endpoints
+  públicos" (deuda residual de Fase G del ROADMAP fitzwatch).
+- Repro: fitzwatch en commit `<próximo>` que documenta el
+  workaround inline en `rate_limit.fitz` + comentarios en
+  `auth.fitz` / `subscriptions.fitz`.
+
+---
+
 ## 🟢 `http.request({...headers: Map<Str, Str>, body: Map...})` desde `async fn` rompía Send via `spawn(...)` — **CERRADO v0.19.4 (2026-06-23)**
 
 > **CERRADO** el mismo día del descubrimiento. Fix mínimo en
