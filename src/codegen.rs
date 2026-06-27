@@ -2181,6 +2181,41 @@ fn program_uses_request_type(program: &Program) -> bool {
     program.iter().any(stmt_uses_request)
 }
 
+/// v0.19.6 (post-fitzwatch 2026-06-27) — `true` if the module declares
+/// at least one HTTP handler (`@get`/`@post`/`@put`/`@delete`) that
+/// applies `@middleware(...)` (regardless of whether the middleware fn
+/// is local or imported). When this fires, the HTTP wrapper emitted
+/// by `emit_middleware_chain` builds `__req: Request = Arc::new(...
+/// RequestData { ... })` to pass to the middleware — so the module's
+/// `.rs` needs `use crate::{Request, RequestData};` even when no local
+/// fn declares `Request` in its TypeExpr.
+///
+/// Closes the sub-case of v0.19.5 where the module IMPORTER of the
+/// middleware (e.g. `auth.fitz`/`subscriptions.fitz` in fitzwatch)
+/// only applies the imported middleware but doesn't use `Request` in
+/// any of its own fn signatures — `program_uses_request_type` returns
+/// `false` for it, and v0.19.5 only covered the case where the local
+/// fn was itself a cross-module middleware target. Now both sides
+/// emit the import correctly.
+///
+/// Heuristic (b) from the deuda doc: dispara cuando hay un handler
+/// HTTP con `@middleware(...)` aplicado, sin importar si el ident del
+/// middleware resuelve local o cross-module. El costo del `use` extra
+/// en módulos benignos es despreciable (rustc dead-code elimina).
+fn program_has_handler_with_middleware(program: &Program) -> bool {
+    program.iter().any(|s| {
+        if let Stmt::FnDef { decorators, .. } = s {
+            let is_http = decorators
+                .iter()
+                .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete"));
+            let has_mw = decorators.iter().any(|d| d.name == "middleware");
+            is_http && has_mw
+        } else {
+            false
+        }
+    })
+}
+
 /// Phase 6.6: True if the program uses async — any user-declared
 /// `async fn`, any `Expr::Await` somewhere, or a call to the `sleep`
 /// builtin. Codegen consults this flag to decide three things:
@@ -5317,7 +5352,22 @@ fn generate_module_rs_with_bindings(
                 false
             }
         });
-    if module_uses_request_local || module_has_imported_middleware_fn {
+    // v0.19.6 (post-fitzwatch 2026-06-27) — sub-case of v0.19.5: the
+    // module IMPORTER of a cross-module middleware (where the handler
+    // with `@middleware(<imported_fn>)` lives) needs the import too,
+    // even when no local fn declares `Request` in its signature. The
+    // HTTP wrapper emitted by `emit_middleware_chain` builds
+    // `__req: Request = Arc::new(... RequestData { ... })` to pass to
+    // the middleware. Without this trigger, rustc aborts with E0425
+    // (`cannot find type Request`) + E0422 (`cannot find struct
+    // RequestData`) — exactly the symptom that fitzwatch hit when
+    // refactoring `@middleware(rate_limit_strict)` cross-module from
+    // an inline workaround.
+    let module_has_handler_with_middleware = program_has_handler_with_middleware(program);
+    if module_uses_request_local
+        || module_has_imported_middleware_fn
+        || module_has_handler_with_middleware
+    {
         ctx.emit(
             "#[allow(unused_imports)]\n\
              use crate::{Request, RequestData};\n\n",

@@ -4,77 +4,51 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🔴 URGENTE — Sub-caso v0.19.5 — wrapper HTTP en módulo IMPORTER del middleware no emite `use crate::{Request, RequestData}` (descubierto 2026-06-27 noche durante refactor real fitzwatch)
+## 🟢 Sub-caso v0.19.5 — wrapper HTTP en módulo IMPORTER del middleware: **CERRADO v0.19.6 (2026-06-27)**
 
-> **DESCUBIERTO** durante la sesión de refactor real fitzwatch contra
-> v0.19.5 (cierre del bug original cross-module `@middleware + Request`).
-> El fix v0.19.5 cubrió correctamente el **módulo del middleware** (emite
-> `use crate::{Request, RequestData}` en `rate_limit.rs`), pero NO cubre
-> el **módulo importer** (donde vive el handler que aplica el
-> `@middleware(<imported_fn>)`). El wrapper HTTP emitido en
-> `auth.rs`/`subscriptions.rs` construye `Request` + `RequestData` para
-> pasarla al middleware, pero el detector `program_uses_request_type`
-> NO dispara para esos módulos porque ninguna fn local declara `Request`
-> en su AST — solo lo aplican como decorator.
->
-> **Impacto en producción fitzwatch**: 14 errores rustc al hacer
-> `fitz build` (7 endpoints × 2 errores cada uno: `E0425 cannot find
-> type Request` + `E0422 cannot find struct, variant or union type
-> RequestData`). Bloquea el refactor del workaround inline (~42 LoC
-> duplicadas) que v0.19.5 prometió destrabar.
->
-> **Workaround user-land aplicado en fitzwatch (commit pendiente)**:
-> declarar una fn dummy `_codegen_request_anchor(req: Request) -> Bool`
-> en cada módulo importer del middleware. Esto fuerza al detector
-> `program_uses_request_type` a disparar (el AST del módulo tiene
-> `Request` en TypeExpr de su param), y el codegen emite
-> `use crate::{Request, RequestData};` correctamente. El binario
-> compila bit-a-bit OK.
+> **CERRADO** el mismo día del descubrimiento (2026-06-27 noche durante
+> refactor real fitzwatch), patrón paralelo a las bugfix releases
+> v0.19.2/v0.19.3/v0.19.4/v0.19.5 — coordinado con feedback real del
+> uso del patrón canónico cross-module middleware. Fix en
+> `src/codegen.rs` (~50 LoC netas) + 1 E2E test nuevo. El módulo
+> importer del middleware (donde vive el handler con
+> `@middleware(<imported_fn>)` aplicado) ahora emite correctamente
+> `use crate::{Request, RequestData};` aunque ninguna fn local del
+> módulo declare `Request` en su firma — el detector reconoce que el
+> wrapper HTTP construirá `__req: Request = Arc::new(... RequestData
+> { ... })` para pasarlo al middleware y dispara el import. Detalle
+> abajo preservado para referencia futura.
 
-### Sub-pasos del fix v0.19.6 propuesto
+### Resumen del fix (v0.19.6)
 
-1. **Extender `program_uses_request_type`** para que también dispare
-   cuando el módulo APLICA `@middleware(<imported_fn>)` a algún handler.
-   Caminos posibles:
-   - **(a) Heurístico**: el módulo importer dispara el detector si
-     declara handlers (`@get/@post/...`) que tienen al menos un
-     `@middleware(<ident>)` decorator donde `<ident>` está en
-     `imported_middleware_fns` del TypeEnv. Más estricto pero requiere
-     parsear los decorators ANTES del codegen para resolver el `<ident>`.
-   - **(b) Trivial**: el detector dispara para CUALQUIER módulo que
-     tenga al menos UN handler con `@middleware(...)` aplicado donde
-     la fn middleware NO es local. Más generoso pero podría sobre-emitir
-     en casos benignos (overhead despreciable: el `use` extra no afecta
-     el binario final si no se referencia).
-   - **(c) Estructural**: hacer que `Request` + `RequestData` SIEMPRE
-     se emitan como `use crate::{Request, RequestData}` en cualquier
-     módulo importado que declare handlers HTTP (`@get/@post/...`).
-     Costo: imports extra en módulos que no los necesitan. Beneficio:
-     el bug no puede repro de nuevo. Probable best balance.
+Detector nuevo `program_has_handler_with_middleware(program: &Program)
+-> bool` en `src/codegen.rs`, paralelo a `program_uses_request_type`
+(v0.19.5) y `program_uses_response_builtin` (v0.19.1). Heurística (b)
+de las 3 opciones evaluadas pre-fix: dispara cuando el módulo declara
+al menos un handler HTTP (`@get`/`@post`/`@put`/`@delete`) con un
+decorator `@middleware(...)` aplicado, sin importar si el ident del
+middleware resuelve a una fn local del módulo o a una fn cross-module
+importada. Costo del `use` extra en módulos benignos es despreciable
+(rustc dead-code elimina si no se usa) y elimina la posibilidad de
+regresión del bug.
 
-2. **E2E test nuevo en `tests/compile_e2e.rs`** —
-   `v019_6_cross_module_middleware_applied_in_importer_module_emits_request_imports`
-   con shape canónica del fitzwatch real:
-   ```fitz
-   // mw.fitz
-   async fn mw_strict(req: Request) {
-       return null
-   }
+El call site de `generate_module_rs_with_bindings` (~línea 5311 pre-fix,
+ahora 5320+) que decide emitir `use crate::{Request, RequestData}` agrega
+el nuevo predicado como tercer OR a los dos existentes
+(`module_uses_request_local` + `module_has_imported_middleware_fn`).
 
-   // handlers.fitz
-   from mw import mw_strict
+### E2E test nuevo (`tests/compile_e2e.rs`)
 
-   @middleware(mw_strict)
-   @post("/protected")
-   async fn protected() -> Str => "ok"
-
-   // main.fitz
-   from handlers import protected
-   @server(N) fn main() => 0
-   ```
-   Validar que `handlers.rs` emitido contiene
-   `use crate::{Request, RequestData};`. Sin ese import, `cargo build`
-   del project generado aborta con E0425/E0422.
+- `v019_6_cross_module_middleware_applied_in_importer_module_emits_request_imports` —
+  shape canónica de fitzwatch con 3 archivos: `mw.fitz`
+  (`async fn mw_strict(req: Request) { return null }`), `handlers.fitz`
+  (`from mw import mw_strict` + `@middleware(mw_strict) @post("/protected")
+  fn protected() -> Str => "ok"`), `main.fitz`
+  (`from handlers import protected` + `@server(N) fn main() => 0`). El
+  test inspecciona el `handlers.rs` emitido confirmando que contiene
+  `use crate::{Request, RequestData}` (o split forms). Paralelo
+  bit-a-bit a `v019_5_cross_module_middleware_fn_con_request_arg_compila`
+  que cubre el otro lado (módulo del middleware).
 
 ### Detalle técnico del sub-caso (preservado para referencia)
 
@@ -166,33 +140,44 @@ use crate::{Request, RequestData};  // ← v0.19.5 dispara para este módulo (de
 wrapper HTTP en `auth.rs` USA `Request`/`RequestData` aunque ninguna fn
 del módulo los tenga en TypeExpr. Sub-caso del fix v0.19.5 no cubierto.
 
-### Workaround user-land (en fitzwatch hasta v0.19.6)
+### Workaround user-land aplicado (pre-v0.19.6, removible al bumpear)
 
 ```fitz
 // auth.fitz / subscriptions.fitz — al inicio del módulo, después de imports
 // Workaround del codegen v0.19.5 — fuerza emisión de
-// `use crate::{Request, RequestData};` en este módulo. Refactor cuando
-// aterrice v0.19.6 (o el sub-caso quede cubierto).
+// `use crate::{Request, RequestData};` en este módulo.
 fn _codegen_request_anchor(req: Request) -> Bool => true
 ```
 
 La fn dummy nunca se invoca, solo existe para que el detector
 `program_uses_request_type` dispare. Costo: 1 LoC + 1 fn extra
 en el `.rs` emitido (zero cost al runtime — rustc dead-code elimina).
+**Tras bumpear `FITZ_TAG=v0.19.5 → v0.19.6`** las 2 fns se quitan y el
+patrón canónico cross-module middleware funciona sin workaround.
 
-### Estimación de fix (~30-50 LoC)
+### Fix aplicado en v0.19.6 (~50 LoC netas)
 
-- Opción (c) "estructural" en `src/codegen.rs::program_uses_request_type`:
-  agregar arm que dispare si el módulo declara handlers HTTP que aplican
-  `@middleware(<ident>)` cross-module donde `<ident>` está en el
-  `imported_middleware_fns` del module's `TypeEnv` o en el set global
-  pre-scaneado (`main_imported_middleware_fns`).
+- Detector nuevo `program_has_handler_with_middleware(program)` en
+  `src/codegen.rs` (opción (b) "trivial" de las 3 evaluadas pre-fix):
+  walka el AST buscando `Stmt::FnDef` con decorator
+  `@get`/`@post`/`@put`/`@delete` + al menos un decorator
+  `@middleware(...)`, sin importar si el ident del middleware resuelve
+  local o cross-module. El predicado es OR-ed al call site existente
+  que ya cubría `module_uses_request_local` (fn local declara `Request`
+  en TypeExpr) y `module_has_imported_middleware_fn` (la fn local es
+  target de un `@middleware` cross-module).
 
-- 1 E2E test nuevo en `tests/compile_e2e.rs` (~30 LoC, paralelo a
-  `v019_5_cross_module_middleware_fn_con_request_arg_compila`).
+- 1 E2E test nuevo
+  `v019_6_cross_module_middleware_applied_in_importer_module_emits_request_imports`
+  en `tests/compile_e2e.rs` con shape canónica de fitzwatch (mw.fitz
+  + handlers.fitz + main.fitz), inspecciona el `handlers.rs` emitido
+  confirmando `use crate::{Request, RequestData}` (o split forms).
+  Paralelo bit-a-bit a
+  `v019_5_cross_module_middleware_fn_con_request_arg_compila`.
 
-- Bump v0.19.6 + bump extensión VSCode 0.19.5 → 0.19.6 + `.vsix`
-  regenerado + CHANGELOG entry + esta sección a CERRADO con detalle del fix.
+- Bump Cargo.toml `0.19.5` → `0.19.6` + bump extensión VSCode + `.vsix`
+  regenerado + CHANGELOG entry detallado + esta sección reescrita a
+  CERRADO con detalle del fix.
 
 ## 🟢 Cross-module `@middleware(fn)` + `Request` en codegen — **CERRADO v0.19.5 (2026-06-27)**
 

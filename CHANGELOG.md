@@ -9,6 +9,70 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.19.6] — 2026-06-27 — Bugfix codegen: sub-caso v0.19.5 — wrapper HTTP en módulo importer del middleware
+
+Bugfix release patch que cierra el sub-caso 🔴 URGENTE del bug original
+de v0.19.5, descubierto la misma noche del cierre de v0.19.5 durante
+el refactor real del patrón canónico "módulo dedicado a rate limiting +
+handlers en módulos separados". El fix de v0.19.5 cubrió correctamente
+el módulo del middleware (emite `use crate::{Request, RequestData}` en
+`rate_limit.rs`), pero NO cubría el módulo IMPORTER del middleware
+(donde vive el handler con `@middleware(<imported_fn>)` aplicado). El
+wrapper HTTP emitido en `auth.rs`/`subscriptions.rs` construía
+`__req: Request = Arc::new(... RequestData { ... })` para pasarlo al
+middleware cross-module, pero el detector `program_uses_request_type`
+NO disparaba para esos módulos porque ninguna fn local declaraba
+`Request` en su firma — solo lo aplicaban como decorator. **14 errores
+rustc** al hacer `fitz build` (7 endpoints × 2 errores cada uno: `E0425
+cannot find type Request` + `E0422 cannot find struct, variant or
+union type RequestData`).
+
+**Fix** (~50 LoC netas, 2 archivos `src/codegen.rs` + `tests/compile_e2e.rs`,
+1 E2E test): detector nuevo `program_has_handler_with_middleware`
+walka el AST buscando handlers HTTP (`@get/@post/@put/@delete`) que
+tienen al menos un decorator `@middleware(...)` aplicado, sin importar
+si el ident del middleware resuelve local o cross-module. Cuando
+dispara, el call site de `generate_module_rs_with_bindings` que decide
+emitir `use crate::{Request, RequestData}` lo agrega como nuevo OR a
+los dos predicados existentes (`module_uses_request_local` +
+`module_has_imported_middleware_fn`). El costo del `use` extra en
+módulos benignos es despreciable (rustc dead-code elimina si no se
+usa) y elimina la posibilidad de regresión del bug en el otro sentido
+(módulo declara handler con `@middleware(localfn)` y la fn local NO
+usa `req: Request` en su firma — pre-fix técnicamente OK porque el
+middleware local sí emitía el import via path antiguo, pero ahora doblemente
+robusto).
+
+**E2E test nuevo** `v019_6_cross_module_middleware_applied_in_importer_module_emits_request_imports`
+(`tests/compile_e2e.rs`) reproduce el shape canónica de fitzwatch con
+3 archivos (`mw.fitz` + `handlers.fitz` + `main.fitz`): middleware
+declarado en mw, handler con `@middleware(mw_strict)` declarado en
+handlers (módulo importer), main solo importa el handler para
+mountarlo. Inspecciona el `handlers.rs` emitido confirmando
+`use crate::{Request, RequestData}` (o split forms). Paralelo
+bit-a-bit al test `v019_5_cross_module_middleware_fn_con_request_arg_compila`
+que cubre el otro lado del bug.
+
+**Workaround user-land aplicado en fitzwatch (sesión 2026-06-27 noche)
+removible tras v0.19.6**: fn dummy `_codegen_request_anchor(req:
+Request) -> Bool => true` declarada al inicio de `auth.fitz` y
+`subscriptions.fitz` forzaba al detector `program_uses_request_type`
+a disparar (el AST del módulo tenía `Request` en TypeExpr del param).
+Costo: 2 fns extra en el `.rs` emitido (zero cost al runtime). Tras
+bumpear `FITZ_TAG=v0.19.5 → v0.19.6` en fitzwatch, las dos fns se
+quitan y el patrón canónico funciona sin workaround.
+
+**Sin regresiones**: 3201 lib + 98 cli_e2e + 3 openapi_e2e + 14
+v019_ E2E (incluyendo el nuevo) + smoke `GUIDE_EXAMPLES_COMPILE`
+verde. `cargo fmt --all --check` + `cargo clippy --lib --tests --bins
+-- -D warnings` (default + lsp) limpios. Bump Cargo.toml `0.19.5` →
+`0.19.6` + extensión VSCode `0.19.5` → `0.19.6` + `.vsix` regenerado
+bundleando el `fitz-lsp.exe` fresh (sin cambios al grammar TextMate ni
+runtime LSP — bug interno del codegen, cero impacto en surface de
+editing). Detalle completo en `docs/deudas-post-5b.md` →
+"🟢 Sub-caso v0.19.5 — wrapper HTTP en módulo IMPORTER del middleware
+cross-module: CERRADO v0.19.6".
+
 ## [v0.19.5] — 2026-06-27 — Bugfix codegen: cross-module `@middleware(fn)` + `Request` destrabados
 
 Bugfix release que cierra una deuda 🔴 URGENTE descubierta el

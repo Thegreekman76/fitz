@@ -13269,3 +13269,67 @@ fn hi() -> Str => \"hello\"
         &[("mw.fitz", mw_mod)],
     );
 }
+
+#[test]
+fn v019_6_cross_module_middleware_applied_in_importer_module_emits_request_imports() {
+    // Sub-caso de v0.19.5 — el bug que el fix anterior NO cubría: el
+    // módulo IMPORTER del middleware (donde vive el handler que aplica
+    // `@middleware(<imported_fn>)`) NO declara ninguna fn local con
+    // `req: Request` en su firma, pero el wrapper HTTP emitido en ese
+    // módulo SÍ construye `__req: Request = Arc::new(... RequestData
+    // { ... })` para pasarlo al middleware. Pre-fix, el detector
+    // `program_uses_request_type` devolvía `false` para ese módulo y
+    // no se emitía `use crate::{Request, RequestData};` — rustc
+    // abortaba con E0425/E0422.
+    //
+    // Repro paralelo bit-a-bit a fitzwatch: `mw.fitz` declara la fn
+    // middleware, `handlers.fitz` aplica `@middleware(mw_strict)` a
+    // un handler `@post`, `main.fitz` solo importa el handler para
+    // mountarlo. Sin el fix de v0.19.6, `handlers.rs` emitido
+    // referencia `Request`/`RequestData` sin import y rustc falla.
+    let mw_mod = "\
+async fn mw_strict(req: Request) {
+    return null
+}
+";
+    let handlers_mod = "\
+from mw import mw_strict
+
+@middleware(mw_strict)
+@post(\"/protected\")
+fn protected() -> Str => \"ok\"
+";
+    let main = "\
+from handlers import protected
+
+@server(43960) fn main() => 0
+";
+    let _dir = build_expect_ok_multi(
+        "v019-6-cross-module-middleware-importer-module",
+        main,
+        &[("mw.fitz", mw_mod), ("handlers.fitz", handlers_mod)],
+    );
+    // Inspeccionar el emitted handlers.rs: debe contener
+    // `use crate::{Request, RequestData}` (o split forms) para que el
+    // wrapper HTTP resuelva el tipo del `__req` que arma para pasarlo
+    // al middleware cross-module.
+    let stem = sanitize_stem("v019-6-cross-module-middleware-importer-module");
+    let handlers_rs = std::path::PathBuf::from("target")
+        .join("fitz-build")
+        .join(&stem)
+        .join("src")
+        .join("handlers.rs");
+    assert!(
+        handlers_rs.exists(),
+        "emitted handlers.rs not found at {}",
+        handlers_rs.display()
+    );
+    let emitted = std::fs::read_to_string(&handlers_rs).expect("read handlers.rs");
+    assert!(
+        emitted.contains("use crate::{Request, RequestData}")
+            || (emitted.contains("use crate::Request;")
+                && emitted.contains("use crate::RequestData;")),
+        "expected `use crate::{{Request, RequestData}};` in handlers.rs, got:\n{}",
+        emitted
+    );
+}
