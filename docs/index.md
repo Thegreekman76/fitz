@@ -65,6 +65,7 @@ $ ./server
 | **HTTP client built-in** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **SMTP built-in** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Response built-in** | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **Cross-module middleware** | ✅ | ⚠️ | ⚠️ | ✅ |
 | Interop Python | ✅ | ❌ | ❌ | ✅ |
 
 **Multiplataforma**: cada [release](https://github.com/Thegreekman76/fitz/releases/latest)

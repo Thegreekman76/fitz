@@ -791,6 +791,16 @@ pub struct TypeEnv {
     /// `CheckCtx.background_fns` so `spawn(<imported_fn>(args))`
     /// in the importer passes the checker's `@background` validation.
     imported_background_fns: HashSet<String>,
+    /// v0.19.5 (post-fitzwatch 2026-06-26) — names of fns that are
+    /// referenced as `@middleware(name)` somewhere in the project
+    /// tree (main OR any imported module). Pre-scanned by the caller
+    /// via `extract_middleware_fn_names` (collected over main + all
+    /// loaded modules) and merged into `CheckCtx.middleware_fn_names`
+    /// so the module's checker accepts `return <status> { ... }` and
+    /// `return null` inside a fn used as middleware cross-module.
+    /// Parallel to `imported_background_fns` (B10) and
+    /// `imported_auth_provider` (W12).
+    imported_middleware_fns: HashSet<String>,
 }
 
 impl TypeEnv {
@@ -914,6 +924,25 @@ impl TypeEnv {
     /// in cross-module imports.
     pub fn imported_background_fns(&self) -> &HashSet<String> {
         &self.imported_background_fns
+    }
+
+    /// v0.19.5 — Registers names of fns referenced as
+    /// `@middleware(name)` anywhere in the project tree (collected
+    /// over main + all imported modules). Pre-scanned by the caller
+    /// via `extract_middleware_fn_names`. The caller invokes this
+    /// AFTER `resolve_program` and BEFORE `check_with_env` so the
+    /// checker (`collect_middleware_fn_names`) sees them when
+    /// validating cross-module middleware fns that contain
+    /// `return <status> { ... }` or `return null` as gate semantics.
+    pub fn add_imported_middleware_fns<I: IntoIterator<Item = String>>(&mut self, names: I) {
+        self.imported_middleware_fns.extend(names);
+    }
+
+    /// v0.19.5 — Returns names of fns referenced as `@middleware(name)`
+    /// in cross-module imports. Consumed by `collect_middleware_fn_names`
+    /// in `check_program`.
+    pub fn imported_middleware_fns(&self) -> &HashSet<String> {
+        &self.imported_middleware_fns
     }
 }
 
@@ -9930,6 +9959,14 @@ fn check_auth_decorators(
 /// references by `Expr::Ident` (the documented form); any other
 /// form (call, lambda, etc.) is captured by the evaluator at runtime with its
 /// own clear error.
+///
+/// v0.19.5 (post-fitzwatch 2026-06-26) — also merges the
+/// cross-module set `env.imported_middleware_fns` (registered by
+/// the caller via `add_imported_middleware_fns` based on a pre-scan
+/// over main + all loaded modules). Without this, a fn that lives
+/// in module `rate_limit.fitz` and is applied as `@middleware(...)`
+/// from `auth.fitz` fails its own module check because the local
+/// pre-scan does not see the external `@middleware` reference.
 fn collect_middleware_fn_names(ctx: &mut CheckCtx, program: &Program) {
     for stmt in program {
         if let Stmt::FnDef { decorators, .. } = stmt {
@@ -9945,6 +9982,38 @@ fn collect_middleware_fn_names(ctx: &mut CheckCtx, program: &Program) {
             }
         }
     }
+    // v0.19.5 — cross-module set from `imported_middleware_fns`.
+    for name in ctx.types.imported_middleware_fns() {
+        ctx.middleware_fn_names.insert(name.clone());
+    }
+}
+
+/// v0.19.5 (post-fitzwatch 2026-06-26) — Pure helper that walks the
+/// program and returns the names of fns referenced as
+/// `@middleware(name)` (Ident form). Used by the caller
+/// (`main.rs::check_program_with_pyi_stubs_and_deps` and the
+/// codegen `ModuleLoader` pre-scan) to build the GLOBAL set of
+/// middleware fn names across main + all loaded modules, then
+/// propagated to each module's `TypeEnv` via
+/// `add_imported_middleware_fns`. Parallel to
+/// `extract_background_fn_names` (B10).
+pub fn extract_middleware_fn_names(program: &Program) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for stmt in program {
+        if let Stmt::FnDef { decorators, .. } = stmt {
+            for deco in decorators {
+                if deco.name != "middleware" {
+                    continue;
+                }
+                for arg in &deco.args {
+                    if let Expr::Ident(n, _) = arg {
+                        out.push(n.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Phase 9.w.2 — Validates the shape of a `@ws("/path")` handler:

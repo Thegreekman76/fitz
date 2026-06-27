@@ -13150,3 +13150,122 @@ async fn poll() -> Null {
 ";
     build_expect_ok("v019-4-regression-for-list-str-await-cron", src);
 }
+
+// ---------------------------------------------------------------------
+// 🟢 v0.19.5 (2026-06-27) — cerró la deuda 🔴 URGENTE descubierta en
+// fitzwatch 2026-06-26: cross-module `@middleware(fn)` + `Request` no
+// compilaba. Tres E2E tests cubren los 3 escenarios (paralelo a W12 +
+// B10 cross-module pre-scan + W11/W16/W18 cross-module imports).
+
+#[test]
+fn v019_5_cross_module_middleware_fn_compila_a_binario_nativo() {
+    // Síntoma 1 — Codegen rechazaba fn middleware cross-module con
+    // `return null` simple (gate-only). El checker del loader sobre el
+    // módulo aislado no veía el `@middleware(mw_simple)` aplicado en
+    // main, y `collect_middleware_fn_names` quedaba sin la entrada
+    // → la fn no clasificaba como middleware → el codegen ni siquiera
+    // llegaba a ese punto (falla previa: build-time check rechaza la
+    // ident del @middleware imported en main).
+    let mw_mod = "\
+async fn mw_simple(req: Request) {
+    return null
+}
+";
+    let main = "\
+from mw import mw_simple
+
+@middleware(mw_simple)
+@get(\"/hi\")
+fn hi() -> Str => \"hello\"
+
+@server(43951) fn main() => 0
+";
+    let _dir = build_expect_ok_multi(
+        "v019-5-cross-module-middleware-fn",
+        main,
+        &[("mw.fitz", mw_mod)],
+    );
+}
+
+#[test]
+fn v019_5_cross_module_middleware_fn_con_request_arg_compila() {
+    // Síntoma 2 — Cuando el módulo del middleware declara helpers que
+    // toman `req: Request`, el codegen emitía el `.rs` sin
+    // `use crate::{Request, RequestData};` y rustc abortaba con
+    // E0425/E0422. Repro: la fn middleware delega a un helper local
+    // que tipa `Request` en su firma — esto fuerza al módulo a
+    // necesitar la struct.
+    let mw_mod = "\
+fn get_client_ip(req: Request) -> Str {
+    return \"127.0.0.1\"
+}
+
+async fn mw_with_helper(req: Request) {
+    let ip = get_client_ip(req)
+    return null
+}
+";
+    let main = "\
+from mw import mw_with_helper
+
+@middleware(mw_with_helper)
+@get(\"/hi\")
+fn hi() -> Str => \"hello\"
+
+@server(43952) fn main() => 0
+";
+    let _dir = build_expect_ok_multi(
+        "v019-5-cross-module-middleware-helper-request",
+        main,
+        &[("mw.fitz", mw_mod)],
+    );
+    // Inspect emitted mw.rs: should contain `use crate::{Request, RequestData}`
+    // (or split forms) so the helper's signature resolves.
+    let stem = sanitize_stem("v019-5-cross-module-middleware-helper-request");
+    let mw_rs = std::path::PathBuf::from("target")
+        .join("fitz-build")
+        .join(&stem)
+        .join("src")
+        .join("mw.rs");
+    assert!(
+        mw_rs.exists(),
+        "emitted mw.rs not found at {}",
+        mw_rs.display()
+    );
+    let emitted = std::fs::read_to_string(&mw_rs).expect("read mw.rs");
+    assert!(
+        emitted.contains("use crate::{Request, RequestData}")
+            || (emitted.contains("use crate::Request;")
+                && emitted.contains("use crate::RequestData;")),
+        "expected `use crate::{{Request, RequestData}};` in mw.rs, got:\n{}",
+        emitted
+    );
+}
+
+#[test]
+fn v019_5_cross_module_middleware_fn_con_return_status_compila() {
+    // Síntoma 1 (variante con `return <status>`) — fn middleware
+    // cross-module con short-circuit (`return 429 { ... }`). Antes el
+    // checker del loader sobre el módulo aislado rechazaba el
+    // `return <status>` porque `collect_middleware_fn_names` no veía
+    // el `@middleware(mw_block)` aplicado en main (vive cross-module).
+    let mw_mod = "\
+async fn mw_block(req: Request) {
+    return 429 { \"error\": \"blocked\" }
+}
+";
+    let main = "\
+from mw import mw_block
+
+@middleware(mw_block)
+@get(\"/hi\")
+fn hi() -> Str => \"hello\"
+
+@server(43953) fn main() => 0
+";
+    let _dir = build_expect_ok_multi(
+        "v019-5-cross-module-middleware-return-status",
+        main,
+        &[("mw.fitz", mw_mod)],
+    );
+}

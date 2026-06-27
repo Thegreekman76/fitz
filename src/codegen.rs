@@ -163,6 +163,18 @@ pub fn generate_project(
     let main_imp_bg =
         pre_scan_imported_background_fns_for_loader(program, &base_dir, &loader.dep_registry);
     loader.set_main_imported_background_fns(main_imp_bg);
+    // v0.19.5 (post-fitzwatch 2026-06-26) — pre-scan main's imports
+    // for `@middleware(name)` references across main + all reachable
+    // modules. Parallel to `main_imp_bg` (B10) and `main_imp_auth`
+    // (B12). Without this, fns living in a dedicated middleware
+    // module (`rate_limit.fitz` / `audit.fitz`) and applied as
+    // `@middleware` from other modules fail BOTH their own check
+    // (loader's `check_with_env` rejects `return <status>` because
+    // local pre-scan doesn't see the external reference) AND main's
+    // build-time check on `@middleware(<imported_fn>)`.
+    let main_imp_mw =
+        pre_scan_imported_middleware_fns_for_loader(program, &base_dir, &loader.dep_registry);
+    loader.set_main_imported_middleware_fns(main_imp_mw);
     loader.collect_imports(program)?;
 
     // 5b.6: detect whether the program (or any loaded module) uses
@@ -2110,6 +2122,65 @@ fn program_uses_response_builtin(program: &Program) -> bool {
     program.iter().any(stmt_uses_response)
 }
 
+/// v0.19.5 (post-fitzwatch 2026-06-26) — `true` if the program
+/// references the `Request` built-in type in any fn signature
+/// (`fn(req: Request) -> ...`), type field, or let binding
+/// annotation. Triggers `use crate::{Request, RequestData};` in
+/// the cross-module prelude of `generate_module_rs_with_bindings`
+/// so a module declaring helpers/middlewares that take `req: Request`
+/// resolves the type alias + struct living in main.rs's HTTP prelude.
+///
+/// Heuristic: scope reduced to TypeExpr (fn params/return,
+/// type fields, let annotations). Expressions that construct
+/// `Request { ... }` literally are not detected — users typically
+/// do NOT build Request manually; the HTTP wrapper does it. If a
+/// user does write `Request { ... }`, the emitted `.rs` will fail
+/// at rustc compile time and the fix is to add the import — but
+/// the cross-module pattern this closes (rate_limit / audit
+/// modules) doesn't hit that path.
+///
+/// Pattern parallel to `program_uses_response_builtin` (v0.19.1)
+/// but limited to types since Request is rarely constructed
+/// inline by user code.
+fn program_uses_request_type(program: &Program) -> bool {
+    fn type_expr_uses_request(t: &TypeExpr) -> bool {
+        match t {
+            TypeExpr::Named(name) => name == "Request",
+            TypeExpr::Generic { name, args } => {
+                name == "Request" || args.iter().any(type_expr_uses_request)
+            }
+            TypeExpr::Nullable(inner) => type_expr_uses_request(inner),
+            TypeExpr::Function { params, ret } => {
+                params.iter().any(type_expr_uses_request) || type_expr_uses_request(ret)
+            }
+            TypeExpr::Tuple(items) => items.iter().any(type_expr_uses_request),
+        }
+    }
+    fn stmt_uses_request(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
+                params
+                    .iter()
+                    .any(|p| p.type_.as_ref().is_some_and(type_expr_uses_request))
+                    || return_type.as_ref().is_some_and(type_expr_uses_request)
+                    || body.iter().any(stmt_uses_request)
+            }
+            Stmt::TypeDef { fields, .. } => fields.iter().any(|f| type_expr_uses_request(&f.type_)),
+            Stmt::Assign { type_, .. } => type_.as_ref().is_some_and(type_expr_uses_request),
+            Stmt::While { body, .. } | Stmt::Loop { body, .. } | Stmt::For { body, .. } => {
+                body.iter().any(stmt_uses_request)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_request)
+}
+
 /// Phase 6.6: True if the program uses async — any user-declared
 /// `async fn`, any `Expr::Await` somewhere, or a call to the `sleep`
 /// builtin. Codegen consults this flag to decide three things:
@@ -4002,6 +4073,21 @@ struct ModuleLoader {
     /// `spawn(<bg>(...))` after `from <bg_mod> import bg`) also see
     /// the cross-module name and pass the checker.
     main_imported_background_fns: Vec<String>,
+    /// v0.19.5 (post-fitzwatch 2026-06-26) — GLOBAL set of fns
+    /// referenced as `@middleware(name)` anywhere in the project
+    /// tree (main + all loaded modules). Pre-scanned by
+    /// `pre_scan_imported_middleware_fns_for_loader` BEFORE
+    /// `collect_imports`. Propagated to each module's checker
+    /// (`add_imported_middleware_fns`) AND to each module's codegen
+    /// ctx (direct insert into `middleware_fn_names` before
+    /// `pre_register_fns`). Without this, fns living in a dedicated
+    /// `rate_limit.fitz` / `audit.fitz` and applied as `@middleware`
+    /// from other modules fail both their own check (because the
+    /// local pre-scan doesn't see the external reference) and the
+    /// module's codegen (because `middleware_fn_names` of the
+    /// module's ctx is empty → `gen_top_fn` doesn't classify the fn
+    /// as middleware → `Stmt::ReturnStatus` rejected at emit time).
+    main_imported_middleware_fns: Vec<String>,
 }
 
 impl ModuleLoader {
@@ -4016,6 +4102,7 @@ impl ModuleLoader {
             main_observability_enabled: true,
             main_imported_auth_provider: None,
             main_imported_background_fns: Vec::new(),
+            main_imported_middleware_fns: Vec::new(),
         }
     }
 
@@ -4043,6 +4130,13 @@ impl ModuleLoader {
     /// pre-scanned from main's imports.
     fn set_main_imported_background_fns(&mut self, names: Vec<String>) {
         self.main_imported_background_fns = names;
+    }
+
+    /// v0.19.5 — see field docs. Called by `generate_project` BEFORE
+    /// `collect_imports` with the GLOBAL set of fn names referenced
+    /// as `@middleware(name)` across main + all loaded modules.
+    fn set_main_imported_middleware_fns(&mut self, names: Vec<String>) {
+        self.main_imported_middleware_fns = names;
     }
 
     /// Walks the main program's AST and loads each module
@@ -4246,6 +4340,21 @@ impl ModuleLoader {
         if !bg_names.is_empty() {
             module_env.add_imported_background_fns(bg_names);
         }
+        // v0.19.5 — cross-module `@middleware(name)` pre-scan
+        // paralelo al de `@background`. Sin esto el checker del
+        // módulo rechaza `return null`/`return <status>` en fns
+        // referenciadas como middleware desde fuera. Dos fuentes:
+        // imports propias del módulo + nombres ya pre-scanneados
+        // desde main (que cubre el caso main + módulos paralelos).
+        let mut mw_names = pre_scan_imported_middleware_fns_for_loader(
+            &module_program,
+            &module_base_dir,
+            &self.dep_registry,
+        );
+        mw_names.extend(self.main_imported_middleware_fns.iter().cloned());
+        if !mw_names.is_empty() {
+            module_env.add_imported_middleware_fns(mw_names);
+        }
         let (module_env, _types, _defs, type_errors) =
             crate::types::check_with_env(&module_program, module_env, module_errors);
         if !type_errors.is_empty() {
@@ -4335,6 +4444,16 @@ impl ModuleLoader {
         // W18 — propagate main's `@server(observability=...)` flag
         // so the module's HTTP wrappers go bare-metal too when main
         // opts out. Default `true`.
+        // v0.19.5 — build the GLOBAL middleware fn names set seen by
+        // this module: combine main's pre-scanned set with the
+        // module's own local + transitive (`pre_scan_imported_*` above).
+        // Same merge semantics as `mw_names` above for the checker.
+        let mut module_mw_names: Vec<String> = pre_scan_imported_middleware_fns_for_loader(
+            &module_program,
+            &module_base_dir,
+            &self.dep_registry,
+        );
+        module_mw_names.extend(self.main_imported_middleware_fns.iter().cloned());
         let rust_content = generate_module_rs_with_bindings(
             &module_program,
             &module_env,
@@ -4342,6 +4461,7 @@ impl ModuleLoader {
             &self.modules,
             &module_python_imports,
             self.main_observability_enabled,
+            &module_mw_names,
         )?;
 
         let mod_name = segments.last().cloned().unwrap_or_default();
@@ -4818,6 +4938,69 @@ fn pre_scan_imported_background_fns_for_loader(
     out
 }
 
+/// v0.19.5 (post-fitzwatch 2026-06-26) — Mirror of
+/// `pre_scan_imported_background_fns_for_loader` for `@middleware`.
+/// Scans each `Stmt::Import` / `Stmt::FromImport`, parses the
+/// imported `.fitz`, and collects names of fns referenced as
+/// `@middleware(name)`. The codegen merges them with the local
+/// pre-scan to build the GLOBAL set, then propagates it to each
+/// module's checker (via `TypeEnv::add_imported_middleware_fns`)
+/// and codegen ctx (via direct insertion into
+/// `ctx.middleware_fn_names` before `pre_register_fns`).
+///
+/// Use case (canonical SaaS pattern): `rate_limit.fitz` declares
+/// `mw_strict`/`mw_block` as fns with `return null`/`return <status>`
+/// gate semantics; `auth.fitz` / `subscriptions.fitz` apply
+/// `@middleware(mw_strict)` on their handlers. Without this
+/// pre-scan, the loader's check of `rate_limit.fitz` fails because
+/// the local pre-scan does not see the cross-module @middleware
+/// reference.
+fn pre_scan_imported_middleware_fns_for_loader(
+    program: &Program,
+    base_dir: &Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // Local references in the program (typical case: main has
+    // `@middleware(local_fn)` — handled as well by the local
+    // pre-scan of `pre_register_fns`, but we collect it here too
+    // so the GLOBAL set is genuinely complete).
+    out.extend(crate::types::extract_middleware_fn_names(program));
+    for stmt in program {
+        let path_segments = match stmt {
+            Stmt::Import { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) =
+            resolve_loader_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(tokens) = crate::lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = crate::parser::parse(tokens) else {
+            continue;
+        };
+        out.extend(crate::types::extract_middleware_fn_names(&module_program));
+    }
+    out
+}
+
 /// W12 (v0.10.8) — `.fitz` file resolution for an import path.
 /// Parallel to `main.rs::resolve_import_file_path`. Single segment
 /// matches the `dep_registry`; rest falls back to a relative path.
@@ -4866,6 +5049,15 @@ fn generate_module_rs_with_bindings(
     loaded_modules: &[LoadedModule],
     python_imports: &[PythonImport],
     main_observability_enabled: bool,
+    // v0.19.5 (post-fitzwatch 2026-06-26) — GLOBAL set of fn names
+    // referenced as `@middleware(name)` across main + all loaded
+    // modules. The module's ctx pre-inserts them into
+    // `middleware_fn_names` so a fn declared here and applied as
+    // middleware from another module is properly classified (right
+    // Rust return type `Option<__FitzResponse>` + `in_middleware_fn
+    // = true` for `Stmt::ReturnStatus`). Empty when called from
+    // pure-test paths via `generate_rust`.
+    cross_module_middleware_fns: &[String],
 ) -> Result<String, FitzError> {
     // Hpx.2 — for modules compiled via the loader, compute a fresh
     // TypeInfo. The loader ran `resolve_program` before but not
@@ -4915,6 +5107,17 @@ fn generate_module_rs_with_bindings(
     // bindings (binding_name → dotted_path + PyAny type in the root
     // scope). Parallel to main's `install_python_bindings`.
     ctx.install_python_bindings(python_imports);
+    // v0.19.5 — pre-insert cross-module @middleware fn names BEFORE
+    // `pre_register_fns`. The post-scan inside `pre_register_fns`
+    // re-classifies by arity (1 = pre / 2 = post), so the union of
+    // local + cross-module is correctly partitioned. Without this,
+    // `gen_top_fn` emits the raw return type for the fn (`-> ()`
+    // for Null) instead of `-> Option<__FitzResponse>`, and
+    // `Stmt::ReturnStatus` in the body bails with "only allowed
+    // inside HTTP handlers".
+    for name in cross_module_middleware_fns {
+        ctx.middleware_fn_names.insert(name.clone());
+    }
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
     ctx.pre_register_top_lets(program)?;
@@ -5088,6 +5291,39 @@ fn generate_module_rs_with_bindings(
         );
     }
 
+    // v0.19.5 (post-fitzwatch 2026-06-26) — When the module
+    // references the `Request` built-in type (typical case:
+    // dedicated `rate_limit.fitz` / `audit.fitz` / `auth.fitz`
+    // module declaring helpers/middlewares with `req: Request` in
+    // their signature), emit `use crate::{Request, RequestData};`
+    // so the emitted `<mod>.rs` resolves the type alias + struct
+    // living in main.rs's HTTP prelude. Without this import, rustc
+    // fails with E0425 (`cannot find type Request`) + E0422
+    // (`cannot find struct RequestData`). Pattern parallel to
+    // W11 (DB), W16 (`__FitzResponse`), v0.19.1 (Response built-in).
+    //
+    // Also triggers if the module is declaring a fn that is
+    // referenced as `@middleware(name)` from another module
+    // (cross-module middleware) — middleware fns have `Request` in
+    // their first param by spec. The cross_module_middleware_fns
+    // set tells us which local fns are middleware targets; we
+    // intersect against the local program's top-level fns.
+    let module_uses_request_local = program_uses_request_type(program);
+    let module_has_imported_middleware_fn = !cross_module_middleware_fns.is_empty()
+        && program.iter().any(|s| {
+            if let Stmt::FnDef { name, .. } = s {
+                cross_module_middleware_fns.iter().any(|n| n == name)
+            } else {
+                false
+            }
+        });
+    if module_uses_request_local || module_has_imported_middleware_fn {
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{Request, RequestData};\n\n",
+        );
+    }
+
     // W11 (v0.10.7) — when the module emits HTTP handlers (returning
     // language types + `@get`/`@post`/etc decorators + `return
     // <status> { ... }`), it needs `__FitzResponse` and the traits
@@ -5097,8 +5333,17 @@ fn generate_module_rs_with_bindings(
     // helper) because the `__handler_<name>` wrapper that we now emit
     // in the module invokes it to inject CORS headers and build the
     // final axum response.
+    //
+    // v0.19.5 (post-fitzwatch 2026-06-26) — also import
+    // `__FitzResponse` when the module declares a fn referenced as
+    // `@middleware(...)` cross-module: the middleware emission
+    // wraps `return <status> { ... }` in `Some(__FitzResponse {
+    // ... })` and the body in `.__to_fitz_json()` (via the
+    // `__ToFitzJson` trait). Without these, the module's emitted
+    // `.rs` aborts with rustc E0405 / E0422 / E0425 even though
+    // there are no HTTP handlers locally.
     let module_has_http = has_http_routes(program);
-    if module_has_http {
+    if module_has_http || module_has_imported_middleware_fn {
         ctx.emit(
             "#[allow(unused_imports)]\n\
              use crate::__FitzResponse;\n\
@@ -5122,8 +5367,11 @@ fn generate_module_rs_with_bindings(
     // `has_http_routes(program)` with any module's `has_http`), so
     // `ws_broadcast` callers in pure-cron/library modules can still
     // reuse them via `crate::*`.
+    // v0.19.5 — also import `__ToFitzJson`/`__FromFitzJson` for
+    // imported middleware fns: `return <status> { body }` emits
+    // `<rt as __ToFitzJson>::__to_fitz_json(&body)`.
     let module_uses_ws_broadcast_local = program_uses_ws_broadcast(program);
-    if module_has_http || module_uses_ws_broadcast_local {
+    if module_has_http || module_uses_ws_broadcast_local || module_has_imported_middleware_fn {
         ctx.emit(
             "#[allow(unused_imports)]\n\
              use crate::{__ToFitzJson, __FromFitzJson};\n\n",
@@ -8304,6 +8552,42 @@ impl<'a> CodegenCtx<'a> {
                 (code, ty.clone())
             })
         }
+    }
+
+    /// v0.19.5 (post-fitzwatch 2026-06-26) — Resolves a fn name to
+    /// its signature considering both local fns (`self.fn_sigs`) and
+    /// imported ones (via `module_bindings` + `loaded_modules`).
+    /// Returns `None` if the name is unknown. Used by the middleware
+    /// chain emission to detect async fns (`.ret = Future<...>`) so
+    /// the wrapper emits `.await` accordingly, and by the build-time
+    /// validation of `@middleware(name)`.
+    fn resolve_fn_sig_anywhere(&self, name: &str) -> Option<FnSig> {
+        if let Some(s) = self.fn_sigs.get(name) {
+            return Some(s.clone());
+        }
+        if let Some(ResolvedBinding::Named {
+            module_index,
+            item,
+            kind: NamedKind::Fn,
+        }) = self.module_bindings.get(name).cloned()
+        {
+            return self
+                .loaded_modules
+                .get(module_index)
+                .and_then(|m| m.fn_sigs.get(&item).cloned());
+        }
+        None
+    }
+
+    /// v0.19.5 — `true` if the middleware fn `name` is async — i.e.
+    /// its resolved signature returns `Type::Future(_)`. Used by the
+    /// middleware chain emission to suffix `.await` to the call.
+    /// Returns `false` if the name is unknown (the build-time check
+    /// will catch it later); the wrapper falls back to sync emission.
+    fn middleware_fn_is_async(&self, name: &str) -> bool {
+        self.resolve_fn_sig_anywhere(name)
+            .map(|s| matches!(s.ret, Type::Future(_)))
+            .unwrap_or(false)
     }
 
     /// For `<ns>.<fn_name>(args)`: returns `(Rust path, signature)` if
@@ -28024,7 +28308,32 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             match arg {
                 // user-fn middleware
                 Expr::Ident(n, _) => {
-                    if !self.fn_sigs.contains_key(n.as_str()) {
+                    // v0.19.5 (post-fitzwatch 2026-06-26) —
+                    // accept imported fn bindings as middleware.
+                    // Before, only `self.fn_sigs` (local fns)
+                    // were valid; `@middleware(mw_strict)` where
+                    // `mw_strict` came from `from rate_limit
+                    // import mw_strict` bailed with "the fn is
+                    // not defined in this program". Now we fall
+                    // back to `module_bindings` to look up the
+                    // imported fn sig from
+                    // `loaded_modules[idx].fn_sigs`. Parallel to
+                    // `is_user_callable` (v0.9.45).
+                    let sig: Option<FnSig> = if let Some(s) = self.fn_sigs.get(n.as_str()) {
+                        Some(s.clone())
+                    } else if let Some(ResolvedBinding::Named {
+                        module_index,
+                        item,
+                        kind: NamedKind::Fn,
+                    }) = self.module_bindings.get(n.as_str()).cloned()
+                    {
+                        self.loaded_modules
+                            .get(module_index)
+                            .and_then(|m| m.fn_sigs.get(&item).cloned())
+                    } else {
+                        None
+                    };
+                    if sig.is_none() {
                         return Err(self.err(format!(
                             "@middleware(`{}`) on fn `{}`: the fn is not \
                              defined in this program (build-time check)",
@@ -28042,7 +28351,6 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     // Response`) only runs in `fitz run` for
                     // now. Codegen rejects it with a clear
                     // message citing the workaround.
-                    let sig = self.fn_sigs.get(n.as_str()).cloned();
                     let mw_arity = sig.as_ref().map(|s| s.params.len()).unwrap_or(1);
                     let is_wrap = sig
                         .as_ref()
@@ -29360,11 +29668,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("        headers: __req_headers_vec,\n");
         self.emit("    }));\n");
         // Middleware chain.
+        // v0.19.5 — Detect async middleware fns (`.ret = Future<_>`)
+        // and emit `.await` suffix accordingly. Sync fns keep the
+        // bare call. Without this, an `async fn` middleware (typical
+        // case: middleware that calls `db.query(...).await` or
+        // `http.head(...).await` for rate limiting) returns
+        // `Future<Option<...>>` and the `if let Some(...)` mismatches.
+        // Parallel to `gen_call` (Phase 6.6) which decides
+        // `.await` by inspecting `.ret`.
         for mw_name in &sig.mw_user_fns {
+            let await_suffix = if self.middleware_fn_is_async(mw_name) {
+                ".await"
+            } else {
+                ""
+            };
             writeln!(
                 &mut self.output,
-                "    if let Some(__resp) = {}(__req.clone()) {{",
-                mw_name,
+                "    if let Some(__resp) = {}(__req.clone()){} {{",
+                mw_name, await_suffix,
             )
             .unwrap();
             self.emit("        return __apply_cors_and_respond(\n");
@@ -29701,10 +30022,17 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             // sees the response first).
             if has_post_mws {
                 for mw_name in sig.mw_user_fns_post.iter().rev() {
+                    // v0.19.5 — async post middleware support
+                    // (same pattern as the pre middleware chain).
+                    let await_suffix = if self.middleware_fn_is_async(mw_name) {
+                        ".await"
+                    } else {
+                        ""
+                    };
                     writeln!(
                         &mut self.output,
-                        "    __resp = {}(__req.clone(), __resp);",
-                        mw_name,
+                        "    __resp = {}(__req.clone(), __resp){};",
+                        mw_name, await_suffix,
                     )
                     .unwrap();
                 }
@@ -29759,10 +30087,16 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.emit("    };\n");
             // Post mws in reverse order — wrap semantics.
             for mw_name in sig.mw_user_fns_post.iter().rev() {
+                // v0.19.5 — async post middleware support.
+                let await_suffix = if self.middleware_fn_is_async(mw_name) {
+                    ".await"
+                } else {
+                    ""
+                };
                 writeln!(
                     &mut self.output,
-                    "    __resp = {}(__req.clone(), __resp);",
-                    mw_name,
+                    "    __resp = {}(__req.clone(), __resp){};",
+                    mw_name, await_suffix,
                 )
                 .unwrap();
             }
@@ -29839,10 +30173,16 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 self.emit("        body: __result.__to_fitz_json(),\n");
                 self.emit("    };\n");
                 for mw_name in sig.mw_user_fns_post.iter().rev() {
+                    // v0.19.5 — async post middleware support.
+                    let await_suffix = if self.middleware_fn_is_async(mw_name) {
+                        ".await"
+                    } else {
+                        ""
+                    };
                     writeln!(
                         &mut self.output,
-                        "    __resp = {}(__req.clone(), __resp);",
-                        mw_name,
+                        "    __resp = {}(__req.clone(), __resp){};",
+                        mw_name, await_suffix,
                     )
                     .unwrap();
                 }
@@ -43487,6 +43827,7 @@ mod tests {
             &[],
             &[],
             main_observability_enabled,
+            &[],
         )
     }
 

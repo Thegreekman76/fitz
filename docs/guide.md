@@ -7646,6 +7646,43 @@ Cuando aplicás `cors(...)`:
 
 **Ejemplo completo**: `examples/guide/17b-middleware.fitz`.
 
+**Middleware cross-module (v0.19.5+)**: el patrón canónico de
+SaaS HTTP es separar los middlewares en su propio módulo y
+aplicarlos desde varios módulos de handlers. Por ejemplo, un
+`rate_limit.fitz` que define `mw_strict`/`mw_block`, y handlers
+en `auth.fitz` / `api.fitz` que apilan `@middleware(mw_strict)`:
+
+```fitz
+// src/rate_limit.fitz
+async fn mw_strict(req: Request) {
+    if (already_too_many(req)) {
+        return 429 { "error": "rate limit exceeded" }
+    }
+    return null
+}
+```
+
+```fitz
+// src/auth.fitz
+from rate_limit import mw_strict
+
+@middleware(mw_strict)
+@post("/auth/login")
+fn login(body: Credentials) -> Result<Token> { ... }
+```
+
+Funciona en `fitz build` (binario nativo). Las fns middleware
+pueden ser `async` (caso típico: rate limit que consulta DB con
+`.await`) y reciben `Request` como primer parámetro normal.
+
+> Limitación conocida (deuda residual derivada de v0.19.5): en
+> `fitz run` (intérprete), las fns middleware **sync** funcionan
+> cross-module sin problema, pero las `async fn` middleware tienen
+> un bug pre-existente del evaluator y devuelven 500. Workaround:
+> durante desarrollo, validar el flujo middleware async con
+> `fitz build && ./binario`. Se cierra en una iteración futura
+> junto a otras mejoras de paridad runtime/codegen.
+
 ### HTTP client outbound
 
 Hasta acá vimos el lado **server** del HTTP nativo: handlers que

@@ -2,6 +2,34 @@
 
 ---
 
+## v0.19.5 — Bugfix codegen: cross-module `@middleware(fn)` + `Request` destrabados ✅ CERRADO (2026-06-27)
+
+**Hito**: bugfix release que cierra la deuda 🔴 URGENTE descubierta el 2026-06-26 implementando rate limiting en fitzwatch (SaaS privado del autor). El patrón canónico SaaS "módulo `rate_limit.fitz` / `audit.fitz` que define middlewares reutilizables aplicados desde varios módulos de handlers" estaba vetado por TRES bugs distintos del codegen, todos del path cross-module. fitzwatch tuvo que abandonar `@middleware` cross-module y duplicar el check inline en 7 endpoints (~42 LoC) como workaround.
+
+**Síntomas** (3 distintos): (1) checker del loader sobre módulo aislado rechazaba `return <status> { ... }` en fns referenciadas como middleware externo; (2) módulos con helpers `req: Request` en su firma emitían `.rs` sin `use crate::{Request, RequestData}` → rustc E0425/E0422; (3) main rechazaba `@middleware(<imported_fn>)` con "the fn is not defined in this program" porque el check solo veía `self.fn_sigs` (locales), no `module_bindings` (imports).
+
+**Fix** (~280 LoC netas, 2 archivos `src/codegen.rs` + `src/types.rs`, 3 E2E tests). Paralelo a W12 (`@auth_provider`) + B10 (`@background`) cross-module pre-scan + W11/W16/W18 (`use crate::{...}` cross-module emission). Siete piezas coordinadas:
+
+1. **Pre-scan global de `@middleware(fn)` references** — `pre_scan_imported_middleware_fns_for_loader` walka main + todos los módulos importados (recursivo) y construye el set GLOBAL de fn names referenciadas como middleware en cualquier punto del árbol del proyecto. Helper público nuevo `crate::types::extract_middleware_fn_names`.
+2. **Propagación al checker** — `TypeEnv` suma campo `imported_middleware_fns: HashSet<String>` paralelo a `imported_background_fns`. Setter `add_imported_middleware_fns`. `collect_middleware_fn_names` del checker mergea el set al `ctx.middleware_fn_names` antes del walk.
+3. **Propagación al codegen del módulo** — `generate_module_rs_with_bindings` recibe parámetro nuevo `cross_module_middleware_fns: &[String]` y pre-inserta los nombres en `ctx.middleware_fn_names` ANTES de `pre_register_fns`.
+4. **`@middleware(<imported_fn>)` aceptado en main** — `collect_route_middlewares` consulta tanto `self.fn_sigs` como `self.module_bindings`. Helper nuevo `resolve_fn_sig_anywhere`. Paralelo a `is_user_callable` (v0.9.45).
+5. **`use crate::{Request, RequestData}` en módulos** — detector nuevo `program_uses_request_type` walka el AST del módulo buscando `Request` en TypeExpr. Paralelo a `program_uses_response_builtin` (v0.19.1).
+6. **`use crate::{__FitzResponse, __ToFitzJson, ...}` en módulos de middleware puro** — condición se extiende a `module_has_http || module_has_imported_middleware_fn` para que módulos sin HTTP routes propios pero con fns referenciadas como middleware externo sigan emitiendo las traits.
+7. **Async middleware fn cross-module bonus** — helper nuevo `middleware_fn_is_async(name)` consulta el FnSig (local o imported) y detecta `Type::Future(_)` en el ret. El wrapper emite `.await` suffix condicional para los 3 paths (pre-mw + post-mw response + post-mw result). Habilita el patrón canónico `async fn mw_strict(req: Request) { match check_rate_limit(req, ...).await { ... } }`.
+
+**3 E2E tests nuevos** en `tests/compile_e2e.rs`: `v019_5_cross_module_middleware_fn_compila_a_binario_nativo` (canónico async gate-only `return null`), `v019_5_cross_module_middleware_fn_con_request_arg_compila` (helper local con `req: Request` + inspección del `mw.rs` emitido confirmando los imports), `v019_5_cross_module_middleware_fn_con_return_status_compila` (con `return 429 { "error": "blocked" }` cross-module).
+
+**Tests al cierre v0.19.5**: 3201 lib (sin cambios — no se agregaron unit tests; el fix se prueba a través de los 3 E2E del codegen) + 98 cli_e2e + 384 compile_e2e (+3 nuevos `v019_5_*`) + 3 openapi_e2e. fmt + clippy (default + lsp) `-D warnings` limpios. **Verificación pre-bump completa**: lib suite 3201/3201 verde, cli_e2e 98/98 verde, openapi_e2e 3/3 verde, smoke `GUIDE_EXAMPLES_COMPILE` (~370 ejemplos guía+curso+TaskHub) verde en 687s, 11/11 boilerplates `fitz check` verde, repro mínima manual `fitz build` produce binario HTTP 200 OK. Bump Cargo.toml `0.19.4` → `0.19.5` + extensión VSCode `0.19.4` → `0.19.5` + `.vsix` regenerado.
+
+**Impacto en producción**: fitzwatch puede activar el refactor `@middleware(rate_limit_strict)` cross-module limpio en los 7 endpoints sensibles cuando bumpee `FITZ_TAG` a v0.19.5+, eliminando las ~42 LoC duplicadas del workaround inline temporal.
+
+**Deudas residuales derivadas** (NO bloquean — documentadas en `docs/deudas-post-5b.md`): (1) async middleware fns en `fitz run` (intérprete) devuelven 500 INCLUSO same-module — bug pre-existente del evaluator (NO regresión de v0.19.5); workaround `fitz build && ./binario`; el binario ahora soporta async middleware cross-module. (2) LSP cross-module pre-scan de `@middleware` — paralelo a la deuda que v0.19.3 cerró para `@auth_provider`/`@background`; el LSP abriendo un módulo aislado de middleware muestra falso positivo. (3) Wrap-style middleware (`Fn() -> Response` second param) sigue siendo deuda pre-existente; rechazada en codegen con mensaje claro.
+
+**Próximo norte tras v0.19.5**: notificar al autor para refactorear fitzwatch (bump `FITZ_TAG` a v0.19.5+ + volver a `@middleware(rate_limit_X)` cross-module limpio + eliminar workaround inline; memoria `project_fitzwatch_pending_language_fix.md` tiene plan exacto de 5 pasos). Ningún ítem crítico abierto del stack web (server + client + WS + auth + SMTP + Response + observability + jobs + ORM + middleware cross-module todos cerrados).
+
+---
+
 ## v0.19.4 — Bugfix codegen: `http.request` con headers Map literal rompía Send en `spawn` ✅ CERRADO (2026-06-23)
 
 **Hito**: bugfix release que cierra la deuda 🔴 URGENTE descubierta durante el deploy real de fitzwatch.com en VPS DigitalOcean. El bloqueo SMTP outbound del provider obligó migrar de `smtp.send` builtin a `http.request` POST a Resend API REST con Authorization Bearer header — el patrón canónico de HTTP outbound con auth Bearer (Stripe, Resend, OpenAI, Mailgun, etc.). El refactor fallaba con `MutexGuard<Vec<(String, String)>>` not Send cuando el caller era `spawn(async fn)`. Mismo root cause que v0.18.1 (`for x in List<Str>` con `.await` en `@cron`).

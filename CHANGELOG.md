@@ -9,6 +9,135 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.19.5] — 2026-06-27 — Bugfix codegen: cross-module `@middleware(fn)` + `Request` destrabados
+
+Bugfix release que cierra una deuda 🔴 URGENTE descubierta el
+2026-06-26 al implementar rate limiting en fitzwatch (SaaS privado
+del autor) usando el patrón canónico "módulo dedicado a
+cross-cutting concerns + handlers en módulos separados". Tres
+síntomas distintos del codegen bloqueaban el patrón:
+
+1. **Síntoma 1**: el checker del loader sobre un módulo aislado
+   (e.g. `rate_limit.fitz` con `fn mw_block(req: Request) {
+   return 429 { ... } }`) rechazaba `return <status> { ... }`
+   porque el pre-scan local no veía el `@middleware(mw_block)`
+   aplicado desde otro módulo.
+2. **Síntoma 2**: cuando módulo declaraba helpers con `req:
+   Request` en su firma, el `.rs` emitido referenciaba `Request`
+   /`RequestData` sin `use crate::{...}` correspondiente y rustc
+   abortaba con E0425/E0422.
+3. **Síntoma 3**: en main, `@middleware(mw_strict)` donde
+   `mw_strict` venía de `from rate_limit import mw_strict` fallaba
+   build-time con "the fn is not defined in this program" porque
+   el check solo consultaba `self.fn_sigs` (locales), no
+   `module_bindings` (imports).
+
+Bloqueaba el patrón canónico "módulo `rate_limit.fitz` / `audit.fitz`
+/ `cors.fitz` que define middlewares reutilizables aplicados desde
+varios módulos de handlers" — encarecía todo proyecto Fitz HTTP de
+producción. fitzwatch tuvo que abandonar `@middleware` cross-module y
+duplicar el check inline en 7 endpoints (~42 LoC duplicadas) como
+workaround temporal.
+
+**Fix** (~280 LoC netas, 2 archivos `src/codegen.rs` + `src/types.rs`,
+3 E2E tests):
+
+1. **Pre-scan global de `@middleware(fn)` references** —
+   `pre_scan_imported_middleware_fns_for_loader` walka main + todos
+   los módulos importados (recursivo) y construye el set GLOBAL de
+   fn names referenciadas como middleware en cualquier punto del
+   árbol del proyecto. Helper público nuevo
+   `crate::types::extract_middleware_fn_names`. Paralelo a W12
+   (`@auth_provider`) + B10 (`@background`) cross-module pre-scan.
+2. **Propagación al checker** — `TypeEnv` suma campo
+   `imported_middleware_fns: HashSet<String>` paralelo a
+   `imported_background_fns`. Setter `add_imported_middleware_fns`.
+   `collect_middleware_fn_names` del checker mergea el set al
+   `ctx.middleware_fn_names` antes del walk.
+3. **Propagación al codegen del módulo** —
+   `generate_module_rs_with_bindings` recibe parámetro nuevo
+   `cross_module_middleware_fns: &[String]` y pre-inserta los
+   nombres en `ctx.middleware_fn_names` ANTES de `pre_register_fns`.
+   La post-scan que clasifica por aridad (1=pre/2=post) ve la unión
+   y emite el Rust return type correcto (`Option<__FitzResponse>`)
+   + activa `in_middleware_fn=true` para los `Stmt::ReturnStatus`
+   del body.
+4. **`@middleware(<imported_fn>)` aceptado en main** —
+   `collect_route_middlewares` (línea ~28171) ahora consulta tanto
+   `self.fn_sigs` (locales) como `self.module_bindings` para
+   `ResolvedBinding::Named { kind: NamedKind::Fn }` y resuelve el
+   `FnSig` desde `loaded_modules[idx].fn_sigs`. Helper nuevo
+   `resolve_fn_sig_anywhere`. Paralelo a `is_user_callable` (v0.9.45).
+5. **`use crate::{Request, RequestData}` en módulos** — detector
+   nuevo `program_uses_request_type` walka el AST del módulo
+   buscando `Request` en TypeExpr (fn params/return, type fields,
+   let annotations). Cuando el módulo declara helpers con `req:
+   Request` (típico: `fn get_client_ip(req: Request) -> Str` en
+   `rate_limit.fitz`), o cuando declara una fn que es referenciada
+   como middleware desde otro módulo (todas las middleware fns
+   tienen `Request` en su primer param por spec), el codegen emite
+   `use crate::{Request, RequestData}` al tope del `.rs`. Paralelo
+   a `program_uses_response_builtin` (v0.19.1).
+6. **`use crate::{__FitzResponse, __ToFitzJson, ...}` en módulos
+   de middleware puro** — cuando el módulo declara solo fns
+   middleware (sin `@get`/`@post`/etc), `module_has_http` es
+   `false` y el codegen pre-fix no emitía los imports necesarios
+   para `Stmt::ReturnStatus`. La condición se extiende a
+   `module_has_http || module_has_imported_middleware_fn` para
+   `__FitzResponse` + `__apply_cors_and_respond` y para
+   `__ToFitzJson`/`__FromFitzJson`.
+7. **Async middleware fn cross-module bonus** — `emit_middleware_chain`
+   detectaba el callsite como `mw_name(__req.clone())` siempre sync.
+   Con cross-module + `async fn mw_strict(req: Request)`, la fn
+   devuelve `Future<Option<...>>` y el `if let Some(...) =`
+   mismatch. Helper nuevo `middleware_fn_is_async(name)` consulta el
+   FnSig (local o imported) y detecta `Type::Future(_)` en el ret.
+   El wrapper emite `.await` suffix condicional para los 3 paths
+   (pre-mw + post-mw response + post-mw result). Paralelo a
+   `gen_call` Phase 6.6. Habilita el patrón canónico
+   `async fn mw_strict(req: Request) { match check_rate_limit(req,
+   ...).await { ... } }` que fitzwatch necesita.
+
+**3 E2E tests nuevos** en `tests/compile_e2e.rs` cubriendo los 3
+síntomas: `v019_5_cross_module_middleware_fn_compila_a_binario_nativo`
+(canónico async gate-only `return null`),
+`v019_5_cross_module_middleware_fn_con_request_arg_compila`
+(helper local con `req: Request` + inspección del `mw.rs` emitido
+confirmando los imports), `v019_5_cross_module_middleware_fn_con_return_status_compila`
+(con `return 429 { "error": "blocked" }` cross-module).
+
+**Verificación pre-bump completa** (memoria
+`feedback_pre_release_verification`): `cargo fmt --all --check` +
+`cargo clippy --lib --tests --bins -- -D warnings` (default + lsp)
+limpios; `cargo test --lib --release` **3201/3201** verde;
+`cargo test --test cli_e2e --release` **98/98** verde;
+`cargo test --test openapi_e2e --release` **3/3** verde; smoke
+`GUIDE_EXAMPLES_COMPILE` (~370 ejemplos guía+curso+TaskHub) verde
+en 687s; 11/11 boilerplates `fitz check` verde; validación bit-a-bit
+`fitz build` produce binario que responde HTTP 200 OK al repro
+mínimo cross-module.
+
+**Bump Cargo.toml** `0.19.4` → `0.19.5` + extensión VSCode `0.19.4`
+→ `0.19.5` + `.vsix` regenerado bundleando el `fitz-lsp.exe` fresh.
+
+**Deudas residuales derivadas** (NO bloquean — documentadas en
+`docs/deudas-post-5b.md`):
+
+1. Async middleware fns en `fitz run` (intérprete) devuelven 500
+   INCLUSO same-module — bug pre-existente del evaluator (NO
+   regresión de v0.19.5). Workaround documentado: validar el flujo
+   con `fitz build && ./binario`. El binario ahora soporta async
+   middleware cross-module sin problema.
+2. LSP cross-module pre-scan de `@middleware` — paralelo a la deuda
+   residual que v0.19.3 cerró para `@auth_provider`/`@background`.
+   El LSP abriendo un módulo aislado de middleware muestra falso
+   positivo. Refinable cuando aparezca presión real.
+
+**Impacto en producción**: fitzwatch puede activar el refactor
+`@middleware(rate_limit_strict)` cross-module limpio en los 7
+endpoints sensibles cuando bumpee `FITZ_TAG` a v0.19.5+, eliminando
+las ~42 LoC duplicadas del workaround inline temporal.
+
 ## [v0.19.4] — 2026-06-23 — Bugfix codegen: `http.request` con headers Map literal rompía Send en `spawn`
 
 Bugfix release que cierra una deuda 🔴 URGENTE descubierta el mismo
