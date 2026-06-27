@@ -4,6 +4,196 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🔴 URGENTE — Sub-caso v0.19.5 — wrapper HTTP en módulo IMPORTER del middleware no emite `use crate::{Request, RequestData}` (descubierto 2026-06-27 noche durante refactor real fitzwatch)
+
+> **DESCUBIERTO** durante la sesión de refactor real fitzwatch contra
+> v0.19.5 (cierre del bug original cross-module `@middleware + Request`).
+> El fix v0.19.5 cubrió correctamente el **módulo del middleware** (emite
+> `use crate::{Request, RequestData}` en `rate_limit.rs`), pero NO cubre
+> el **módulo importer** (donde vive el handler que aplica el
+> `@middleware(<imported_fn>)`). El wrapper HTTP emitido en
+> `auth.rs`/`subscriptions.rs` construye `Request` + `RequestData` para
+> pasarla al middleware, pero el detector `program_uses_request_type`
+> NO dispara para esos módulos porque ninguna fn local declara `Request`
+> en su AST — solo lo aplican como decorator.
+>
+> **Impacto en producción fitzwatch**: 14 errores rustc al hacer
+> `fitz build` (7 endpoints × 2 errores cada uno: `E0425 cannot find
+> type Request` + `E0422 cannot find struct, variant or union type
+> RequestData`). Bloquea el refactor del workaround inline (~42 LoC
+> duplicadas) que v0.19.5 prometió destrabar.
+>
+> **Workaround user-land aplicado en fitzwatch (commit pendiente)**:
+> declarar una fn dummy `_codegen_request_anchor(req: Request) -> Bool`
+> en cada módulo importer del middleware. Esto fuerza al detector
+> `program_uses_request_type` a disparar (el AST del módulo tiene
+> `Request` en TypeExpr de su param), y el codegen emite
+> `use crate::{Request, RequestData};` correctamente. El binario
+> compila bit-a-bit OK.
+
+### Sub-pasos del fix v0.19.6 propuesto
+
+1. **Extender `program_uses_request_type`** para que también dispare
+   cuando el módulo APLICA `@middleware(<imported_fn>)` a algún handler.
+   Caminos posibles:
+   - **(a) Heurístico**: el módulo importer dispara el detector si
+     declara handlers (`@get/@post/...`) que tienen al menos un
+     `@middleware(<ident>)` decorator donde `<ident>` está en
+     `imported_middleware_fns` del TypeEnv. Más estricto pero requiere
+     parsear los decorators ANTES del codegen para resolver el `<ident>`.
+   - **(b) Trivial**: el detector dispara para CUALQUIER módulo que
+     tenga al menos UN handler con `@middleware(...)` aplicado donde
+     la fn middleware NO es local. Más generoso pero podría sobre-emitir
+     en casos benignos (overhead despreciable: el `use` extra no afecta
+     el binario final si no se referencia).
+   - **(c) Estructural**: hacer que `Request` + `RequestData` SIEMPRE
+     se emitan como `use crate::{Request, RequestData}` en cualquier
+     módulo importado que declare handlers HTTP (`@get/@post/...`).
+     Costo: imports extra en módulos que no los necesitan. Beneficio:
+     el bug no puede repro de nuevo. Probable best balance.
+
+2. **E2E test nuevo en `tests/compile_e2e.rs`** —
+   `v019_6_cross_module_middleware_applied_in_importer_module_emits_request_imports`
+   con shape canónica del fitzwatch real:
+   ```fitz
+   // mw.fitz
+   async fn mw_strict(req: Request) {
+       return null
+   }
+
+   // handlers.fitz
+   from mw import mw_strict
+
+   @middleware(mw_strict)
+   @post("/protected")
+   async fn protected() -> Str => "ok"
+
+   // main.fitz
+   from handlers import protected
+   @server(N) fn main() => 0
+   ```
+   Validar que `handlers.rs` emitido contiene
+   `use crate::{Request, RequestData};`. Sin ese import, `cargo build`
+   del project generado aborta con E0425/E0422.
+
+### Detalle técnico del sub-caso (preservado para referencia)
+
+**Cómo apareció**: refactor real fitzwatch 2026-06-27 noche. Después
+del bump `FITZ_TAG=v0.19.4` → `v0.19.5` y aplicar el patrón canónico:
+
+```fitz
+// rate_limit.fitz — módulo del middleware
+async fn rate_limit_auth_strict(req: Request) {
+    let x_real_ip: Str? = match req.headers.get("x-real-ip") { ... }
+    ...
+    match check_rate_limit_by_ip(ip, "auth_strict", 10).await {
+        Ok(_) => {},
+        Err(_) => return 429 { "error": t(loc, "rate_limit.exceeded") },
+    }
+    return null
+}
+```
+
+```fitz
+// auth.fitz — módulo IMPORTER del middleware
+from rate_limit import rate_limit_auth_strict, rate_limit_auth_slow
+
+@middleware(rate_limit_auth_strict)
+@header(name="X-Real-IP", into="x_real_ip")
+@header(name="X-Forwarded-For", into="x_forwarded_for")
+@header(name="Accept-Language", into="accept_lang")
+@header(name="User-Agent", into="ua")
+@post("/auth/login")
+async fn login(x_real_ip: Str?, x_forwarded_for: Str?, accept_lang: Str?, ua: Str?, creds: Credentials) -> Result<LoginResponse> {
+    ...
+}
+```
+
+`fitz check` pasa limpio. `fitz build` aborta con 14 errores rustc
+(en `auth.rs` y `subscriptions.rs`):
+
+```
+error[E0425]: cannot find type `Request` in this scope
+  --> src/auth.rs:1547:16
+error[E0422]: cannot find struct, variant or union type `RequestData` in this scope
+  --> src/auth.rs:1547:68
+... (7 ocurrencias = 7 handlers que aplican @middleware cross-module)
+```
+
+**`auth.rs` emitido**, líneas 1542-1551 (wrapper HTTP del handler `login`):
+
+```rust
+        __fitz_span_ctx,
+        move || async move {    let __req_headers_vec: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = std::sync::Arc::new(std::sync::Mutex::new(
+        __hmap.iter()
+            .filter_map(|(n, v)| v.to_str().ok().map(|s| (n.as_str().to_lowercase(), s.to_string())))
+            .collect()
+    ));
+    let __req_path = String::from("/auth/login");
+    let __req: Request = std::sync::Arc::new(std::sync::Mutex::new(RequestData {  // ← Request y RequestData usados acá
+        method: "POST".to_string(),
+        path: __req_path,
+        headers: __req_headers_vec,
+    }));
+    if let Some(__resp) = rate_limit_auth_strict(__req.clone()).await {  // ← y pasado al middleware cross-module
+        return __apply_cors_and_respond(...);
+    }
+```
+
+**`auth.rs` `use crate::*` imports emitidos** (líneas 117-185):
+
+```rust
+use crate::audit::EVENT_LOGIN_LOCKED;
+...
+use crate::rate_limit::compute_client_ip;
+use crate::rate_limit::rate_limit_auth_slow;
+use crate::rate_limit::rate_limit_auth_strict;
+...
+use crate::__FitzResponse;
+use crate::__apply_cors_and_respond;
+...
+// ← FALTA: `use crate::{Request, RequestData};`
+```
+
+**`rate_limit.rs` `use crate::*` imports** (línea 134) — emitido correctamente:
+
+```rust
+use crate::{Request, RequestData};  // ← v0.19.5 dispara para este módulo (declara fns con Request en su AST)
+```
+
+**Conclusión**: el detector `program_uses_request_type` cubre el caso
+"el módulo DECLARA fns con `Request` en su AST", pero el codegen del
+wrapper HTTP en `auth.rs` USA `Request`/`RequestData` aunque ninguna fn
+del módulo los tenga en TypeExpr. Sub-caso del fix v0.19.5 no cubierto.
+
+### Workaround user-land (en fitzwatch hasta v0.19.6)
+
+```fitz
+// auth.fitz / subscriptions.fitz — al inicio del módulo, después de imports
+// Workaround del codegen v0.19.5 — fuerza emisión de
+// `use crate::{Request, RequestData};` en este módulo. Refactor cuando
+// aterrice v0.19.6 (o el sub-caso quede cubierto).
+fn _codegen_request_anchor(req: Request) -> Bool => true
+```
+
+La fn dummy nunca se invoca, solo existe para que el detector
+`program_uses_request_type` dispare. Costo: 1 LoC + 1 fn extra
+en el `.rs` emitido (zero cost al runtime — rustc dead-code elimina).
+
+### Estimación de fix (~30-50 LoC)
+
+- Opción (c) "estructural" en `src/codegen.rs::program_uses_request_type`:
+  agregar arm que dispare si el módulo declara handlers HTTP que aplican
+  `@middleware(<ident>)` cross-module donde `<ident>` está en el
+  `imported_middleware_fns` del module's `TypeEnv` o en el set global
+  pre-scaneado (`main_imported_middleware_fns`).
+
+- 1 E2E test nuevo en `tests/compile_e2e.rs` (~30 LoC, paralelo a
+  `v019_5_cross_module_middleware_fn_con_request_arg_compila`).
+
+- Bump v0.19.6 + bump extensión VSCode 0.19.5 → 0.19.6 + `.vsix`
+  regenerado + CHANGELOG entry + esta sección a CERRADO con detalle del fix.
+
 ## 🟢 Cross-module `@middleware(fn)` + `Request` en codegen — **CERRADO v0.19.5 (2026-06-27)**
 
 > **CERRADO** un día después del descubrimiento, mismo patrón que las
