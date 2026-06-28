@@ -4,22 +4,57 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🟡 LSP marca false positive `unknown variable smtp` en `smtp.send(...)` (descubierto 2026-06-28)
+## 🟡 LSP marca false positives sobre built-ins del lenguaje no registrados — `smtp` + `Response` (descubierto 2026-06-28)
 
 > **Severidad**: amarillo (no urgente). `fitz check` real acepta el código
 > sin errores, `fitz build` compila y produce binario correcto. SOLO se
 > manifiesta como squiggle rojo + error en la pestaña "Problems" del
-> VSCode al editar archivos `.fitz` que usan `smtp.send(...)`. UX
-> ruidoso para developers tocando código con SMTP, pero no bloquea ni el
-> dev loop (build) ni el deploy.
+> VSCode al editar archivos `.fitz` que usan los built-ins afectados.
+> UX ruidoso para developers tocando código con esos built-ins, pero
+> no bloquea ni el dev loop (build) ni el deploy.
+>
+> **Actualizado 2026-06-28 noche**: el patrón se confirmó simétrico —
+> mismo bug afecta a OTRO built-in (`Response`) además de `smtp`. La
+> hipótesis 1 (extensión VSCode con LSP bundleado < v0.19.0 que no
+> conoce los built-ins recientes) sube de prioridad y probablemente
+> cierra ambos casos con un solo bump.
 
-### Repro mínima
+### Casos confirmados del false positive
 
-Crear archivo `repro_smtp_lsp.fitz` en un proyecto con `fitz.toml`:
+**Caso 1 — `smtp.send(...)`** (mini-tanda SMTP builtin v0.18.0):
+LSP marca `unknown variable smtp` cuando se usa el módulo built-in
+[`smtp` (registrado en `src/types.rs` línea 3461)](../src/types.rs#L3461)
+con `Type::Any` (mismo pattern que `http`/`jwt`/`hash`/`log`/`db`/
+`auth`/`flags`). Repro: ver
+[`d:\fitzwatch\src\emails.fitz`](../../fitzwatch/src/emails.fitz)
+línea 120.
+
+**Caso 2 — `Response { status: ..., content_type: ..., body: ... }`**
+(HTTP `Response { ... }` built-in v0.19.0): LSP marca `type Response
+does not have a field named X` para los 5 fields del built-in
+(`status`, `content_type`, `headers`, `body`, `body_bytes`).
+`fitz check` real acepta perfectamente porque `Response` está
+pre-registrado en el `TypeEnv` con los 5 fields (ver
+[CHANGELOG v0.19.0](../CHANGELOG.md)). Repro: ver
+[`d:\fitzwatch\src\public.fitz`](../../fitzwatch/src/public.fitz)
+líneas 607, 620, 918, 1213, 1327 (~10 ocurrencias actuales del
+patrón). Símbolos también afectados: `ResponseData` si se nombra
+explícitamente.
+
+**Probables casos no validados** (mismo pattern, asentar si aparecen):
+- `Request { method, path, headers }` (built-in HTTP middleware MW.1
+  + cross-module fix v0.19.5/v0.19.6).
+- `HttpClientResponse { status, body, headers, duration_ms }`
+  (mini-tanda HTTP client v0.17.0).
+- `SmtpResult { delivered, message_id, duration_ms }` (v0.18.0).
+- `File { path, name, size }` (si fue agregado).
+
+### Repro mínima — combinado (cubre ambos casos)
+
+Crear archivo `repro_lsp_builtins.fitz` en un proyecto con `fitz.toml`:
 
 ```fitz
-from i18n import t
-
+// Caso 1 — smtp module
 async fn send_test(to: Str, body: Str) -> Result<Bool> {
     let result = smtp.send({
         "to": to,
@@ -27,20 +62,36 @@ async fn send_test(to: Str, body: Str) -> Result<Bool> {
         "subject": "Test",
         "body_html": body,
     }).await?
-    log.info("sent message_id={result.message_id}")
     return Ok(true)
+}
+
+// Caso 2 — Response built-in
+@get("/test")
+async fn test_handler() -> Result<Response> {
+    return Ok(Response {
+        status: 200,
+        content_type: "text/html; charset=utf-8",
+        headers: { "Cache-Control": "no-cache" },
+        body: "<h1>Hola</h1>",
+    })
 }
 ```
 
-- **`fitz check`** (CLI): ✓ pasa limpio sin errores.
-- **`fitz build`** (CLI): ✓ binario producido OK.
-- **LSP en VSCode**: marca `unknown variable smtp` (Error severity)
-  en la línea `let result = smtp.send({`, columna 22 (sobre el `smtp`).
+- **`fitz check`** (CLI): ✓ pasa limpio sin errores en ambos casos.
+- **`fitz build`** (CLI): ✓ binario producido OK con ambos.
+- **LSP en VSCode**:
+  - Caso 1: `unknown variable smtp` (Error) en columna 22 sobre `smtp`.
+  - Caso 2: `type Response does not have a field named status` (Error)
+    en cada uno de los 5 fields del struct literal.
 
-Repro real validado en fitzwatch al editar
-[`d:\fitzwatch\src\emails.fitz`](../../fitzwatch/src/emails.fitz)
-línea 120 durante la sesión 2026-06-28 noche (F.f.6 unsubscribe page
-brandeada).
+Repro real validado en fitzwatch durante sesión 2026-06-28 noche:
+- Caso 1: [`src/emails.fitz`](../../fitzwatch/src/emails.fitz) línea 120
+  (F.f.6 unsubscribe page brandeada).
+- Caso 2: [`src/public.fitz`](../../fitzwatch/src/public.fitz) líneas
+  607, 620, 918, 1213, 1327 (SSR OG tags por slug, Opción A
+  post-F.f.6 — los nuevos handlers `slug_ssr_no_slash` /
+  `slug_ssr_with_slash` y el helper `slug_ssr_internal` heredaron el
+  squiggle al usar `Response { ... }`).
 
 ### Hipótesis (en orden de probabilidad)
 
@@ -79,10 +130,10 @@ custom que no incluye los builtins:
   `register_imported_auth_provider_lsp` que ya hace el LSP-specific
   pre-scan.
 
-**Test del fix**: nuevo unit test en `src/lsp.rs::tests` paralelo a
-`smtp_module_is_pre_registered_as_any` (types.rs:11991) pero corriendo
-sobre `check_source_with_types` o
-`check_source_with_types_and_base_dir`:
+**Test del fix**: dos unit tests en `src/lsp.rs::tests` paralelos a
+`smtp_module_is_pre_registered_as_any` y al pre-registro de
+`Response` en `types.rs`, pero corriendo sobre
+`check_source_with_types` o `check_source_with_types_and_base_dir`:
 
 ```rust
 #[test]
@@ -100,10 +151,34 @@ async fn send_test() -> Result<Bool> {
     assert!(smtp_errors.is_empty(),
         "LSP no debe marcar smtp como unknown: {:?}", smtp_errors);
 }
+
+#[test]
+fn lsp_response_builtin_no_dispara_field_not_found() {
+    let src = r#"
+@get("/test")
+async fn h() -> Result<Response> {
+    return Ok(Response {
+        status: 200,
+        content_type: "text/plain",
+        headers: { "X-Foo": "bar" },
+        body: "hi",
+    })
+}
+"#;
+    let (_, _, _, errors) = check_source_with_types(src);
+    let response_errors: Vec<_> = errors.iter()
+        .filter(|e| e.message().contains("Response")
+                 && e.message().contains("field"))
+        .collect();
+    assert!(response_errors.is_empty(),
+        "LSP no debe marcar fields del Response built-in: {:?}",
+        response_errors);
+}
 ```
 
-Idem para `http`/`jwt`/`hash`/`log`/`db`/`auth`/`flags` para evitar
-regresión paralela en otros builtins.
+Idem para `http`/`jwt`/`hash`/`log`/`db`/`auth`/`flags` (módulos) +
+`Request`/`HttpClientResponse`/`SmtpResult`/`File` (built-in types)
+para evitar regresión paralela en otros built-ins.
 
 **Hipótesis 3 — Cache del cliente LSP en VSCode con env stale**.
 VSCode/tower-lsp client cachea el `documents` Map y el TypeEnv del
@@ -163,11 +238,18 @@ LSP, podría seguir corriendo el checker viejo:
 ### Workaround actual en fitzwatch
 
 Ninguno — el código compila y corre. Solo es ruido visual en VSCode
-al editar archivos que usan `smtp.send(...)` (hoy:
-[`src/emails.fitz`](../../fitzwatch/src/emails.fitz),
-[`src/subscriptions.fitz`](../../fitzwatch/src/subscriptions.fitz)
-indirecto via import, [`src/auth.fitz`](../../fitzwatch/src/auth.fitz)
-idem).
+al editar archivos que usan los built-ins afectados:
+
+- `smtp`: [`src/emails.fitz`](../../fitzwatch/src/emails.fitz)
+  (línea 120 directo), `src/subscriptions.fitz` + `src/auth.fitz`
+  indirecto via import.
+- `Response { ... }`: [`src/public.fitz`](../../fitzwatch/src/public.fitz)
+  (~10 ocurrencias incluyendo handlers `slug_incidents_rss`,
+  `slug_unsubscribe_get`, `slug_badge_svg`, `slug_badge_json`,
+  `slug_embed_html`, `slug_ssr_no_slash`, `slug_ssr_with_slash` +
+  helper `slug_ssr_internal`),
+  [`src/subscriptions.fitz`](../../fitzwatch/src/subscriptions.fitz)
+  (handler `unsubscribe_get` después de F.f.6).
 
 ---
 
