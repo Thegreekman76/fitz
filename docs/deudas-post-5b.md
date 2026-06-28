@@ -4,6 +4,173 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 LSP marca false positive `unknown variable smtp` en `smtp.send(...)` (descubierto 2026-06-28)
+
+> **Severidad**: amarillo (no urgente). `fitz check` real acepta el código
+> sin errores, `fitz build` compila y produce binario correcto. SOLO se
+> manifiesta como squiggle rojo + error en la pestaña "Problems" del
+> VSCode al editar archivos `.fitz` que usan `smtp.send(...)`. UX
+> ruidoso para developers tocando código con SMTP, pero no bloquea ni el
+> dev loop (build) ni el deploy.
+
+### Repro mínima
+
+Crear archivo `repro_smtp_lsp.fitz` en un proyecto con `fitz.toml`:
+
+```fitz
+from i18n import t
+
+async fn send_test(to: Str, body: Str) -> Result<Bool> {
+    let result = smtp.send({
+        "to": to,
+        "from": "noreply@example.com",
+        "subject": "Test",
+        "body_html": body,
+    }).await?
+    log.info("sent message_id={result.message_id}")
+    return Ok(true)
+}
+```
+
+- **`fitz check`** (CLI): ✓ pasa limpio sin errores.
+- **`fitz build`** (CLI): ✓ binario producido OK.
+- **LSP en VSCode**: marca `unknown variable smtp` (Error severity)
+  en la línea `let result = smtp.send({`, columna 22 (sobre el `smtp`).
+
+Repro real validado en fitzwatch al editar
+[`d:\fitzwatch\src\emails.fitz`](../../fitzwatch/src/emails.fitz)
+línea 120 durante la sesión 2026-06-28 noche (F.f.6 unsubscribe page
+brandeada).
+
+### Hipótesis (en orden de probabilidad)
+
+**Hipótesis 1 (más probable) — Extensión VSCode instalada con LSP
+viejo pre-SMTP-builtin (v0.17.0 o anterior)**. La mini-tanda SMTP
+builtin cerró en v0.18.0 (2026-06-19). Si el `.vsix` instalado en
+VSCode trae un `fitz-lsp.exe` bundleado de versión < v0.18.0, el
+binario del LSP no tiene `smtp` registrado en el checker:
+
+- Verificar versión del binario LSP que VSCode usa:
+  - Si la extensión es self-managed: ver `editors/vscode/server/fitz-lsp.exe`
+    y correr `fitz-lsp --version` (si soporta — si no, comparar md5
+    contra binarios de versiones recientes).
+  - Si es bundle del `.vsix`: ver versión del `package.json` de la
+    extensión + verificar que el `.vsix` bundleó el LSP de esa misma
+    versión (memoria `feedback_vscode_extension_workflow` exige
+    regenerar `.vsix` con LSP fresh cada release).
+
+**Test del fix**: bumpear extensión VSCode a v0.19.6+ (que bundlea
+LSP v0.19.6+ ya con SMTP registrado) → reabrir VSCode → confirmar
+que el squiggle desaparece sobre `smtp.send(...)`.
+
+**Hipótesis 2 — Path del LSP que omite `register_builtins` cuando
+hay imports cross-module**. El compilador full-flow llama
+[`CheckCtx::new`](../src/types.rs#L3461) que sí registra `smtp`
+con `Type::Any`, pero quizás el LSP en el path
+`check_source_with_types_and_base_dir` (heredado del fix v0.19.3
+para cross-module @auth_provider/@background) crea un CheckCtx
+custom que no incluye los builtins:
+
+- Inspeccionar `src/lsp.rs::check_source_with_types_and_base_dir` y
+  confirmar que el `CheckCtx` que construye llama a la inicialización
+  que registra `smtp` + `http` + `jwt` + `hash` + `log` + `db` +
+  `auth` + `flags`.
+- Si el path omite alguno, sumar el registro paralelo a
+  `register_imported_auth_provider_lsp` que ya hace el LSP-specific
+  pre-scan.
+
+**Test del fix**: nuevo unit test en `src/lsp.rs::tests` paralelo a
+`smtp_module_is_pre_registered_as_any` (types.rs:11991) pero corriendo
+sobre `check_source_with_types` o
+`check_source_with_types_and_base_dir`:
+
+```rust
+#[test]
+fn lsp_smtp_module_no_dispara_unknown_variable() {
+    let src = r#"
+async fn send_test() -> Result<Bool> {
+    let r = smtp.send({"to": "x@y.com", "subject": "t"}).await?
+    return Ok(true)
+}
+"#;
+    let (_, _, _, errors) = check_source_with_types(src);
+    let smtp_errors: Vec<_> = errors.iter()
+        .filter(|e| e.message().contains("smtp"))
+        .collect();
+    assert!(smtp_errors.is_empty(),
+        "LSP no debe marcar smtp como unknown: {:?}", smtp_errors);
+}
+```
+
+Idem para `http`/`jwt`/`hash`/`log`/`db`/`auth`/`flags` para evitar
+regresión paralela en otros builtins.
+
+**Hipótesis 3 — Cache del cliente LSP en VSCode con env stale**.
+VSCode/tower-lsp client cachea el `documents` Map y el TypeEnv del
+último open. Si el documento se abrió ANTES del bump de versión del
+LSP, podría seguir corriendo el checker viejo:
+
+- Workaround: cerrar VSCode entero, kill cualquier `fitz-lsp.exe` que
+  quede en background (`Get-Process fitz-lsp | Stop-Process`),
+  reabrir VSCode.
+- Fix permanente: el LSP server debería invalidar cache en
+  `did_change` y forzar full re-parse cuando detecte que el
+  TypeEnv root cambió de version.
+
+### Pasos para la sesión separada del compilador
+
+1. **Confirmar Hipótesis 1 primero** (más barato): verificar versión
+   del LSP que el VSCode del autor está usando. Si es < v0.18.0,
+   bumpear extensión + regenerar `.vsix` (memoria
+   `feedback_vscode_extension_workflow`), pedirle al autor reinstalar
+   `.vsix` desde el release de GitHub. Si esto cierra el bug, no hay
+   trabajo de compilador necesario.
+2. **Si H1 no cierra el bug**, validar H2: leer
+   `src/lsp.rs::check_source_with_types_and_base_dir` y comparar el
+   `CheckCtx` que construye contra `CheckCtx::new()` (que sí incluye
+   smtp). Si hay path divergente que omite builtins, sumar el registro
+   en paralelo.
+3. **Agregar el unit test sugerido arriba** (independiente de cuál
+   hipótesis cierre el bug) para protección contra regresión en los 8
+   built-ins módulo (`smtp`, `http`, `jwt`, `hash`, `log`, `db`,
+   `auth`, `flags`).
+4. **Audit paralelo** del LSP: grep `register_builtins` /
+   `Type::Any` / "smtp" en `src/lsp.rs` y confirmar que TODOS los
+   built-ins están consistentes con `types.rs::CheckCtx::new()`.
+5. **Validación post-fix**: editar
+   [`d:\fitzwatch\src\emails.fitz`](../../fitzwatch/src/emails.fitz)
+   línea 120 en VSCode con la extensión bumpeada y confirmar que el
+   squiggle desaparece sobre `smtp.send(...)`.
+6. **Verification pre-bump** (si toca código del compilador):
+   `cargo fmt --all --check` + `cargo clippy --lib --tests --bins
+   --features lsp -- -D warnings` + `cargo test --release --features
+   lsp --lib lsp::tests` + smoke real reabriendo fitzwatch en VSCode.
+7. **Bump release coordinado** si la fix toca código (v0.19.7 o
+   minor según scope) + extensión VSCode v0.19.7 con `.vsix`
+   regenerado + CHANGELOG/roadmap/CLAUDE/README updateado.
+
+### Por qué no es urgente
+
+- `fitz check` real funciona, `fitz build` funciona, deploy a prod
+  funciona — el código que dispara el warning compila y corre
+  correctamente.
+- El developer puede ignorar el squiggle al editar (paralelo a otros
+  false positives del LSP que el ecosistema convive con —
+  rust-analyzer también marca falsos positivos ocasionales).
+- Workaround inmediato: confirmar que la versión del LSP instalado
+  es la última (Hipótesis 1 cierra esto en 80% de los casos).
+
+### Workaround actual en fitzwatch
+
+Ninguno — el código compila y corre. Solo es ruido visual en VSCode
+al editar archivos que usan `smtp.send(...)` (hoy:
+[`src/emails.fitz`](../../fitzwatch/src/emails.fitz),
+[`src/subscriptions.fitz`](../../fitzwatch/src/subscriptions.fitz)
+indirecto via import, [`src/auth.fitz`](../../fitzwatch/src/auth.fitz)
+idem).
+
+---
+
 ## 🟢 Sub-caso v0.19.5 — wrapper HTTP en módulo IMPORTER del middleware: **CERRADO v0.19.6 (2026-06-27)**
 
 > **CERRADO** el mismo día del descubrimiento (2026-06-27 noche durante
