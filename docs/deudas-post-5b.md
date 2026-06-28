@@ -4,7 +4,113 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🟡 LSP marca false positives sobre built-ins del lenguaje no registrados — `smtp` + `Response` (descubierto 2026-06-28)
+## 🟢 LSP marca false positives sobre built-ins del lenguaje no registrados — `smtp` + `Response` — **CERRADO 2026-06-28 (H1 confirmado)**
+
+> **CERRADO** el mismo día del descubrimiento (sesión nocturna 2026-06-28
+> sobre repo del lenguaje, separada de la sesión fitzwatch que disparó la
+> deuda). Investigación con 5 tests de regresión nuevos en
+> `src/lsp.rs::tests` invalidó H2 (no hay divergencia entre LSP y CLI en
+> código) y confirmó H1 (extensión VSCode instalada con `.vsix` bundleando
+> un `fitz-lsp.exe` pre-v0.18.0/v0.19.0). **Acción del usuario**:
+> reinstalar `editors/vscode/fitz-language-win32-x64-0.19.6.vsix` (que ya
+> bundlea LSP fresh con timestamp 2026-06-27 19:36, post-v0.18.0
+> `smtp` + post-v0.19.0 `Response`). Sin bump de versión (el código del
+> compilador estaba correcto desde el día del release). Detalle abajo
+> preservado para referencia futura.
+
+### Resumen del cierre (2026-06-28)
+
+**H2 invalidada** — 5 tests nuevos en `src/lsp.rs::tests` cubren el path
+LSP completo y todos pasan contra el código actual de v0.19.6:
+
+- `lsp_repro_smtp_module_no_unknown_variable` — canónico del Caso 1.
+- `lsp_repro_response_built_in_no_field_not_found` — canónico del Caso 2.
+- `lsp_repro_cross_module_branch_also_registers_smtp_and_response` —
+  cubre la rama `_with_base_dir` (el path heredado del fix v0.19.3 de
+  cross-module `@auth_provider`/`@background`).
+- `lsp_audit_all_builtin_modules_visible_from_lsp_path` — audit
+  paralelo de los 8 módulos built-in
+  (`smtp`/`http`/`jwt`/`hash`/`log`/`db`/`auth`/`flags`).
+- `lsp_audit_all_builtin_nominals_visible_from_lsp_path` — audit de
+  los 5 nominales (`Request`/`Response`/`File`/`HttpClientResponse`/`SmtpResult`)
+  con su field canónico (`method`/`status`/`name`/`status`/`delivered`).
+
+Razón por la que ambos paths del LSP funcionan correctamente:
+
+1. **Single-file branch** (`check_source_with_types_and_base_dir(src, None)`):
+   - `parse_with_recovery(tokens)` → `Program`.
+   - `check_program(&program)` → llama a `resolve_program` → llama a
+     `resolve_program_with_env(program, TypeEnv::new(), Vec::new())` →
+     **`register_http_builtin_types(&mut env)`** al arrancar (línea 1532
+     de `src/types.rs`) registra `Request`/`Response`/`File`/
+     `HttpClientResponse`/`SmtpResult` como nominales con sus fields.
+   - `check_with_env(&program, env, errors)` construye
+     `CheckCtx::new(&env)` que **invoca `register_builtins()`**
+     (línea 3167 de `src/types.rs`) registrando `smtp`/`http`/`jwt`/
+     `hash`/`log`/`db`/`auth`/`flags` con `Type::Any` en el scope 0.
+
+2. **Cross-module branch** (`check_source_with_types_and_base_dir(src, Some(bd))`):
+   - Idéntico al single-file pero con `resolve_program_with_env(program,
+     TypeEnv::new(), Vec::new())` explícito (también pasa por
+     `register_http_builtin_types`) + pre-scan de imports +
+     `check_with_env` (también pasa por `CheckCtx::new` →
+     `register_builtins`).
+   - El registro de built-ins vive en `register_http_builtin_types` y
+     `register_builtins` ANTES del pre-scan de imports, por lo que la
+     ausencia de `base_dir` o módulos fallidos no afecta la
+     registración.
+
+**H1 confirmada por exclusión** — los 5 tests pasan en código → el bug
+debe estar en el binario `fitz-lsp.exe` que VSCode está corriendo, no
+en el path del checker. Si el `.vsix` instalado pre-data v0.18.0 (sin
+`smtp` registrado) o v0.19.0 (sin fields del `Response` built-in), el
+binario del LSP no conoce los símbolos y emite los false positives.
+
+### Acción del usuario (cierra el bug)
+
+1. Cerrar VSCode entero.
+2. (Opcional, recomendado) `Get-Process fitz-lsp | Stop-Process` por
+   si quedó algún proceso huérfano.
+3. Reinstalar el `.vsix` existente — desde la carpeta del repo:
+   ```powershell
+   code --install-extension editors\vscode\fitz-language-win32-x64-0.19.6.vsix --force
+   ```
+   El `--force` overrides la instalación anterior. El bundle bundleó
+   `fitz-lsp.exe` con timestamp 2026-06-27 19:36 (mismo día del release
+   de v0.19.6).
+4. Reabrir VSCode con el proyecto que usa `smtp`/`Response`. El
+   squiggle debería desaparecer.
+
+Si después de reinstalar el squiggle persiste, escalar como H3 (cache
+del cliente LSP) y forzar reload de la window (`Ctrl+Shift+P` →
+"Developer: Reload Window").
+
+### Deuda residual derivada (NO bloquea uso real)
+
+(1) **Indicador de versión del LSP server visible en VSCode** — hoy no
+hay forma trivial de saber qué versión del `fitz-lsp.exe` está
+corriendo dentro de la extensión. La extensión podría:
+   - Loguear la versión del server al status bar de VSCode (parallel
+     a rust-analyzer que muestra "rust-analyzer 0.4.2074" en el status
+     bar).
+   - Exponer un comando `Fitz: Show LSP server version` que ejecute
+     `fitz-lsp --version` (requiere agregar el flag al bin).
+   - Disparar warning popup si la versión del server < versión de la
+     extensión (caso de instalaciones con override de `fitz.lspPath`
+     apuntando a un binario stale en PATH).
+
+Workaround actual: comparar timestamp del `fitz-lsp.exe` adentro del
+`.vsix` (visible con `unzip -l`) contra fecha del release.
+
+(2) **Test de regresión sobre el binario empaquetado** — los 5 tests
+nuevos validan el código fuente, no el binario `.exe` empaquetado en
+el `.vsix`. Refinamiento futuro: smoke test en CI que descomprima el
+`.vsix` y verifique que el `fitz-lsp.exe` adentro corre `--version` y
+matchea con el bumpeo del crate. Bajo riesgo hoy porque la pipeline de
+release usa `build:vsix` que rebuildea el LSP fresh por design
+(memoria `feedback_vscode_extension_workflow`).
+
+### Texto original de la deuda (preservado para referencia)
 
 > **Severidad**: amarillo (no urgente). `fitz check` real acepta el código
 > sin errores, `fitz build` compila y produce binario correcto. SOLO se

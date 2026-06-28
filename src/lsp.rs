@@ -3749,6 +3749,182 @@ mod tests {
     // (Phase 9.x.2). The new thing vs. `check_source` is that it
     // retains the `TypeInfo` populated by F16.
 
+    // ----- Regression: built-ins not flagged as unknown (v0.19.6+) -----
+    // Bug discovered 2026-06-28 during fitzwatch work: VSCode LSP shows
+    // false-positive squiggles for `smtp` (mini-tanda SMTP v0.18.0) and
+    // for fields of the `Response` built-in (v0.19.0), while `fitz check`
+    // CLI accepts the code without errors. Both tests below MUST pass if
+    // the LSP path mirrors the CLI path (CheckCtx::new + register_builtins
+    // + register_http_builtin_types).
+    //
+    // If they pass, the user-visible bug is H1 (stale `.vsix` with an
+    // older fitz-lsp.exe bundled). If they fail, it's a code divergence
+    // (H2) and that's where the fix has to land.
+
+    #[test]
+    fn lsp_repro_smtp_module_no_unknown_variable() {
+        let src = r#"
+async fn send_test(to: Str, body: Str) -> Result<Bool> {
+    let r = smtp.send({
+        "to": to,
+        "subject": "t",
+        "body_html": body,
+    }).await?
+    return Ok(true)
+}
+"#;
+        let (_p, _env, _info, _defs, errors) = check_source_with_types(src);
+        let smtp_errors: Vec<&FitzError> = errors
+            .iter()
+            .filter(|e| {
+                let m = &e.message;
+                m.contains("smtp") || m.contains("unknown variable")
+            })
+            .collect();
+        assert!(
+            smtp_errors.is_empty(),
+            "LSP should not flag `smtp` as unknown variable: {smtp_errors:?}",
+        );
+    }
+
+    #[test]
+    fn lsp_repro_response_built_in_no_field_not_found() {
+        let src = r#"
+@get("/test")
+async fn h() -> Result<Response> {
+    return Ok(Response {
+        status: 200,
+        content_type: "text/plain",
+        headers: { "X-Foo": "bar" },
+        body: "hi",
+    })
+}
+"#;
+        let (_p, _env, _info, _defs, errors) = check_source_with_types(src);
+        let response_errors: Vec<&FitzError> = errors
+            .iter()
+            .filter(|e| {
+                let m = &e.message;
+                m.contains("Response") && (m.contains("field") || m.contains("does not have"))
+            })
+            .collect();
+        assert!(
+            response_errors.is_empty(),
+            "LSP should not flag fields of the `Response` built-in: {response_errors:?}",
+        );
+    }
+
+    // Same as above but exercising the cross-module branch of
+    // `check_source_with_types_and_base_dir(base_dir = Some(...))`,
+    // which goes through `resolve_program_with_env` +
+    // `pre_scan_imported_*` + `check_with_env` instead of the
+    // single-file `check_program`. Both branches must register the
+    // built-ins via `register_http_builtin_types` (TypeEnv) and
+    // `CheckCtx::new` (registers `smtp`/`http`/etc).
+    #[test]
+    fn lsp_repro_cross_module_branch_also_registers_smtp_and_response() {
+        // Use a non-existent base_dir — the pre-scan silently skips
+        // unresolvable imports (silent-fallback policy), but the
+        // registration of built-ins still happens because it lives
+        // BEFORE the import walk.
+        let bd = std::path::Path::new("d:/this/dir/does/not/exist");
+        let src = r#"
+async fn send_one(to: Str) -> Result<Bool> {
+    let r = smtp.send({"to": to, "subject": "x", "body": "y"}).await?
+    return Ok(true)
+}
+
+@get("/r")
+fn make_resp() -> Response {
+    return Response {
+        status: 200,
+        content_type: "text/plain",
+        headers: {},
+        body: "ok",
+    }
+}
+"#;
+        let (_p, _env, _info, _defs, errors) = check_source_with_types_and_base_dir(src, Some(bd));
+        let relevant: Vec<&FitzError> = errors
+            .iter()
+            .filter(|e| {
+                let m = &e.message;
+                m.contains("smtp")
+                    || m.contains("unknown variable")
+                    || (m.contains("Response")
+                        && (m.contains("field") || m.contains("does not have")))
+            })
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "cross-module branch must register built-ins too: {relevant:?}",
+        );
+    }
+
+    // Parallel audit — all built-in MODULES registered in
+    // `CheckCtx::register_builtins` (smtp/http/jwt/hash/log/db/auth/flags)
+    // must be visible from the LSP path. Single test instead of one per
+    // module to keep noise low; if a module disappears from the registry,
+    // the failure message names which one.
+    #[test]
+    fn lsp_audit_all_builtin_modules_visible_from_lsp_path() {
+        for module in &["smtp", "http", "jwt", "hash", "log", "db", "auth", "flags"] {
+            let src = format!("let m = {}\nprint(m)\n", module);
+            let errs = check_source(&src);
+            let unknown: Vec<&FitzError> = errs
+                .iter()
+                .filter(|e| {
+                    let m = &e.message;
+                    m.contains("unknown variable") || m.contains(*module)
+                })
+                .collect();
+            assert!(
+                unknown.is_empty(),
+                "built-in module `{module}` should be visible from the LSP path: {unknown:?}",
+            );
+        }
+    }
+
+    // Parallel audit — all built-in NOMINAL types registered in
+    // `register_http_builtin_types` (Request/Response/File/HttpClientResponse/SmtpResult)
+    // must be visible AND their fields must type-check. Single test for
+    // the same reason as above; uses one canonical field per nominal as
+    // a smoke that the resolution went all the way.
+    #[test]
+    fn lsp_audit_all_builtin_nominals_visible_from_lsp_path() {
+        // (type_name, sample_field) — picks one obvious field per
+        // built-in nominal. If the field disappears (rename, removal),
+        // the test fails and the assertion message points at it.
+        let cases = &[
+            ("Request", "method"),
+            ("Response", "status"),
+            ("File", "name"),
+            ("HttpClientResponse", "status"),
+            ("SmtpResult", "delivered"),
+        ];
+        for (ty, field) in cases {
+            // Smoke: function annotated with the built-in, accesses the
+            // field. If the nominal is missing or fields are not
+            // registered, the checker emits errors mentioning the type
+            // name or "field".
+            let src = format!(
+                "fn use_it(x: {ty}) -> Bool {{\n    let _ = x.{field}\n    return true\n}}\n"
+            );
+            let errs = check_source(&src);
+            let relevant: Vec<&FitzError> = errs
+                .iter()
+                .filter(|e| {
+                    let m = &e.message;
+                    m.contains(*ty) || m.contains("field") || m.contains("nominal")
+                })
+                .collect();
+            assert!(
+                relevant.is_empty(),
+                "built-in nominal `{ty}` with field `{field}` should type-check from the LSP path: {relevant:?}",
+            );
+        }
+    }
+
     #[test]
     fn check_source_with_types_valid_program_returns_non_empty_type_info() {
         let src = "let x = 42\nlet y = x + 1";
