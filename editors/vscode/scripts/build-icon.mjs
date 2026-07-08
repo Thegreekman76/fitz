@@ -63,3 +63,13 @@ render(
   [path.join(repoRoot, "assets", "logo-social.png")],
   { loadSystemFonts: true },
 );
+
+// Variante inglesa del social preview 1280×640 → Mastodon header /
+// social posts en inglés (Twitter/X, LinkedIn, Bluesky). Mismo diseño
+// del SVG hermano, texto traducido.
+render(
+  path.join(repoRoot, "assets", "logo-social-en.svg"),
+  1280,
+  [path.join(repoRoot, "assets", "logo-social-en.png")],
+  { loadSystemFonts: true },
+);

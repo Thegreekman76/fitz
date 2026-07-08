@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1280 640"
+     width="1280" height="640">
+  <title>Fitz Language — Social Preview (English)</title>
+  <desc>1280×640 image for GitHub Social Preview / link previews.
+        Logo (Rust gear + Fitz Roy silhouette) on the left,
+        project name + tagline on the right.</desc>
+
+  <defs>
+    <!-- Gear tooth of the logo (re-use from logo.svg). -->
+    <rect id="tooth"
+          x="116" y="8" width="24" height="32"
+          rx="3" ry="3"
+          fill="#CE412B"/>
+
+    <!-- Circular clip for the Fitz Roy silhouette inside the hollow. -->
+    <clipPath id="hueco-clip-en">
+      <circle cx="128" cy="128" r="68"/>
+    </clipPath>
+  </defs>
+
+  <!-- White background — legible in all themes (light + dark) -->
+  <rect width="1280" height="640" fill="#FFFFFF"/>
+
+  <!-- ===== Logo (256×256) positioned on the left, vertically centered ===== -->
+  <g transform="translate(80, 192)">
+    <use href="#tooth" transform="rotate(0 128 128)"/>
+    <use href="#tooth" transform="rotate(30 128 128)"/>
+    <use href="#tooth" transform="rotate(60 128 128)"/>
+    <use href="#tooth" transform="rotate(90 128 128)"/>
+    <use href="#tooth" transform="rotate(120 128 128)"/>
+    <use href="#tooth" transform="rotate(150 128 128)"/>
+    <use href="#tooth" transform="rotate(180 128 128)"/>
+    <use href="#tooth" transform="rotate(210 128 128)"/>
+    <use href="#tooth" transform="rotate(240 128 128)"/>
+    <use href="#tooth" transform="rotate(270 128 128)"/>
+    <use href="#tooth" transform="rotate(300 128 128)"/>
+    <use href="#tooth" transform="rotate(330 128 128)"/>
+    <circle cx="128" cy="128" r="100" fill="#CE412B"/>
+    <circle cx="128" cy="128" r="68" fill="#FFFFFF"/>
+    <g clip-path="url(#hueco-clip-en)">
+      <path d="M 50 200
+               L 92 130
+               L 110 158
+               L 128 78
+               L 148 150
+               L 168 108
+               L 206 200
+               Z"
+            fill="#CE412B"/>
+    </g>
+  </g>
+
+  <!-- ===== Text to the right of the logo ===== -->
+  <!-- "Fitz" — big title in Rust orange -->
+  <text x="400" y="310"
+        font-family="Segoe UI, Arial, Helvetica, sans-serif"
+        font-size="160"
+        font-weight="bold"
+        fill="#CE412B">Fitz</text>
+
+  <!-- Tagline 1 -->
+  <text x="400" y="390"
+        font-family="Segoe UI, Arial, Helvetica, sans-serif"
+        font-size="42"
+        font-weight="normal"
+        fill="#333333">A compiled language born in Patagonia</text>
+
+  <!-- Tagline 2 (smaller, lighter gray) -->
+  <text x="400" y="445"
+        font-family="Segoe UI, Arial, Helvetica, sans-serif"
+        font-size="32"
+        font-weight="normal"
+        fill="#666666">Built with Rust · Native HTTP · Gradual typing</text>
+</svg>

@@ -313,7 +313,7 @@ Detalle completo en [cap 22 de la guía](https://thegreekman76.github.io/fitz/gu
 Desarrollado en El Chaltén, Santa Cruz, Argentina 🇦🇷
 Por un developer independiente que quería un lenguaje que no tuviera que disculparse por nada.
 
-TheGreekMan (Palopoli Martín)
+TheGreekMan (Palopoli Martín) — <a rel="me" href="https://mastodon.social/@thegreekman">@thegreekman@mastodon.social</a>
 
 ### Cómo se construye
 
