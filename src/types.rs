@@ -804,6 +804,21 @@ pub struct TypeEnv {
     /// name for handler dispatch. Types without the decorator
     /// return `None`.
     live_components: HashMap<TypeId, LiveComponentMetadata>,
+    /// Phase 4 (fitz-liveviews Y-B, session 1.b) — Render handler
+    /// registry. Keyed by component name, value is the top-level
+    /// Fitz fn name declared with `@render_for("name")`. Populated
+    /// by `resolve_program` after shape validation
+    /// (`process_render_for_decorators`). Consumed by the
+    /// framework layer to resolve which fn renders each
+    /// component. Duplicate declarations (two `@render_for("x")`
+    /// on distinct fns) fire an error at register time.
+    render_handlers: HashMap<String, String>,
+    /// Phase 4 (fitz-liveviews Y-B, session 1.b) — Event handler
+    /// registry. Keyed by `(component_name, event_name)`, value
+    /// is the top-level Fitz fn name declared with
+    /// `@on("component", "event")`. Duplicate `(component,
+    /// event)` pairs fire an error at register time.
+    event_handlers: HashMap<(String, String), String>,
     /// W12 (v0.10.8) — `@auth_provider` declared in a module
     /// imported by the local program. The caller (typically
     /// `main.rs::check_program_with_pyi_stubs_and_imports`)
@@ -899,6 +914,57 @@ impl TypeEnv {
         self.live_components
             .iter()
             .find_map(|(id, meta)| (meta.name == name).then_some(*id))
+    }
+
+    /// Phase 4 (fitz-liveviews Y-B, session 1.b) — Registers a
+    /// render handler for a component. Returns `Err` if the
+    /// component already has a handler declared elsewhere. The
+    /// caller (typically `resolve_program`) turns the `Err`
+    /// into a `FitzError` with the offending fn's span.
+    pub fn set_render_handler(
+        &mut self,
+        component: String,
+        fn_name: String,
+    ) -> Result<(), String> {
+        if let Some(existing) = self.render_handlers.get(&component) {
+            return Err(existing.clone());
+        }
+        self.render_handlers.insert(component, fn_name);
+        Ok(())
+    }
+
+    /// Phase 4 (fitz-liveviews Y-B, session 1.b) — Returns the
+    /// name of the fn registered as render handler for the
+    /// given component, or `None` if no such handler exists.
+    pub fn render_handler_for(&self, component: &str) -> Option<&str> {
+        self.render_handlers.get(component).map(|s| s.as_str())
+    }
+
+    /// Phase 4 (fitz-liveviews Y-B, session 1.b) — Registers an
+    /// event handler for a `(component, event)` pair. Same error
+    /// semantics as `set_render_handler`.
+    pub fn set_event_handler(
+        &mut self,
+        component: String,
+        event: String,
+        fn_name: String,
+    ) -> Result<(), String> {
+        let key = (component, event);
+        if let Some(existing) = self.event_handlers.get(&key) {
+            return Err(existing.clone());
+        }
+        self.event_handlers.insert(key, fn_name);
+        Ok(())
+    }
+
+    /// Phase 4 (fitz-liveviews Y-B, session 1.b) — Returns the
+    /// name of the fn registered as event handler for
+    /// `(component, event)`, or `None` if no such handler
+    /// exists.
+    pub fn event_handler_for(&self, component: &str, event: &str) -> Option<&str> {
+        self.event_handlers
+            .get(&(component.to_string(), event.to_string()))
+            .map(|s| s.as_str())
     }
 
     /// Registers a nominal type by name, returning its id.
@@ -1746,6 +1812,64 @@ pub fn resolve_program_with_env(
         }
     }
 
+    // Phase 4 (fitz-liveviews Y-B, session 1.b) — pass over
+    // `Stmt::FnDef`s picking up `@render_for("name")` and
+    // `@on("component", "event")`. Only shape is validated here
+    // (dedicated processors); signature validation (params +
+    // return type + component-name existence) lives in the
+    // checker walker with `check_render_for_decorator` /
+    // `check_on_decorator`. Register conflicts (two
+    // `@render_for("x")` on distinct fns, duplicate `(comp,
+    // event)` pairs across the program) are reported here.
+    for stmt in program {
+        if let Stmt::FnDef {
+            name,
+            decorators,
+            span,
+            ..
+        } = stmt
+        {
+            match process_render_for_decorators(name, decorators, *span) {
+                Ok(Some(component)) => {
+                    if let Err(existing) = env.set_render_handler(component.clone(), name.clone())
+                    {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            span.line,
+                            span.column,
+                            format!(
+                                "fn `{name}` declares `@render_for(\"{component}\")` but component `{component}` already has a render handler registered as fn `{existing}`"
+                            ),
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(errs) => errors.extend(errs),
+            }
+            match process_on_decorators(name, decorators, *span) {
+                Ok(pairs) => {
+                    for (component, event) in pairs {
+                        if let Err(existing) = env.set_event_handler(
+                            component.clone(),
+                            event.clone(),
+                            name.clone(),
+                        ) {
+                            errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                span.line,
+                                span.column,
+                                format!(
+                                    "fn `{name}` declares `@on(\"{component}\", \"{event}\")` but that (component, event) pair already has a handler registered as fn `{existing}`"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Err(errs) => errors.extend(errs),
+            }
+        }
+    }
+
     // Pass 3: annotations of FnDef / Assign / internal lets.
     for stmt in program {
         resolve_stmt_annotations(stmt, &env, &mut errors);
@@ -1815,6 +1939,211 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
 ///   - The rest: structural equality on the base (peeling a
 ///     `Nullable` if present).
 //
+/// Phase 4 (fitz-liveviews Y-B, session 1.b) — result of
+/// `process_render_for_decorators`. Carries the parsed component
+/// name so the caller (`resolve_program`) can register the
+/// handler with `env.set_render_handler`. `None` when the fn
+/// has no `@render_for` decorator.
+type RenderForShape = Option<String>;
+
+/// Phase 4 (fitz-liveviews Y-B, session 1.b) — result of
+/// `process_on_decorators`. Vec of `(component, event)` pairs
+/// (a single fn may carry multiple `@on(...)` decorators — the
+/// framework layer routes each event to it).
+type OnShapes = Vec<(String, String)>;
+
+// Phase 4 (fitz-liveviews Y-B, session 1.b) — processes
+// `@render_for("name")` over a `fn`. Returns the component name
+// on success, `None` if the fn has no such decorator, or
+// `Err(errors)` when shape is invalid (wrong arg count/type,
+// kwargs, empty name, more than one `@render_for` per fn).
+//
+// Only shape validation lives here. Signature validation (params,
+// return type, existence of `@live_component("name")`) happens in
+// the checker walker via `check_render_for_decorator`.
+pub fn process_render_for_decorators(
+    fn_name: &str,
+    fn_decorators: &[Decorator],
+    fn_span: Span,
+) -> Result<RenderForShape, Vec<FitzError>> {
+    let mut errors: Vec<FitzError> = Vec::new();
+    let mut name: Option<String> = None;
+    let mut seen = false;
+
+    for d in fn_decorators {
+        if d.name != "render_for" {
+            continue;
+        }
+        if seen {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "fn `{fn_name}` has more than one `@render_for` decorator; only one is allowed"
+                ),
+            ));
+            continue;
+        }
+        seen = true;
+
+        if !d.kwargs.is_empty() {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "`@render_for` does not accept kwargs; received: {:?}",
+                    d.kwargs.iter().map(|(k, _)| k).collect::<Vec<_>>()
+                ),
+            ));
+        }
+
+        if d.args.len() != 1 {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "`@render_for(\"name\")` expects exactly 1 Str arg, received {}",
+                    d.args.len()
+                ),
+            ));
+            continue;
+        }
+
+        match &d.args[0] {
+            Expr::Str(s, _) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        "`@render_for(\"...\")` does not accept an empty component name"
+                            .to_string(),
+                    ));
+                } else {
+                    name = Some(trimmed.to_string());
+                }
+            }
+            _ => errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                "`@render_for(...)` expects a Str literal as the component name".to_string(),
+            )),
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(name)
+}
+
+// Phase 4 (fitz-liveviews Y-B, session 1.b) — processes
+// `@on("component", "event")` over a `fn`. Returns the list of
+// `(component, event)` pairs (a fn may carry multiple `@on(...)`
+// — each pair routes a distinct event to the same fn).
+//
+// Only shape validation. Signature validation (params, return
+// type, `T` matches the component's state) happens in the
+// checker walker via `check_on_decorator`.
+pub fn process_on_decorators(
+    fn_name: &str,
+    fn_decorators: &[Decorator],
+    fn_span: Span,
+) -> Result<OnShapes, Vec<FitzError>> {
+    let mut errors: Vec<FitzError> = Vec::new();
+    let mut pairs: OnShapes = Vec::new();
+
+    for d in fn_decorators {
+        if d.name != "on" {
+            continue;
+        }
+
+        if !d.kwargs.is_empty() {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "`@on` does not accept kwargs; received: {:?}",
+                    d.kwargs.iter().map(|(k, _)| k).collect::<Vec<_>>()
+                ),
+            ));
+            continue;
+        }
+
+        if d.args.len() != 2 {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "`@on(\"component\", \"event\")` on fn `{fn_name}` expects exactly 2 Str args, received {}",
+                    d.args.len()
+                ),
+            ));
+            continue;
+        }
+
+        let parse_str_arg = |idx: usize, role: &str| -> Result<String, FitzError> {
+            match &d.args[idx] {
+                Expr::Str(s, _) => {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        Err(FitzError::new(
+                            ErrorKind::TypeError,
+                            fn_span.line,
+                            fn_span.column,
+                            format!("`@on(...)` does not accept empty {role} name"),
+                        ))
+                    } else {
+                        Ok(trimmed.to_string())
+                    }
+                }
+                _ => Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!("`@on(...)` expects a Str literal as the {role} name"),
+                )),
+            }
+        };
+
+        let comp = parse_str_arg(0, "component");
+        let evt = parse_str_arg(1, "event");
+        match (comp, evt) {
+            (Ok(c), Ok(e)) => {
+                if pairs.iter().any(|(pc, pe)| pc == &c && pe == &e) {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "fn `{fn_name}` has more than one `@on(\"{c}\", \"{e}\")` decorator; each (component, event) pair is unique"
+                        ),
+                    ));
+                } else {
+                    pairs.push((c, e));
+                }
+            }
+            (Err(e1), Err(e2)) => {
+                errors.push(e1);
+                errors.push(e2);
+            }
+            (Err(e), _) | (_, Err(e)) => errors.push(e),
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(pairs)
+}
+
 // Phase 4 (fitz-liveviews Y-B) — processes `@live_component("name")`
 // over a `type`. Returns:
 //   - `Ok(Some(meta))`: the type has `@live_component("name")` and is
@@ -9135,6 +9464,14 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // `@cron + @get/@post/...` are rejected.
             check_cron_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
             check_background_decorator(ctx, fn_name, decorators, *fn_span);
+            // Phase 4 (fitz-liveviews Y-B, session 1.b) — validate
+            // `@render_for("name")` and `@on("component", "event")`
+            // on fns. Shape errors were already reported by
+            // `resolve_program`; here we validate signature (params
+            // + return type + component-name existence) and reject
+            // conflicts with other runtime decorators.
+            check_render_for_decorator(ctx, fn_name, params, &ret, decorators, *fn_span);
+            check_on_decorator(ctx, fn_name, params, &ret, decorators, *fn_span);
             // Phase 12.1.a — validate `@healthz`/`@readyz` (K8s-style
             // probes). Singletons, no args/kwargs/params, return
             // `Bool`/`Result<Null>`/`Result<Bool>` (sync or async). NOT
@@ -11053,6 +11390,323 @@ fn check_background_decorator(
                 ),
             ));
             return;
+        }
+    }
+}
+
+// Phase 4 (fitz-liveviews Y-B, session 1.b) — helper shared by
+// `check_render_for_decorator` and `check_on_decorator` to reject
+// conflicts with decorators from other runtimes. Live components
+// render on demand from the framework layer; they are neither
+// HTTP handlers, WS handlers, cron jobs, background workers, auth
+// providers, tests nor CLI commands.
+const LIVE_HANDLER_CONFLICTING: &[&str] = &[
+    "get",
+    "post",
+    "put",
+    "delete",
+    "ws",
+    "cron",
+    "background",
+    "auth_provider",
+    "authenticated",
+    "admin",
+    "requires",
+    "test",
+    "command",
+    "healthz",
+    "readyz",
+];
+
+// Phase 4 (fitz-liveviews Y-B, session 1.b) — validates the
+// signature of a fn decorated with `@render_for("component")`.
+// Shape (decorator arg count/types) already validated in
+// `resolve_program`; here we check:
+//   - The component name exists as a `@live_component("name")`.
+//   - The fn has exactly 1 param whose type matches the
+//     component's state type.
+//   - The return type is `Str` (MVP; when Fitz adds a nominal
+//     `Html` built-in we accept both).
+//   - No conflict with @get/@post/@ws/@cron/@background/etc.
+fn check_render_for_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    ret: &Type,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let deco = match decorators.iter().find(|d| d.name == "render_for") {
+        Some(d) => d,
+        None => return,
+    };
+    // Shape errors from resolve_program already reported; bail
+    // silently if we cannot extract the name here.
+    let component_name = match deco.args.first() {
+        Some(Expr::Str(s, _)) => s.trim().to_string(),
+        _ => return,
+    };
+    if component_name.is_empty() {
+        return;
+    }
+
+    for other in decorators {
+        if LIVE_HANDLER_CONFLICTING.contains(&other.name.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@render_for on fn '{fn_name}' is not combinable with `@{}`: live component render handlers are dispatched by the framework layer, not by HTTP/WS/cron/background/auth/test/command runtimes.",
+                    other.name
+                ),
+            ));
+            return;
+        }
+    }
+
+    let component_id = match ctx.types.live_component_by_name(&component_name) {
+        Some(id) => id,
+        None => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@render_for on fn '{fn_name}': no `@live_component(\"{component_name}\")` is declared in this program. Declare `@live_component(\"{component_name}\") type <State> {{ ... }}` before the render handler."
+                ),
+            ));
+            return;
+        }
+    };
+
+    // Signature: exactly 1 param, of type = component's nominal.
+    if params.len() != 1 {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@render_for on fn '{fn_name}': expected exactly 1 param (`state: <ComponentType>`), received {}.",
+                params.len()
+            ),
+        ));
+        return;
+    }
+
+    // Resolve the declared type of the param, if annotated. Params
+    // without annotation stay as `Type::Any` and slip through
+    // gradually — the framework layer will validate at runtime.
+    if let Some(param_ty_expr) = &params[0].type_ {
+        if let Ok(param_ty) = resolve_type_expr(param_ty_expr, ctx.types) {
+            match param_ty {
+                Type::Nominal(id) if id == component_id => {}
+                Type::Any => {}
+                other => {
+                    let expected_name = ctx.types.info(component_id).name.clone();
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "@render_for on fn '{fn_name}': param must be of type `{expected_name}` (the state of component `{component_name}`), received `{}`.",
+                            other.display(ctx.types)
+                        ),
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
+    // Return type: MVP accepts `Str` (raw HTML). When Fitz adds a
+    // built-in nominal `Html`, we will accept both. `Any` is also
+    // accepted (fn without declared return type).
+    match ret {
+        Type::Str | Type::Any => {}
+        other => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@render_for on fn '{fn_name}': return type must be `Str` (raw HTML), received `{}`.",
+                    other.display(ctx.types)
+                ),
+            ));
+        }
+    }
+}
+
+// Phase 4 (fitz-liveviews Y-B, session 1.b) — validates the
+// signature of a fn decorated with `@on("component", "event")`.
+// A single fn may carry multiple `@on(...)` decorators; each
+// must match the same component (all `@on(...)`s bound to a fn
+// dispatch different events on the SAME component state).
+//
+// Shape already validated by `resolve_program`; here we check:
+//   - Each component name exists as a `@live_component(...)`.
+//   - All `@on(...)` decorators on this fn share the same
+//     component (a single fn cannot handle events for two
+//     distinct components).
+//   - The fn has exactly 2 params: `state: T` and
+//     `payload: Map<Str, Str>`.
+//   - The return type is `T` (state after the transition) or
+//     `Any`.
+//   - No conflict with other runtime decorators.
+fn check_on_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    ret: &Type,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let on_decos: Vec<&Decorator> = decorators.iter().filter(|d| d.name == "on").collect();
+    if on_decos.is_empty() {
+        return;
+    }
+
+    for other in decorators {
+        if LIVE_HANDLER_CONFLICTING.contains(&other.name.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@on on fn '{fn_name}' is not combinable with `@{}`: live component event handlers are dispatched by the framework layer.",
+                    other.name
+                ),
+            ));
+            return;
+        }
+    }
+
+    // Collect the distinct component names. If a fn has @on for
+    // two different components, that's an error (each event
+    // handler is bound to a single state type).
+    let mut components: Vec<String> = Vec::new();
+    for d in &on_decos {
+        let comp = match d.args.first() {
+            Some(Expr::Str(s, _)) => s.trim().to_string(),
+            _ => continue, // shape error already emitted
+        };
+        if comp.is_empty() {
+            continue;
+        }
+        if !components.contains(&comp) {
+            components.push(comp);
+        }
+    }
+
+    if components.len() > 1 {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@on on fn '{fn_name}': cannot mix events from different components on the same fn (found: {}). Each event handler binds to a single component's state type.",
+                components.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")
+            ),
+        ));
+        return;
+    }
+
+    let component_name = match components.first() {
+        Some(c) => c.clone(),
+        None => return, // all shapes invalid; errors already emitted
+    };
+
+    let component_id = match ctx.types.live_component_by_name(&component_name) {
+        Some(id) => id,
+        None => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@on on fn '{fn_name}': no `@live_component(\"{component_name}\")` is declared in this program. Declare `@live_component(\"{component_name}\") type <State> {{ ... }}` before the event handler."
+                ),
+            ));
+            return;
+        }
+    };
+
+    // Signature: exactly 2 params.
+    if params.len() != 2 {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@on on fn '{fn_name}': expected exactly 2 params (`state: <ComponentType>, payload: Map<Str, Str>`), received {}.",
+                params.len()
+            ),
+        ));
+        return;
+    }
+
+    // Param 1: state: T.
+    if let Some(param_ty_expr) = &params[0].type_ {
+        if let Ok(param_ty) = resolve_type_expr(param_ty_expr, ctx.types) {
+            match param_ty {
+                Type::Nominal(id) if id == component_id => {}
+                Type::Any => {}
+                other => {
+                    let expected_name = ctx.types.info(component_id).name.clone();
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "@on on fn '{fn_name}': first param must be of type `{expected_name}` (the state of component `{component_name}`), received `{}`.",
+                            other.display(ctx.types)
+                        ),
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
+    // Param 2: payload: Map<Str, Str>. Any is accepted for
+    // gradual escape hatch.
+    if let Some(param_ty_expr) = &params[1].type_ {
+        if let Ok(param_ty) = resolve_type_expr(param_ty_expr, ctx.types) {
+            let is_map_str_str = matches!(
+                &param_ty,
+                Type::Map(k, v) if matches!(**k, Type::Str) && matches!(**v, Type::Str)
+            );
+            if !is_map_str_str && !matches!(param_ty, Type::Any) {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@on on fn '{fn_name}': second param must be `Map<Str, Str>` (event payload), received `{}`.",
+                        param_ty.display(ctx.types)
+                    ),
+                ));
+                return;
+            }
+        }
+    }
+
+    // Return type: `T` (the state after the transition) or `Any`.
+    match ret {
+        Type::Nominal(id) if *id == component_id => {}
+        Type::Any => {}
+        other => {
+            let expected_name = ctx.types.info(component_id).name.clone();
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@on on fn '{fn_name}': return type must be `{expected_name}` (the state of component `{component_name}` after the transition), received `{}`.",
+                    other.display(ctx.types)
+                ),
+            ));
         }
     }
 }
@@ -18229,6 +18883,230 @@ print(total)
             errs.iter()
                 .any(|e| e.message.contains("`@live_component` does not accept kwargs")),
             "expected error about kwargs: {:?}",
+            errs
+        );
+    }
+
+    // ===== Phase 4 (fitz-liveviews Y-B) — @render_for / @on checker =====
+
+    #[test]
+    fn render_for_valid_registers_handler() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @render_for(\"card_editor\")\n\
+                   fn card_editor_render(state: CardEditor) -> Str => \"<div/>\"";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
+        assert_eq!(
+            env.render_handler_for("card_editor"),
+            Some("card_editor_render")
+        );
+    }
+
+    #[test]
+    fn render_for_missing_component_arg_errors() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @render_for\n\
+                   fn card_editor_render(state: CardEditor) -> Str => \"<div/>\"";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("`@render_for(\"name\")` expects exactly 1 Str arg")),
+            "expected error about missing arg: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn render_for_unknown_component_errors() {
+        // No `@live_component("card_editor")` declared — the render
+        // handler cannot resolve its target.
+        let src = "@render_for(\"card_editor\")\n\
+                   fn card_editor_render(state: Str) -> Str => \"<div/>\"";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("no `@live_component(\"card_editor\")` is declared")),
+            "expected error about unknown component: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn render_for_wrong_param_type_errors() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @render_for(\"card_editor\")\n\
+                   fn card_editor_render(state: Int) -> Str => \"<div/>\"";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("param must be of type `CardEditor`")),
+            "expected error about wrong param type: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn render_for_wrong_return_type_errors() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @render_for(\"card_editor\")\n\
+                   fn card_editor_render(state: CardEditor) -> Int => 42";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("return type must be `Str`")),
+            "expected error about wrong return type: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn render_for_conflicts_with_get_error() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @get(\"/card\")\n\
+                   @render_for(\"card_editor\")\n\
+                   fn card_editor_render(state: CardEditor) -> Str => \"<div/>\"";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e
+                .message
+                .contains("@render_for on fn 'card_editor_render' is not combinable with `@get`")),
+            "expected error about @get conflict: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn render_for_duplicate_component_errors() {
+        // Two distinct fns registering as render handler for the
+        // same component. `resolve_program` should catch the
+        // conflict when the second registration fires.
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @render_for(\"card_editor\")\n\
+                   fn render_a(state: CardEditor) -> Str => \"<a/>\"\n\
+                   @render_for(\"card_editor\")\n\
+                   fn render_b(state: CardEditor) -> Str => \"<b/>\"";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("already has a render handler registered")),
+            "expected error about duplicate render handler: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn on_valid_registers_handler() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @on(\"card_editor\", \"save\")\n\
+                   fn card_editor_save(state: CardEditor, payload: Map<Str, Str>) -> CardEditor => state";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
+        assert_eq!(
+            env.event_handler_for("card_editor", "save"),
+            Some("card_editor_save")
+        );
+    }
+
+    #[test]
+    fn on_wrong_arg_count_errors() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @on(\"card_editor\")\n\
+                   fn card_editor_save(state: CardEditor, payload: Map<Str, Str>) -> CardEditor => state";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("expects exactly 2 Str args")),
+            "expected error about wrong arg count: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn on_unknown_component_errors() {
+        let src = "@on(\"card_editor\", \"save\")\n\
+                   fn card_editor_save(state: Str, payload: Map<Str, Str>) -> Str => state";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("no `@live_component(\"card_editor\")` is declared")),
+            "expected error about unknown component: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn on_wrong_payload_type_errors() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @on(\"card_editor\", \"save\")\n\
+                   fn card_editor_save(state: CardEditor, payload: Int) -> CardEditor => state";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("second param must be `Map<Str, Str>`")),
+            "expected error about wrong payload type: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn on_wrong_return_type_errors() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @on(\"card_editor\", \"save\")\n\
+                   fn card_editor_save(state: CardEditor, payload: Map<Str, Str>) -> Int => 0";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("return type must be `CardEditor`")),
+            "expected error about wrong return type: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn on_multiple_decorators_for_same_component_ok() {
+        // A single fn handling several events on the SAME component
+        // is valid (the framework layer routes each event to the same fn).
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @on(\"card_editor\", \"save\")\n\
+                   @on(\"card_editor\", \"discard\")\n\
+                   fn card_editor_handle(state: CardEditor, payload: Map<Str, Str>) -> CardEditor => state";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
+        assert_eq!(
+            env.event_handler_for("card_editor", "save"),
+            Some("card_editor_handle")
+        );
+        assert_eq!(
+            env.event_handler_for("card_editor", "discard"),
+            Some("card_editor_handle")
+        );
+    }
+
+    #[test]
+    fn on_mixed_components_on_same_fn_errors() {
+        let src = "@live_component(\"a\") type A { x: Int = 0 }\n\
+                   @live_component(\"b\") type B { x: Int = 0 }\n\
+                   @on(\"a\", \"e1\")\n\
+                   @on(\"b\", \"e2\")\n\
+                   fn mixed(state: A, payload: Map<Str, Str>) -> A => state";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("cannot mix events from different components")),
+            "expected error about mixed components: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn on_duplicate_component_event_pair_errors() {
+        // Two distinct fns claiming the SAME (component, event)
+        // pair fires an error at register time.
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\" }\n\
+                   @on(\"card_editor\", \"save\")\n\
+                   fn handler_a(state: CardEditor, payload: Map<Str, Str>) -> CardEditor => state\n\
+                   @on(\"card_editor\", \"save\")\n\
+                   fn handler_b(state: CardEditor, payload: Map<Str, Str>) -> CardEditor => state";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("already has a handler registered")),
+            "expected error about duplicate (component, event) pair: {:?}",
             errs
         );
     }

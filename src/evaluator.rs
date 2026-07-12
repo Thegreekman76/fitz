@@ -487,6 +487,17 @@ fn process_decorator(
         return register_cli_command(deco, fn_name, params, handler);
     }
 
+    // Phase 4 (fitz-liveviews Y-B, session 1.b) — `@render_for` and
+    // `@on` are markers consumed by the framework layer
+    // (`fitz-liveviews`). The Fitz checker already validated their
+    // shape and signature in `resolve_program` + walker; the runtime
+    // does not need any side effect here. Accept and return Ok(())
+    // so that fns carrying these decorators can be defined without
+    // "decorator not implemented" errors.
+    if deco.name == "render_for" || deco.name == "on" {
+        return Ok(());
+    }
+
     // Unknown decorator. Message ready to guide the user.
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::InvalidSyntax,
@@ -494,7 +505,7 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' not implemented (on fn '{}'). \
-             Decorators supported today: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command, @healthz, @readyz.",
+             Decorators supported today: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command, @healthz, @readyz, @render_for, @on.",
             deco.name, fn_name,
         ),
     )))
