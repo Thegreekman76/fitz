@@ -744,6 +744,31 @@ impl TableMetadata {
     }
 }
 
+/// Phase 4 (fitz-liveviews Y-B) — Metadata extracted from
+/// `@live_component("name")` on a `type Foo { ... }`. If the type
+/// does NOT carry the decorator, it stays `None` in
+/// `TypeEnv.live_components`. If it does, we register the
+/// component name (unique string identifier used by
+/// `component(name, id)` and by `@render_for` / `@on` handlers
+/// declared in sub-phase 1.b).
+///
+/// The checker (`process_live_component_decorators`) only
+/// validates shape (1 Str literal arg, no kwargs, no duplicates).
+/// The framework layer (`fitz-liveviews`) consumes this metadata
+/// via a builtin to dispatch render + event handlers keyed by
+/// component name.
+#[derive(Debug, Clone)]
+pub struct LiveComponentMetadata {
+    /// Component name (`@live_component("name")`). Unique string
+    /// identifier. Used by the framework layer to look up render
+    /// + event handlers registered via `@render_for` and `@on`.
+    pub name: String,
+    /// `TypeId` of the state type that carries the decorator.
+    /// Populated by `resolve_program` right after
+    /// `process_live_component_decorators` succeeds.
+    pub type_id: TypeId,
+}
+
 /// Type environment of the program. Carries:
 ///  - Built-ins (primitives and generics), implicit via
 ///    `resolve_named`.
@@ -772,6 +797,13 @@ pub struct TypeEnv {
     /// `table_metadata` returns `None` and ORM queries
     /// fail with a clear error.
     tables: HashMap<TypeId, TableMetadata>,
+    /// Phase 4 (fitz-liveviews Y-B) — LiveComponent metadata by
+    /// `TypeId`. Only types with `@live_component("name")` appear
+    /// here. The framework layer consults
+    /// `env.live_component_metadata(id)` to know the component
+    /// name for handler dispatch. Types without the decorator
+    /// return `None`.
+    live_components: HashMap<TypeId, LiveComponentMetadata>,
     /// W12 (v0.10.8) — `@auth_provider` declared in a module
     /// imported by the local program. The caller (typically
     /// `main.rs::check_program_with_pyi_stubs_and_imports`)
@@ -839,6 +871,34 @@ impl TypeEnv {
     /// of the table and the primary key.
     pub fn table_metadata(&self, id: TypeId) -> Option<&TableMetadata> {
         self.tables.get(&id)
+    }
+
+    /// Phase 4 (fitz-liveviews Y-B) — Registers LiveComponent
+    /// metadata for a nominal type. Called by `resolve_program`
+    /// when a `type` carries `@live_component("name")`.
+    pub fn set_live_component_metadata(&mut self, id: TypeId, meta: LiveComponentMetadata) {
+        self.live_components.insert(id, meta);
+    }
+
+    /// Phase 4 (fitz-liveviews Y-B) — Returns the type's
+    /// LiveComponent metadata if declared with
+    /// `@live_component("name")`. Consumed by the framework
+    /// layer to dispatch render + event handlers keyed by
+    /// component name.
+    pub fn live_component_metadata(&self, id: TypeId) -> Option<&LiveComponentMetadata> {
+        self.live_components.get(&id)
+    }
+
+    /// Phase 4 (fitz-liveviews Y-B) — Reverse lookup: returns the
+    /// `TypeId` of the state type registered under the given
+    /// component name, or `None` if no such component exists.
+    /// The framework layer uses this when resolving
+    /// `component("name", id)` to find which type carries the
+    /// render + event handlers.
+    pub fn live_component_by_name(&self, name: &str) -> Option<TypeId> {
+        self.live_components
+            .iter()
+            .find_map(|(id, meta)| (meta.name == name).then_some(*id))
     }
 
     /// Registers a nominal type by name, returning its id.
@@ -1671,6 +1731,18 @@ pub fn resolve_program_with_env(
                 Ok(None) => {}
                 Err(errs) => errors.extend(errs),
             }
+            // Phase 4 (fitz-liveviews Y-B) — parallel pass over
+            // `@live_component("name")`. The processor returns
+            // metadata with a sentinel `type_id`; we overwrite it
+            // with the resolved id here before registering.
+            match process_live_component_decorators(name, decorators, *span) {
+                Ok(Some(mut meta)) => {
+                    meta.type_id = id;
+                    env.set_live_component_metadata(id, meta);
+                }
+                Ok(None) => {}
+                Err(errs) => errors.extend(errs),
+            }
         }
     }
 
@@ -1743,6 +1815,109 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
 ///   - The rest: structural equality on the base (peeling a
 ///     `Nullable` if present).
 //
+// Phase 4 (fitz-liveviews Y-B) — processes `@live_component("name")`
+// over a `type`. Returns:
+//   - `Ok(Some(meta))`: the type has `@live_component("name")` and is
+//     registered under that name for framework-layer dispatch.
+//   - `Ok(None)`: the type has no `@live_component` decorator. The
+//     framework layer will not consider it a live component.
+//   - `Err(errs)`: invalid decorator shape (missing name, non-Str
+//     arg, kwargs present, more than one `@live_component`).
+//
+// The decorator is a marker: the checker only validates shape
+// and registers metadata. The framework layer (`fitz-liveviews`)
+// consumes it via `env.live_component_metadata` +
+// `env.live_component_by_name` to look up render + event handlers
+// declared with `@render_for` and `@on` (Session 1.b).
+pub fn process_live_component_decorators(
+    type_name: &str,
+    type_decorators: &[Decorator],
+    type_span: Span,
+) -> Result<Option<LiveComponentMetadata>, Vec<FitzError>> {
+    let mut errors: Vec<FitzError> = Vec::new();
+    let mut name: Option<String> = None;
+    let mut seen = false;
+
+    for d in type_decorators {
+        if d.name != "live_component" {
+            continue;
+        }
+        if seen {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                type_span.line,
+                type_span.column,
+                format!(
+                    "type `{type_name}` has more than one `@live_component` decorator; only one is allowed"
+                ),
+            ));
+            continue;
+        }
+        seen = true;
+
+        if !d.kwargs.is_empty() {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                type_span.line,
+                type_span.column,
+                format!(
+                    "`@live_component` does not accept kwargs; received: {:?}",
+                    d.kwargs.iter().map(|(k, _)| k).collect::<Vec<_>>()
+                ),
+            ));
+        }
+
+        if d.args.len() != 1 {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                type_span.line,
+                type_span.column,
+                format!(
+                    "`@live_component(\"name\")` expects exactly 1 Str arg, received {}",
+                    d.args.len()
+                ),
+            ));
+            continue;
+        }
+
+        match &d.args[0] {
+            Expr::Str(s, _) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        "`@live_component(\"...\")` does not accept an empty component name"
+                            .to_string(),
+                    ));
+                } else {
+                    name = Some(trimmed.to_string());
+                }
+            }
+            _ => errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                type_span.line,
+                type_span.column,
+                "`@live_component(...)` expects a Str literal as the component name".to_string(),
+            )),
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // `type_id` is filled by `resolve_program` right after this
+    // call succeeds; we use `TypeId(usize::MAX)` as a sentinel that
+    // MUST be overwritten before the metadata is exposed to any
+    // consumer. See the call site in `resolve_program`.
+    Ok(name.map(|n| LiveComponentMetadata {
+        name: n,
+        type_id: TypeId(usize::MAX),
+    }))
+}
+
 // Phase 10.3.a — processes ORM decorators over a `type`.
 // Returns:
 //   - `Ok(Some(meta))`: the type has `@table(...)`, there is metadata.
@@ -2241,13 +2416,19 @@ pub fn process_table_decorators(
                 }
                 pending_check_constraints.push(CheckConstraintSpec { name, expr });
             }
+            // Phase 4 (fitz-liveviews Y-B) — `@live_component("name")`
+            // is a valid `type`-level decorator handled by
+            // `process_live_component_decorators`. Silent no-op here
+            // so this pass does not report it as unrecognized. Shape
+            // validation lives in the dedicated processor.
+            "live_component" => {}
             other => {
                 errors.push(FitzError::new(
                     ErrorKind::TypeError,
                     type_span.line,
                     type_span.column,
                     format!(
-                        "decorator `@{other}` not supported on `type`. Recognized: `@table`, `@renamed_from`, `@index`, `@unique`, `@check_constraint`."
+                        "decorator `@{other}` not supported on `type`. Recognized: `@table`, `@renamed_from`, `@index`, `@unique`, `@check_constraint`, `@live_component`."
                     ),
                 ));
             }
@@ -17980,6 +18161,74 @@ print(total)
             errs.iter()
                 .any(|e| e.message.contains("more than one `@table` decorator")),
             "expected error about duplicate @table: {:?}",
+            errs
+        );
+    }
+
+    // ===== Phase 4 (fitz-liveviews Y-B) — @live_component checker =====
+
+    #[test]
+    fn live_component_valid_decorator_registers_metadata() {
+        let src = "@live_component(\"card_editor\") type CardEditor { text: Str = \"\", is_editing: Bool = false }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "expected 0 errors: {:?}", errs);
+        let id = env
+            .lookup("CardEditor")
+            .expect("CardEditor should be registered");
+        let meta = env
+            .live_component_metadata(id)
+            .expect("should have LiveComponentMetadata");
+        assert_eq!(meta.name, "card_editor");
+        assert_eq!(meta.type_id, id);
+        // Reverse lookup by component name must resolve to the same TypeId.
+        assert_eq!(env.live_component_by_name("card_editor"), Some(id));
+    }
+
+    #[test]
+    fn live_component_missing_name_arg_errors() {
+        let src = "@live_component type CardEditor { text: Str = \"\" }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("`@live_component(\"name\")` expects exactly 1 Str arg")),
+            "expected error about missing name arg: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn live_component_non_str_arg_errors() {
+        let src = "@live_component(42) type CardEditor { text: Str = \"\" }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("expects a Str literal")),
+            "expected error about non-Str arg: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn live_component_multiple_decorators_on_same_type_errors() {
+        let src = "@live_component(\"a\") @live_component(\"b\") type CardEditor { text: Str = \"\" }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e
+                .message
+                .contains("more than one `@live_component` decorator")),
+            "expected error about duplicate @live_component: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn live_component_kwargs_error() {
+        let src =
+            "@live_component(\"card_editor\", extra=1) type CardEditor { text: Str = \"\" }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("`@live_component` does not accept kwargs")),
+            "expected error about kwargs: {:?}",
             errs
         );
     }
