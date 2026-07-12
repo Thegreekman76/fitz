@@ -2226,3 +2226,171 @@ fn deploy_help_lista_docker_y_compose() {
     assert!(stdout.contains("docker"));
     assert!(stdout.contains("compose"));
 }
+
+// -----------------------------------------------------------------
+// Phase 4 Y-B, Session 1.c — `fitz new --template <name>`
+// -----------------------------------------------------------------
+
+/// Corre `fitz` seteando además los env vars indicados. Necesario para
+/// los tests del template CLI, que apuntan las plantillas a repos git
+/// locales via `FITZ_TEMPLATE_<NAME>_URL/SUBPATH/REF` sin tocar red.
+fn run_fitz_with_env(args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (String, String, i32) {
+    let mut cmd = Command::new(fitz_bin());
+    cmd.args(args).current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("invocar fitz");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// Setup helper: crea un template repo mínimo en `<tmp>/tpl-src/` con
+/// una carpeta `templates/basic/` que contiene `fitz.toml` +
+/// `src/main.fitz` + `README.md`, usando `{{name}}` como placeholder.
+/// Lo convierte en git repo con tag `main` y devuelve la ruta absoluta
+/// del repo (para armar la URL `file:///`).
+fn setup_liveviews_template_repo(tmp_root: &Path) -> std::path::PathBuf {
+    let repo = tmp_root.join("tpl-src");
+    let basic = repo.join("templates").join("basic");
+    let basic_src = basic.join("src");
+    std::fs::create_dir_all(&basic_src).unwrap();
+
+    std::fs::write(
+        basic.join("fitz.toml"),
+        "[package]\nname = \"{{name}}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [bin]\nmain = \"src/main.fitz\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        basic_src.join("main.fitz"),
+        "print(\"Hola desde {{name}}\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        basic.join("README.md"),
+        "# {{name}}\n\nProject scaffolded from the `liveviews` template.\n",
+    )
+    .unwrap();
+    // A binary-ish file to make sure the copy tolerates non-UTF-8
+    // content untouched.
+    std::fs::write(basic.join("blob.bin"), [0xFFu8, 0xFE, 0x00, 0x01, 0x02]).unwrap();
+
+    // Convertimos en repo git con tag `main` (reusando el patrón de
+    // `init_git_repo_with_tag` pero con el tag `main` que coincide con
+    // el ref por default del template `liveviews`).
+    let _ = init_git_repo_with_tag(&repo, "main");
+    repo
+}
+
+#[test]
+fn new_with_template_liveviews_scaffolds_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = setup_liveviews_template_repo(tmp.path());
+
+    // `file:///...` que git entiende igual en Linux/Mac/Windows.
+    let repo_str = repo.to_string_lossy().replace('\\', "/");
+    let git_url = format!("file:///{}", repo_str.trim_start_matches('/'));
+
+    // Directorio de trabajo aislado para que el proyecto scaffoldeado
+    // caiga adentro del tempdir.
+    let workdir = tmp.path().join("workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let (stdout, stderr, code) = run_fitz_with_env(
+        &["new", "my-app", "--template", "liveviews", "--no-git"],
+        &workdir,
+        &[
+            ("FITZ_TEMPLATE_LIVEVIEWS_URL", git_url.as_str()),
+            ("FITZ_TEMPLATE_LIVEVIEWS_SUBPATH", "templates/basic"),
+            ("FITZ_TEMPLATE_LIVEVIEWS_REF", "main"),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+
+    let project = workdir.join("my-app");
+    assert!(project.is_dir(), "project directory was not created");
+    assert!(project.join("fitz.toml").is_file(), "fitz.toml missing");
+    assert!(
+        project.join("src").join("main.fitz").is_file(),
+        "src/main.fitz missing",
+    );
+    assert!(project.join("README.md").is_file(), "README.md missing");
+
+    // `{{name}}` fue substituido en cada archivo de texto.
+    let toml = std::fs::read_to_string(project.join("fitz.toml")).unwrap();
+    assert!(
+        toml.contains("name = \"my-app\""),
+        "placeholder not substituted in fitz.toml: {toml}",
+    );
+    assert!(
+        !toml.contains("{{name}}"),
+        "leftover placeholder in fitz.toml"
+    );
+
+    let main = std::fs::read_to_string(project.join("src").join("main.fitz")).unwrap();
+    // Normalizamos CRLF: en Windows `git clone` puede convertir LF a
+    // CRLF (autocrlf); otros SOs mantienen LF. Nos importa el
+    // contenido, no el line ending exacto.
+    assert_eq!(
+        main.replace("\r\n", "\n"),
+        "print(\"Hola desde my-app\")\n",
+    );
+
+    let readme = std::fs::read_to_string(project.join("README.md")).unwrap();
+    assert!(readme.contains("# my-app"), "README head: {readme}");
+
+    // El archivo binario se copió byte-a-byte sin sustituir.
+    let blob = std::fs::read(project.join("blob.bin")).unwrap();
+    assert_eq!(blob, vec![0xFFu8, 0xFE, 0x00, 0x01, 0x02]);
+
+    // `.git/` del template repo NO se propaga al proyecto scaffoldeado.
+    assert!(
+        !project.join(".git").exists(),
+        "template's .git/ should not be copied into the new project",
+    );
+}
+
+#[test]
+fn new_with_unknown_template_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(
+        &["new", "my-app", "--template", "does-not-exist", "--no-git"],
+        tmp.path(),
+    );
+    assert_ne!(code, 0, "expected non-zero exit for unknown template");
+    assert!(
+        stderr.contains("unknown template") || stderr.contains("does-not-exist"),
+        "stderr should mention the unknown template name: {stderr}",
+    );
+    // El folder my-app no debería haber quedado creado.
+    assert!(
+        !tmp.path().join("my-app").exists(),
+        "aborted scaffolding should not leave the target directory behind",
+    );
+}
+
+#[test]
+fn new_template_and_http_are_mutually_exclusive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(
+        &[
+            "new",
+            "my-app",
+            "--template",
+            "liveviews",
+            "--http",
+            "--no-git",
+        ],
+        tmp.path(),
+    );
+    assert_ne!(code, 0, "expected clap to reject --template + --http");
+    // clap suele mencionar el flag conflictivo por nombre.
+    assert!(
+        stderr.contains("--http") || stderr.contains("--template") || stderr.contains("conflict"),
+        "stderr: {stderr}",
+    );
+}

@@ -6,7 +6,8 @@
 
 use fitz::{
     ast, codegen, cron_jobs, db, deploy, docker, error, evaluator, fmt, http, launcher_template,
-    lexer, lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, testing, types,
+    lexer, lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, templates,
+    testing, types,
 };
 
 // `fitz py-types` sub-command (Phase 8.5) — only with the `python` feature.
@@ -138,8 +139,15 @@ enum Commands {
         /// Project name (also the name of the folder to create).
         name: String,
         /// HTTP template instead of the CLI hello world.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "template")]
         http: bool,
+        /// Named starter template. Currently supported: `liveviews`.
+        /// Overrides the built-in CLI/HTTP templates and scaffolds
+        /// from a git repo instead. Per-template env var overrides
+        /// (`FITZ_TEMPLATE_<NAME>_URL/SUBPATH/REF`) let tests and
+        /// power users redirect the source.
+        #[arg(long)]
+        template: Option<String>,
         /// Don't run `git init` in the created folder.
         #[arg(long)]
         no_git: bool,
@@ -671,8 +679,13 @@ fn main() {
         Commands::PyStubs { source, out } => {
             py_stubs_file(&source, out.as_deref());
         }
-        Commands::New { name, http, no_git } => {
-            new_project(&name, http, no_git);
+        Commands::New {
+            name,
+            http,
+            template,
+            no_git,
+        } => {
+            new_project(&name, http, template.as_deref(), no_git);
         }
         Commands::Init { name, http, no_git } => {
             init_project(name.as_deref(), http, no_git);
@@ -2715,7 +2728,7 @@ fn template_gitignore() -> &'static str {
 
 /// `fitz new <name> [--http] [--no-git]` — creates a new Fitz
 /// project in a folder. Fails if the folder already exists.
-fn new_project(name: &str, http: bool, no_git: bool) {
+fn new_project(name: &str, http: bool, template: Option<&str>, no_git: bool) {
     if !manifest::is_valid_package_name(name) {
         eprintln!(
             "✗ invalid name: `{name}`. Must match `^[a-z][a-z0-9_-]{{0,63}}$` \
@@ -2734,12 +2747,79 @@ fn new_project(name: &str, http: bool, no_git: bool) {
         std::process::exit(1);
     }
 
-    scaffold_project(&target, name, http, no_git);
+    if let Some(tpl_name) = template {
+        scaffold_from_named_template(&target, name, tpl_name, no_git);
+    } else {
+        scaffold_project(&target, name, http, no_git);
+    }
+
     println!("✓ Fitz project created at `{}`", target.display());
     println!();
     println!("To try it out:");
     println!("  cd {}", target.display());
     println!("  fitz run src/main.fitz");
+}
+
+/// Scaffolds `<target>` from the named template in the built-in
+/// registry (see `fitz::templates::resolve_template`).
+///
+/// Aborts with an actionable error if the template name is unknown or
+/// the scaffolding fails. Runs `git init` at the end unless `no_git`.
+fn scaffold_from_named_template(
+    target: &std::path::Path,
+    project_name: &str,
+    template_name: &str,
+    no_git: bool,
+) {
+    let source = match templates::resolve_template(template_name) {
+        Some(s) => s,
+        None => {
+            eprintln!("✗ unknown template: `{template_name}`. Available: `liveviews`.");
+            std::process::exit(1);
+        }
+    };
+
+    // Create the target dir up front — the templates module expects a
+    // writable destination.
+    if let Err(e) = fs::create_dir_all(target) {
+        eprintln!("✗ could not create `{}`: {e}", target.display());
+        std::process::exit(1);
+    }
+
+    if let Err(e) = templates::scaffold_from_template(&source, target, project_name) {
+        eprintln!("✗ {e}");
+        std::process::exit(1);
+    }
+
+    if !no_git {
+        init_git_in_new_project(target);
+    }
+}
+
+/// Runs `git init --quiet` in `dir`. Never aborts — the project is
+/// still valid without git; failure is a warning.
+fn init_git_in_new_project(dir: &std::path::Path) {
+    match std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .current_dir(dir)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!(
+                "  (notice: `git init` exited with code {} — the project was created anyway. \
+                 Pass `--no-git` to silence this notice.)",
+                status.code().unwrap_or(-1)
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "  (notice: could not run `git init` ({e}). The project was created \
+                 anyway. Pass `--no-git` to silence this notice.)"
+            );
+        }
+    }
 }
 
 /// `fitz init [--name X] [--http] [--no-git]` — initializes a Fitz
@@ -2845,27 +2925,7 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
     // project is still valid without git; we only note it as a
     // warning.
     if !no_git {
-        match std::process::Command::new("git")
-            .arg("init")
-            .arg("--quiet")
-            .current_dir(target)
-            .status()
-        {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                eprintln!(
-                    "  (notice: `git init` exited with code {} — the project was created anyway. \
-                     Pass `--no-git` to silence this notice.)",
-                    status.code().unwrap_or(-1)
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "  (notice: could not run `git init` ({e}). The project was created \
-                     anyway. Pass `--no-git` to silence this notice.)"
-                );
-            }
-        }
+        init_git_in_new_project(target);
     }
 }
 

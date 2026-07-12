@@ -921,11 +921,7 @@ impl TypeEnv {
     /// component already has a handler declared elsewhere. The
     /// caller (typically `resolve_program`) turns the `Err`
     /// into a `FitzError` with the offending fn's span.
-    pub fn set_render_handler(
-        &mut self,
-        component: String,
-        fn_name: String,
-    ) -> Result<(), String> {
+    pub fn set_render_handler(&mut self, component: String, fn_name: String) -> Result<(), String> {
         if let Some(existing) = self.render_handlers.get(&component) {
             return Err(existing.clone());
         }
@@ -1831,8 +1827,7 @@ pub fn resolve_program_with_env(
         {
             match process_render_for_decorators(name, decorators, *span) {
                 Ok(Some(component)) => {
-                    if let Err(existing) = env.set_render_handler(component.clone(), name.clone())
-                    {
+                    if let Err(existing) = env.set_render_handler(component.clone(), name.clone()) {
                         errors.push(FitzError::new(
                             ErrorKind::TypeError,
                             span.line,
@@ -1849,11 +1844,9 @@ pub fn resolve_program_with_env(
             match process_on_decorators(name, decorators, *span) {
                 Ok(pairs) => {
                     for (component, event) in pairs {
-                        if let Err(existing) = env.set_event_handler(
-                            component.clone(),
-                            event.clone(),
-                            name.clone(),
-                        ) {
+                        if let Err(existing) =
+                            env.set_event_handler(component.clone(), event.clone(), name.clone())
+                        {
                             errors.push(FitzError::new(
                                 ErrorKind::TypeError,
                                 span.line,
@@ -1926,19 +1919,6 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
     }
 }
 
-/// Checks (simple case) that a literal default matches the
-/// declared field type. Applies only to constant literals:
-/// other defaults (expressions, struct literals, calls) are
-/// accepted without checking until 5.3, which validates expressions against
-/// expected types.
-///
-/// Rules:
-///   - `Null` acceptable if the declared is `T?`.
-///   - `Int` acceptable against `Float` (Int→Float coercion, same
-///     criterion the evaluator uses at runtime).
-///   - The rest: structural equality on the base (peeling a
-///     `Nullable` if present).
-//
 /// Phase 4 (fitz-liveviews Y-B, session 1.b) — result of
 /// `process_render_for_decorators`. Carries the parsed component
 /// name so the caller (`resolve_program`) can register the
@@ -18843,7 +18823,9 @@ print(total)
         let src = "@live_component type CardEditor { text: Str = \"\" }";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("`@live_component(\"name\")` expects exactly 1 Str arg")),
+            errs.iter().any(|e| e
+                .message
+                .contains("`@live_component(\"name\")` expects exactly 1 Str arg")),
             "expected error about missing name arg: {:?}",
             errs
         );
@@ -18863,7 +18845,8 @@ print(total)
 
     #[test]
     fn live_component_multiple_decorators_on_same_type_errors() {
-        let src = "@live_component(\"a\") @live_component(\"b\") type CardEditor { text: Str = \"\" }";
+        let src =
+            "@live_component(\"a\") @live_component(\"b\") type CardEditor { text: Str = \"\" }";
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e
@@ -18876,12 +18859,12 @@ print(total)
 
     #[test]
     fn live_component_kwargs_error() {
-        let src =
-            "@live_component(\"card_editor\", extra=1) type CardEditor { text: Str = \"\" }";
+        let src = "@live_component(\"card_editor\", extra=1) type CardEditor { text: Str = \"\" }";
         let errs = errors_of(src);
         assert!(
-            errs.iter()
-                .any(|e| e.message.contains("`@live_component` does not accept kwargs")),
+            errs.iter().any(|e| e
+                .message
+                .contains("`@live_component` does not accept kwargs")),
             "expected error about kwargs: {:?}",
             errs
         );
@@ -18909,8 +18892,9 @@ print(total)
                    fn card_editor_render(state: CardEditor) -> Str => \"<div/>\"";
         let errs = errors_of(src);
         assert!(
-            errs.iter()
-                .any(|e| e.message.contains("`@render_for(\"name\")` expects exactly 1 Str arg")),
+            errs.iter().any(|e| e
+                .message
+                .contains("`@render_for(\"name\")` expects exactly 1 Str arg")),
             "expected error about missing arg: {:?}",
             errs
         );
@@ -18924,7 +18908,9 @@ print(total)
                    fn card_editor_render(state: Str) -> Str => \"<div/>\"";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("no `@live_component(\"card_editor\")` is declared")),
+            errs.iter().any(|e| e
+                .message
+                .contains("no `@live_component(\"card_editor\")` is declared")),
             "expected error about unknown component: {:?}",
             errs
         );
@@ -18986,7 +18972,9 @@ print(total)
                    fn render_b(state: CardEditor) -> Str => \"<b/>\"";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("already has a render handler registered")),
+            errs.iter().any(|e| e
+                .message
+                .contains("already has a render handler registered")),
             "expected error about duplicate render handler: {:?}",
             errs
         );
@@ -19012,7 +19000,8 @@ print(total)
                    fn card_editor_save(state: CardEditor, payload: Map<Str, Str>) -> CardEditor => state";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("expects exactly 2 Str args")),
+            errs.iter()
+                .any(|e| e.message.contains("expects exactly 2 Str args")),
             "expected error about wrong arg count: {:?}",
             errs
         );
@@ -19024,7 +19013,9 @@ print(total)
                    fn card_editor_save(state: Str, payload: Map<Str, Str>) -> Str => state";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("no `@live_component(\"card_editor\")` is declared")),
+            errs.iter().any(|e| e
+                .message
+                .contains("no `@live_component(\"card_editor\")` is declared")),
             "expected error about unknown component: {:?}",
             errs
         );
@@ -19087,8 +19078,9 @@ print(total)
                    fn mixed(state: A, payload: Map<Str, Str>) -> A => state";
         let errs = errors_of(src);
         assert!(
-            errs.iter()
-                .any(|e| e.message.contains("cannot mix events from different components")),
+            errs.iter().any(|e| e
+                .message
+                .contains("cannot mix events from different components")),
             "expected error about mixed components: {:?}",
             errs
         );
@@ -19105,7 +19097,8 @@ print(total)
                    fn handler_b(state: CardEditor, payload: Map<Str, Str>) -> CardEditor => state";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("already has a handler registered")),
+            errs.iter()
+                .any(|e| e.message.contains("already has a handler registered")),
             "expected error about duplicate (component, event) pair: {:?}",
             errs
         );
