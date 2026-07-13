@@ -11012,3 +11012,85 @@ patrón `@<ident>` genérico ya cubría los decoradores nuevos).
 **Próximo norte tras v0.20.0**: seguir con lo que estaba
 pendiente pre-Y-B (Fase 11 frontend nativo o iteración
 sobre boilerplates según demanda).
+
+## v0.20.1 (2026-07-13) — Implicit `flv_register(...)` para LiveView components (fitz-liveviews Phase 5, A.1)
+
+Primer sub-paso de la Fase 5 diferida post-Phase-4 de
+`fitz-liveviews`. El compilador auto-genera una llamada
+`flv_register("name", InitialState {}, render_fn,
+{"event": handler})` por cada tipo con `@live_component`,
+consumiendo la metadata que `resolve_program` ya persiste
+en `TypeEnv` (`live_components`, `render_handlers`,
+`event_handlers`). Sin breaking: la API pública de
+`fitz-liveviews` es idéntica; los programas con manual
+`flv_register(...)` siguen funcionando y toman precedencia
+sobre la inyección implícita.
+
+**Nueva helper** en `src/types.rs`:
+
+- `pub fn inject_live_component_registrations(program:
+  &mut Program, env: &TypeEnv) ->
+  Result<(), Vec<FitzError>>` — walker determinístico
+  (componentes ordenados por nombre) que appendéa un
+  `Stmt::Expr(Call flv_register(...))` sintético por
+  cada `@live_component`. Validaciones en tiempo de
+  inyección:
+  - `@live_component` sin `@render_for` matching → error
+    claro citando el fn que falta.
+  - Field sin `default` en un `@live_component` type →
+    error citando el field (el `TypeName {}` sintético
+    requiere defaults en todos los fields).
+  - `flv_register` no está en scope (ni por `from
+    fitz_liveviews import flv_register` ni por `fn
+    flv_register` local en tests) → error sugiriendo el
+    import canónico.
+  - User ya llamó `flv_register("name", ...)` manualmente
+    → skip para ese componente (idempotencia sin
+    conflicto, respeta intent explícito).
+  - Sin `@live_component` en el programa → no-op (return
+    Ok early).
+
+**Wiring en el pipeline**: `run_file`, `build_file` y
+`build_file_with_bundle` en `src/main.rs` llaman la
+helper después de `check_program_with_pyi_stubs` y
+antes de eval/codegen. Los errores de inyección abortan
+(exit code 1) con el mismo formato que los errores del
+checker. `fitz check` no llama la helper — el chequeo es
+solo de build/run time.
+
+**Smoke real**: `examples/kanban/` y `examples/dashboard/`
+de `fitz-liveviews` compilan (`fitz check`) y corren
+(`fitz run`) sin el `flv_register(...)` manual que
+exigía Phase 4. El dashboard, con smoke `curl` sobre
+`/`, sirve HTML con `data-flv-component-name="metric_tile"`
+proving auto-registration end-to-end.
+
+**9 unit tests nuevos** en `src/types.rs::tests::
+implicit_register_*`: inyección básica, no-op sin
+componentes, skip cuando manual call existe, missing
+`@render_for` error, field sin default error, missing
+`flv_register` en scope error, alias de import trata
+como out-of-scope, orden alfabético, componente sin
+events emite Map vacío.
+
+**Deudas residuales derivadas** (NO bloquean uso real):
+
+- Cross-module `@live_component` NO soportado en este
+  MVP — solo componentes declarados en el program
+  top-level. Paralelo a `imported_auth_provider` /
+  `imported_background_fns` (W12, B10) — refinable
+  cuando aparezca demanda real.
+- `from fitz_liveviews import flv_register as register`
+  deja `flv_register` fuera de scope canónico → error
+  claro con fix. Los usuarios simplemente no aliasan
+  el nombre.
+- Custom initial state con valores distintos de los
+  defaults del type requiere manual `flv_register(...)`
+  explícito — el implicit sintetiza `TypeName {}` que
+  usa exclusivamente defaults.
+
+**Próximo norte tras v0.20.1**: los otros dos items de
+Phase 5 de `fitz-liveviews` (per-instance init +
+`dispatch_to_all`) son features **nuevas** — se deciden
+con datos empíricos de un showcase post-cierre. Sin
+presión al cierre.

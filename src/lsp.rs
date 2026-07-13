@@ -1569,7 +1569,7 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "live_component",
             "live_component(\"${1:component_name}\")",
             "@live_component(\"name\") — declares a type as a LiveView component",
-            "On a `type`. Registers the type as a stateful component. Exactly one string-literal arg (the component name used to reference it from templates via `component(\"name\", \"instance-id\")`). Combine with `@render_for(\"name\")` on a render fn and `@on(\"name\", \"event\")` on event handlers.",
+            "On a `type`. Registers the type as a stateful component. Exactly one string-literal arg (the component name used to reference it from templates via `component(\"name\", \"instance-id\")`). Combine with `@render_for(\"name\")` on a render fn and `@on(\"name\", \"event\")` on event handlers. Since Fitz core v0.20.1, the compiler auto-generates the boot `flv_register(...)` call from these decorators — every field must declare a default, and `flv_register` must be imported from `fitz_liveviews`.",
         ),
         (
             "render_for",

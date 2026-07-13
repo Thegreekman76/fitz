@@ -1605,6 +1605,22 @@ fn build_file(
         (env, types)
     };
 
+    // Phase 5 (fitz-liveviews) — auto-inject `flv_register(...)` for
+    // every `@live_component` type. Mutates `program` in place so
+    // codegen sees the synthetic calls. Errors abort the build the
+    // same way the checker does.
+    if let Err(inject_errs) = fitz::types::inject_live_component_registrations(&mut program, &env) {
+        eprintln!(
+            "✗ {} — {} error(s) at implicit @live_component registration:",
+            path.display(),
+            inject_errs.len()
+        );
+        for e in &inject_errs {
+            eprintln!("  {}", e);
+        }
+        std::process::exit(1);
+    }
+
     // Codegen to a Cargo project. Mini-batch Hpx.2 — the checker's
     // TypeInfo is passed to codegen to infer return types of
     // unannotated fns. Phase 12.8 — manifest's flag_defaults are
@@ -1928,6 +1944,20 @@ fn build_file_with_bundle(
     } else {
         (env, types)
     };
+
+    // Phase 5 (fitz-liveviews) — auto-inject `flv_register(...)` for
+    // every `@live_component` type (parallel to `build_file`).
+    if let Err(inject_errs) = fitz::types::inject_live_component_registrations(&mut program, &env) {
+        eprintln!(
+            "✗ {} — {} error(s) at implicit @live_component registration:",
+            path.display(),
+            inject_errs.len()
+        );
+        for e in &inject_errs {
+            eprintln!("  {}", e);
+        }
+        std::process::exit(1);
+    }
 
     // --- Codegen + write the real binary's Cargo project ---
     let project = match codegen::generate_project(
@@ -2573,7 +2603,7 @@ fn run_file(
     // get reported but execution continues), intended for legacy
     // code or to diagnose checker bugs.
     // 8-pyi.B: loads adjacent .pyi stubs before the check.
-    let (_type_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
+    let (type_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         if no_typecheck {
             eprintln!(
@@ -2596,6 +2626,27 @@ fn run_file(
                 "   Use `fitz check` to review, or `fitz run --no-typecheck {}` to run anyway.",
                 path.display()
             );
+            std::process::exit(1);
+        }
+    }
+
+    // Phase 5 (fitz-liveviews) — auto-inject `flv_register(...)` for
+    // every `@live_component` type. Only if the checker succeeded
+    // (in `--no-typecheck` mode we skip injection to preserve the
+    // legacy behavior of running through even with type errors).
+    let mut program = program;
+    if type_errors.is_empty() {
+        if let Err(inject_errs) =
+            fitz::types::inject_live_component_registrations(&mut program, &type_env)
+        {
+            eprintln!(
+                "✗ {} — {} error(s) at implicit @live_component registration:",
+                path.display(),
+                inject_errs.len()
+            );
+            for e in &inject_errs {
+                eprintln!("  {}", e);
+            }
             std::process::exit(1);
         }
     }
