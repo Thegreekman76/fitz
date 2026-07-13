@@ -603,6 +603,23 @@ revs. Detects the exact commit hash for the lockfile via
 `git rev-parse HEAD`. Cache reuse with no automatic re-clone;
 `fitz update <name>` invalidates the cache.
 
+### templates.rs — project scaffolding (v0.20.0)
+
+Powers `fitz new my-app --template <name>`. Registry with one entry
+today (`liveviews` →
+`https://github.com/Thegreekman76/fitz-liveviews` at `templates/basic`
+on `main`); env var overrides per template
+(`FITZ_TEMPLATE_LIVEVIEWS_URL/SUBPATH/REF`) change only known names
+so tests + power users can retarget without opening the registry.
+
+`scaffold_from_template(source, target_dir, project_name)` shallow
+clones to an in-house self-cleaning `TempDir` (avoids promoting
+`tempfile` from dev-dep to runtime dep), copies the requested subpath
+(skipping any nested `.git/`), and substitutes `{{name}}` in every
+UTF-8-decodable file with the project name (binaries copy verbatim).
+Two-strategy clone parallels `git_dep::clone_fresh`:
+`--depth 1 --branch <ref>` first, full clone + `git checkout` fallback.
+
 ### db.rs — pure Postgres driver + ORM (Phase 10, ~3000+ LoC)
 
 The largest module in the project by LoC. Implements a

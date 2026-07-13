@@ -1561,6 +1561,28 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "@renamed_from(\"old_name\") — safe rename (v0.10.17)",
             "Transient decorator so `fitz db diff` emits `ALTER TABLE ... RENAME COLUMN/TABLE` instead of DROP + ADD (preserves data). On a field: column rename. On the `type` (together with `@table`): table rename. Delete it after applying the migration.",
         ),
+        // Phase 4 Y-B (v0.20.0) — LiveView components (fitz-liveviews).
+        // Registered as language-level decorators here in Fitz core so
+        // the checker validates shape; the runtime dispatch lives in the
+        // `fitz-liveviews` framework (imported as a lib dep).
+        (
+            "live_component",
+            "live_component(\"${1:component_name}\")",
+            "@live_component(\"name\") — declares a type as a LiveView component",
+            "On a `type`. Registers the type as a stateful component. Exactly one string-literal arg (the component name used to reference it from templates via `component(\"name\", \"instance-id\")`). Combine with `@render_for(\"name\")` on a render fn and `@on(\"name\", \"event\")` on event handlers.",
+        ),
+        (
+            "render_for",
+            "render_for(\"${1:component_name}\")",
+            "@render_for(\"name\") — render fn for a live component",
+            "On a fn. Marks it as the renderer of the named component. Signature: `fn(state: T) -> Html` (or `-> Str`), where T is the type with matching `@live_component(\"name\")`. Called by the framework when the component is mounted or its state changes.",
+        ),
+        (
+            "on",
+            "on(\"${1:component_name}\", \"${2:event_name}\")",
+            "@on(\"component\", \"event\") — event handler for a live component",
+            "On a fn. Registers a handler for a client-side event on the named component. Signature: `fn(state: T, payload: Map<Str, Str>) -> T`, returning the new state. The framework routes `data-flv-click`/`data-flv-submit`/... events with matching event name.",
+        ),
     ];
 
     entries

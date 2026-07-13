@@ -2335,10 +2335,7 @@ fn new_with_template_liveviews_scaffolds_project() {
     // Normalizamos CRLF: en Windows `git clone` puede convertir LF a
     // CRLF (autocrlf); otros SOs mantienen LF. Nos importa el
     // contenido, no el line ending exacto.
-    assert_eq!(
-        main.replace("\r\n", "\n"),
-        "print(\"Hola desde my-app\")\n",
-    );
+    assert_eq!(main.replace("\r\n", "\n"), "print(\"Hola desde my-app\")\n",);
 
     let readme = std::fs::read_to_string(project.join("README.md")).unwrap();
     assert!(readme.contains("# my-app"), "README head: {readme}");

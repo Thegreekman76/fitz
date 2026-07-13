@@ -9,6 +9,115 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.20.0] — 2026-07-12 — Language surface para LiveView components (Phase 4 Y-B) + template CLI
+
+Release menor con nueva superficie del lenguaje habilitando componentes
+LiveView-style construidos sobre `fitz-liveviews`. Tres decoradores
+nuevos (`@live_component`, `@render_for`, `@on`) validados por el
+checker, más el sub-comando `fitz new --template <name>` que scaffoldea
+proyectos desde un repo git (arranque canónico:
+`fitz new my-app --template liveviews`). Sin breaking; los programas
+existentes compilan y corren bit-a-bit igual.
+
+**Nuevos decoradores** (validados por el checker en `src/types.rs`;
+la ejecución la provee la lib `fitz-liveviews`):
+
+- **`@live_component("name")`** sobre un `type` — registra el type como
+  componente stateful. Exactamente 1 arg Str literal, sin kwargs, uno
+  por type. El checker persiste `LiveComponentMetadata { name, type_id }`
+  en el `TypeEnv` con lookup por `TypeId` y por nombre.
+- **`@render_for("name")`** sobre un `fn` — marca la fn como el renderer
+  del componente `"name"`. Firma esperada: `fn(state: T) -> Html` (o
+  `-> Str`), con T = tipo que declara `@live_component("name")`.
+  Persiste `RenderForMetadata { component_name, fn_name }`.
+- **`@on("component", "event")`** sobre un `fn` — registra un handler
+  para un evento cliente-side (`data-flv-click`/`data-flv-submit`/etc)
+  del componente. Firma: `fn(state: T, payload: Map<Str, Str>) -> T`.
+  Persiste `EventHandlerMetadata { component_name, event_name, fn_name }`
+  con lookup por `(component_name, event_name)`.
+
+**Template CLI** — `fitz new --template <name>` clona un repo git a un
+dir temporal, copia el sub-path declarado al nuevo proyecto, sustituye
+`{{name}}` en cada archivo UTF-8 con el nombre del proyecto, y corre
+`git init` (skippable con `--no-git`). El flag es mutuamente
+excluyente con `--http`. Módulo nuevo `src/templates.rs` (~520 LoC)
+con:
+
+- **Registry built-in**: hoy solo `liveviews` →
+  `https://github.com/Thegreekman76/fitz-liveviews` en `templates/basic`
+  sobre `main`. Refinable por PR si aparecen más.
+- **Override por env vars**: `FITZ_TEMPLATE_LIVEVIEWS_URL/SUBPATH/REF`
+  cambian solo templates conocidos (no permiten registrar nuevos).
+  Sirve para tests + power users que apuntan a forks o subpaths
+  alternativos.
+- **Clone estrategia split** (paralelo a `git_dep::clone_fresh` de
+  9.y.3.c): `--depth 1 --branch <ref>` para tags/branches, full clone
+  + `git checkout` fallback para commits específicos.
+- **Sustitución `{{name}}`**: solo en archivos UTF-8 decodables (los
+  binarios se copian byte-por-byte). `.git/` interno del template NO
+  se propaga al nuevo proyecto.
+- **`TempDir` in-house**: evita promover `tempfile` de dev-dep a runtime
+  dep. Auto-cleanup en `Drop`.
+
+**LSP** (v0.20.0) — `decorator_completions()` suma los 3 decoradores
+nuevos con snippets tabstop-guided:
+
+- `@live_component("component_name")` con placeholder editable.
+- `@render_for("component_name")` con placeholder editable.
+- `@on("component_name", "event_name")` con dos placeholders.
+
+Extensión VSCode bumpeada a **0.20.0** con `.vsix` regenerado
+bundleando el `fitz-lsp.exe` fresh. Grammar TextMate sin cambios
+(`@<ident>` genérico ya cubría los decoradores nuevos por regla).
+
+**Tests** al cierre v0.20.0:
+
+- `cargo test --lib --release` → verde (3229+ tests, incluye 5 tests
+  nuevos del `@live_component`, 8+ nuevos de `@render_for`/`@on`, 8
+  nuevos de `templates.rs`)
+- `cargo test --lib --release --features lsp` → verde
+- `cargo test --lib --release --features python` → verde
+- `cargo test --test cli_e2e --release` → verde (101 total, +3 nuevos:
+  scaffold OK con env var override, error claro sobre template
+  desconocido, `--template` + `--http` mutuamente excluyentes)
+- `cargo test --test openapi_e2e --release` → verde (3 total)
+- `cargo test --test compile_e2e --release` → 377 verde / 8 pre-existentes
+  ya documentados (file-lock Windows race sobre `handler_panic_r6` +
+  `hidden_decorator_v0_10_11`, codegen cross-module + observability,
+  routing 404, orm_w17 #7 drift). Delta de 1 test respecto al último
+  run verificado (378/7 en commit `556441c`) es file-lock flake sobre
+  Windows entre corridas — sin regresión imputable al diff de v0.20.0
+  (LSP-only + fmt-en-cli_e2e; el binary de compile_e2e no toca esos
+  paths)
+- `cargo fmt --all --check` limpio
+- `cargo clippy --lib --tests --bins -- -D warnings` limpio
+- `cargo clippy --lib --tests --bins --features lsp -- -D warnings` limpio
+
+**Ejemplo end-to-end**:
+
+```bash
+$ fitz new my-app --template liveviews
+✓ scaffolded my-app from template `liveviews`
+
+$ cd my-app && fitz run
+Server listening on http://127.0.0.1:3000
+```
+
+Los tres decoradores son inertes runtime-side en Fitz core (metadata
+puro registrada por el checker); la lib `fitz-liveviews` v0.3.1+
+provee `component(name, id)` + state store + `dispatch_component_events`
+que los consumen para renderizar y despachar eventos.
+
+**Deudas residuales derivadas** (NO bloquean uso real): dispatch
+runtime por nombre (`invoke_by_name`) queda como sub-paso futuro de
+Fitz core si la lib fitz-liveviews lo pide (hoy resuelve con lookup
+en `TypeEnv` + registro estático); imports auto de `fitz-liveviews`
+al usar `@live_component` (hoy el user debe declarar la dep en su
+`fitz.toml`, comportamiento explícito acorde al modelo del PM);
+registro de templates externos por manifest (hoy solo built-in +
+env overrides, refinable con `[template.custom]` cuando aparezca
+demanda real).
+
 ## [v0.19.6] — 2026-06-27 — Bugfix codegen: sub-caso v0.19.5 — wrapper HTTP en módulo importer del middleware
 
 Bugfix release patch que cierra el sub-caso 🔴 URGENTE del bug original

@@ -10944,3 +10944,71 @@ mini-fase: ~3-4 días de trabajo dedicado.
 del plan post-boilerplates (paso 4 del plan) o salto directo a
 Fase 10 (Stack DB nativo) según prioridad del autor al
 arrancar.
+
+## v0.20.0 (2026-07-12) — Superficie del lenguaje para LiveView components + template CLI
+
+Release menor con superficie nueva del lenguaje habilitando
+componentes LiveView-style construidos sobre la lib
+`fitz-liveviews` (repo separado). Tres decoradores nuevos
+validados por el checker, más el sub-comando
+`fitz new --template <name>`. Sin breaking: los programas
+existentes compilan y corren bit-a-bit idénticos.
+
+**Decoradores** (validados por el checker en `src/types.rs`,
+inertes runtime-side en Fitz core; la lib `fitz-liveviews`
+consume la metadata):
+
+- **`@live_component("name")`** sobre un `type` — registra el
+  type como componente stateful. 1 arg Str literal, sin
+  kwargs, uno por type. `LiveComponentMetadata { name,
+  type_id }` persiste en el `TypeEnv` con lookup por
+  `TypeId` y por nombre.
+- **`@render_for("name")`** sobre un `fn` — marca la fn como
+  renderer del componente. Firma esperada:
+  `fn(state: T) -> Html` (o `-> Str`), T = el type con
+  `@live_component("name")`.
+- **`@on("component", "event")`** sobre un `fn` — handler para
+  eventos cliente-side (`data-flv-click`/`data-flv-submit`).
+  Firma: `fn(state: T, payload: Map<Str, Str>) -> T`. Lookup
+  por `(component_name, event_name)`.
+
+**Template CLI** — nuevo `src/templates.rs` (~520 LoC):
+
+- `fitz new my-app --template liveviews` clona un repo git
+  a un tempdir, copia el subpath declarado, sustituye
+  `{{name}}` en archivos UTF-8, corre `git init` (skippable
+  con `--no-git`). Mutuamente excluyente con `--http`.
+- Registry built-in: `liveviews` →
+  `github.com/Thegreekman76/fitz-liveviews@main` sub
+  `templates/basic`.
+- Env vars `FITZ_TEMPLATE_<NAME>_URL/SUBPATH/REF` overridean
+  solo templates conocidos (útil en tests + power users que
+  apuntan a forks).
+- Clone estrategia split paralela a
+  `git_dep::clone_fresh` de 9.y.3.c
+  (`--depth 1 --branch <ref>` primero, full clone +
+  checkout fallback).
+- `TempDir` in-house con auto-cleanup en Drop (no promueve
+  `tempfile` de dev-dep a runtime dep).
+
+**LSP** — `decorator_completions()` suma los 3 decoradores
+nuevos con snippets tabstop-guided.
+
+**Extensión VSCode 0.20.0** — `.vsix` regenerado bundleando
+el `fitz-lsp.exe` fresh. Grammar TextMate sin cambios (el
+patrón `@<ident>` genérico ya cubría los decoradores nuevos).
+
+**Deudas residuales derivadas** (NO bloquean uso real):
+
+- Dispatch runtime por nombre (`invoke_by_name`) queda como
+  sub-paso futuro si la lib `fitz-liveviews` lo pide (hoy
+  resuelve con lookup en `TypeEnv` + registro estático).
+- Imports auto de `fitz-liveviews` al usar `@live_component`
+  (hoy el user debe declarar la dep en su `fitz.toml`,
+  comportamiento explícito acorde al modelo del PM).
+- Registro de templates externos por manifest (hoy solo
+  built-in + env overrides).
+
+**Próximo norte tras v0.20.0**: seguir con lo que estaba
+pendiente pre-Y-B (Fase 11 frontend nativo o iteración
+sobre boilerplates según demanda).
