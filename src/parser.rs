@@ -3108,6 +3108,100 @@ pub fn parse_with_recovery(tokens: Vec<TokenWithPos>) -> (Program, Vec<FitzError
     (stmts, parser.recovered_errors)
 }
 
+// ---------------------------------------------------------------------------
+// Phase 11.2 — public source-level entry points.
+//
+// The classic parser is designed as a batch pipeline: tokenize a whole
+// `.fitz` file, then walk it once to build a `Program`. Phase 11
+// (`.fitzv` Single-File Components) needs a *sub-parser* — the view
+// parser captures event bodies, state field defaults, template
+// interpolations, and event params as raw source strings, and later
+// wants to hand each of those blobs back to the classic parser.
+//
+// Rather than expose the internal `Parser` struct (which would leak
+// grammar-state details like `no_struct_literal`), we expose four thin
+// wrappers: one per unit of grammar the view expander needs. Each one
+// asserts that the whole input was consumed, so a trailing typo does
+// not silently succeed.
+//
+// **Position note.** Errors from these fns carry positions relative to
+// the blob they were called with (1-based, blob-local). The caller
+// (typically `view::expand`) is responsible for shifting them into
+// coordinates that make sense in the enclosing `.fitzv` file.
+
+/// Parse a single expression from source. The entire input must be a
+/// well-formed expression (trailing whitespace / newlines are allowed,
+/// but any other trailing token errors).
+pub fn parse_expression_from_source(source: &str) -> FitzResult<Expr> {
+    let tokens = tokenize(source)?;
+    let mut parser = Parser::new(tokens);
+    parser.skip_newlines();
+    let expr = parser.expression()?;
+    parser.skip_newlines();
+    if !parser.is_at_end() {
+        return Err(parser.error(
+            ErrorKind::UnexpectedToken,
+            "unexpected trailing tokens after expression",
+        ));
+    }
+    Ok(expr)
+}
+
+/// Parse a type expression from source (e.g. `Str`, `List<User>`,
+/// `Bool?`). The entire input must be a single type expression.
+pub fn parse_type_expression_from_source(source: &str) -> FitzResult<TypeExpr> {
+    let tokens = tokenize(source)?;
+    let mut parser = Parser::new(tokens);
+    parser.skip_newlines();
+    let ty = parser.parse_type_expr()?;
+    parser.skip_newlines();
+    if !parser.is_at_end() {
+        return Err(parser.error(
+            ErrorKind::UnexpectedToken,
+            "unexpected trailing tokens after type expression",
+        ));
+    }
+    Ok(ty)
+}
+
+/// Parse a block of statements from source. Empty input yields an empty
+/// `Vec`. Used to parse the body of a `.fitzv` `event` handler.
+pub fn parse_statements_from_source(source: &str) -> FitzResult<Vec<Stmt>> {
+    let tokens = tokenize(source)?;
+    let mut parser = Parser::new(tokens);
+    // Reuse the same driver as the file top-level: `parse_program`
+    // handles empty input, newlines, and stmt terminators uniformly.
+    parser.parse_program()
+}
+
+/// Parse a comma-separated parameter list from source (e.g.
+/// `new_title: Str, count: Int = 0`). The input must NOT include the
+/// enclosing parentheses — the view parser already consumed them.
+pub fn parse_parameters_from_source(source: &str) -> FitzResult<Vec<Param>> {
+    // `parse_params` expects the stream to end with `)`. Wrap the
+    // input so the internal grammar can reuse the same driver without
+    // divergence. Empty input yields an empty `Vec`.
+    let wrapped = format!("({source})");
+    let tokens = tokenize(&wrapped)?;
+    let mut parser = Parser::new(tokens);
+    if !parser.eat(&Token::LParen) {
+        return Err(parser.error(
+            ErrorKind::UnexpectedToken,
+            "internal: parse_parameters_from_source expected the wrapping `(`",
+        ));
+    }
+    // `parse_params` consumes the closing `)` itself.
+    let params = parser.parse_params()?;
+    parser.skip_newlines();
+    if !parser.is_at_end() {
+        return Err(parser.error(
+            ErrorKind::UnexpectedToken,
+            "unexpected trailing tokens after parameter list",
+        ));
+    }
+    Ok(params)
+}
+
 /// Takes the raw contents of a `Token::Str` and builds the matching
 /// expression: `Expr::Str` if it's just text, or `Expr::StrInterp`
 /// if it has `{...}` interpolations.
