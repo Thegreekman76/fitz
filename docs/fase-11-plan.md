@@ -212,7 +212,7 @@ Phase 11 promise.
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits, ALL **CLOSED 2026-07-14**: **11.3.a** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container`, keeps other at-rules opaque, handles strings + comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class) (see §9.j). **11.3.c** — wire scoping end-to-end in `expand`: new `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc }, Global { css, loc } }` replaces the raw-passthrough `Option<RawStyle>`; scope class synthesised via FNV-1a of `<component>::<css_raw>` truncated to 8 hex, shape `<component-kebab>-c-<8hex>`; `apply_scope(...)` runs on the CSS body; every Element with a static `class` attribute gets suffixed variants added (`class="card"` → `class="card card-<scope>"`) via a recursive walker that descends into If then/else branches + For bodies; interpolated `class` attributes left alone as a documented limitation. Global styles are pure passthrough — no CSS transform, no template rewrite. Includes 21 new unit tests + `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (see §9.k). **Closes 11.3 entire** — Phase 11.3 shipped end-to-end. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
-| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
+| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **11.4.c** — counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded. **11.4.d** — cierre formal + §9.m/n entries + roadmap refresh. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
 | **11.7** | LSP support inside `.fitzv` — hover over `{expr}` shows the type, autocomplete inside `state { }` and `event ...` bodies, template-attr completion knows about the declared event handlers of the enclosing component. | VSCode extension bumped with the new grammar + LSP config; typing `{sta` inside a template completes to `state field name` when the component has that field. |
@@ -1657,6 +1657,250 @@ No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
 11.3.a or 11.3.b. `docs/fase-11-plan.md` gets the row update in
 §6 (11.3 row carries "CLOSES 11.3 entire" annotation) and this
 section.
+
+---
+
+## 9.l Decision recorded by 11.4.a — client target: WASM-first, hand-rolled `wasm-bindgen` (feature `client-wasm`)
+
+First sub-commit of 11.4. **Research + decision only — zero code
+touched, zero tests added, docs-only commit.** The output IS this
+§9.l section plus the refreshed row for 11.4 in §6. Confirms the
+architectural direction already committed in `docs/stack.md` v1
+(2026-07-14, lines 99-101), and picks the concrete Rust→WASM
+approach among five candidates before 11.4.b starts writing the
+emitter.
+
+**Decision**: **Approach A2 — hand-roll `wasm-bindgen` + `web-sys`
+directly**. Feature-gated as opt-in `client-wasm`; `cargo build`
+default remains standalone with the current dep tree. The emitter
+lives in `src/view/codegen_wasm.rs` (new, added in 11.4.b),
+preserving Invariant 4.
+
+**Files touched by 11.4.a**:
+
+- `docs/fase-11-plan.md` — the row for 11.4 in §6 expands with the
+  four sub-commit breakdown + the closed 11.4.a annotation. This
+  section (§9.l) captures the analysis so the decision has a
+  place to live and 11.4.b/c/d can reference it.
+
+That's it. No `src/` changes, no `examples/` changes, no
+`Cargo.toml` changes yet — the deps for `client-wasm` land in
+11.4.b when the emitter starts calling them.
+
+**Data collected during 11.4.a research**:
+
+Bundle sizes for a hypothetical counter component, from public
+benchmarks + framework documentation (all measurements are
+gzipped transfer size unless noted):
+
+| Path | Baseline | Counter estimate | Sources |
+|---|---|---|---|
+| `wasm-bindgen` hello world | ~15 KB WASM | ~15-25 KB gzipped after `opt-level=z` + `wasm-opt` | [sendilkumarn.com wasm-bindgen post](https://sendilkumarn.com/blog/wasm-bindgen); [rustwasm/wasm-bindgen#2856](https://github.com/rustwasm/wasm-bindgen/issues/2856); [Leptos book — Optimizing WASM Binary Size](https://book.leptos.dev/deployment/binary_size.html) |
+| Solid.js runtime + counter | ~7 KB | ~7-10 KB gzipped | [pkgpulse.com Solid vs Svelte](https://www.pkgpulse.com/compare/solid-js-vs-svelte) |
+| Svelte 5 compiled counter | ~2-3 KB | ~2-10 KB gzipped for full production build | [Svelte 5 bundle size discussion](https://github.com/sveltejs/svelte/discussions/11214); [Bundlephobia svelte](https://bundlephobia.com/package/svelte) |
+
+Real ratio between WASM and JS-vanilla for the counter: **~2-5x**,
+not the "~10-20x" often quoted in Reddit / HN threads. Optimized
+WASM sits in the "acceptable" band for SPAs, admin panels,
+dashboards, LiveViews-augmented sites — the 90% of real use
+cases. The 10% where JS-vanilla still wins (edge functions with
+< 1 MB budgets, ultra-low-power mobile) is exactly the nicho
+that `docs/stack.md` reserves for the JS-vanilla secondary target.
+
+**Approaches evaluated during 11.4.a**:
+
+| # | Approach | Bundle base | Deps added | Invariant 4 | Verdict |
+|---|---|---|---|---|---|
+| **A1** | Delegate to Leptos/Sycamore/Dioxus/Yew | 30-100 KB gz | Framework crate + transitive tree | ⚠️ debatable — compiling to a framework's code | ❌ ecosystem lock-in; violates `docs/stack.md` L24 "Fitz por sí solo puede resolver el rango entero" |
+| **A2** | Hand-roll `wasm-bindgen` + `web-sys` directly | 15-25 KB gz | `wasm-bindgen`, `web-sys`, `console_error_panic_hook` under opt-in feature `client-wasm` | ✅ 100% inside `src/view/codegen_wasm.rs` | ✅ **elegido** |
+| **A3** | In-tree runtime crate (Svelte-style, shared signals + DOM patching) | ~10 KB gz base + N KB per component | Same as A2 plus a Fitz-published micro-crate | ✅ | 🟡 refinement of A2 — not the arranque; open a sub-phase later if `N` components bloat the bundle (measurable when kanban of 11.6 ports) |
+| **B1** | Emit hand-written JS from the AST | 2-10 KB gz | Zero Cargo deps (emitter code + string constants) | ✅ | 🟡 queued for 11.9+ as the secondary target promised in `docs/stack.md`; NOT built in 11.4 |
+| **B2** | Delegate to Svelte/Solid compiler | 2-10 KB gz | Requires `node.js` in the build machine | ❌ | ❌ same lock-in as A1 plus `npm` dep in the build toolchain |
+
+**Rationale for picking A2** (in priority order):
+
+1. **Respects `docs/stack.md` v1**. WASM-first was committed on
+   2026-07-14 in the same doc where the architectural invariants
+   for the stack were written. Re-litigating that commitment
+   inside 11.4.a would ask for evidence 11.4.a explicitly does
+   NOT have — real bundle measurements come from 11.4.c on the
+   actual emitter, not from external framework benchmarks.
+2. **Preserves the "Fitz por sí solo" philosophy**. The `fitz`
+   binary compiles `.fitzv` to WASM without external
+   frameworks, without `npm`, without `node`. A user with only
+   `fitz` installed can build a WASM client bundle.
+3. **Preserves Invariant 4**. The emitter lives entirely in
+   `src/view/codegen_wasm.rs`. The feature `client-wasm` is
+   opt-in — `cargo build` default keeps the current dep tree
+   untouched, meaning the `~370` guide/course/TaskHub examples
+   plus the 11 boilerplates keep compiling with zero changes.
+4. **Bundle 15-25 KB gz is acceptable for the 90% of cases**.
+   For the 10% of pathological cases (edge functions, ultra-
+   low-power mobile), JS-vanilla via B1 remains queued for
+   11.9+.
+5. **A3 is a refinement, not a competitor**. Start with A2 (each
+   component emits its own DOM binding code, redundant across
+   components). If bundle sizes bloat when N components stack
+   up (measurable when the kanban port lands in 11.6), refactor
+   by extracting shared signals + DOM patching into an in-tree
+   runtime crate. The refactor is transparent to user code — it
+   changes the emitter internals only.
+6. **Zero transitive coupling today**. `cargo tree -e normal`
+   confirms neither `wasm-bindgen`, `web-sys`, nor `js-sys` are
+   in the current dep tree — the feature `client-wasm` is 100%
+   additive with no accidental exposure via existing crates.
+
+**Measured gate for 11.4.b / 11.4.c**:
+
+If the counter POC produced by A2 exceeds **40 KB gzipped** (2x
+the projected ceiling), 11.4.b PIVOTs to B1 (JS-vanilla emitter)
+and 11.4.c re-runs the demo. In that scenario, `docs/stack.md`
+lines 99-101 get updated with the measured data. This is a real
+gate, not a rubber-stamp — the number is measured, recorded in
+§9.n at close of 11.4.c, and drives the pivot if triggered.
+
+**Cargo.toml delta that 11.4.b will add** (for reference, not
+edited in this commit):
+
+```toml
+# Fase 11.4.b — target client WASM. Feature `client-wasm` opt-in:
+# the `fitz` binary default does NOT link wasm-bindgen; only
+# `fitz build --target wasm` (Phase 11.5) or the WASM emitter
+# tests activate these deps.
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Document", "Element", "HtmlElement", "Event", "EventTarget",
+    "Node", "Text", "Window",
+] }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+client-wasm = ["dep:wasm-bindgen", "dep:web-sys", "dep:console_error_panic_hook"]
+```
+
+`web-sys` follows "pay-only-for-what-you-use" — only the DOM
+classes the emitter actually touches get feature-gated in. The
+initial set above covers the counter subset; 11.4.b / future
+sub-phases expand it (add `MouseEvent`, `InputEvent`,
+`HtmlInputElement`, etc.) as the template dialect demands.
+
+**Deferred / queued items (NOT built in 11.4)**:
+
+- **B1 — JS-vanilla emitter**. Queued for a later sub-phase
+  (likely 11.9) when either real demand for <5 KB bundles
+  surfaces OR the WASM path measurably fails the 40 KB gate on
+  the counter. `ExpandedComponent` is target-agnostic —
+  a second emitter in `src/view/codegen_js.rs` does NOT
+  require refactoring the AST or `check`/`expand`.
+- **A3 — in-tree runtime crate**. Refactor of A2, gated by
+  measured bundle-bloat when `N` components stack up. Opens
+  post-11.6 (kanban ported) when we have real component counts
+  to measure against.
+- **11.5 CLI wiring** (`fitz build --target wasm`). Stays in
+  11.5. 11.4 assumes the emitter is invoked from a test / bin
+  dedicated to `view::codegen_wasm`, NOT through `fitz build`.
+
+**Design decisions worth naming**:
+
+- **A1 (framework delegation) rejected as arranque**. Two
+  reasons: (1) Leptos/Sycamore/Yew/Dioxus each have their own
+  release cadence + breaking-change history that Fitz would
+  inherit if it emitted to their component model. (2) Compiling
+  to third-party framework code makes Invariant 4 harder to
+  defend — a bug in the emitter that produces malformed Leptos
+  code would first surface as a Leptos compiler error, not a
+  Fitz error. The isolation story gets fuzzier.
+- **B1 (JS-vanilla) NOT dropped, just queued**. The AST post-
+  expand is target-agnostic; a JS emitter that reads
+  `ExpandedComponent` and emits vanilla JS is a straightforward
+  addition when demand justifies it. The reason it isn't
+  arranque is that `docs/stack.md` already committed to WASM
+  as primary — starting with JS would require reversing that
+  commitment on evidence 11.4.a doesn't have.
+- **A3 (in-tree runtime crate) NOT arranque either**. Starting
+  with A3 pays the coordination cost of a second published
+  crate before we know if the shared runtime pattern pays off
+  for Fitz's specific reactivity model. A2 is refactorable to
+  A3 later without user-facing breakage — the emitter internals
+  just change from "each component embeds all bindings" to
+  "each component references shared runtime helpers".
+- **`console_error_panic_hook` included in the feature bundle**.
+  Without it, WASM panics silently no-op or produce cryptic
+  browser errors. Cost is ~2-3 KB gzipped, worth every byte for
+  the DX during 11.4.b/c development. Users of the production
+  build can toggle it off in a future refinement if bundle size
+  becomes contested.
+- **`opt-level = "z"` + `wasm-opt` policy for 11.4.b**. The
+  emitter itself doesn't set these — they're `Cargo.toml`
+  profile settings the user's build applies. 11.4.b documents
+  the recommended profile settings in the emitter's rustdoc,
+  and 11.4.c measures with them applied.
+- **Zero code / zero tests in 11.4.a is deliberate**. This
+  sub-commit is pure decision. Splitting the research from the
+  POC keeps the git history readable: the future 11.4.b commit
+  becomes "implement the decision recorded in §9.l" rather
+  than "research + implement together, no clear record of why
+  we chose A2".
+
+**Verification pre-close of 11.4.a**:
+
+- Row 11.4 in §6 refreshed with sub-commit breakdown; the
+  markdown table still renders (no broken pipes, no orphan
+  columns).
+- §9.l inserted between §9.k and §10; heading level is
+  consistent with the rest of §9.
+- `grep -n "^## 9\." docs/fase-11-plan.md` shows the section
+  index reads §9.a through §9.l in order.
+- No `src/` files touched, no `Cargo.toml` touched, no
+  `examples/` touched — verified by `git diff --stat` showing
+  only `docs/fase-11-plan.md` in the changeset.
+- Cero tests to run: this is a docs-only commit. Invariants 1-5
+  hold trivially because no code changed. The classic `.fitz`
+  pipeline, the `.fitzv` pipeline post-11.3.d, the boilerplates,
+  and the smoke `GUIDE_EXAMPLES_COMPILE` are all unchanged by
+  this sub-commit.
+
+**Debt residual visible from 11.4.a** (opens deuda entries that
+11.4.b/c must respect):
+
+- **Scoped CSS injection strategy in WASM**. `ExpandedStyle::Scoped`
+  carries pre-suffixed CSS from 11.3.c. The WASM emitter has to
+  inject the `<style>` block into `document.head` at mount
+  time, deduplicating by `scope_class` so N mounted instances of
+  the same component share one `<style>` block. 11.4.b
+  documents the canonical strategy inline.
+- **`Value::Secret` in interpolations**. The checker of 11.2.b
+  already blocks Secret at type-check time. The WASM emitter
+  assumes that guarantee — zero defensive runtime handling of
+  `Secret` in template rendering. If a Secret ever reaches the
+  emitter it means the checker was bypassed, and the emitter's
+  behavior in that case is intentionally undefined (the safe
+  answer is to redact via the check, not the emit).
+- **`<slot />` opaque handling in 11.4**. The emitter must emit
+  a DOM marker (probable shape: a `<template
+  data-fitz-slot="name">` element or a marker comment) without
+  resolving the composition. Composition resolution lands in
+  11.5 alongside `<Child prop="v" />` syntax. 11.4.b's test
+  suite includes a smoke test that a component with a `<slot />`
+  compiles cleanly (opaque marker present in output) without
+  actually mounting a child.
+- **Interpolated `class="{expr}"` unchanged from 11.3.c
+  limitation**. Dynamic class values do NOT get the scope
+  suffix appended. The WASM emitter preserves this limitation
+  faithfully — dynamic class attributes are set as raw strings
+  from the interpolation. Users who want scoped dynamic
+  classes concatenate the suffix manually inside the expression
+  (a workaround, escape hatch documented in 11.4.c).
+- **`docs/stack.md` cross-link**. When 11.4.d closes the
+  sub-phase, `docs/stack.md` gets a footnote crediting §9.l
+  with the "hand-rolled A2" refinement of the WASM-first
+  commitment. The footnote makes future readers of stack.md
+  find the concrete decision without re-deriving it.
+
+No other files touched by 11.4.a. The next sub-commit (11.4.b)
+will add `src/view/codegen_wasm.rs`, the `client-wasm` feature
+plus deps in `Cargo.toml`, and the initial suite of emitter unit
+tests.
 
 ---
 
