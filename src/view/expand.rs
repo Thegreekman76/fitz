@@ -28,9 +28,10 @@
 
 use super::ast::{
     Attr as RawAttr, Component as RawComponent, EventHandler as RawEventHandler, Loc,
-    StateField as RawStateField, Style as RawStyle, Template as RawTemplate,
+    StateField as RawStateField, Style as RawStyle, StyleKind, Template as RawTemplate,
     TemplateNode as RawTemplateNode, ViewFile,
 };
+use super::css_parser::{apply_scope, CssParseError};
 use crate::ast as fast; // Fitz AST — imported prefixed to avoid collisions with view AST names.
 use crate::error::FitzError;
 use crate::lexer::{tokenize, TokenWithPos};
@@ -57,7 +58,45 @@ pub struct ExpandedComponent {
     pub state: Vec<ExpandedStateField>,
     pub events: Vec<ExpandedEventHandler>,
     pub template: Option<ExpandedTemplate>,
-    pub style: Option<RawStyle>,
+    /// The component's `<style scoped>` or `<style global>` block
+    /// after processing. `Scoped` blocks carry the CSS with every
+    /// class selector suffixed with `-<scope_class>` (via
+    /// `css_parser::apply_scope`) plus the synthesised
+    /// `scope_class` that the template rewrite also injects into
+    /// every element's `class` attribute. `Global` blocks carry
+    /// the CSS verbatim — no transformation, no template rewrite.
+    /// See §9.k of `docs/fase-11-plan.md` for the exact wiring.
+    pub style: Option<ExpandedStyle>,
+}
+
+/// A component's `<style ...>` block after 11.3.c's wiring runs.
+/// Mirrors `StyleKind` but carries the actual processed data
+/// instead of the raw source.
+///
+/// - `Scoped`: `css_scoped` is the CSS body with `.<ident>` selectors
+///   rewritten to `.<ident>-<scope_class>`; `scope_class` is
+///   `<component-kebab>-c-<8hex>` where the 8-hex payload is
+///   FNV-1a of `<component name>::<original css body>` — same
+///   name + same CSS → same class, guaranteed. The template
+///   rewrite (also 11.3.c) adds `<class>-<scope_class>` for every
+///   original class token on every element's `class` attribute,
+///   preserving the originals so external `.<class>` queries in
+///   user JS keep working.
+/// - `Global`: `css` is the raw CSS body copied verbatim. No
+///   scoping, no template rewrite. Intended for cross-cutting
+///   rules like resets or utility classes the component owns but
+///   exposes beyond itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExpandedStyle {
+    Scoped {
+        css_scoped: String,
+        scope_class: String,
+        loc: Loc,
+    },
+    Global {
+        css: String,
+        loc: Loc,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -215,19 +254,226 @@ fn expand_component(c: &RawComponent) -> ExpandResult<ExpandedComponent> {
         .iter()
         .map(|e| expand_event_handler(e, &c.name))
         .collect::<ExpandResult<Vec<_>>>()?;
-    let template = c
+    let mut template = c
         .template
         .as_ref()
         .map(|t| expand_template(t, &c.name))
         .transpose()?;
+    // Process the style block (if any). For `Scoped`, this also
+    // mutates `template` in place to add suffixed class variants
+    // — has to run AFTER `expand_template` so the walker sees the
+    // already-expanded tree.
+    let style = process_style(&c.style, &c.name, template.as_mut())?;
     Ok(ExpandedComponent {
         name: c.name.clone(),
         loc: c.loc,
         state,
         events,
         template,
-        style: c.style.clone(),
+        style,
     })
+}
+
+/// Turn a raw `Style` block into its `ExpandedStyle` form. For
+/// `Scoped`, synthesises the scope class, runs the CSS through
+/// `apply_scope`, and — if a template is present — rewrites every
+/// element's static `class` attribute to add the suffixed variants.
+/// For `Global`, copies the CSS verbatim; no template mutation.
+/// `None` in → `None` out.
+fn process_style(
+    raw: &Option<RawStyle>,
+    component_name: &str,
+    template: Option<&mut ExpandedTemplate>,
+) -> ExpandResult<Option<ExpandedStyle>> {
+    let Some(style) = raw else {
+        return Ok(None);
+    };
+    match style.kind {
+        StyleKind::Scoped => {
+            let scope_class = synth_scope_class(component_name, &style.css_raw);
+            let css_scoped = apply_scope(&style.css_raw, &scope_class)
+                .map_err(|e| css_parse_error_to_expand(e, style.loc, component_name))?;
+            if let Some(t) = template {
+                rewrite_class_attrs_in_template(&mut t.roots, &scope_class);
+            }
+            Ok(Some(ExpandedStyle::Scoped {
+                css_scoped,
+                scope_class,
+                loc: style.loc,
+            }))
+        }
+        StyleKind::Global => Ok(Some(ExpandedStyle::Global {
+            css: style.css_raw.clone(),
+            loc: style.loc,
+        })),
+    }
+}
+
+/// Shift a CSS parse error into an `ExpandError` located at the
+/// `<style scoped>` block's `Loc` inside the `.fitzv` file. Precise
+/// offset mapping (turning `pos` into a line + column INSIDE the
+/// CSS blob) stays deferred — same debt as the other blob-parsers
+/// in the view module. The context label names the component so
+/// users know which style block to look at when a `.fitzv` file
+/// has several components.
+fn css_parse_error_to_expand(err: CssParseError, loc: Loc, component_name: &str) -> ExpandError {
+    ExpandError {
+        message: format!(
+            "{} (char offset {} inside the CSS body)",
+            err.message, err.pos
+        ),
+        loc,
+        context: format!("component '{component_name}': <style scoped> block"),
+    }
+}
+
+/// Derive the per-component scope class used to isolate scoped CSS
+/// rules. Shape: `<component-kebab>-c-<8hex>`. The 8-hex suffix is
+/// FNV-1a of `<component_name>::<css_raw>` truncated to the low 32
+/// bits — deterministic for a given (name, css) pair, so the same
+/// input always produces the same class. Two components with the
+/// same name but different CSS bodies produce different classes,
+/// so hot-reload during 11.3.d + 11.4 can invalidate stale styles
+/// without name collisions.
+fn synth_scope_class(component_name: &str, css_raw: &str) -> String {
+    let kebab = to_kebab_case(component_name);
+    let seed = format!("{component_name}::{css_raw}");
+    let hex = fnv1a_hash_8_hex(&seed);
+    format!("{kebab}-c-{hex}")
+}
+
+/// Convert a component name (typically CamelCase) to kebab-case
+/// suitable for a CSS class. Insertion rule: a `-` goes before
+/// every uppercase char that follows a lowercase or digit. `_`
+/// becomes `-`. Non-ASCII-alphanumeric chars are dropped
+/// (component names are validated by the shell parser to be Fitz
+/// identifiers, so this only trips on hypothetical future
+/// extensions). If the result would be empty, falls back to
+/// `component` so the class is always non-empty.
+fn to_kebab_case(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_was_lower_or_digit = false;
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            if prev_was_lower_or_digit {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+            prev_was_lower_or_digit = false;
+        } else if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+            prev_was_lower_or_digit = true;
+        } else if c == '_' {
+            out.push('-');
+            prev_was_lower_or_digit = false;
+        }
+        // Drop other chars silently.
+    }
+    if out.is_empty() {
+        out.push_str("component");
+    }
+    out
+}
+
+/// FNV-1a 64-bit hash truncated to the low 32 bits, formatted as
+/// 8 hex chars. Good enough for uniqueness within a single project
+/// (32 bits = 4 billion permutations vs. typically <100 components
+/// per file) and short enough to keep the generated class names
+/// readable in DevTools. Not a cryptographic hash — collisions
+/// under adversarial input are trivial to construct, but the
+/// scope-class use case (per-component isolation) has no threat
+/// model beyond accidental collisions between distinct CSS bodies.
+fn fnv1a_hash_8_hex(input: &str) -> String {
+    let mut hash: u64 = 14_695_981_039_346_656_037; // FNV offset basis
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211); // FNV prime
+    }
+    format!("{:08x}", (hash & 0xFFFF_FFFF) as u32)
+}
+
+/// Walk the expanded template and, for every element with a
+/// static `class` attribute, add the suffixed variant of each
+/// class token. Recurses through Element children, If then + else
+/// children, and For children. Non-element nodes (Text,
+/// Interpolation, Slot) pass through unchanged.
+///
+/// Handles interpolated `class` attributes (`class="{dynamic}"`)
+/// as a documented limitation: they're left unchanged, so a fully
+/// dynamic class binding won't pick up the scope suffix. Users who
+/// want dynamic scoped classes will need to include the suffix
+/// manually in the interpolation expression until a follow-up
+/// wires this end-to-end. Recorded as deuda residual in
+/// `docs/fase-11-plan.md` §9.k.
+fn rewrite_class_attrs_in_template(nodes: &mut [ExpandedTemplateNode], scope_class: &str) {
+    for node in nodes {
+        match node {
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                for attr in attrs.iter_mut() {
+                    if let ExpandedAttr::Static { name, value, .. } = attr {
+                        if name == "class" {
+                            *value = rewrite_class_value(value, scope_class);
+                        }
+                    }
+                }
+                rewrite_class_attrs_in_template(children, scope_class);
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                rewrite_class_attrs_in_template(children, scope_class);
+                if let Some(nodes) = else_children {
+                    rewrite_class_attrs_in_template(nodes, scope_class);
+                }
+            }
+            ExpandedTemplateNode::For { children, .. } => {
+                rewrite_class_attrs_in_template(children, scope_class);
+            }
+            ExpandedTemplateNode::Text(_)
+            | ExpandedTemplateNode::Interpolation { .. }
+            | ExpandedTemplateNode::Slot { .. } => {}
+        }
+    }
+}
+
+/// Rewrite a `class="..."` value by appending the suffixed
+/// variant of each original class token. `"card"` becomes
+/// `"card card-<scope>"`; `"card title"` becomes
+/// `"card title card-<scope> title-<scope>"`. Empty and
+/// whitespace-only inputs are preserved as-is (nothing to
+/// suffix). Tokens are split on ASCII whitespace and rejoined
+/// with single spaces; user-written double spaces or tabs
+/// normalise to single spaces, which matches how the browser
+/// tokenises `class` anyway.
+fn rewrite_class_value(original: &str, scope_class: &str) -> String {
+    let tokens: Vec<&str> = original.split_ascii_whitespace().collect();
+    if tokens.is_empty() {
+        return original.to_string();
+    }
+    let mut out = String::with_capacity(original.len() + tokens.len() * (scope_class.len() + 2));
+    // First emit the originals, then the suffixed variants. The
+    // browser semantics don't care about class order, but keeping
+    // originals-first keeps the intended styles from the user's
+    // POV grouped in DevTools before the compiler's additions.
+    let mut first = true;
+    for tok in &tokens {
+        if !first {
+            out.push(' ');
+        }
+        out.push_str(tok);
+        first = false;
+    }
+    for tok in &tokens {
+        out.push(' ');
+        out.push_str(tok);
+        out.push('-');
+        out.push_str(scope_class);
+    }
+    out
 }
 
 fn expand_state_field(f: &RawStateField, component_name: &str) -> ExpandResult<ExpandedStateField> {
@@ -1148,5 +1394,514 @@ component B {
             "context = {:?}",
             err.context
         );
+    }
+
+    // -----------------------------------------------------------------
+    // 11.3.c — style scoping + template class-attr rewrite
+    // -----------------------------------------------------------------
+
+    fn find_element<'a>(
+        nodes: &'a [ExpandedTemplateNode],
+        tag: &str,
+    ) -> Option<&'a ExpandedTemplateNode> {
+        for n in nodes {
+            match n {
+                ExpandedTemplateNode::Element {
+                    tag: t, children, ..
+                } => {
+                    if t == tag {
+                        return Some(n);
+                    }
+                    if let Some(nested) = find_element(children, tag) {
+                        return Some(nested);
+                    }
+                }
+                ExpandedTemplateNode::If {
+                    children,
+                    else_children,
+                    ..
+                } => {
+                    if let Some(nested) = find_element(children, tag) {
+                        return Some(nested);
+                    }
+                    if let Some(nodes) = else_children {
+                        if let Some(nested) = find_element(nodes, tag) {
+                            return Some(nested);
+                        }
+                    }
+                }
+                ExpandedTemplateNode::For { children, .. } => {
+                    if let Some(nested) = find_element(children, tag) {
+                        return Some(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn class_of(node: &ExpandedTemplateNode) -> Option<&str> {
+        if let ExpandedTemplateNode::Element { attrs, .. } = node {
+            for a in attrs {
+                if let ExpandedAttr::Static { name, value, .. } = a {
+                    if name == "class" {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn scoped_style_expands_to_expanded_style_scoped_with_suffixed_css() {
+        // The CARD_SRC fixture uses `<style scoped>`. After 11.3.c
+        // it should expand to `ExpandedStyle::Scoped { css_scoped,
+        // scope_class, .. }` where `css_scoped` carries the
+        // `.card-<scope>` transformation applied by `apply_scope`.
+        let file = expand_str(CARD_SRC).unwrap();
+        let c = &file.components[0];
+        match c.style.as_ref().unwrap() {
+            ExpandedStyle::Scoped {
+                css_scoped,
+                scope_class,
+                ..
+            } => {
+                let expected_selector = format!(".card-{scope_class}");
+                assert!(
+                    css_scoped.contains(&expected_selector),
+                    "css_scoped = {css_scoped:?} should contain {expected_selector:?}"
+                );
+                assert!(
+                    scope_class.starts_with("card-c-"),
+                    "scope_class = {scope_class:?} should be `card-c-<8hex>`"
+                );
+                // 8 hex chars follow `card-c-`; total = 7 (`card-c-`) + 8 = 15.
+                assert_eq!(scope_class.len(), 15);
+            }
+            other => panic!("expected Scoped variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn global_style_expands_to_expanded_style_global_verbatim() {
+        let src = r#"component X {
+  <template><div>hi</div></template>
+  <style global>body { margin: 0; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        match c.style.as_ref().unwrap() {
+            ExpandedStyle::Global { css, .. } => {
+                assert_eq!(css.trim(), "body { margin: 0; }");
+            }
+            other => panic!("expected Global variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_style_block_produces_none_style() {
+        let src = r#"component X {
+  <template><div>hi</div></template>
+}"#;
+        let file = expand_str(src).unwrap();
+        assert!(file.components[0].style.is_none());
+    }
+
+    #[test]
+    fn scope_class_is_deterministic_for_same_name_and_css() {
+        // Two runs of the exact same source must produce the exact
+        // same scope class. This is what makes hot-reload safe:
+        // unchanged input → unchanged output, no spurious
+        // invalidation.
+        let file1 = expand_str(CARD_SRC).unwrap();
+        let file2 = expand_str(CARD_SRC).unwrap();
+        let s1 = match &file1.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => scope_class.clone(),
+            _ => panic!("expected Scoped"),
+        };
+        let s2 = match &file2.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => scope_class.clone(),
+            _ => panic!("expected Scoped"),
+        };
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn scope_class_differs_when_css_body_differs() {
+        // Same component name, different CSS body → different
+        // scope class. This means editing the CSS in a hot-reload
+        // scenario invalidates the stale rules cleanly.
+        let src_a = r#"component X {
+  <template><div class="c">hi</div></template>
+  <style scoped>.c { color: red; }</style>
+}"#;
+        let src_b = r#"component X {
+  <template><div class="c">hi</div></template>
+  <style scoped>.c { color: blue; }</style>
+}"#;
+        let a = expand_str(src_a).unwrap();
+        let b = expand_str(src_b).unwrap();
+        let sa = match &a.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => scope_class.clone(),
+            _ => panic!("expected Scoped"),
+        };
+        let sb = match &b.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => scope_class.clone(),
+            _ => panic!("expected Scoped"),
+        };
+        assert_ne!(sa, sb);
+    }
+
+    #[test]
+    fn scope_class_differs_when_component_name_differs() {
+        // Same CSS body, different component name → different
+        // scope class. Prevents cross-component collisions on
+        // identical CSS.
+        let src_a = r#"component A {
+  <template><div class="c">hi</div></template>
+  <style scoped>.c { color: red; }</style>
+}"#;
+        let src_b = r#"component B {
+  <template><div class="c">hi</div></template>
+  <style scoped>.c { color: red; }</style>
+}"#;
+        let a = expand_str(src_a).unwrap();
+        let b = expand_str(src_b).unwrap();
+        let sa = match &a.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => scope_class.clone(),
+            _ => panic!("expected Scoped"),
+        };
+        let sb = match &b.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => scope_class.clone(),
+            _ => panic!("expected Scoped"),
+        };
+        assert_ne!(sa, sb);
+    }
+
+    #[test]
+    fn to_kebab_case_camelcase_component_name() {
+        // Internal helper — verified via a component named
+        // `LoginForm`. The scope class should start with
+        // `login-form-c-`.
+        let src = r#"component LoginForm {
+  <template><div class="root">hi</div></template>
+  <style scoped>.root { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        match &file.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => {
+                assert!(
+                    scope_class.starts_with("login-form-c-"),
+                    "scope_class = {scope_class:?}"
+                );
+            }
+            _ => panic!("expected Scoped"),
+        }
+    }
+
+    #[test]
+    fn to_kebab_case_all_lowercase_component_name() {
+        // A component named `card` (all lowercase) stays as-is —
+        // no dashes injected mid-word.
+        let src = r#"component card {
+  <template><div class="c">hi</div></template>
+  <style scoped>.c { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        match &file.components[0].style {
+            Some(ExpandedStyle::Scoped { scope_class, .. }) => {
+                assert!(
+                    scope_class.starts_with("card-c-"),
+                    "scope_class = {scope_class:?}"
+                );
+                // The name is `card` so the prefix before `-c-` is
+                // exactly `card` (4 chars) — no extra dashes.
+                assert_eq!(scope_class.len(), 15);
+            }
+            _ => panic!("expected Scoped"),
+        }
+    }
+
+    #[test]
+    fn element_with_static_class_gets_suffixed_variant_added() {
+        let src = r#"component Card {
+  <template><div class="card"><p>hi</p></div></template>
+  <style scoped>.card { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let scope = match c.style.as_ref().unwrap() {
+            ExpandedStyle::Scoped { scope_class, .. } => scope_class.clone(),
+            _ => unreachable!(),
+        };
+        let div = find_element(&c.template.as_ref().unwrap().roots, "div").unwrap();
+        let cls = class_of(div).unwrap();
+        // Original class kept first, suffixed variant appended.
+        assert_eq!(cls, format!("card card-{scope}"));
+    }
+
+    #[test]
+    fn element_with_multiple_static_classes_gets_each_suffixed() {
+        let src = r#"component X {
+  <template><div class="card title">hi</div></template>
+  <style scoped>.card { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let scope = match c.style.as_ref().unwrap() {
+            ExpandedStyle::Scoped { scope_class, .. } => scope_class.clone(),
+            _ => unreachable!(),
+        };
+        let div = find_element(&c.template.as_ref().unwrap().roots, "div").unwrap();
+        let cls = class_of(div).unwrap();
+        // Both original class tokens preserved first, then each
+        // suffixed variant. Order: originals in input order,
+        // suffixed in input order.
+        assert_eq!(cls, format!("card title card-{scope} title-{scope}"));
+    }
+
+    #[test]
+    fn element_without_class_attribute_is_left_alone() {
+        // A `<div>` without `class` doesn't get one injected — the
+        // MVP class-suffix strategy only scopes rules that target
+        // classes. Type-selector-only rules (`div { ... }`) don't
+        // scope; users opt into scoping by targeting classes.
+        let src = r#"component X {
+  <template><div><p class="inner">hi</p></div></template>
+  <style scoped>.inner { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let div = find_element(&c.template.as_ref().unwrap().roots, "div").unwrap();
+        // No class on the div — attr list stays empty.
+        if let ExpandedTemplateNode::Element { attrs, .. } = div {
+            assert!(attrs.is_empty(), "div attrs = {attrs:?}");
+        }
+        // The `<p>` inside DOES have a class and gets scoped.
+        let p = find_element(&c.template.as_ref().unwrap().roots, "p").unwrap();
+        let cls = class_of(p).unwrap();
+        assert!(cls.starts_with("inner "));
+        assert!(cls.contains(" inner-"));
+    }
+
+    #[test]
+    fn element_with_interpolated_class_is_not_transformed() {
+        // Documented limitation: fully-interpolated `class="{dyn}"`
+        // stays as an `ExpandedAttr::Interpolation` and the
+        // rewrite skips it. Users who want scoped dynamic classes
+        // need to include the suffix manually in the interpolation
+        // until a follow-up wires this end-to-end.
+        let src = r#"component X {
+  state { theme: Str = "light" }
+  <template><div class="{theme}">hi</div></template>
+  <style scoped>.light { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let div = find_element(&c.template.as_ref().unwrap().roots, "div").unwrap();
+        // The attr is still an Interpolation, not rewritten to a
+        // Static with concatenated scope class.
+        if let ExpandedTemplateNode::Element { attrs, .. } = div {
+            let has_interp = attrs
+                .iter()
+                .any(|a| matches!(a, ExpandedAttr::Interpolation { name, .. } if name == "class"));
+            assert!(has_interp, "expected class Interpolation, got {attrs:?}");
+        }
+    }
+
+    #[test]
+    fn class_rewrite_recurses_into_element_children() {
+        let src = r#"component X {
+  <template>
+    <div class="outer">
+      <section class="middle">
+        <span class="inner">hi</span>
+      </section>
+    </div>
+  </template>
+  <style scoped>.outer { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let scope = match c.style.as_ref().unwrap() {
+            ExpandedStyle::Scoped { scope_class, .. } => scope_class.clone(),
+            _ => unreachable!(),
+        };
+        for tag in &["div", "section", "span"] {
+            let node = find_element(&c.template.as_ref().unwrap().roots, tag).unwrap();
+            let cls = class_of(node).unwrap_or_else(|| panic!("no class on <{tag}>"));
+            assert!(
+                cls.contains(&format!("-{scope}")),
+                "tag <{tag}> class = {cls:?} lacks scope suffix -{scope}"
+            );
+        }
+    }
+
+    #[test]
+    fn class_rewrite_recurses_into_if_then_and_else_branches() {
+        let src = r#"component X {
+  state { on: Bool = true }
+  <template>
+    {#if on}
+      <span class="a">on</span>
+    {#else}
+      <span class="b">off</span>
+    {/if}
+  </template>
+  <style scoped>.a { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let scope = match c.style.as_ref().unwrap() {
+            ExpandedStyle::Scoped { scope_class, .. } => scope_class.clone(),
+            _ => unreachable!(),
+        };
+        // The `find_element` helper walks into If then/else, so
+        // both branches should have their `<span>` scoped. We only
+        // find the FIRST match (the then-branch); verify it via
+        // the tree structure to make sure else also scoped.
+        let roots = &c.template.as_ref().unwrap().roots;
+        // Locate the If node.
+        let if_node = roots
+            .iter()
+            .find(|n| matches!(n, ExpandedTemplateNode::If { .. }))
+            .expect("if node");
+        if let ExpandedTemplateNode::If {
+            children,
+            else_children,
+            ..
+        } = if_node
+        {
+            let then_span = find_element(children, "span").unwrap();
+            assert_eq!(class_of(then_span).unwrap(), format!("a a-{scope}"));
+            let else_nodes = else_children.as_ref().expect("else present");
+            let else_span = find_element(else_nodes, "span").unwrap();
+            assert_eq!(class_of(else_span).unwrap(), format!("b b-{scope}"));
+        }
+    }
+
+    #[test]
+    fn class_rewrite_recurses_into_for_body() {
+        let src = r#"component X {
+  state { xs: List<Str> = ["a", "b"] }
+  <template>
+    {#for x in xs}
+      <li class="item">{x}</li>
+    {/for}
+  </template>
+  <style scoped>.item { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let scope = match c.style.as_ref().unwrap() {
+            ExpandedStyle::Scoped { scope_class, .. } => scope_class.clone(),
+            _ => unreachable!(),
+        };
+        let li = find_element(&c.template.as_ref().unwrap().roots, "li").unwrap();
+        assert_eq!(class_of(li).unwrap(), format!("item item-{scope}"));
+    }
+
+    #[test]
+    fn global_style_does_not_trigger_template_class_rewrite() {
+        // `<style global>` must NOT rewrite template classes. The
+        // whole point of `global` is "no scoping" — templates stay
+        // exactly as the user wrote them.
+        let src = r#"component X {
+  <template><div class="card">hi</div></template>
+  <style global>.card { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let div = find_element(&c.template.as_ref().unwrap().roots, "div").unwrap();
+        assert_eq!(class_of(div).unwrap(), "card");
+        // And the style itself is Global with CSS verbatim.
+        match c.style.as_ref().unwrap() {
+            ExpandedStyle::Global { css, .. } => {
+                assert_eq!(css.trim(), ".card { color: red; }");
+            }
+            _ => panic!("expected Global"),
+        }
+    }
+
+    #[test]
+    fn no_style_block_leaves_template_untouched() {
+        // No style at all — class attrs stay as the user wrote
+        // them.
+        let src = r#"component X {
+  <template><div class="card">hi</div></template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        let div = find_element(&c.template.as_ref().unwrap().roots, "div").unwrap();
+        assert_eq!(class_of(div).unwrap(), "card");
+    }
+
+    #[test]
+    fn malformed_scoped_css_produces_expand_error_with_component_context() {
+        // Unterminated rule body inside the scoped CSS. The
+        // `apply_scope` error is remapped into an ExpandError
+        // whose `context` names the offending component.
+        let src = r#"component MyCard {
+  <template><div class="a">hi</div></template>
+  <style scoped>.a { color: red;</style>
+}"#;
+        let err = expand_str(src).unwrap_err();
+        assert!(
+            err.context.contains("component 'MyCard'"),
+            "context = {:?}",
+            err.context
+        );
+        assert!(
+            err.context.contains("<style scoped>"),
+            "context = {:?}",
+            err.context
+        );
+        assert!(
+            err.message.contains("unterminated"),
+            "message = {:?}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn scoped_style_with_no_template_still_expands_style() {
+        // A component that has a `<style scoped>` but no
+        // `<template>` — the style still expands to Scoped (with
+        // the CSS transformed and a scope_class synthesised); the
+        // template rewrite is a no-op because there's no template.
+        let src = r#"component X {
+  <style scoped>.card { color: red; }</style>
+}"#;
+        let file = expand_str(src).unwrap();
+        let c = &file.components[0];
+        assert!(c.template.is_none());
+        match c.style.as_ref().unwrap() {
+            ExpandedStyle::Scoped {
+                css_scoped,
+                scope_class,
+                ..
+            } => {
+                let expected = format!(".card-{scope_class}");
+                assert!(css_scoped.contains(&expected));
+            }
+            _ => panic!("expected Scoped"),
+        }
+    }
+
+    #[test]
+    fn rewrite_class_value_helper_normalises_whitespace() {
+        // Direct unit test on the free helper — user-written
+        // double spaces + tabs in `class="foo  bar"` become
+        // single-spaced in the output.
+        let out = rewrite_class_value("foo  bar\t baz", "s");
+        assert_eq!(out, "foo bar baz foo-s bar-s baz-s");
+    }
+
+    #[test]
+    fn rewrite_class_value_helper_leaves_empty_and_whitespace_only_alone() {
+        assert_eq!(rewrite_class_value("", "s"), "");
+        assert_eq!(rewrite_class_value("   ", "s"), "   ");
     }
 }

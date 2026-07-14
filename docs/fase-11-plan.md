@@ -203,7 +203,7 @@ Phase 11 promise.
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
-| **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits: **11.3.a CLOSED 2026-07-14** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b CLOSED 2026-07-14** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container` bodies, keeps `@keyframes`/`@font-face`/other at-rules opaque, handles strings + block comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class); still standalone — not wired into expand yet (see §9.j). Mini-commit 11.3.c (wire scoping into expand + template class-attr rewrite) still open. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
+| **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits, ALL **CLOSED 2026-07-14**: **11.3.a** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container`, keeps other at-rules opaque, handles strings + comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class) (see §9.j). **11.3.c** — wire scoping end-to-end in `expand`: new `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc }, Global { css, loc } }` replaces the raw-passthrough `Option<RawStyle>`; scope class synthesised via FNV-1a of `<component>::<css_raw>` truncated to 8 hex, shape `<component-kebab>-c-<8hex>`; `apply_scope(...)` runs on the CSS body; every Element with a static `class` attribute gets suffixed variants added (`class="card"` → `class="card card-<scope>"`) via a recursive walker that descends into If then/else branches + For bodies; interpolated `class` attributes left alone as a documented limitation. Global styles are pure passthrough — no CSS transform, no template rewrite. Includes 21 new unit tests + `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (see §9.k). **Closes 11.3 entire** — Phase 11.3 shipped end-to-end. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
@@ -1441,6 +1441,214 @@ No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
 11.3.a. `docs/fase-11-plan.md` gets the row update in §6 (11.3
 row carries "mini-commit 11.3.b CLOSED 2026-07-14" annotation)
 and this section.
+
+---
+
+## 9.k Files touched by 11.3.c — wire scoping in expand + template class-attr rewrite
+
+Third and last mini-commit inside 11.3. **Closes 11.3 entire** —
+`<style scoped>` blocks now flow through the pipeline as
+scoped-and-rewritten CSS with a matching per-component class
+prefix injected into every element's `class` attribute in the
+template. `<style global>` blocks flow through as pure
+passthrough (verbatim CSS, no template rewrite). The pipeline is
+now `parse → expand (with scoping) → check`, with 11.4 / 11.5 to
+come to actually render the result.
+
+**Files touched**:
+
+- `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (+21 unit
+  tests, total 50 in `view::expand::tests`). Key changes:
+  - `ExpandedComponent.style` type changes from
+    `Option<RawStyle>` to `Option<ExpandedStyle>` — the raw
+    passthrough is gone, replaced by the processed form.
+  - New public `enum ExpandedStyle { Scoped { css_scoped,
+    scope_class, loc }, Global { css, loc } }`. Doc comments
+    document each variant's semantics + the naming rule for
+    `scope_class`.
+  - `expand_component` now grabs `template.as_mut()` and threads
+    it through the new `process_style(...)` helper AFTER
+    `expand_template` has run, so the class-attr rewrite walks
+    the already-expanded tree.
+  - New helper `process_style(raw, component_name, template) ->
+    ExpandResult<Option<ExpandedStyle>>`: dispatches on
+    `StyleKind`. For `Scoped`, synthesises the scope class, runs
+    the CSS body through `apply_scope`, and (if a template is
+    present) mutates it via `rewrite_class_attrs_in_template`.
+    For `Global`, copies the CSS body verbatim; no template
+    mutation.
+  - New helper `synth_scope_class(component_name, css_raw) ->
+    String`: shape `<component-kebab>-c-<8hex>`. Deterministic
+    across runs — same name + same CSS → same class.
+  - New helper `to_kebab_case(name) -> String`: CamelCase →
+    kebab-case, `_` becomes `-`, non-alphanumerics dropped,
+    empty result falls back to `"component"` so the class is
+    always non-empty.
+  - New helper `fnv1a_hash_8_hex(input) -> String`: FNV-1a 64-bit
+    truncated to the low 32 bits, formatted as 8 hex chars.
+    Zero deps.
+  - New helper `rewrite_class_attrs_in_template(nodes,
+    scope_class)`: recursive walker over the ExpandedTemplateNode
+    tree. Descends into Element children, If then + else
+    branches, and For bodies. For each Element with a static
+    `class` attribute, transforms the value via
+    `rewrite_class_value`.
+  - New helper `rewrite_class_value(original, scope_class) ->
+    String`: splits on ASCII whitespace, keeps the originals
+    first, then appends each suffixed variant with a space
+    separator. Empty / whitespace-only inputs pass through.
+  - New helper `css_parse_error_to_expand(err, loc,
+    component_name) -> ExpandError`: shifts a `CssParseError`
+    into an `ExpandError` whose `context` names the component
+    and the `<style scoped>` block. Precise offset mapping (turn
+    `err.pos` into a `Loc` inside the CSS blob) stays deferred —
+    same debt as the other blob-parsers in `view/`.
+  - The 21 new unit tests cover: scoped style produces
+    `ExpandedStyle::Scoped` with the correct `-<scope_class>`
+    suffix inside the CSS; global style produces
+    `ExpandedStyle::Global` with CSS verbatim; no style produces
+    `None`; determinism (same input → same class); different CSS
+    body → different class; different component name →
+    different class; CamelCase name kebab-cases to
+    `login-form-c-...`; all-lowercase name stays as-is; element
+    with single class gets suffixed variant; element with
+    multiple classes gets each suffixed independently; element
+    without a class attribute stays unchanged; element with
+    interpolated `class="{dyn}"` stays as an Interpolation attr
+    (documented limitation); class rewrite recurses into
+    Element children; class rewrite recurses into both If
+    branches; class rewrite recurses into For bodies; Global
+    style does NOT trigger template class rewrite; no style
+    block leaves template untouched; malformed scoped CSS
+    surfaces an ExpandError with the component context; scoped
+    style with no template still expands the style (rewrite is
+    a no-op with `None` template); the free
+    `rewrite_class_value` helper normalises multi-space input;
+    empty / whitespace-only inputs preserve.
+- `src/view/mod.rs` — one line adding `ExpandedStyle` to the
+  `pub use expand::{...}` list so external consumers (11.4 /
+  11.5) can pattern-match on the scoped vs global shape.
+
+**Design decisions worth naming**:
+
+- **Class-suffix strategy over Vue-style attribute selector**.
+  Decided at 11.3 kick-off — see §9.i and §9.j. The template
+  rewrite in 11.3.c preserves original class names and appends
+  suffixed variants, so external JS querying `.card` keeps
+  working. CSS `.card { ... }` becomes `.card-<scope>`, and the
+  template's `class="card"` becomes `class="card card-<scope>"`
+  — the suffixed variant is what the scoped CSS actually matches.
+- **Enum `ExpandedStyle` over struct with `Option<scope_class>`**.
+  A struct would need `scope_class: Option<String>` to accommodate
+  the Global variant, leaking the abstraction. The enum makes
+  the invariant "Global has no scope class" a type-level fact.
+  Small win, worth the extra pattern-match at each consumer.
+- **`scope_class` synthesised from `<component_name>::<css_raw>`,
+  not from a random UUID**. Determinism is load-bearing: the
+  same source file rebuilt on a different machine produces the
+  same scope class, so caches (rustc, incremental hot reload,
+  eventual SSR output) don't invalidate spuriously. FNV-1a is
+  fast, tiny, deterministic, and non-cryptographic — perfect
+  fit here.
+- **8 hex chars of the FNV-1a low 32 bits (not 16 of the full
+  64)**. 4 billion permutations vs. typically <100 components
+  per file — the birthday-paradox collision probability is
+  vanishing. 8 chars keep the class name readable in DevTools
+  and don't inflate the compiled HTML. If we ever hit a
+  collision in practice, we can bump to 16 in a one-line change.
+- **Template rewrite runs after `expand_template`, not
+  interleaved**. The rewrite walks the already-expanded tree,
+  which means it works uniformly for Elements, If children,
+  For children, and future template constructs. Interleaving
+  with the expand pass would spread the scoping logic across
+  five match arms and make the ordering harder to reason about.
+  The trade-off is one extra pass over the tree — negligible
+  for the sizes we're targeting.
+- **Rewrite preserves originals before appending suffixes**.
+  `class="card title"` becomes `"card title card-<s> title-<s>"`,
+  not `"card-<s> title-<s>"`. External CSS / JS querying `.card`
+  keeps working — the compiler adds isolation without breaking
+  the source-visible class names. Trade-off: bigger `class`
+  attribute strings in the output HTML. Acceptable.
+- **Interpolated `class="{expr}"` NOT rewritten**. The
+  transformer only touches `Attr::Static` with name `"class"`.
+  `Attr::Interpolation` passes through unchanged. Rationale:
+  we don't know at compile time what the runtime string will
+  be, so we can't append suffixes to the right tokens. A future
+  refinement could emit a runtime helper that suffixes on the
+  fly, but for MVP the user includes the suffix manually in
+  the interpolation expression when they need scoped dynamic
+  classes.
+- **Global style is a pure passthrough — no CSS transform, no
+  template rewrite**. That's the semantic promise of `global`:
+  the user opts out of isolation. No hidden magic.
+- **`css_parse_error_to_expand` remaps char-offset errors to
+  the style block's `Loc`**. Users see the CSS error at the
+  `<style scoped>` block's location in the `.fitzv` file, plus
+  the char offset inside the CSS body for further diagnosis.
+  Precise line/column mapping inside the CSS blob is the same
+  debt as the rest of 11.2's blob parsers (blob-local + best-
+  effort base offset) and stays deferred.
+
+**Verification** (delta at 11.3.c over 11.3.b's baseline of 3466
+unit + 3602 with `--features lsp`): `cargo test --lib` green
+(3487 total, +21 new in `view::expand::tests`, so total
+`view::expand::tests` = 50), `cargo test --lib --features lsp`
+green (3623 total, same +21 mirrored), `cargo fmt --all --check`
+clean, `cargo clippy --lib --tests --bins -- -D warnings` clean,
+`cargo clippy --lib --tests --bins --features lsp -- -D warnings`
+clean. Full `cargo test` suite (cli_e2e, openapi_e2e,
+compile_e2e) recommended before tagging a release that includes
+this change; deferred here since 11.3.c is internal to
+`src/view/` with no user-facing surface — the `.fitzv`
+compilation entry point still lives behind Phase 11.5 per the
+plan.
+
+**Deuda residual** (does NOT block 11.4 or 11.5):
+
+- **Interpolated `class` attributes** stay as-is. Users who
+  want dynamic scoped classes include the suffix manually
+  today; a future refinement could emit a runtime helper. Not
+  urgent — full interpolation is already an escape hatch.
+- **`class` attributes with mixed static / interpolated parts**
+  (`class="btn btn-{kind}"`) are already rejected at the raw
+  parser level (see AST doc-comment on `Attr` — "POC allows
+  only fully-static or fully-interpolated values"). Whenever
+  the raw parser learns mixed parts, the rewriter here will
+  need matching support.
+- **Type / ID / attribute selectors are NOT scoped**. Documented
+  MVP trade-off; refinable behind a `<style scoped=deep>`
+  opt-in that would swap `apply_scope` for a Vue-style
+  attribute-selector rewriter. Would ALSO need the template
+  rewrite to inject a `data-c-XXXX` attribute on every element
+  (matching change here). Sized as a dedicated mini-commit if
+  demand appears.
+- **`:global(...)` escape hatch** is not yet parsed by
+  `apply_scope`, so `.card :global(.legacy) { ... }` inside a
+  scoped block will get the `.legacy` scoped (incorrect). Same
+  deuda as 11.3.b. When `apply_scope` grows the escape hatch,
+  the template rewrite doesn't change — the template still
+  doesn't know or care about `:global(...)`.
+- **Precise position mapping of CSS errors into the `.fitzv`
+  file**. `CssParseError.pos` is a char offset into the CSS
+  blob. Today we surface the style block's `Loc` (which points
+  at `<style scoped>` in the `.fitzv` file) plus the offset for
+  further diagnosis. Turning the offset into a line + column
+  inside the blob is the same debt as the other blob parsers
+  in `view/`, tracked in §7.
+- **No SSR / codegen consumer yet**. The `ExpandedStyle`
+  variants are shipped but no code path in the `fitz` binary
+  routes to them — that's the promise of 11.4 and 11.5. Tests
+  cover the shape end-to-end; a downstream consumer (Rust SSR
+  render fn, or a WASM / JS emitter) will read
+  `ExpandedComponent.style` + walk the template and pick up
+  the suffixed classes directly.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
+1/2/3 or the §7 follow-up or 11.2.c mini-commits 1/2/3 or
+11.3.a or 11.3.b. `docs/fase-11-plan.md` gets the row update in
+§6 (11.3 row carries "CLOSES 11.3 entire" annotation) and this
+section.
 
 ---
 

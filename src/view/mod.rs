@@ -35,6 +35,6 @@ pub use check::{check, CheckError};
 pub use css_parser::{apply_scope, CssParseError};
 pub use expand::{
     expand, ExpandError, ExpandResult, ExpandedAttr, ExpandedComponent, ExpandedEventHandler,
-    ExpandedStateField, ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
+    ExpandedStateField, ExpandedStyle, ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
 };
 pub use parser::{parse, ViewParseError, ViewParseResult};
