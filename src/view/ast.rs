@@ -84,10 +84,16 @@ pub struct Template {
 ///     The `cond` is captured raw and re-parsed as a classic Fitz
 ///     `Expr` in `expand`; the `children` are the nodes between
 ///     opener and closer, allowing arbitrary nesting.
+///   - `For` — `{#for x in xs}...{/for}` — since 11.2.c mini-commit 2.
+///     The binding `var` is a bare identifier; `iter_raw` is the raw
+///     source text of the iter expression, re-parsed as a classic
+///     Fitz `Expr` in `expand`. Type inference of `x` delegates to
+///     the classic `Stmt::For` checker via synth-and-delegate.
+///     Compound patterns (`(k, v)` for Map) and index bindings
+///     (`(x, i)`) are deferred to later mini-commits.
 ///
-/// Deferred to 11.2.c mini-commits 2/3:
+/// Deferred to 11.2.c mini-commit 3:
 ///   - `{#if cond} ... {#else} ... {/if}` — `#else` branch
-///   - `{#for x in xs} ... {/for}` blocks
 ///   - `<slot name="X" />` for component composition
 ///
 /// Not planned for 11.2:
@@ -110,9 +116,21 @@ pub enum TemplateNode {
     /// `{#if cond_raw} ... {/if}` — conditional inclusion of the
     /// nested `children`. `cond_raw` is the raw source text between
     /// `{#if ` and the matching `}` (trimmed). The `#else` branch is
-    /// deferred to 11.2.c mini-commit 2.
+    /// deferred to 11.2.c mini-commit 3.
     If {
         cond_raw: String,
+        children: Vec<TemplateNode>,
+        loc: Loc,
+    },
+    /// `{#for var in iter_raw} ... {/for}` — iterate over an iterable
+    /// expression. `var` is a bare identifier bound in `children`'s
+    /// scope with the element type of the iter (List<T> → T, Range →
+    /// Int, Map<K,V> → Tuple[K,V]) as resolved by the classic
+    /// `Stmt::For` checker. `iter_raw` is the raw source text between
+    /// `in` and the matching `}` (trimmed).
+    For {
+        var: String,
+        iter_raw: String,
         children: Vec<TemplateNode>,
         loc: Loc,
     },

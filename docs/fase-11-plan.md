@@ -202,7 +202,7 @@ Phase 11 promise.
 | **11.2** | Parse state defaults / event bodies / template interpolations as `crate::ast::Expr`/`Stmt`. Add `{#if}` / `{#for}` / `<slot>` to the template AST. Type-check every expression in `state` + `event` + `{...}` interpolations. | `fitz check my.fitzv` reports type errors for state field mismatches and template interpolation type errors, with source-accurate line/column pointing inside the `.fitzv` file. |
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
-| **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits. **Mini-commit 1 CLOSED 2026-07-14**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. Mini-commits 2 (`{#for}` — introduces a scoped binding for the loop variable) and 3 (`<slot>` — MVP marker for 11.5 composition) still open. | Nested control flow inside `<template>` parses, expands, type-checks. |
+| **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits. **Mini-commit 1 CLOSED 2026-07-14**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2 CLOSED 2026-07-14**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. Mini-commit 3 (`<slot>` — MVP marker for 11.5 composition, plus `{#else}` alongside `{#if}`) still open. | Nested control flow inside `<template>` parses, expands, type-checks. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
@@ -647,12 +647,14 @@ green (3358 total, 68 in `view::check::tests`, 20 in
 --check`, `cargo clippy --lib --tests --bins -- -D warnings`,
 `cargo clippy --lib --tests --bins --features lsp -- -D warnings`.
 
-**Deuda residual** (does NOT block 11.2.c mini-commit 2):
+**Deuda residual** (does NOT block 11.2.c mini-commit 3):
 
 - **`{#else}` branch**. Not modelled today — a `{#if}` has one
-  set of children, no else path. When mini-commit 2 lands with
-  `{#for}`, we'll likely revisit and add `{#else}` alongside
-  since both involve extending `{#if}`'s AST shape.
+  set of children, no else path. Re-scoped from mini-commit 2
+  to mini-commit 3 when it became clear that adding `{#else}`
+  independently of `{#for}` keeps commits bisectable. Mini-commit
+  3 will fold `{#else}` alongside `<slot>` since both extend
+  the template AST without changing scope semantics.
 - **Truthiness on `Nullable<Bool>` is deliberately loose**. We
   accept `Bool?` as a cond but don't force the user to unwrap
   the null case explicitly. Same posture as classic `if`; may
@@ -664,6 +666,165 @@ green (3358 total, 68 in `view::check::tests`, 20 in
 No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
 1/2/3 or the §7 follow-up. `docs/fase-11-plan.md` gets the row
 update in §5 and this section.
+
+---
+
+## 9.g Files touched by 11.2.c mini-commit 2 — `{#for x in xs}...{/for}`
+
+Second of the three mini-commits inside 11.2.c. Adds `{#for}`
+end-to-end (parser + expand + checker) parallel to `{#if}` in
+mini-commit 1, plus the scope-tracking refactor of the checker
+that mini-commit 1 promised. Same isolation posture as before —
+`fitz check my.fitzv` remains the ONE public entry to the view
+pipeline, and the classic `crate::parser::parse()` is untouched.
+
+- **src/view/ast.rs**
+  - `TemplateNode::For { var, iter_raw, children, loc }` — new
+    variant paralelo a `If`. `var` is a bare String (single
+    identifier — compound patterns and index bindings deferred).
+    `iter_raw` is the trimmed raw source text between `in` and
+    the matching `}`; expand reparses it as `fast::Expr`.
+  - Doc comment on the `TemplateNode` enum updated: `{#else}`
+    moves from "deferred to mini-commit 2" to "deferred to
+    mini-commit 3", and `{#for}` moves from deferred to
+    supported.
+
+- **src/view/parser.rs**
+  - `parse_directive_open` dispatches on the directive name:
+    `if` → `parse_if_directive` (extracted from the previous
+    inline body), `for` → `parse_for_directive` (new), other
+    → error with mention of both supported directives + 11.2.c
+    mini-commit 3 for `#else` and `<slot>`.
+  - `parse_for_directive` reads a bare identifier, expects the
+    literal keyword `in` (via new `consume_keyword_in` helper
+    with a word-boundary check so `interior_var` doesn't match),
+    then reuses `capture_directive_arg_raw` (brace-depth aware,
+    same as `{#if}`'s cond capture) to grab the iter expression.
+    Recurses `parse_nodes` with `directive_parent = Some("for")`
+    for the body. Targeted error messages for: missing var
+    identifier, missing `in`, empty iter, unterminated `{#for}`.
+  - Added 10 unit tests (`template_for_block_*`): basic shape,
+    complex iter with nested braces, nested inside `<ul>`,
+    nested `<div>` inside for, nested `{#for}` + `{#if}` in
+    various interleavings, unterminated for, mismatched close,
+    missing var / missing `in` / empty iter, and the corner case
+    `{#for in in xs}` (binding named `in` — legal but ugly).
+
+- **src/view/expand.rs**
+  - `ExpandedTemplateNode::For { var, iter, children, loc }` —
+    new variant.
+  - `expand_template_node` gains a match arm that reparses
+    `iter_raw` as `fast::Expr` with context label `"template
+    `{#for x in ...}` iter"`, then recurses children.
+  - Added 4 unit tests (`expand_for_block_*`): iter parses as
+    classic Expr, method-chain iter parses, malformed iter
+    produces `ExpandError` with the correct context label,
+    children expanded recursively.
+
+- **src/view/check.rs**
+  - New pass `check_template_for_iters` runs as the third
+    template pass (after handler bodies + before interpolations
+    and if conds), invoked from `check()`. Iterates every
+    `{#for x in iter}`, synthesises `for <var> in <iter> { }`,
+    and lets the classic `Stmt::For` checker resolve iterable
+    types + reject non-iterables (`the `for` iterable must be
+    List, Range or Map, received ...`). Errors are shifted to
+    the block's `Loc` with context `"component 'X': template
+    `{#for <var> in ...}` iter"`.
+  - New helper types + refactor: `ForBinding<'a> { var, iter }`
+    captures one enclosing `{#for}` binding; `wrap_stmt_in_for_scope`
+    envuelve el `extra` stmt in a chain of `Stmt::For { ... }`
+    outer-most to inner-most; `build_env_program` takes a
+    fourth param `for_scope: &[ForBinding]` and applies the
+    wrap. Reads: when an interp / if-cond / nested for-iter
+    lives inside one or more `{#for}` blocks, the synth
+    program mirrors the source's real scoping so the classic
+    checker walks the fors, resolves each binding's type, and
+    enters the innermost body with all bindings visible.
+  - Refactor of the 3 collectors: `collect_interpolations`,
+    `collect_if_conds`, `collect_for_iters` (new) all take
+    `for_scope: &mut Vec<ForBinding<'a>>` and push/pop on
+    enter/leave of `For` children. Each ref type
+    (`InterpolationRef` / `IfCondRef` / `ForIterRef`) carries a
+    `for_scope: Vec<ForBinding<'a>>` snapshot so the check-time
+    synth sees the exact enclosing chain. `collect_event_attrs`
+    recurses into For children without scope (event attrs
+    cross-ref only names, don't need bindings).
+  - Added 11 unit tests (`for_block_*`): List<Str> / List<Int>
+    / Range binding types, non-iterable (`Str`) rejected with
+    the classic message shifted to the iter context, var
+    visible inside body interp (text and attr), var invisible
+    after `{/for}`, `{#if}` cond sees the for binding, nested
+    for iter references the outer binding via nominal field
+    access (state-error cascade documented for the case where
+    the nominal isn't declared), inner iter with a bad method
+    on the outer binding's type errors at the iter context,
+    Map iter binds Tuple which is Str-friendly, method chain
+    iter typechecks.
+
+**Design decisions taken at kick-off**:
+
+- **Solo binding `x` bare** (sin `(x, i)` con index, sin
+  `(k, v)` para Map). El clásico HOY no tiene index binding, y
+  metering asymmetric syntax at the template level lo divergiría
+  del lenguaje. `(k, v)` para Map con `Pattern::Tuple` es
+  paralelo del clásico y refinable en un mini-commit dedicado
+  si aparece demanda. El MVP acepta `Map<K, V>` bindeeando
+  a `Tuple[K, V]` (heredado del clásico) — sigue siendo
+  Str-friendly vía auto-Display, así que `{kv}` renderiza sin
+  error, aunque awkward.
+- **Delegación total al classic checker para tipar el binding**
+  + rechazar no-iterables. Cero lógica de tipos nueva en
+  `view/check.rs`. La única regla propia es "el iter tiene su
+  propio contexto de error" — el mensaje se shifta al bloque
+  `{#for}` correcto.
+- **Scope tracking en los 3 collectors** — necesario para que
+  interps y `{#if}` conds nested vean el binding. El costo es
+  `.clone()` del `Vec<ForBinding>` en cada ref, insignificante
+  en la práctica (templates casi nunca anidan más de 2-3 fors).
+- **`{#else}` diferido a mini-commit 3** — mini-commit 1 dejó
+  la promesa de "revisitar con mini-commit 2", pero mezclar
+  `{#for}` + `{#else}` en el mismo commit rompe bisect. Mejor
+  cerrar `{#for}` limpio y luego mini-commit 3 folds `{#else}`
+  alongside `<slot>` (ambos extienden el template AST sin
+  cambiar semántica de scoping).
+
+**Verification** (delta at 11.2.c mini-commit 2 over mini-commit
+1's baseline of 3358 unit + 3494 with `--features lsp`):
+`cargo test --lib` green (3383 total, 79 in `view::check::tests`,
+24 in `view::expand::tests`, 31 in `view::parser::tests`),
+`cargo test --lib --features lsp` green (3519 total), `cargo fmt
+--all --check`, `cargo clippy --lib --tests --bins -- -D warnings`,
+`cargo clippy --lib --tests --bins --features lsp -- -D warnings`.
+
+**Deuda residual** (does NOT block 11.2.c mini-commit 3):
+
+- **`{#for (k, v) in m}` compound patterns**. No modelado hoy —
+  el HTML sub-parser solo lee una identifier bare tras `#for`.
+  El clásico ya soporta `Pattern::Tuple` para iterar Maps con
+  `(k, v)`; llegar al template exige extender el sub-parser
+  para leer un mini-Pattern. Refinable en un mini-commit
+  dedicado si aparece demanda pedagógica real (hoy el
+  workaround es `{#for kv in m}<li>{kv}</li>{/for}` que sale
+  como `("clave", valor)` vía Tuple auto-Display).
+- **`{#for (x, i) in xs}` index bindings**. El clásico HOY no
+  tiene esto tampoco. Cualquier extensión al template debería
+  aterrizar en paralelo con la del clásico para no divergir
+  conceptualmente. Diferido sin fecha.
+- **Codegen SSR/client del `{#for}`**. Todavía es solo
+  parser + checker; el evaluator / codegen no consume
+  `ExpandedTemplateNode::For` — llega en 11.4/11.5 con el
+  client target decidido. El checker cierra el ciclo de "el
+  usuario escribe `{#for}` y ve errores útiles si se equivoca",
+  pero el template no renderiza aún.
+- **Refinar el error del iter no-iterable con hint del
+  `.iter()`/`.entries()` idioms**. Hoy sale el mensaje bruto
+  del clásico. Aceptable — el mensaje es correcto y accionable.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
+1/2/3 or the §7 follow-up or 11.2.c mini-commit 1.
+`docs/fase-11-plan.md` gets the row update in §6 and this
+section.
 
 ---
 

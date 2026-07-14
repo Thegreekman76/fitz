@@ -99,9 +99,20 @@ pub enum ExpandedTemplateNode {
     /// `{#if cond}...{/if}` — conditional inclusion. `cond` is
     /// parsed from the raw `cond_raw` captured by the HTML sub-
     /// parser; `children` are expanded recursively. The `#else`
-    /// branch lands in 11.2.c mini-commit 2.
+    /// branch lands in 11.2.c mini-commit 3.
     If {
         cond: fast::Expr,
+        children: Vec<ExpandedTemplateNode>,
+        loc: Loc,
+    },
+    /// `{#for var in iter}...{/for}` — iterate over `iter`. `iter`
+    /// is parsed from the raw `iter_raw` captured by the HTML sub-
+    /// parser; `children` are expanded recursively. Type of `var`
+    /// is inferred by the classic `Stmt::For` checker in
+    /// `check_template_for_iters`.
+    For {
+        var: String,
+        iter: fast::Expr,
         children: Vec<ExpandedTemplateNode>,
         loc: Loc,
     },
@@ -298,6 +309,26 @@ fn expand_template_node(
                 .collect::<ExpandResult<Vec<_>>>()?;
             Ok(ExpandedTemplateNode::If {
                 cond,
+                children,
+                loc: *loc,
+            })
+        }
+        RawTemplateNode::For {
+            var,
+            iter_raw,
+            children,
+            loc,
+        } => {
+            let ctx =
+                format!("component '{component_name}': template `{{#for {var} in ...}}` iter");
+            let iter = parse_expr_at(iter_raw, *loc, ctx)?;
+            let children = children
+                .iter()
+                .map(|n| expand_template_node(n, component_name))
+                .collect::<ExpandResult<Vec<_>>>()?;
+            Ok(ExpandedTemplateNode::For {
+                var: var.clone(),
+                iter,
                 children,
                 loc: *loc,
             })
@@ -883,6 +914,102 @@ component B {
                 other => panic!("expected Element, got {:?}", other),
             },
             other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    // ---- 11.2.c mini-commit 2: `{#for}` expand tests -----------------
+
+    #[test]
+    fn expand_for_block_parses_iter_as_classic_expr() {
+        // `{#for x in xs}` — the raw `xs` must expand into an
+        // `Expr::Ident("xs")`.
+        let src = r#"component X {
+  state { xs: List<Str> = [] }
+  <template>{#for x in xs}<li>{x}</li>{/for}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::For {
+                var,
+                iter,
+                children,
+                ..
+            } => {
+                assert_eq!(var, "x");
+                match iter {
+                    fast::Expr::Ident(name, _) => assert_eq!(name, "xs"),
+                    other => panic!("expected Ident iter, got {:?}", other),
+                }
+                assert_eq!(children.len(), 1);
+            }
+            other => panic!("expected For root, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_for_block_iter_with_method_chain_parses() {
+        // `{#for u in users.filter(fn(u) => u.active)}` — iter is a
+        // method call chain with a closure inside; just assert
+        // parsing succeeds and it's not a bare Ident.
+        let src = r#"component X {
+  state { users: List<Str> = [] }
+  <template>{#for u in users.filter(fn(u) => len(u) > 0)}<li/>{/for}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::For { iter, .. } => {
+                assert!(
+                    !matches!(iter, fast::Expr::Ident(_, _)),
+                    "expected method-chain expr, got {:?}",
+                    iter
+                );
+            }
+            other => panic!("expected For, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_for_block_bad_iter_syntax_produces_expand_error() {
+        // `{#for x in 1 +}` — malformed iter. Classic parser errors,
+        // expand shifts it into an ExpandError citing the `{#for}`
+        // block's loc + context label.
+        let src = r#"component X {
+  <template>{#for x in 1 +}<span/>{/for}</template>
+}"#;
+        let err = expand_str(src).unwrap_err();
+        assert!(
+            err.context.contains("`{#for") && err.context.contains("iter"),
+            "context = {:?}",
+            err.context
+        );
+    }
+
+    #[test]
+    fn expand_for_block_children_expanded_recursively() {
+        // `{x}` inside the For children must expand into an
+        // `ExpandedTemplateNode::Interpolation` — proves recursion.
+        let src = r#"component X {
+  state { xs: List<Str> = [] }
+  <template>{#for x in xs}<li>{x}</li>{/for}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::For { children, .. } => match &children[0] {
+                ExpandedTemplateNode::Element {
+                    children: inner, ..
+                } => match &inner[0] {
+                    ExpandedTemplateNode::Interpolation { expr, .. } => match expr {
+                        fast::Expr::Ident(name, _) => assert_eq!(name, "x"),
+                        other => panic!("expected Ident interp, got {:?}", other),
+                    },
+                    other => panic!("expected Interpolation, got {:?}", other),
+                },
+                other => panic!("expected Element, got {:?}", other),
+            },
+            other => panic!("expected For, got {:?}", other),
         }
     }
 }

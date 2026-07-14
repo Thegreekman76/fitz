@@ -646,11 +646,11 @@ impl<'a> HtmlParser<'a> {
         }
     }
 
-    /// Parse a directive opener like `{#if cond}` (currently the
-    /// only supported one). Recurses through `parse_nodes` with
-    /// `directive_parent = Some("if")` to collect children up to
-    /// the matching `{/if}`. `{#for}` and `<slot>` are deferred to
-    /// 11.2.c mini-commits 2 and 3.
+    /// Parse a directive opener like `{#if cond}` or `{#for x in
+    /// xs}`. Recurses through `parse_nodes` with the matching
+    /// `directive_parent` to collect children up to `{/if}` or
+    /// `{/for}`. `<slot>` and `{#else}` are deferred to 11.2.c
+    /// mini-commit 3.
     fn parse_directive_open(&mut self) -> ViewParseResult<TemplateNode> {
         let start_line = self.line;
         let start_col = self.column;
@@ -664,15 +664,26 @@ impl<'a> HtmlParser<'a> {
                 column: start_col,
             });
         }
-        if name != "if" {
-            return Err(ViewParseError {
+        match name.as_str() {
+            "if" => self.parse_if_directive(start_line, start_col),
+            "for" => self.parse_for_directive(start_line, start_col),
+            other => Err(ViewParseError {
                 message: format!(
-                    "unknown template directive `{{#{name}}}` — the POC supports `{{#if}}` only; `{{#for}}` lands in 11.2.c mini-commit 2"
+                    "unknown template directive `{{#{other}}}` — the POC supports `{{#if}}` and `{{#for}}` only; `{{#else}}` and `<slot>` land in 11.2.c mini-commit 3"
                 ),
                 line: start_line,
                 column: start_col,
-            });
+            }),
         }
+    }
+
+    /// Parse an `{#if cond} ... {/if}` block. Called after
+    /// `parse_directive_open` has consumed `{#if`.
+    fn parse_if_directive(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+    ) -> ViewParseResult<TemplateNode> {
         // Capture the cond expression as raw text up to the
         // matching `}` at directive-open depth 0. Nested `{}` (e.g.
         // struct or map literals inside the cond) are tracked so we
@@ -686,6 +697,85 @@ impl<'a> HtmlParser<'a> {
             children,
             loc: Loc::new(start_line, start_col),
         })
+    }
+
+    /// Parse a `{#for x in xs} ... {/for}` block. Called after
+    /// `parse_directive_open` has consumed `{#for`. Only accepts a
+    /// single bare identifier as the binding — compound patterns
+    /// like `(k, v)` for Map and index tuples like `(x, i)` are
+    /// deferred (would need `Pattern::Tuple` from the classic AST,
+    /// out of scope for this mini-commit). The iter expression is
+    /// captured raw up to the closing `}` at directive depth 0 and
+    /// re-parsed in `expand`.
+    fn parse_for_directive(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+    ) -> ViewParseResult<TemplateNode> {
+        self.skip_ws_inline();
+        let var_line = self.line;
+        let var_col = self.column;
+        let var = self.read_directive_name();
+        if var.is_empty() {
+            return Err(ViewParseError {
+                message: "expected binding identifier after `{#for` (only bare identifiers are supported — compound patterns `(k, v)` for Map deferred to later mini-commit)".into(),
+                line: var_line,
+                column: var_col,
+            });
+        }
+        self.skip_ws_inline();
+        // Expect literal `in` keyword. We can't just `read_directive_name`
+        // and compare because the user might type `,` or `=` here —
+        // spot the specific failures for a targeted message.
+        if !self.consume_keyword_in() {
+            return Err(ViewParseError {
+                message: format!(
+                    "expected `in` after `{{#for {var}` — only `{{#for x in xs}}` shape is supported (compound patterns and index bindings deferred to later mini-commit)"
+                ),
+                line: self.line,
+                column: self.column,
+            });
+        }
+        self.skip_ws_inline();
+        let iter_raw = self.capture_directive_arg_raw(start_line, start_col)?;
+        let iter_trimmed = iter_raw.trim();
+        if iter_trimmed.is_empty() {
+            return Err(ViewParseError {
+                message: format!(
+                    "expected iter expression after `{{#for {var} in` — `{{#for {var} in }}` is empty"
+                ),
+                line: start_line,
+                column: start_col,
+            });
+        }
+        let children = self.parse_nodes(None, Some("for"))?;
+        Ok(TemplateNode::For {
+            var,
+            iter_raw: iter_trimmed.to_string(),
+            children,
+            loc: Loc::new(start_line, start_col),
+        })
+    }
+
+    /// Consume the literal keyword `in` if present at the cursor.
+    /// Requires a word boundary after the keyword (so `interior`
+    /// doesn't match) — the next char must be whitespace or `{`
+    /// (unlikely, but keeps the check symmetric).
+    fn consume_keyword_in(&mut self) -> bool {
+        if self.peek() != Some('i') || self.peek_at(1) != Some('n') {
+            return false;
+        }
+        // Look at the char after `in` — must be whitespace or `{`
+        // for a word boundary. This distinguishes `in xs` from
+        // `interior_var`.
+        let next = self.peek_at(2);
+        let is_boundary = matches!(next, Some(' ' | '\t' | '\n' | '\r') | Some('{') | None);
+        if !is_boundary {
+            return false;
+        }
+        self.advance(); // `i`
+        self.advance(); // `n`
+        true
     }
 
     /// Read the identifier following `{#` or `{/` — restricted to
@@ -1448,17 +1538,254 @@ mod tests {
 
     #[test]
     fn template_unknown_directive_name_errors_clearly() {
-        // `{#for ...}` — not supported in mini-commit 1. The message
-        // should point at 11.2.c mini-commit 2 so the user knows this
-        // is a planned feature, not a bug.
+        // Some hypothetical `{#while}` — not supported. The message
+        // should mention `{#if}` and `{#for}` so the user sees the
+        // supported set, plus 11.2.c mini-commit 3 for `#else` /
+        // `<slot>`.
         let src = r#"component X {
-  <template>{#for x in xs}<li/>{/for}</template>
+  <template>{#while cond}<li/>{/while}</template>
 }"#;
         let err = parse(src).unwrap_err();
         assert!(
-            err.message.contains("unknown template directive") && err.message.contains("for"),
+            err.message.contains("unknown template directive") && err.message.contains("while"),
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    // ---- 11.2.c mini-commit 2: `{#for x in xs}...{/for}` -------------
+
+    #[test]
+    fn template_for_block_basic_shape() {
+        // Basic `{#for}` opener with a text-content child and `{/for}`
+        // closer. The var + iter_raw are captured; children are text
+        // between the delimiters.
+        let src = r#"component X {
+  <template>{#for x in xs}<li>{x}</li>{/for}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        let template = &file.components[0].template.as_ref().unwrap();
+        assert_eq!(template.roots.len(), 1);
+        match &template.roots[0] {
+            TemplateNode::For {
+                var,
+                iter_raw,
+                children,
+                ..
+            } => {
+                assert_eq!(var, "x");
+                assert_eq!(iter_raw, "xs");
+                // <li>{x}</li>
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    TemplateNode::Element { tag, children, .. } => {
+                        assert_eq!(tag, "li");
+                        assert_eq!(children.len(), 1);
+                        match &children[0] {
+                            TemplateNode::Interpolation { expr_raw, .. } => {
+                                assert_eq!(expr_raw, "x");
+                            }
+                            other => panic!("expected interpolation, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected element, got {other:?}"),
+                }
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_for_block_iter_is_complex_expr() {
+        // The iter expression can be a call chain with nested braces
+        // (map literals inside args). `capture_directive_arg_raw`
+        // must track nesting depth, same as `{#if}`.
+        let src = r#"component X {
+  <template>{#for row in rows.filter(fn(r) => r.active)}<span/>{/for}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::For { var, iter_raw, .. } => {
+                assert_eq!(var, "row");
+                assert_eq!(iter_raw, "rows.filter(fn(r) => r.active)");
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_for_block_nested_inside_element() {
+        // `<ul>{#for x in xs}<li/>{/for}</ul>` — the `<ul>` element
+        // sees the For as a single child.
+        let src = r#"component X {
+  <template><ul>{#for x in xs}<li/>{/for}</ul></template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        let roots = &file.components[0].template.as_ref().unwrap().roots;
+        assert_eq!(roots.len(), 1);
+        match &roots[0] {
+            TemplateNode::Element { tag, children, .. } => {
+                assert_eq!(tag, "ul");
+                assert_eq!(children.len(), 1);
+                assert!(matches!(children[0], TemplateNode::For { .. }));
+            }
+            other => panic!("expected <ul>, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_for_block_nested_element_inside() {
+        // `{#for x in xs}<div><span/></div>{/for}` — the For body
+        // contains a nested element.
+        let src = r#"component X {
+  <template>{#for x in xs}<div><span/></div>{/for}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::For { children, .. } => {
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    TemplateNode::Element {
+                        tag,
+                        children: inner,
+                        ..
+                    } => {
+                        assert_eq!(tag, "div");
+                        assert_eq!(inner.len(), 1);
+                        assert!(matches!(inner[0], TemplateNode::Element { .. }));
+                    }
+                    other => panic!("expected <div>, got {other:?}"),
+                }
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_for_block_nested_for_and_if() {
+        // Two levels of `{#for}` with an `{#if}` between them, each
+        // closes at its own `{/…}` in the right order.
+        let src = r#"component X {
+  <template>{#for x in xs}{#if x.active}{#for tag in x.tags}<span>{tag}</span>{/for}{/if}{/for}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::For {
+                var,
+                iter_raw,
+                children,
+                ..
+            } => {
+                assert_eq!(var, "x");
+                assert_eq!(iter_raw, "xs");
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    TemplateNode::If {
+                        cond_raw,
+                        children: if_children,
+                        ..
+                    } => {
+                        assert_eq!(cond_raw, "x.active");
+                        assert_eq!(if_children.len(), 1);
+                        match &if_children[0] {
+                            TemplateNode::For {
+                                var: v2,
+                                iter_raw: i2,
+                                ..
+                            } => {
+                                assert_eq!(v2, "tag");
+                                assert_eq!(i2, "x.tags");
+                            }
+                            other => panic!("expected inner For, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected If, got {other:?}"),
+                }
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_for_block_missing_var_errors_clearly() {
+        // `{#for in xs}` — no binding identifier.
+        let src = r#"component X {
+  <template>{#for in xs}<li/>{/for}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("binding identifier") || err.message.contains("expected"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_for_block_missing_in_errors_clearly() {
+        // `{#for x , xs}` — no `in` keyword between var and iter.
+        // Compound patterns like `(k, v)` or `(x, i)` are the
+        // canonical case for this — error must guide the user.
+        let src = r#"component X {
+  <template>{#for x , xs}<li/>{/for}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("expected `in`"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_for_block_empty_iter_errors_clearly() {
+        // `{#for x in }` — iter expression is missing after `in`.
+        let src = r#"component X {
+  <template>{#for x in }<li/>{/for}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("expected iter expression") && err.message.contains("empty"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_for_block_unterminated_errors_clearly() {
+        // `{#for x in xs}...` — no `{/for}`. Reaches EOF before the
+        // closer, must error with the directive's position.
+        let src = r#"component X {
+  <template>{#for x in xs}<li/></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("unterminated `{#for}`")
+                || err.message.contains("expected `{/for}`"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_for_block_var_named_in_is_rejected() {
+        // Using `in` as the binding identifier is a nasty
+        // ambiguity: `{#for in in xs}` would read as `#for` with
+        // binding `in` and then no `in` keyword. The `read_directive_name`
+        // greedy-reads `in`, then `consume_keyword_in` looks at the
+        // next `in` — this should actually work correctly, but the
+        // test documents behavior. The binding `in` is legal
+        // syntactically; it's ugly Fitz but not a parser error.
+        // We just verify the parser doesn't crash.
+        let src = r#"component X {
+  <template>{#for in in xs}<li/>{/for}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed (odd but legal)");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::For { var, iter_raw, .. } => {
+                assert_eq!(var, "in");
+                assert_eq!(iter_raw, "xs");
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
     }
 }
