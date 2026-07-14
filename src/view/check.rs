@@ -1460,4 +1460,105 @@ component B {
         let declared: Vec<&str> = Vec::new();
         assert_eq!(suggestion_for("anything", &declared), None);
     }
+
+    // ---- view-lexer §7 follow-up: source-level tests for shapes
+    // ---- that previously required direct AST construction. Now that
+    // ---- the view lexer emits `Lt`, `Gt`, `Question`, `LBracket`,
+    // ---- `RBracket`, users can write `List<Str>`, `Map<K, V>`, and
+    // ---- `Str?` directly in `.fitzv` state annotations + defaults.
+    // ---- Direct-construction variants above stay as coverage of the
+    // ---- checker's internal paths, but the source-level equivalents
+    // ---- prove the parse→expand→check pipeline handles the
+    // ---- destrabado shape end-to-end.
+
+    #[test]
+    fn state_field_nullable_str_default_null_source_level() {
+        // Source-level equivalent of
+        // `state_field_nullable_accepts_null_default_directly_constructed`.
+        let src = r#"component X {
+  state { subtitle: Str? = null }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "Str? = null must round-trip through source"
+        );
+    }
+
+    #[test]
+    fn state_field_nullable_str_default_concrete_source_level() {
+        // Source-level equivalent of
+        // `state_field_nullable_accepts_concrete_value`.
+        let src = r#"component X {
+  state { subtitle: Str? = "hello" }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "Str? = \"hello\" must round-trip through source"
+        );
+    }
+
+    #[test]
+    fn state_field_list_of_str_source_level() {
+        // Source-level equivalent of
+        // `state_field_list_default_matches_declared_generic`.
+        let src = r#"component X {
+  state { tags: List<Str> = [] }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "List<Str> = [] must round-trip through source"
+        );
+    }
+
+    #[test]
+    fn state_field_list_of_wrong_element_type_source_level() {
+        // Source-level equivalent of
+        // `state_field_list_of_wrong_element_type_reports_error`.
+        let src = r#"component X {
+  state { xs: List<Int> = ["nope"] }
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "one mismatch expected: {:?}", errs);
+        assert!(errs[0].context.contains("state field 'xs'"));
+    }
+
+    #[test]
+    fn state_field_map_str_int_source_level() {
+        // Source-level equivalent of
+        // `state_field_map_default_matches_declared_generic`.
+        let src = r#"component X {
+  state { meta: Map<Str, Int> = {} }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "Map<Str, Int> = {{}} must round-trip through source"
+        );
+    }
+
+    #[test]
+    fn state_field_nested_generic_source_level() {
+        // `List<Map<Str, Int>>` — two levels of `Lt`/`Gt` — must
+        // round-trip. Exercises the shell-parser rebuild + classic
+        // parser handoff for nested generics.
+        let src = r#"component X {
+  state { rows: List<Map<Str, Int>> = [] }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "nested generics must round-trip through source"
+        );
+    }
+
+    #[test]
+    fn state_field_list_nullable_source_level() {
+        // `List<Str>?` — Nullable wrapping a generic — must
+        // round-trip. Exercises the `Question` after a `Gt`.
+        let src = r#"component X {
+  state { xs: List<Str>? = null }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "List<Str>? = null must round-trip through source"
+        );
+    }
 }

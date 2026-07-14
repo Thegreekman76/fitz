@@ -250,20 +250,24 @@ Running the POC surfaced a few things worth naming:
   state), and the current error catches it clearly. 11.2+ may
   want to accept multiple templates keyed by name (`<template
   name="loading">`) as an ergonomic escape hatch.
-- **State field type annotations are ASCII-limited today**. The
-  view lexer does not tokenize `<`, `>`, or `?` outside the
-  `<template>` / `<style scoped>` block detector — `<` outside
-  those two openers still hits the "unexpected `<`" error path.
-  Consequence: `List<Str>`, `Map<K, V>`, `Result<T, Str>`, and
-  `Str?` cannot come through source in a `.fitzv` file yet.
-  Detected while writing 11.2.b mini-commit 1 (`src/view/check.rs`
-  tests). The checker itself handles those shapes correctly — the
-  tests for them construct the `ExpandedViewFile` directly. Fix
-  scope for a follow-up view-lexer mini-commit: emit `Lt`, `Gt`,
-  `Question` tokens (preserving `<template>` / `<style scoped>`
-  detection order), extend `append_token_source` +
-  `needs_space_before`, keep the shell parser's error unchanged
-  for those tokens at top level.
+- **State field type annotations no longer ASCII-limited** —
+  **CLOSED 2026-07-14** as a view-lexer follow-up right after
+  11.2.b mini-commit 3. The view lexer now emits `Lt`, `Gt`,
+  `Question`, `LBracket`, `RBracket` when they're not opening a
+  `<template>` / `<style scoped>` block; the shell parser's
+  `capture_raw_until` gained bracket-depth awareness (`{}`, `()`,
+  `[]` count as nesting pairs) so a `{}` map literal default no
+  longer looks like the closing brace of the `state { }` block.
+  Consequence: `List<Str> = []`, `Map<K, V> = {}`, `List<Map<K, V>> = []`,
+  and `Str? = null` now round-trip through `.fitzv` source
+  end-to-end. The direct-construction tests from mini-commits 1+2
+  stay as coverage of the checker's internal paths; matching
+  source-level tests were added alongside so the parse→expand→check
+  pipeline is proved for each shape (see §9.e). The shell parser's
+  "expected `state`, `event`, `<template>` or `<style scoped>`"
+  error path still catches `<foo/>` and other stray `<` at the
+  top level of a component — just from the parser now, not the
+  lexer.
 
 ---
 
@@ -465,6 +469,81 @@ surface yet (the `.fitzv` compilation entry point is still
 gated behind Phase 11.5).
 
 No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits 1/2/3.
+
+---
+
+## 9.e Files touched by view-lexer §7 follow-up (closes the state-annotation ASCII debt)
+
+Small follow-up mini-commit right after 11.2.b mini-commit 3. Its
+only job is to destrabar `List<T>` / `Map<K, V>` / `Str?` /
+`List<T>?` shapes at the source level — the checker already
+handled them internally, but the raw-blob capture in the shell
+parser stopped short because the lexer errored on the first `<`.
+
+**Changes**:
+
+- `src/view/lexer.rs` — 5 new `Token` variants (`Lt`, `Gt`,
+  `Question`, `LBracket`, `RBracket`) with `Display` and dispatch.
+  The `<template>` / `<style scoped>` block detection stays first
+  in `run()`; a `<` that doesn't open one of those blocks falls
+  back to `Token::Lt`. `>` / `?` / `[` / `]` get their own match
+  branches. 4 new unit tests + the pre-existing
+  `unknown_lt_at_top_level_is_error` was renamed and repurposed to
+  assert the new behaviour (lexer accepts, parser rejects).
+- `src/view/parser.rs` — `append_token_source` learned the 5 new
+  tokens; `needs_space_before` puts `Lt`/`Gt`/`Question`/`LBracket`/`RBracket`
+  in the "no space before" list so `List<Str>` and `xs[0]`
+  reconstruct verbatim. `capture_raw_until` grew a bracket-depth
+  counter (`{}`, `()`, `[]` count) so a `{}` map literal default
+  no longer looks like the closing brace of the `state { }` block.
+  `<`/`>` are NOT counted — a `<` in a state default context could
+  be a comparison operator (`count < 5`), so tracking it would
+  confuse those cases.
+- `src/view/check.rs` — 7 new source-level unit tests mirroring
+  the pre-existing direct-construction ones from mini-commits 1+2:
+  `Str? = null`, `Str? = "hello"`, `List<Str> = []`, `List<Int> = ["nope"]`
+  (mismatch), `Map<Str, Int> = {}`, nested `List<Map<Str, Int>> = []`,
+  and `List<Str>? = null` (Nullable wrapping a generic — exercises
+  `Question` right after `Gt`). Direct-construction variants stay
+  as coverage of the checker's internal paths.
+
+**Verification** (delta at view-lexer §7 over 11.2.b mini-commit
+3's baseline of 3323 unit + 50 `view::check`): `cargo test --lib`
+green (3334 total, 57 in `view::check::tests`, 11 in
+`view::lexer::tests`), `cargo test --lib --features lsp` green
+(3470 total), `cargo fmt --all --check`, `cargo clippy --lib
+--tests --bins -- -D warnings`, `cargo clippy --lib --tests --bins
+--features lsp -- -D warnings`.
+
+**Deuda residual** (does NOT block 11.2.c):
+
+- **`.` in state defaults**. The view lexer still rejects `.` at
+  the top level of a state default (Float literals like `0.5`,
+  field access chains like `env.NAME`, method calls). The
+  `state_field_int_to_float_coerces_no_errors` test uses `= 0`
+  (an Int coerced to Float) because `= 0.5` won't lex today.
+  Fix scope for a next mini-commit if demand appears: emit
+  `Token::Dot` and add it to the "no space" list in
+  `needs_space_before`.
+- **`/` in the top level of a component body**. Non-issue in
+  practice — `/` only shows up inside `<template>` / `<style
+  scoped>` raw blocks (where it never reaches the shell lexer)
+  or inside default expressions as a division operator (where
+  the classic parser handles it after `expand`). Documented
+  because the retired lexer test `unknown_lt_at_top_level_is_error`
+  used `<foo/>` and had to be rewritten to `<foo` to isolate
+  the new `Lt` behaviour from the still-existing "unexpected
+  `/`" error.
+- **Struct literal defaults with explicit generic args** (e.g.
+  `Result<Str, Str>::Ok("x")` if we ever add such syntax). The
+  view lexer would tokenize it but `capture_raw_until`'s
+  balance counter does NOT track `<`/`>` — a `>` outside any
+  `{}`/`()`/`[]` at depth 0 still wouldn't confuse the current
+  stop set, but if we grow syntax that needs generic tracking
+  in defaults, revisit.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
+1/2/3 or the §7 follow-up.
 
 ---
 

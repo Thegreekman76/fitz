@@ -20,6 +20,18 @@
 //   - Line comments `// ...`; silently skipped.
 //   - `<template>...</template>` and `<style scoped>...</style>` as
 //     single raw tokens.
+//   - `<`, `>`, `?`, `[`, `]` — emitted as `Lt`, `Gt`, `Question`,
+//     `LBracket`, `RBracket` when they don't open a `<template>` /
+//     `<style scoped>` block. Purpose: let state field type
+//     annotations AND their defaults carry classic Fitz shapes like
+//     `xs: List<Str> = []`, `m: Map<K, V> = {}`, `subtitle: Str? = null`,
+//     `r: Result<T, Str> = Ok(0)` through the raw-blob capture in the
+//     shell parser, so `expand` (11.2.a) can re-parse them with the
+//     classic parser. The shell parser never accepts these tokens at
+//     the top level of a component — the "expected `state`, `event`,
+//     `<template>` or `<style scoped>`" error path takes over there,
+//     so `<foo />` in a component body still errors, just from the
+//     parser rather than the lexer.
 
 use std::fmt;
 
@@ -39,14 +51,19 @@ pub enum Token {
     Str(String),
 
     // Delimiters
-    LBrace, // {
-    RBrace, // }
-    LParen, // (
-    RParen, // )
-    Comma,  // ,
-    Colon,  // :
-    Semi,   // ; (optional; the parser treats it as a soft separator)
-    Eq,     // =
+    LBrace,   // {
+    RBrace,   // }
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    Comma,    // ,
+    Colon,    // :
+    Semi,     // ; (optional; the parser treats it as a soft separator)
+    Eq,       // =
+    Lt,       // < (only when not opening a `<template>`/`<style scoped>` block)
+    Gt,       // >
+    Question, // ?
 
     // Blocks captured raw by the lexer.
     /// Raw content between `<template>` and `</template>` — without
@@ -72,10 +89,15 @@ impl fmt::Display for Token {
             Token::RBrace => write!(f, "`}}`"),
             Token::LParen => write!(f, "`(`"),
             Token::RParen => write!(f, "`)`"),
+            Token::LBracket => write!(f, "`[`"),
+            Token::RBracket => write!(f, "`]`"),
             Token::Comma => write!(f, "`,`"),
             Token::Colon => write!(f, "`:`"),
             Token::Semi => write!(f, "`;`"),
             Token::Eq => write!(f, "`=`"),
+            Token::Lt => write!(f, "`<`"),
+            Token::Gt => write!(f, "`>`"),
+            Token::Question => write!(f, "`?`"),
             Token::TemplateRaw(_) => write!(f, "<template> block"),
             Token::StyleScopedRaw(_) => write!(f, "<style scoped> block"),
             Token::Newline => write!(f, "newline"),
@@ -209,7 +231,14 @@ impl ViewLexer {
 
             // Detect raw blocks BEFORE anything else. A `<` followed
             // by `template>` or `style scoped>` switches modes and
-            // captures up to the matching closing tag.
+            // captures up to the matching closing tag. Any other
+            // `<` is a plain `Lt` token — needed so state field
+            // defaults can carry `List<T>` / `Map<K, V>` / `Result<T, E>`
+            // through the shell parser's raw-blob capture. The shell
+            // parser rejects `Lt` at the top level of a component with
+            // the "expected state/event/..." error, so `<foo/>` in a
+            // component body still fails cleanly, just from the parser
+            // rather than the lexer.
             if c == '<' {
                 if self.starts_with("<template>") {
                     self.consume_template_block(start_line, start_col)?;
@@ -219,11 +248,13 @@ impl ViewLexer {
                     self.consume_style_block(start_line, start_col)?;
                     continue;
                 }
-                return Err(ViewLexError {
-                    message: "unexpected `<` — the POC only recognises `<template>` and `<style scoped>` as block openers".to_string(),
+                self.advance();
+                self.tokens.push(TokenWithLoc {
+                    token: Token::Lt,
                     line: start_line,
                     column: start_col,
                 });
+                continue;
             }
 
             match c {
@@ -267,6 +298,22 @@ impl ViewLexer {
                         column: start_col,
                     });
                 }
+                '[' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::LBracket,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                ']' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::RBracket,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
                 ',' => {
                     self.advance();
                     self.tokens.push(TokenWithLoc {
@@ -295,6 +342,22 @@ impl ViewLexer {
                     self.advance();
                     self.tokens.push(TokenWithLoc {
                         token: Token::Eq,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '>' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Gt,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '?' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Question,
                         line: start_line,
                         column: start_col,
                     });
@@ -555,10 +618,94 @@ mod tests {
     }
 
     #[test]
-    fn unknown_lt_at_top_level_is_error() {
-        let src = "component X { <foo/> }";
-        let err = tokenize(src).unwrap_err();
-        assert!(err.message.contains("`<template>`"));
+    fn unknown_lt_at_top_level_lexes_as_lt_token() {
+        // Since view-lexer §7, the lexer no longer errors on a
+        // `<` that isn't a `<template>` / `<style scoped>` opener —
+        // it emits `Token::Lt`. The shell parser is the one that
+        // rejects `Lt` at the top level of a component with its
+        // "expected state/event/..." error path; that guard is
+        // covered separately in `parser.rs::tests`.
+        //
+        // Uses `<foo` (no `/>`) since `/` still isn't tokenized —
+        // that would trigger a real "unexpected character" from
+        // the lexer and mask what this test is proving.
+        let src = "component X { <foo }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        assert!(
+            toks.contains(&Token::Lt),
+            "expected `Token::Lt` in {:?}",
+            toks
+        );
+        assert!(toks.contains(&Token::Ident("foo".into())));
+    }
+
+    #[test]
+    fn tokenizes_generic_type_expr_list_of_str() {
+        // `List<Str>` inside a state field default must produce
+        // Ident("List"), Lt, Ident("Str"), Gt so the raw capture
+        // + `expand` can reconstruct the classic Fitz `TypeExpr`.
+        let src = "component X { state { xs: List<Str> = [] } }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        // Locate the sub-sequence around `List<Str>`.
+        let list_idx = toks
+            .iter()
+            .position(|t| matches!(t, Token::Ident(s) if s == "List"))
+            .expect("`List` ident");
+        assert_eq!(toks[list_idx], Token::Ident("List".into()));
+        assert_eq!(toks[list_idx + 1], Token::Lt);
+        assert_eq!(toks[list_idx + 2], Token::Ident("Str".into()));
+        assert_eq!(toks[list_idx + 3], Token::Gt);
+    }
+
+    #[test]
+    fn tokenizes_nullable_type_expr_str_question() {
+        // `Str?` must produce Ident("Str"), Question.
+        let src = "component X { state { subtitle: Str? = null } }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        let str_idx = toks
+            .iter()
+            .position(|t| matches!(t, Token::Ident(s) if s == "Str"))
+            .expect("`Str` ident");
+        assert_eq!(toks[str_idx], Token::Ident("Str".into()));
+        assert_eq!(toks[str_idx + 1], Token::Question);
+    }
+
+    #[test]
+    fn tokenizes_map_generic_with_two_args() {
+        // `Map<Str, Int>` must produce Ident("Map"), Lt,
+        // Ident("Str"), Comma, Ident("Int"), Gt.
+        let src = "component X { state { meta: Map<Str, Int> = {} } }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        let map_idx = toks
+            .iter()
+            .position(|t| matches!(t, Token::Ident(s) if s == "Map"))
+            .expect("`Map` ident");
+        assert_eq!(toks[map_idx], Token::Ident("Map".into()));
+        assert_eq!(toks[map_idx + 1], Token::Lt);
+        assert_eq!(toks[map_idx + 2], Token::Ident("Str".into()));
+        assert_eq!(toks[map_idx + 3], Token::Comma);
+        assert_eq!(toks[map_idx + 4], Token::Ident("Int".into()));
+        assert_eq!(toks[map_idx + 5], Token::Gt);
+    }
+
+    #[test]
+    fn template_and_style_blocks_still_detected_before_lt_fallback() {
+        // A `<template>` opener must still route to raw-block
+        // capture, even though `<` on its own now emits `Lt`. This
+        // is the ordering invariant of `run()`.
+        let src = "component X { <template><div>hi</div></template> }";
+        let toks = tokenize(src).unwrap();
+        let template_tok = toks.iter().find_map(|t| match &t.token {
+            Token::TemplateRaw(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(template_tok.as_deref(), Some("<div>hi</div>"));
+        // Ensure no stray `Token::Lt` slipped in.
+        assert!(
+            !toks.iter().any(|t| matches!(t.token, Token::Lt)),
+            "unexpected Lt token when `<template>` should have been detected: {:?}",
+            toks
+        );
     }
 
     #[test]

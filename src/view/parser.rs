@@ -300,8 +300,21 @@ impl ViewParser {
     /// in `stops`. Reconstructs an approximate source rendering from
     /// the tokens — enough for opaque blobs that the POC does not
     /// re-analyse.
+    ///
+    /// **Balance-aware**: `{`/`}`, `(`/`)`, and `[`/`]` are tracked
+    /// as nesting pairs; a stop token only ends the capture when the
+    /// bracket depth is zero. This lets defaults carry Map / List /
+    /// paren-grouped literals (`{}`, `[]`, `(1 + 2)`) without the
+    /// inner `}`/`]`/`)` being mistaken for the outer block's
+    /// closer. `<`/`>` are NOT counted — a `<` in a state default
+    /// context could be a comparison operator, so tracking it as a
+    /// bracket would confuse `count < 5`. Generic type annotations
+    /// (`List<Str>`) live BEFORE the `=` and never contain nested
+    /// braces, so their `<` / `>` also round-trip fine without depth
+    /// tracking.
     fn capture_raw_until(&mut self, stops: &[Token]) -> ViewParseResult<String> {
         let mut out = String::new();
+        let mut depth: usize = 0;
         loop {
             let cur = self.peek();
             if cur.token == Token::Eof {
@@ -311,13 +324,21 @@ impl ViewParser {
                     column: cur.column,
                 });
             }
-            if stops
-                .iter()
-                .any(|s| std::mem::discriminant(s) == std::mem::discriminant(&cur.token))
+            if depth == 0
+                && stops
+                    .iter()
+                    .any(|s| std::mem::discriminant(s) == std::mem::discriminant(&cur.token))
             {
                 return Ok(out);
             }
             let tok = self.advance();
+            match tok.token {
+                Token::LBrace | Token::LParen | Token::LBracket => depth += 1,
+                Token::RBrace | Token::RParen | Token::RBracket => {
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
             append_token_source(&mut out, &tok.token);
         }
     }
@@ -389,10 +410,15 @@ fn append_token_source(out: &mut String, tok: &Token) {
         Token::RBrace => out.push('}'),
         Token::LParen => out.push('('),
         Token::RParen => out.push(')'),
+        Token::LBracket => out.push('['),
+        Token::RBracket => out.push(']'),
         Token::Comma => out.push(','),
         Token::Colon => out.push(':'),
         Token::Semi => out.push(';'),
         Token::Eq => out.push('='),
+        Token::Lt => out.push('<'),
+        Token::Gt => out.push('>'),
+        Token::Question => out.push('?'),
         Token::Newline => out.push('\n'),
         Token::TemplateRaw(_) | Token::StyleScopedRaw(_) | Token::Eof => {
             // Should not appear inside a `capture_*` call. If they
@@ -409,14 +435,24 @@ fn needs_space_before(prev_out: &str, tok: &Token) -> bool {
     match tok {
         Token::LParen
         | Token::RParen
+        | Token::LBracket
+        | Token::RBracket
         | Token::Comma
         | Token::Colon
         | Token::Semi
         | Token::LBrace
-        | Token::RBrace => false,
+        | Token::RBrace
+        // `<`, `>`, `?` bind tightly to the surrounding identifier so
+        // that `List<Str>` and `Str?` reconstruct verbatim from
+        // `Ident("List") Lt Ident("Str") Gt` and `Ident("Str") Question`
+        // — no stray whitespace that would confuse the eye when the
+        // captured raw blob gets logged in an error message.
+        | Token::Lt
+        | Token::Gt
+        | Token::Question => false,
         _ => matches!(
             last,
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | ')' | '}' | ']' | '"'
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | ')' | '}' | ']' | '"' | '>' | '?'
         ),
     }
 }
