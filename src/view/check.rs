@@ -1,44 +1,56 @@
 // view/check.rs — Phase 11.2.b — type-check an `ExpandedViewFile`
 // produced by `super::expand`.
 //
-// **Scope of this commit (mini-commit 1 of 11.2.b)**: state field
-// defaults only. For every `ExpandedStateField`:
-// - The declared `TypeExpr` must resolve against the fresh `TypeEnv`
-//   seeded by `check_program` (primitives + built-in generics).
-// - The parsed default `Expr` must produce a type compatible with the
-//   declared type. Compatibility rules are the same as classic Fitz:
-//   `Int → Float`, `Null → T?`, gradual `Any`, etc.
+// **Scope (mini-commit 2 of 11.2.b)**: state field defaults +
+// event handler bodies + template interpolations.
 //
-// Deferred to subsequent mini-commits:
-// - Event handler bodies (with state fields visible as let-bindings +
-//   handler params as their own scope) — mini-commit 2.
-// - Template `{expr}` interpolations (against state env) — mini-commit 2.
-// - `@event="handler"` cross-checks (handler must name a declared event) —
-//   mini-commit 3.
+// - State field defaults must be compatible with their declared
+//   `TypeExpr` (this is the mini-commit 1 rule, preserved).
+// - Event handler bodies are checked as `async fn`s with the
+//   component's state fields visible as let-bindings in the outer
+//   scope + the handler's own params inside the fn scope.
+// - Template `{expr}` interpolations (both direct in text nodes and
+//   inside HTML attribute values) are checked in the same env as
+//   the handler bodies. Additionally, the result type must be
+//   *`Str`-friendly* (something the SSR/client target can convert
+//   to a string): primitives (Int/Float/Str/Bool/Null/Bytes), Range,
+//   List/Map, Date/DateTime/Uuid, nominals (all types get an
+//   auto-`Display` impl in codegen), and `Nullable<inner>` when
+//   `inner` is `Str`-friendly. Explicitly rejected: Function,
+//   Result<T,E>, Future<T>, WsConn, DbConn/DbRow, QueryBuilder,
+//   Aggregated, Secret<T> — those must be unwrapped/awaited/
+//   matched before rendering.
 //
-// **Strategy**: for each state field we synthesise the smallest
-// classic-Fitz program that expresses the constraint we want to
-// check — `field_name: T = <default>` as a `Stmt::Assign` — and run
-// `crate::types::check_program`. The full type checker handles type
-// resolution (nominal lookups, arity, generics), compatibility with
-// coercions, and reports errors with the message the user is used to
-// from the classic pipeline. We then remap each `FitzError` back to a
-// `CheckError` whose `Loc` points inside the `.fitzv` file at the
-// state field's blob location. Position precision inside a field is
-// deferred alongside expand's own precision debt (see
-// `docs/fase-11-plan.md` §7).
+// Deferred to mini-commit 3:
+// - `@event="handler"` attrs cross-check: the referenced handler
+//   name must correspond to a declared `event ...` in the same
+//   component.
 //
-// This synth-and-check strategy is intentional: it keeps the view
-// checker tiny and forces the classic checker to remain the single
-// source of truth for what "compatible with T" means. When 11.2.c
-// adds `{#if}` / `{#for}` control flow to the template AST, the same
-// pattern will extend — wrap each blob in the smallest containing
-// program, delegate, remap errors.
+// **Strategy**: synth-and-delegate — build the smallest classic
+// Fitz program that expresses each check we want, run
+// `crate::types::check_program`, and remap emitted `FitzError`s
+// back to `CheckError`s carrying the correct blob `Loc` +
+// `context` label. This keeps the view checker tiny and forces the
+// classic checker to remain the single source of truth for
+// compatibility rules.
+//
+// **Cascade avoidance**: when a component has ANY state field
+// default error, we skip handler + interpolation checks for that
+// component. Reason: those checks would run against an env where
+// the failing state field's binding still exists (the classic
+// checker registers the binding with its declared type even if
+// the default is bogus), but the mini-commit 1 error already told
+// the user what to fix. Running the second layer would just duplicate
+// the same error many times over across every handler / interpolation
+// that touches the failing field. Users fix state, then re-run.
 
 use super::ast::Loc;
-use super::expand::{ExpandedStateField, ExpandedViewFile};
-use crate::ast::{AssignTarget, Span, Stmt};
-use crate::types::check_program;
+use super::expand::{
+    ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStateField, ExpandedTemplate,
+    ExpandedTemplateNode, ExpandedViewFile,
+};
+use crate::ast::{AssignTarget, Expr, Span, Stmt};
+use crate::types::{check_program, Type};
 use std::fmt;
 
 /// A type-check error carries the classic checker's message plus a
@@ -69,15 +81,33 @@ impl std::error::Error for CheckError {}
 /// does NOT short-circuit on the first one (unlike `expand`, which
 /// aborts on the first parse error — the model there is "you can't
 /// type-check what you can't parse"). Type errors are independent, so
-/// we surface them all.
+/// we surface them all — modulo the cascade-avoidance rule described
+/// at the top of the file: within a component, handler +
+/// interpolation checks are skipped when state field defaults have
+/// errors, because those errors' consequences would flood the
+/// output.
 ///
-/// The order of returned errors is: components in file order; within
-/// a component, state fields in declaration order.
+/// The order of returned errors is: components in file order;
+/// within a component, state fields first (declaration order), then
+/// event handlers (declaration order), then template interpolations
+/// (source order — depth-first walk of the template AST).
 pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
     let mut errors = Vec::new();
     for component in &file.components {
+        let before = errors.len();
         for field in &component.state {
             check_state_field(component.name.as_str(), field, &mut errors);
+        }
+        // Cascade avoidance — only check handlers + interpolations
+        // when the state is clean, so consequential errors don't
+        // pile up on top of the actual bug.
+        if errors.len() == before {
+            for handler in &component.events {
+                check_event_handler(component, handler, &mut errors);
+            }
+            if let Some(template) = &component.template {
+                check_template_interpolations(component, template, &mut errors);
+            }
         }
     }
     errors
@@ -109,6 +139,274 @@ fn check_state_field(
                 component_name, field.name
             ),
         });
+    }
+}
+
+/// Check an event handler body. Synthesises a program of the shape:
+///
+/// ```text
+/// let field1: T1 = default1
+/// let field2: T2 = default2
+/// async fn handler_name(params) { body }
+/// ```
+///
+/// The classic checker resolves the state field types, records them
+/// as let-bindings visible in the enclosing scope, and then enters
+/// the fn body with the params in a nested scope. Reassignments in
+/// the body (e.g. `is_editing = true`) are validated against the
+/// annotated declared type of the field (preserved because the state
+/// field lets carry `type_: Some(...)`, which marks the binding as
+/// `annotated: true` in `VarBinding` — see the post-5a debt note in
+/// `CLAUDE.md`).
+///
+/// The handler is emitted as `async fn` so `.await` and async
+/// method chains work inside the body. Handler bodies that don't
+/// use async are compatible with an async fn signature (unused-async
+/// warnings are not emitted by the classic checker).
+fn check_event_handler(
+    component: &ExpandedComponent,
+    handler: &ExpandedEventHandler,
+    errors: &mut Vec<CheckError>,
+) {
+    // Include ONLY the current handler's body; the other handlers
+    // are pushed as fn signatures with empty bodies so handler-to-
+    // handler calls resolve without accidentally surfacing their
+    // body errors here (each handler's body is checked in its own
+    // pass via `check_event_handler`).
+    let program = build_env_program(component, Some(&handler.name), None);
+    let (_env, _info, _defs, classic_errors) = check_program(&program);
+    for e in classic_errors {
+        errors.push(CheckError {
+            message: e.message,
+            loc: handler.loc,
+            context: format!(
+                "component '{}': event handler '{}'",
+                component.name, handler.name,
+            ),
+        });
+    }
+}
+
+/// Check every `{expr}` interpolation nested in the template — both
+/// in text nodes and in HTML attribute values. Each interpolation
+/// goes through TWO checks:
+///
+/// 1. The expression must type-check in the state-seeded env
+///    (same as handler bodies).
+/// 2. The resulting type must be `Str`-friendly (see
+///    `is_str_friendly`).
+///
+/// The two checks run in ONE `check_program` pass per interpolation
+/// so we can inspect the inferred type from the returned `TypeInfo`.
+/// Overhead per interpolation is a full classic-checker walk over
+/// `<state fields> + let __check = <interp expr>` — bounded by the
+/// state field count, which is small (<20 in practice).
+fn check_template_interpolations(
+    component: &ExpandedComponent,
+    template: &ExpandedTemplate,
+    errors: &mut Vec<CheckError>,
+) {
+    let mut interpolations: Vec<InterpolationRef<'_>> = Vec::new();
+    collect_interpolations(&template.roots, &mut interpolations);
+
+    for (idx, interp) in interpolations.iter().enumerate() {
+        // The synth uses a distinctive check ident per interpolation
+        // so the classic checker's TypeInfo picks up the inferred
+        // type at the interp expr's own span.
+        let check_var = format!("__view_interp_check_{}", idx);
+        let interp_span = interp.expr.span();
+        // Handlers are included in the env so `{handler_name}`
+        // interpolations resolve — the resulting Function type then
+        // trips the Str-friendly rule for a clear error. This
+        // matches how Vue/React expose methods to templates.
+        let program = build_env_program(
+            component,
+            None,
+            Some(Stmt::Assign {
+                target: AssignTarget::Ident(check_var, Span::ZERO),
+                type_: None,
+                value: interp.expr.clone(),
+                span: Span::ZERO,
+            }),
+        );
+        let (env, type_info, _defs, classic_errors) = check_program(&program);
+        for e in classic_errors {
+            errors.push(CheckError {
+                message: e.message,
+                loc: interp.loc,
+                context: interp.context(component),
+            });
+        }
+        // Str-friendly check. If the classic checker failed to infer
+        // a type at the interp expr's span, silently skip: some
+        // upstream error already surfaced above and there's no useful
+        // extra info to add.
+        if let Some(ty) = type_info.type_at(interp_span) {
+            if !is_str_friendly(ty) {
+                errors.push(CheckError {
+                    message: format!(
+                        "template interpolation must render to a string; type `{}` is not Str-friendly (unwrap Result with `match`, await Future, unwrap Nullable with `?`, or use `.expose()` on a Secret before interpolating)",
+                        ty.display(&env)
+                    ),
+                    loc: interp.loc,
+                    context: interp.context(component),
+                });
+            }
+        }
+    }
+}
+
+/// Build the component's synth env — state field let-bindings plus
+/// every declared handler as an `async fn`. Handlers other than the
+/// one identified by `include_body_for` (if any) are emitted with
+/// empty bodies so their signatures resolve for cross-handler calls
+/// but their bodies don't accidentally surface errors here (each
+/// handler's body is checked in its own pass). If `include_body_for`
+/// is `None`, every handler is emitted body-less — typical for
+/// interpolation checks, which never re-check any handler body.
+///
+/// The classic checker's `preregister_fn_signatures` phase makes
+/// handler declarations visible to every other stmt regardless of
+/// declaration order, so handler-to-handler calls (mutual recursion,
+/// one handler invoking another) resolve without further care.
+fn build_env_program(
+    component: &ExpandedComponent,
+    include_body_for: Option<&str>,
+    extra: Option<Stmt>,
+) -> Vec<Stmt> {
+    let mut program: Vec<Stmt> =
+        Vec::with_capacity(component.state.len() + component.events.len() + 1);
+    for field in &component.state {
+        program.push(Stmt::Assign {
+            target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
+            type_: Some(field.type_expr.clone()),
+            value: field.default.clone(),
+            span: Span::ZERO,
+        });
+    }
+    for handler in &component.events {
+        let include_body = Some(handler.name.as_str()) == include_body_for;
+        program.push(Stmt::FnDef {
+            name: handler.name.clone(),
+            params: handler.params.clone(),
+            return_type: None,
+            body: if include_body {
+                handler.body.clone()
+            } else {
+                Vec::new()
+            },
+            is_async: true,
+            decorators: Vec::new(),
+            span: Span::ZERO,
+        });
+    }
+    if let Some(s) = extra {
+        program.push(s);
+    }
+    program
+}
+
+/// Reference to a template interpolation, carrying enough context
+/// to attribute errors correctly.
+struct InterpolationRef<'a> {
+    expr: &'a Expr,
+    loc: Loc,
+    /// Attribute name when this interpolation lives inside an HTML
+    /// attribute value; `None` for text-node interpolations. Used
+    /// only to enrich the error `context` label.
+    attr_name: Option<String>,
+}
+
+impl InterpolationRef<'_> {
+    fn context(&self, component: &ExpandedComponent) -> String {
+        match &self.attr_name {
+            Some(name) => format!(
+                "component '{}': template attr '{}' interpolation",
+                component.name, name
+            ),
+            None => format!("component '{}': template interpolation", component.name),
+        }
+    }
+}
+
+fn collect_interpolations<'a>(
+    nodes: &'a [ExpandedTemplateNode],
+    out: &mut Vec<InterpolationRef<'a>>,
+) {
+    for node in nodes {
+        match node {
+            ExpandedTemplateNode::Text(_) => {}
+            ExpandedTemplateNode::Interpolation { expr, loc } => {
+                out.push(InterpolationRef {
+                    expr,
+                    loc: *loc,
+                    attr_name: None,
+                });
+            }
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                for attr in attrs {
+                    if let ExpandedAttr::Interpolation { name, expr, loc } = attr {
+                        out.push(InterpolationRef {
+                            expr,
+                            loc: *loc,
+                            attr_name: Some(name.clone()),
+                        });
+                    }
+                }
+                collect_interpolations(children, out);
+            }
+        }
+    }
+}
+
+/// A type is *`Str`-friendly* if the SSR/client target can convert
+/// it to a string suitable for embedding in HTML output.
+///
+/// **Allow-list** (renders cleanly via existing Display impls):
+/// - Primitives: Int, Float, Str, Bool, Null, Bytes
+/// - Range (renders as `0..10`)
+/// - List/Map (Display renders as `[1, 2, 3]` / `{"a": 1}`)
+/// - Date/DateTime/Uuid (ISO 8601 / canonical)
+/// - Nominal(_) (all user `type`s receive an auto-Display in codegen)
+/// - Nullable(inner) — recurses; `null` renders as the string `"null"`
+/// - Any, PyAny — gradual escape
+///
+/// **Block-list** (must be unwrapped before rendering):
+/// - Result<T,E> — `match`/`?` first
+/// - Future<T> — `.await` first
+/// - WsConn — opaque handle, no textual form
+/// - DbConn, DbRow — opaque handles
+/// - QueryBuilder, Aggregated — call a terminal (`.all`/`.first`/…)
+/// - Secret<T> — deliberately opaque; `.expose()` explicitly
+/// - Function — a callable, not a value to display
+fn is_str_friendly(ty: &Type) -> bool {
+    match ty {
+        Type::Int
+        | Type::Float
+        | Type::Str
+        | Type::Bool
+        | Type::Null
+        | Type::Bytes
+        | Type::Range
+        | Type::Date
+        | Type::DateTime
+        | Type::Uuid
+        | Type::Nominal(_)
+        | Type::Any
+        | Type::PyAny => true,
+        Type::List(_) | Type::Map(_, _) | Type::Tuple(_) => true,
+        Type::Nullable(inner) => is_str_friendly(inner),
+        Type::Result { .. }
+        | Type::Future(_)
+        | Type::WsConn { .. }
+        | Type::DbConn
+        | Type::DbRow
+        | Type::QueryBuilder(_)
+        | Type::Aggregated(_)
+        | Type::Secret(_)
+        | Type::Function { .. } => false,
     }
 }
 
@@ -161,6 +459,8 @@ mod tests {
             loc: Loc::new(1, 1),
         }
     }
+
+    // ---- Mini-commit 1: state field defaults ------------------------------
 
     #[test]
     fn state_field_str_default_compat_no_errors() {
@@ -412,8 +712,11 @@ component B {
     #[test]
     fn card_component_from_expand_module_type_checks_cleanly() {
         // The canonical Card fixture used in `view::expand::tests`
-        // must type-check without errors: `title: Str = "Untitled"`
-        // and `is_editing: Bool = false` are both valid.
+        // must type-check cleanly under mini-commit 2 too: state
+        // defaults are valid, the two handlers reassign fields with
+        // matching types, and the template interpolation references
+        // an existing state field (`title` — a Str, which IS
+        // Str-friendly).
         let src = r#"component Card {
   state {
     title: Str = "Untitled"
@@ -443,7 +746,382 @@ component B {
 "#;
         assert!(
             check_str(src).is_empty(),
-            "Card should type-check cleanly (state defaults are the only thing checked in mini-commit 1)"
+            "Card should type-check cleanly end-to-end (mini-commit 2)"
         );
+    }
+
+    // ---- Mini-commit 2: event handler bodies ------------------------------
+
+    #[test]
+    fn handler_reassigning_state_with_matching_type_ok() {
+        // `is_editing = true` reassigns Bool → Bool: valid.
+        let src = r#"component X {
+  state { is_editing: Bool = false }
+  event start() { is_editing = true }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "matching-type reassignment should be valid"
+        );
+    }
+
+    #[test]
+    fn handler_reassigning_state_with_wrong_type_reports_error() {
+        // `is_editing: Bool = false` declared, handler body
+        // reassigns `is_editing = 42`. Classic checker's post-5a
+        // rule catches this: the binding is `annotated: true`, so
+        // subsequent assignments must match its declared type.
+        let src = r#"component X {
+  state { is_editing: Bool = false }
+  event weird() { is_editing = 42 }
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "wrong-type reassignment errors: {:?}", errs);
+        let e = &errs[0];
+        assert!(
+            e.context.contains("event handler 'weird'"),
+            "context = {:?}",
+            e.context
+        );
+        // Loc must be the handler's, not the state field's.
+        assert_ne!(e.loc, Loc::new(2, 3), "should not be the state field's loc");
+    }
+
+    #[test]
+    fn handler_uses_param_as_local_variable() {
+        // The handler's param `new_title: Str` must be visible in
+        // its body. `title = new_title` reassigns state field
+        // `title: Str` with a Str param — valid.
+        let src = r#"component X {
+  state { title: Str = "" }
+  event save(new_title: Str) { title = new_title }
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "param `new_title` must be in scope inside body"
+        );
+    }
+
+    #[test]
+    fn handler_params_do_not_leak_across_handlers() {
+        // `save`'s `new_title` param should NOT be visible inside
+        // `start`. If it were, a spurious "undefined" error would NOT
+        // trigger — so instead we test the opposite: `start` body
+        // referencing `new_title` errors because it's not in scope.
+        let src = r#"component X {
+  state { title: Str = "" }
+  event save(new_title: Str) { title = new_title }
+  event start() { title = new_title }
+}"#;
+        let errs = check_str(src);
+        assert!(
+            !errs.is_empty(),
+            "`start` referencing `new_title` should error"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("event handler 'start'")
+                    && e.message.contains("new_title")),
+            "errors = {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn handler_body_can_reference_state_from_other_handler_scope() {
+        // Between handlers, state fields stay visible (they're at
+        // the outer scope). `save` reads `title` and reassigns
+        // `is_editing`, both fine because both are declared state.
+        let src = r#"component X {
+  state {
+    title: Str = ""
+    is_editing: Bool = false
+  }
+  event save(new_title: Str) {
+    title = new_title
+    is_editing = false
+  }
+}"#;
+        assert!(check_str(src).is_empty());
+    }
+
+    #[test]
+    fn handler_body_calling_undefined_ident_reports_error() {
+        // `undefined_var` is not a state field nor a param.
+        let src = r#"component X {
+  state { title: Str = "" }
+  event save() { title = undefined_var }
+}"#;
+        let errs = check_str(src);
+        assert!(
+            !errs.is_empty(),
+            "undefined ident inside handler must error"
+        );
+        assert!(errs
+            .iter()
+            .any(|e| e.context.contains("event handler 'save'")));
+    }
+
+    #[test]
+    fn handler_with_state_error_is_not_double_checked_cascade_avoidance() {
+        // State field default has an error. Handler references the
+        // same field. Only the state error should surface — the
+        // handler check gets skipped (cascade avoidance).
+        let src = r#"component X {
+  state { count: Int = "bad" }
+  event tick() { count = 5 }
+}"#;
+        let errs = check_str(src);
+        assert_eq!(
+            errs.len(),
+            1,
+            "only the state error should surface, not cascaded: {:?}",
+            errs
+        );
+        assert!(errs[0].context.contains("state field 'count'"));
+    }
+
+    #[test]
+    fn multiple_handlers_only_the_bad_one_errors() {
+        let src = r#"component X {
+  state {
+    title: Str = ""
+    is_editing: Bool = false
+  }
+  event ok_one() { is_editing = true }
+  event bad_one() { is_editing = 42 }
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "only the bad handler errors: {:?}", errs);
+        assert!(errs[0].context.contains("event handler 'bad_one'"));
+        assert!(!errs[0].context.contains("event handler 'ok_one'"));
+    }
+
+    // ---- Mini-commit 2: template interpolations --------------------------
+
+    #[test]
+    fn interpolation_reads_state_field_ok() {
+        // Interpolating a Str state field — Str is Str-friendly.
+        let src = r#"component X {
+  state { title: Str = "hi" }
+  <template><div>{title}</div></template>
+}"#;
+        assert!(check_str(src).is_empty());
+    }
+
+    #[test]
+    fn interpolation_of_undefined_ident_reports_error() {
+        let src = r#"component X {
+  state { title: Str = "hi" }
+  <template><div>{missing}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty());
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("template interpolation")
+                    && e.message.contains("missing")),
+            "errors = {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn interpolation_in_attr_value_is_checked() {
+        // Attribute value with an interpolation should check as well.
+        let src = r#"component X {
+  state { title: Str = "hi" }
+  <template><input value="{title}" /></template>
+}"#;
+        assert!(check_str(src).is_empty());
+    }
+
+    #[test]
+    fn interpolation_in_attr_value_context_names_attr() {
+        // Wrong ident in attr interpolation — context label should
+        // include the attr name so users find the bug in a busy
+        // template.
+        let src = r#"component X {
+  state { title: Str = "hi" }
+  <template><input value="{missing}" /></template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty());
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("attr 'value'") && e.context.contains("interpolation")),
+            "errors = {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn interpolation_of_str_friendly_types_are_ok() {
+        // The view POC parser tokenizes state defaults with the same
+        // lexer it uses for the shell — Float literals with a `.`
+        // are not accepted at that layer yet (deferred with the
+        // rest of the state-field literal shape refinement noted in
+        // §7 of the plan doc). We exercise Int + Bool through
+        // source; Float coverage lives in the direct-construction
+        // path further below.
+        let src = r#"component X {
+  state {
+    count: Int = 0
+    ok: Bool = true
+  }
+  <template>
+    <div>{count}</div>
+    <div>{ok}</div>
+  </template>
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "Int and Bool are both Str-friendly"
+        );
+    }
+
+    #[test]
+    fn interpolation_of_float_field_ok_direct_construction() {
+        // Float coverage via direct construction — see the note in
+        // `interpolation_of_str_friendly_types_are_ok` about the
+        // view POC lexer not accepting `.` in state defaults.
+        let file = ExpandedViewFile {
+            components: vec![ExpandedComponent {
+                name: "X".into(),
+                loc: Loc::new(1, 1),
+                state: vec![synth_state_field(
+                    "ratio",
+                    TypeExpr::Named("Float".into()),
+                    Expr::Float(0.5, Span::ZERO),
+                )],
+                events: Vec::new(),
+                template: Some(crate::view::expand::ExpandedTemplate {
+                    roots: vec![crate::view::expand::ExpandedTemplateNode::Interpolation {
+                        expr: Expr::Ident("ratio".into(), Span::new(1, 1)),
+                        loc: Loc::new(2, 1),
+                    }],
+                    loc: Loc::new(2, 1),
+                }),
+                style: None,
+            }],
+        };
+        assert!(check(&file).is_empty(), "Float is Str-friendly");
+    }
+
+    #[test]
+    fn interpolation_of_function_value_reports_str_friendly_error() {
+        // Reference the handler itself as a value — its type is
+        // `Function`, which is NOT Str-friendly. The handler is
+        // top-level after synth so its Ident resolves; the type is
+        // a Function.
+        let src = r#"component X {
+  state { title: Str = "" }
+  event go() { title = "next" }
+  <template><div>{go}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("Str-friendly")
+                && e.context.contains("template interpolation")),
+            "expected Str-friendly rejection, got {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn interpolation_with_state_error_is_not_double_checked_cascade_avoidance() {
+        // Same rule as handlers: state error → skip interpolation
+        // checks.
+        let src = r#"component X {
+  state { count: Int = "bad" }
+  <template><div>{count}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].context.contains("state field 'count'"));
+    }
+
+    #[test]
+    fn interpolation_expr_arithmetic_ok() {
+        // `{count + 1}` — Int + Int → Int, still Str-friendly.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template><div>{count + 1}</div></template>
+}"#;
+        assert!(check_str(src).is_empty());
+    }
+
+    #[test]
+    fn interpolation_multiple_interpolations_each_checked() {
+        // Two interpolations: one references defined `title`, one
+        // references undefined `missing`. Only the second errors.
+        let src = r#"component X {
+  state { title: Str = "" }
+  <template>
+    <div>{title}</div>
+    <div>{missing}</div>
+  </template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "one error expected: {:?}", errs);
+        assert!(errs[0].message.contains("missing"));
+    }
+
+    // ---- Mini-commit 2: is_str_friendly unit tests ----------------------
+
+    #[test]
+    fn is_str_friendly_accepts_primitives() {
+        assert!(is_str_friendly(&Type::Int));
+        assert!(is_str_friendly(&Type::Float));
+        assert!(is_str_friendly(&Type::Str));
+        assert!(is_str_friendly(&Type::Bool));
+        assert!(is_str_friendly(&Type::Null));
+        assert!(is_str_friendly(&Type::Bytes));
+    }
+
+    #[test]
+    fn is_str_friendly_accepts_gradual_and_compound() {
+        assert!(is_str_friendly(&Type::Any));
+        assert!(is_str_friendly(&Type::PyAny));
+        assert!(is_str_friendly(&Type::List(Box::new(Type::Int))));
+        assert!(is_str_friendly(&Type::Map(
+            Box::new(Type::Str),
+            Box::new(Type::Int)
+        )));
+        assert!(is_str_friendly(&Type::Nullable(Box::new(Type::Str))));
+    }
+
+    #[test]
+    fn is_str_friendly_rejects_result_and_future() {
+        assert!(!is_str_friendly(&Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Str)
+        }));
+        assert!(!is_str_friendly(&Type::Future(Box::new(Type::Int))));
+    }
+
+    #[test]
+    fn is_str_friendly_rejects_secret_and_opaque_handles() {
+        assert!(!is_str_friendly(&Type::Secret(Box::new(Type::Str))));
+        assert!(!is_str_friendly(&Type::DbConn));
+        assert!(!is_str_friendly(&Type::DbRow));
+        assert!(!is_str_friendly(&Type::WsConn {
+            recv: Box::new(Type::Str),
+            send: Box::new(Type::Str),
+        }));
+        assert!(!is_str_friendly(&Type::Function {
+            params: vec![],
+            ret: Box::new(Type::Null),
+        }));
+    }
+
+    #[test]
+    fn is_str_friendly_nullable_of_unfriendly_is_unfriendly() {
+        // `Result<T,E>?` is still not Str-friendly — the inner
+        // Result carries the rejection.
+        assert!(!is_str_friendly(&Type::Nullable(Box::new(Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Str)
+        }))));
     }
 }

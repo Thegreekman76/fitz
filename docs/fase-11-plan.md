@@ -201,7 +201,7 @@ Phase 11 promise.
 | **11.1** | POC parser: recognise the SFC shape, capture bodies as raw. Isolated `src/view/` module. **CLOSED 2026-07-14** — this doc + `src/view/` + 19 unit tests. | Card component test parses cleanly; classic pipeline untouched (Invariants 1-5 verified). |
 | **11.2** | Parse state defaults / event bodies / template interpolations as `crate::ast::Expr`/`Stmt`. Add `{#if}` / `{#for}` / `<slot>` to the template AST. Type-check every expression in `state` + `event` + `{...}` interpolations. | `fitz check my.fitzv` reports type errors for state field mismatches and template interpolation type errors, with source-accurate line/column pointing inside the `.fitzv` file. |
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
-| **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits: **(1)** state field defaults compatible with declared type — **CLOSED 2026-07-14** (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params. Template `{expr}` interpolations checked in the state env; must resolve to a `Str`-friendly type. **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component. | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) surface a type error at the correct field/blob. |
+| **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits: **(1)** state field defaults compatible with declared type — **CLOSED 2026-07-14** (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params. Template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret). **CLOSED 2026-07-14** (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component. | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) surface a type error at the correct field/blob. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. | Nested control flow inside `<template>` parses, expands, type-checks. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
@@ -324,13 +324,77 @@ Delta on `src/lib.rs`: one line, `pub mod view;`.
   extension — see §7).
 - Delta on `src/view/mod.rs`: two lines to export `check::*`.
 
-No other files touched by 11.1 / 11.2.a / 11.2.b mini-commit 1.
-Invariants 1-5 of `docs/stack.md` verified for each closure by
-running `cargo test --lib`, `cargo test --test cli_e2e --release`
-(101/101), `cargo test --test openapi_e2e --release` (3/3),
-`cargo fmt --all --check`, and `cargo clippy --lib --tests --bins
--- -D warnings` — all green (delta at 11.2.b mini-commit 1: +16
-`view::check::*` tests over 11.2.a's baseline of 3273 unit).
+## 9.c Files touched by 11.2.b mini-commit 2
+
+`src/view/check.rs` grew from ~325 LoC to ~640 LoC (23 new unit
+tests, total 39 in `view::check::tests`). No new files; no changes
+outside `src/view/`.
+
+**New shape of `check()`**:
+
+- Every state field default is still checked in isolation
+  (mini-commit 1 behaviour, preserved).
+- If any state field in a component errors, the component's
+  handler + interpolation checks are **skipped** (cascade
+  avoidance — see the file's doc-comment). This keeps the output
+  focused on the actual bug instead of piling up consequential
+  errors on every downstream reference.
+- Each event handler body is checked in a synth program built by
+  `build_env_program(component, Some(&handler.name), None)`. The
+  helper emits state fields as annotated `let`s and every OTHER
+  handler as an empty-body `async fn` (signatures only) so
+  handler-to-handler calls resolve. The handler being checked is
+  emitted with its full body.
+- Every template interpolation (text nodes AND HTML attribute
+  values) walks through `collect_interpolations` and gets its own
+  synth program via `build_env_program(component, None,
+  Some(<interp assign>))`. Every handler is a signature (empty
+  body); the interp expr is bound to a distinct `__view_interp_check_N`
+  local so `check_program` populates the returned `TypeInfo` for
+  the interp span. If `TypeInfo::type_at(interp.span())` returns
+  a `Type` that fails the `is_str_friendly` allow-list, the check
+  emits a dedicated CheckError citing the unfriendly type.
+
+**Additions to the public surface**:
+
+- No new pub API. `view::check` and `view::CheckError` re-export
+  paths from 9.b remain unchanged.
+
+**Design decisions worth naming**:
+
+- Handlers as signatures inside interpolation env: matches
+  Vue/React template scope. `{go}` where `go` is a handler
+  resolves to a Function value; the Str-friendly rule then
+  produces a clear error naming Function as unrenderable. If
+  handlers were absent, users would see "unknown variable `go`"
+  which is misleading — the handler IS declared, just not
+  displayable.
+- Emit body-less fn signatures for every non-focused handler
+  when checking a specific handler's body. Alternative
+  (pre-registering signatures into a `TypeEnv` and calling
+  `check_with_env`) is more surgical but the empty-body approach
+  is simpler and produces identical results. Empty bodies with
+  `-> Null` inference type-check cleanly.
+- The Str-friendly allow-list is intentionally generous
+  (accepts List/Map/Tuple/Nominal/Nullable-of-friendly-inner)
+  because the codegen will emit `format!("{}", value)` at the
+  interpolation site, and every listed type has an auto-Display
+  impl. The block-list (Function, Result, Future, WsConn,
+  DbConn/DbRow, QueryBuilder, Aggregated, Secret) captures the
+  cases where the display would be wrong or the type is
+  deliberately opaque (`Secret<T>` redacts).
+
+**Verification** (delta at 11.2.b mini-commit 2 over mini-commit
+1's baseline of 3273 unit + 39 `view::check`): `cargo test --lib`
+green (3312 total, 39 in `view::check::tests`), `cargo test --lib
+--features lsp` green (3448 total), `cargo test --test cli_e2e
+--release` (101/101), `cargo test --test openapi_e2e --release`
+(3/3), `cargo fmt --all --check`, `cargo clippy --lib --tests
+--bins -- -D warnings`. The `GUIDE_EXAMPLES_COMPILE` smoke
+(~290 ejemplos guía+curso+TaskHub, ~7 min) remains green — no
+regression outside `src/view/`.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits 1/2.
 
 ---
 
