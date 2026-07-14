@@ -356,6 +356,42 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
 
+# Fase 11.4.b — target client WASM del compilador `.fitzv`. Deps
+# OPCIONALES detrás de la feature `client-wasm`: el binario `fitz`
+# default NO linkea `wasm-bindgen` ni `web-sys` — el dep tree base
+# queda intocado, `cargo build` sigue idéntico bit-a-bit al de
+# v0.20.1. La feature se activa al buildear el módulo emitter WASM
+# de `src/view/codegen_wasm.rs` (11.4.b) o al invocar
+# `fitz build --target wasm` (Fase 11.5+).
+#
+# `wasm-bindgen` (0.2): puente Rust↔JS estándar del ecosistema.
+# El emitter produce código que usa `Closure::wrap` + `JsCast` para
+# atar handlers Fitz a eventos DOM.
+#
+# `web-sys` (0.3) con features "pay-only-for-what-you-use": solo
+# activamos las clases DOM que el emitter del subset del counter
+# realmente toca. 11.4.c / 11.5+ extienden la lista según lo
+# demande el template dialect.
+#
+# `console_error_panic_hook` (0.1): forwardea panics de Rust al
+# `console.error` del browser con un stack trace legible. Cuesta
+# ~2-3 KB gzipped pero salva horas de debug del DX; en 11.4.b/c
+# vive dentro del bundle. Post-POC podríamos gate-arlo por sub-
+# feature `client-wasm-dev` si aparece presión por bundle.
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlElement",
+    "HtmlHeadElement",
+    "Node",
+    "Text",
+    "Window",
+] }
+console_error_panic_hook = { version = "0.1", optional = true }
+
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el
@@ -372,6 +408,16 @@ python = ["dep:pyo3"]
 # bin `fitz-lsp` necesita esta feature por `required-features` (ver
 # arriba en `[[bin]]`).
 lsp = ["dep:tower-lsp"]
+
+# Fase 11.4.b — Activa las deps del emitter WASM del módulo
+# `src/view/codegen_wasm.rs`. Con esta feature, el módulo se
+# compila con `wasm-bindgen`, `web-sys` (features arriba) y
+# `console_error_panic_hook` disponibles para que el output emitido
+# compile contra ellas. Sin la feature, el módulo emitter sigue
+# existiendo (los tests de la string emitida corren siempre en
+# `cargo test --lib`) pero el `Cargo.toml` generado por el CLI de
+# 11.5 declara las deps solo cuando el target es `wasm`.
+client-wasm = ["dep:wasm-bindgen", "dep:web-sys", "dep:console_error_panic_hook"]
 
 [dev-dependencies]
 # Directorios temporales para tests del loader de módulos (3.5):

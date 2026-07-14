@@ -26,12 +26,14 @@
 
 pub mod ast;
 pub mod check;
+pub mod codegen_wasm;
 pub mod css_parser;
 pub mod expand;
 pub mod lexer;
 pub mod parser;
 
 pub use check::{check, CheckError};
+pub use codegen_wasm::{emit_component, emit_module, EmitError, EmitResult};
 pub use css_parser::{apply_scope, CssParseError};
 pub use expand::{
     expand, ExpandError, ExpandResult, ExpandedAttr, ExpandedComponent, ExpandedEventHandler,

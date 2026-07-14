@@ -212,7 +212,7 @@ Phase 11 promise.
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits, ALL **CLOSED 2026-07-14**: **11.3.a** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container`, keeps other at-rules opaque, handles strings + comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class) (see §9.j). **11.3.c** — wire scoping end-to-end in `expand`: new `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc }, Global { css, loc } }` replaces the raw-passthrough `Option<RawStyle>`; scope class synthesised via FNV-1a of `<component>::<css_raw>` truncated to 8 hex, shape `<component-kebab>-c-<8hex>`; `apply_scope(...)` runs on the CSS body; every Element with a static `class` attribute gets suffixed variants added (`class="card"` → `class="card card-<scope>"`) via a recursive walker that descends into If then/else branches + For bodies; interpolated `class` attributes left alone as a documented limitation. Global styles are pure passthrough — no CSS transform, no template rewrite. Includes 21 new unit tests + `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (see §9.k). **Closes 11.3 entire** — Phase 11.3 shipped end-to-end. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
-| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **11.4.c** — counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded. **11.4.d** — cierre formal + §9.m/n entries + roadmap refresh. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
+| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **CLOSED 2026-07-14** — `src/view/codegen_wasm.rs` (~1500 LoC + 23 unit tests) emits Rust source for one component (struct + `new()` + event fns + `mount()` + `render()` + scoped/global style helper) via `pub fn emit_component(&ExpandedComponent) -> EmitResult<String>` and a whole `.rs` module via `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`. Naive re-render on state mutation (D1), two-fn public API (D2), strictly conservative subset (D3 — Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/Slot/non-click/Str/Bool/Nominal/handler-params reject with `EmitError` citing 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml` gains opt-in feature `client-wasm` with `wasm-bindgen`/`web-sys`/`console_error_panic_hook`; `cargo build` default dep tree unchanged. Verification: 3510 lib tests green (3487 baseline + 23 new), fmt + clippy `-D warnings` clean in both default and `--features client-wasm` modes. See §9.m. Deuda derivada VISIBLE that gates 11.4.c: view lexer does NOT tokenise `+`/`-`/`*`/`/`/`%` — event bodies like `count = count + 1` fail at lex time before `capture_balanced_body_raw` runs. Must close in a mini-commit before the browser smoke of 11.4.c. **11.4.c** — pre-req view-lexer arithmetic gap fix + counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded against the 40 KB gate. **11.4.d** — cierre formal + roadmap refresh. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
 | **11.7** | LSP support inside `.fitzv` — hover over `{expr}` shows the type, autocomplete inside `state { }` and `event ...` bodies, template-attr completion knows about the declared event handlers of the enclosing component. | VSCode extension bumped with the new grammar + LSP config; typing `{sta` inside a template completes to `state field name` when the component has that field. |
@@ -1901,6 +1901,303 @@ No other files touched by 11.4.a. The next sub-commit (11.4.b)
 will add `src/view/codegen_wasm.rs`, the `client-wasm` feature
 plus deps in `Cargo.toml`, and the initial suite of emitter unit
 tests.
+
+## 9.m Files touched by 11.4.b — POC WASM emitter (`src/view/codegen_wasm.rs`)
+
+Second sub-commit of 11.4. Implements the decision recorded in
+§9.l: hand-rolled `wasm-bindgen` + `web-sys` emitter for `.fitzv`
+components, feature-gated behind opt-in `client-wasm`. Consumes an
+`ExpandedComponent` post-11.3.c pipeline (parse → expand →
+optional check) and produces Rust source code that, when built for
+`wasm32-unknown-unknown` with the `client-wasm` feature active,
+mounts the component into a DOM node.
+
+**Files touched**:
+
+- `src/view/codegen_wasm.rs` — **new module, ~1500 LoC + 23 unit
+  tests** in `view::codegen_wasm::tests`. See below for the
+  public API + subset covered + design decisions.
+- `src/view/mod.rs` — two lines: `pub mod codegen_wasm;` and
+  `pub use codegen_wasm::{emit_component, emit_module, EmitError,
+  EmitResult};`. External consumers (11.4.c smoke, 11.5 CLI) can
+  now call `view::emit_component(...)` directly.
+- `Cargo.toml` — +14 lines: three new `optional = true` deps
+  (`wasm-bindgen = "0.2"`, `web-sys = "0.3"` with features
+  `Document`/`Element`/`Event`/`EventTarget`/`HtmlElement`/
+  `HtmlHeadElement`/`Node`/`Text`/`Window`, and
+  `console_error_panic_hook = "0.1"`) plus the feature
+  declaration `client-wasm = ["dep:wasm-bindgen", "dep:web-sys",
+  "dep:console_error_panic_hook"]`. Zero effect on the default
+  `cargo build` — the dep tree base stays byte-for-byte identical
+  to v0.20.1.
+
+**Public API (D2 of 11.4.b)**:
+
+```rust
+pub struct EmitError { pub message: String, pub context: String }
+pub type EmitResult<T> = Result<T, EmitError>;
+
+/// Emit Rust source for ONE component (struct + impl + optional
+/// style helper). Does NOT emit `use` imports.
+pub fn emit_component(component: &ExpandedComponent) -> EmitResult<String>;
+
+/// Emit a full Rust module ready for `wasm-pack build`: preludio
+/// with imports + N components concatenated.
+pub fn emit_module(file: &ExpandedViewFile) -> EmitResult<String>;
+```
+
+Both mirror the posture of `view::css_parser::apply_scope`:
+stringly-typed input/output, pure functions, tests validate
+substrings of the emit.
+
+**What the emitter produces per component**:
+
+- `pub struct <Name> { <state fields wrapped in RefCell>...,
+  root: RefCell<Option<HtmlElement>> }`.
+- `impl <Name>` with:
+  - `pub fn new() -> Rc<Self>` — instantiates with the parsed
+    defaults from `ExpandedStateField.default`.
+  - One `fn <event>(self: &Rc<Self>)` per declared handler,
+    body lowered from the classic Fitz `Vec<Stmt>` and tail-
+    called by `self.render()` so any state mutation triggers a
+    re-render.
+  - `pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(),
+    JsValue>` — resolves the CSS selector, casts to
+    `HtmlElement`, injects the style helper (when the component
+    has one), and kicks off the first `render()`.
+  - `fn render(self: &Rc<Self>)` — clears the mount root's
+    children and rebuilds the DOM subtree from the expanded
+    template using the current state.
+- When the component has a `<style scoped>` or `<style global>`
+  block, a free `fn __inject_style_<Component>_<sanitized>()`
+  that appends a `<style>` element to `document.head` exactly
+  once (dedup via `AtomicBool` for scoped; scoped rules only
+  apply to the component thanks to 11.3.b/c already suffixing
+  the CSS selectors + template class attributes).
+
+**Scope of the POC (D3 of 11.4.b — strictly conservative)**:
+
+Cubre exactamente lo necesario para el counter demo de 11.4.c:
+
+- State fields: only `Int` primitives with `Expr::Int` literal
+  defaults (`state { count: Int = 0 }`).
+- Event handlers: sync, zero params, body = a single
+  `Stmt::Assign` whose target is a state field ident and whose
+  RHS is `Expr::Int` / `Expr::Ident` (referencing a state field)
+  / `Expr::BinOp` with arithmetic ops (Add/Sub/Mul/Div/Mod).
+- Template nodes: `Text`, `Element` (static tag), `Interpolation`
+  with an `Expr::Ident` referencing a state field, `Static`
+  attributes (`class="..."` etc), `Event` attributes with
+  `@click` mapped to the DOM `click` event.
+- Styles: `Scoped` (dedup helper) or `Global` (single-shot
+  injection). No style = no helper emitted.
+
+Rechazos explícitos con `EmitError` que cita la sub-fase donde se
+cierra:
+
+- `{#if cond}` / `{#for x in xs}` → "deferred to Phase 11.4.c".
+- `<slot />` → "deferred to Phase 11.5".
+- Interpolated attrs (`class="{expr}"`) → "deferred to 11.4.c"
+  (paired with the 11.3.c documented limitation of no scope-suffix
+  on dynamic classes).
+- `@input` / `@change` / `@submit` and any non-`@click` event →
+  "only `@click` supported in Phase 11.4.b (deferred to 11.4.c)".
+- State field type `Str` / `Bool` / `Float` / `List<...>` /
+  `Map<...,...>` / nominal / nullable → "deferred to Phase 11.4.c".
+- Handler with parameters or `async` → "deferred to Phase 11.5".
+- Non-arithmetic BinOps (comparisons, logical, bitwise) inside
+  an event body → "deferred to Phase 11.4.c".
+- `Stmt::Assign` where target is `AssignTarget::Field` /
+  `AssignTarget::Index`, or any Stmt kind other than `Assign` →
+  "deferred to Phase 11.4.c".
+
+Every rejection carries a `context` label that names the exact
+component + field / handler / element where the misuse lives.
+
+**Reactivity model (D1 of 11.4.b)**:
+
+Naive re-render on state mutation. Every emitted event handler
+tail-calls `self.render()`, which:
+
+1. Borrows the mount root, no-ops if not yet mounted.
+2. Removes every child of the root.
+3. Grabs `document` and rebuilds the entire template subtree
+   from scratch, reading state via `(*self.<field>.borrow())`.
+
+Ineffective for large / high-frequency updates (1000-item list
+refreshing at 60 fps would repaint N nodes per tick). Acceptable
+for the counter / forms / dashboards with occasional updates. The
+signals-based refinement (Solid/Leptos-style fine-grained
+reactivity) is queued as the A3 refactor from §9.l, gated by
+measured bloat when many components stack up in 11.6's kanban
+port.
+
+**Testing strategy (D4 of 11.4.b) — 23 unit tests**:
+
+All tests validate substrings of the emitted string (parallel
+bit-for-bit to `view::css_parser::tests`). Split roughly as:
+
+- 8 tests around the counter shape (struct decl, `new()` with
+  defaults, event handler signature + assign lowering + auto-
+  render call, mount signature + style helper call, render
+  clears + rebuilds, template element with scoped class attr,
+  interpolation via `format!` + state borrow, event attr wires
+  click via Closure + `add_event_listener_with_callback`).
+- 3 tests around the style helper (scoped with `AtomicBool`
+  dedup, global helper naming convention, no-style skips the
+  helper entirely).
+- 6 rejection tests (Str state field / `{#if}` / `{#for}` /
+  `<slot />` / `@input` / handler with params).
+- 2 arithmetic lowering tests built directly from AST nodes
+  because the view lexer does NOT yet tokenise `+`/`-` (see
+  Deuda residual below).
+- 1 test for `emit_module` covering the preamble + component
+  concat.
+- 3 helper tests (sanitize_ident, rust_string_literal, and
+  the emit_no_style negative case).
+
+Tests use `parse_expand(source)` (parse → expand pipeline) for
+shapes the view lexer accepts, and direct `ExpandedComponent`
+construction for the arithmetic subset that requires operators.
+
+**Design decisions worth naming**:
+
+- **`Closure::forget()` leaks the closure per-event-listener,
+  per-render**. Cada `render()` rebuilds N event listeners; each
+  one calls `.forget()` to keep the closure alive as long as the
+  DOM element exists. Since `render()` removes all children first,
+  the old element (and its click handler ref) becomes unreachable
+  and JS's GC eventually reclaims them — but the Rust closure
+  itself is `Box::leak`-ed via `forget()`, so the *Rust* side
+  never drops. For a counter clicked 10× per session this leaks
+  ~10 tiny closures; for a chat client that re-renders every
+  second, over an hour that's ~3600 leaked closures. Acceptable
+  for the POC; refinement lives in A3 (in-tree runtime crate
+  with pooled closures per event kind) or by storing closures on
+  the component struct and rebinding rather than re-creating.
+- **`AsRef<EventTarget>` via Deref chain**. The emitter calls
+  `element.add_event_listener_with_callback(...)` directly on
+  the `Element` — wasm-bindgen models JS inheritance via `Deref`
+  chains (`Element: Deref<Target = Node>`, `Node: Deref<Target =
+  EventTarget>`), so the `EventTarget` methods are inherited.
+  Simpler than explicit `.dyn_ref::<EventTarget>()` calls.
+- **Var counter allocation** (`__el0`, `__t1`, `__interp2`,
+  `__el3`, ...). The `RenderCtx` allocates unique names via a
+  single monotonic counter across ALL node kinds; this reads
+  slightly less prettily than per-kind counters (`__el0`, `__el1`,
+  `__t0`, `__interp0` would be nicer to read in the emit output),
+  but keeps the emitter code trivial. The test that asserted on
+  a specific `__interp0` had to be relaxed to just check for
+  `= format!("{}", (*self.count.borrow()));` (any var name).
+- **Whitespace-only text nodes skipped**. `emit_text` drops nodes
+  whose content is entirely whitespace — HTML collapses them
+  anyway, and skipping keeps the emit smaller. Real Text nodes
+  with content (e.g. `"reset"`, `"bump"`) still emit
+  `create_text_node` + `append_child` as normal.
+- **`rust_string_literal` uses `{:?}` formatting**. Produces a
+  valid Rust string literal with the necessary escapes (quotes,
+  backslashes, control chars). Good enough for the POC because
+  the strings coming through the emitter (CSS bodies, static
+  attr values, text nodes, tag names) are all authored by the
+  Fitz user in the `.fitzv` source — no runtime interpolation
+  from an untrusted source.
+- **`sanitize_ident` replaces `-` with `_`, drops the rest**.
+  The scope class from 11.3.c is `<component-kebab>-c-<8hex>`
+  which contains hyphens; hyphens are not legal in Rust idents.
+  Replace with underscore. Everything non-alphanumeric that
+  isn't `-` gets silently dropped (defensive; should not happen
+  in practice given the naming rules of 11.3.c).
+- **`emit_component_impl` leaves the `impl <Name> {` block
+  open** after emitting `new()`, and each subsequent helper
+  (`emit_event_handlers`, `emit_mount_and_render`) writes its
+  content into the same block, then `emit_mount_and_render`
+  closes it with `}`. This flat write-in-order style avoids
+  buffering + concatenation of separate strings; a small
+  invariant that emit code stays lean.
+- **Docs-only `#[cfg(test)]` cargo commands work in both
+  feature modes**. The tests never call `wasm_bindgen` or
+  `web_sys` types — they only inspect the emitted STRING. So
+  `cargo test --lib` (default features) exercises all 23 tests
+  without needing to link the WASM crates. `cargo build
+  --features client-wasm` compiles the emitter itself under the
+  same code path plus the WASM deps in scope, confirming the
+  string the emitter produces AT LEAST refers to pinned versions
+  of `wasm-bindgen`/`web-sys` that resolve in the crates.io
+  index. Real end-to-end (`wasm-pack build` + browser mount)
+  lives in 11.4.c.
+
+**Verification pre-close of 11.4.b**:
+
+- `cargo test --lib --release`: **3510 passed / 0 failed** in
+  3.25s (3487 baseline pre-11.4.b + 23 new
+  `view::codegen_wasm::tests::*`).
+- `cargo build`: clean, dep tree byte-identical to v0.20.1.
+- `cargo build --features client-wasm`: clean in 2m 40s cold
+  (first run downloads `wasm-bindgen` 0.2, `web-sys` 0.3,
+  `console_error_panic_hook` 0.1, `js-sys` 0.3 transitive).
+- `cargo fmt --all --check`: clean.
+- `cargo clippy --lib --tests -- -D warnings`: clean.
+- `cargo clippy --lib --tests --features client-wasm -- -D
+  warnings`: clean in 1m 42s.
+- Invariants 1-5 (`docs/stack.md`) all hold: the 3487 pre-
+  existing tests still green, boilerplates untouched, classic
+  `.fitz` parser surface unchanged, emitter isolated in
+  `src/view/`, verification suite unchanged.
+
+**Debt residual visible from 11.4.b**:
+
+- **View lexer arithmetic gap — BLOCKS 11.4.c browser smoke**.
+  The view lexer does NOT tokenise `+`/`-`/`*`/`/`/`%`. Any
+  `.fitzv` source with an arithmetic operator inside an event
+  body (`event increment() { count = count + 1 }`) errors at
+  lex time with "unexpected character `+` at the top level of
+  a component" — before the parser's `capture_balanced_body_raw`
+  ever runs. §7's balance-aware capture only handles bracket
+  pairs. Fix scope: extend the view lexer with `Token::Plus` /
+  `Token::Minus` / `Token::Star` / `Token::Slash` / `Token::Percent`
+  emitted as bare tokens that `capture_balanced_body_raw`
+  serialises verbatim. Should be ~40 LoC + a handful of tests.
+  Must land as a dedicated pre-req sub-commit before 11.4.c's
+  counter demo can `parse → expand → check → emit` end-to-end.
+- **Closure leak via `.forget()`**. Documented in Design
+  decisions above. Refinement path: A3 (in-tree runtime crate)
+  with pooled closures per event kind, or reuse-closures-on-
+  render by storing them on the component struct. Not urgent
+  for POC.
+- **Naive re-render is O(N) per state mutation**. Documented in
+  Reactivity model above. Refinement queued for A3.
+- **Var counter is shared across node kinds** (produces
+  `__el0`, `__t1`, `__interp2`, `__el3`, ...). Cosmetic — the
+  emit reads a bit less prettily than per-kind counters would.
+  Refinable if any user complains about generated code
+  readability.
+- **`emit_module` preludio hardcoded**. The `use` list at the
+  top of `emit_module`'s preludio (`RefCell`, `Rc`,
+  `AtomicBool`, `wasm_bindgen::prelude::*`, `JsCast`, `Event`,
+  `HtmlElement`) is a static string constant. If the emitter
+  ever produces code that references types outside this fixed
+  set (e.g. `MouseEvent` for the `@click` DOM event data,
+  `HtmlInputElement` for `@input` handlers on `<input>`), the
+  preludio needs to grow. 11.4.c will likely bump `web-sys`
+  features + preludio as it wires the first non-`click` event.
+- **No `#[wasm_bindgen(start)]` in `emit_module`**. The
+  preludio + component + style helpers land, but the browser
+  entry point (the fn that runs on page load, creates a
+  `Counter::new()`, and calls `.mount("#app")`) is expected to
+  be authored by the user in 11.4.c or emitted by the 11.5 CLI.
+  Keeping it out of `emit_module` avoids forcing an opinion
+  about how many components are mounted, in what order, into
+  what selectors.
+- **Cross-link to §9.l**. §9.l names the A3 (in-tree runtime
+  crate) refinement path but does not schedule it. 11.4.b's
+  measured emit output size (per-component redundancy) is the
+  first real data point — TBD after 11.4.c bundle size
+  measurement whether A3 is worth pulling forward.
+
+No other files touched by 11.4.b. The next sub-commit (11.4.c)
+must first close the view lexer arithmetic gap (dedicated pre-req
+mini-commit) before it can build the runnable counter demo end-
+to-end.
 
 ---
 
