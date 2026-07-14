@@ -203,7 +203,7 @@ Phase 11 promise.
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
-| **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits: **11.3.a CLOSED 2026-07-14** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). Mini-commits 11.3.b (CSS mini-parser + `apply_scope(...)` helper) and 11.3.c (wire scoping into expand + template class-attr rewrite) still open. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
+| **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits: **11.3.a CLOSED 2026-07-14** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b CLOSED 2026-07-14** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container` bodies, keeps `@keyframes`/`@font-face`/other at-rules opaque, handles strings + block comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class); still standalone — not wired into expand yet (see §9.j). Mini-commit 11.3.c (wire scoping into expand + template class-attr rewrite) still open. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
@@ -1219,6 +1219,228 @@ No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
 `docs/fase-11-plan.md` gets the row update in §6 (11.3 row now
 carries a "mini-commit 11.3.a CLOSED 2026-07-14" annotation) and
 this section.
+
+---
+
+## 9.j Files touched by 11.3.b — CSS mini-parser + `apply_scope(...)` helper
+
+Second of the three planned mini-commits inside 11.3. Adds the
+CSS mini-parser and the pure `apply_scope(css_raw, scope) ->
+Result<String, CssParseError>` function that 11.3.c will call to
+transform each component's `<style scoped>` body. Standalone — no
+wiring into `expand` yet, no changes to the raw or expanded AST,
+no changes to the shell / lexer / parser. The single new module
+lives at `src/view/css_parser.rs` and is exposed as
+`crate::view::apply_scope` + `crate::view::CssParseError` via
+`view::mod`'s `pub use`.
+
+**Files touched**:
+
+- `src/view/css_parser.rs` (new, ~900 LoC + 45 unit tests + 1
+  doctest). Contents: `pub fn apply_scope(css_raw: &str, scope:
+  &str) -> Result<String, CssParseError>` (the only public API);
+  `pub struct CssParseError { message, pos }` with `Display` +
+  `std::error::Error`; `struct CssParser<'a>` private with
+  char-by-char walk state; `enum AtRuleTerminator { Semicolon,
+  Brace, Eof }` internal; helpers `transform_selector_list`,
+  `transform_selector`, `capture_balanced_slice`,
+  `capture_string_slice`, `capture_comment_slice`,
+  `is_class_start`, `is_ident_cont`, `scan_ident_end`,
+  `at_rule_nests_selectors`.
+- `src/view/mod.rs` — one line adding `pub mod css_parser;` +
+  one line adding `pub use css_parser::{apply_scope,
+  CssParseError};`.
+
+**Scoping strategy chosen — class-suffix**:
+
+- Every class selector `.<ident>` in the CSS becomes
+  `.<ident>-<scope>`. Everything else — type selectors, IDs,
+  attribute selectors, pseudo-classes, pseudo-elements,
+  combinators, declarations, comments, strings — passes through
+  verbatim.
+- Rationale: this is the smallest possible transformation that
+  achieves per-component isolation for the common case of "target
+  elements by class". Vue-style attribute-selector scoping
+  (`.foo[data-c-XXXX]`) would need a more capable CSS parser (to
+  understand where each compound selector ends before pseudo-
+  classes / pseudo-elements) AND would mutate every element in
+  the template with a bespoke attribute. Class-suffix keeps both
+  the parser and the template rewrite dead simple.
+- Trade-off (documented instead of solved): type selectors
+  (`div`), IDs (`#foo`), and attribute selectors (`[data-x]`) are
+  NOT scoped. Users who want per-component styling opt in by
+  targeting classes — same posture as Svelte for the MVP. If
+  demand appears, we can layer on Vue-style attribute selectors
+  as a second strategy behind a flag on `<style scoped>` (e.g.
+  `<style scoped=deep>`) without breaking the class-suffix
+  default.
+
+**Parser design**:
+
+- Recursive-descent-ish, char-by-char (no regex, no crates).
+  `parse_stylesheet` loops over rules; `parse_rule` dispatches on
+  `@` vs other; `parse_qualified_rule` reads a selector prelude
+  into a scratch `String`, transforms it via
+  `transform_selector_list`, then copies the `{ ... }` body
+  verbatim while tracking brace depth + strings + comments.
+- `parse_at_rule` reads the at-rule name, copies the prelude
+  (media queries / feature queries / URLs / keyframe names never
+  need scoping), then dispatches on the name: `@media`,
+  `@supports`, `@container` recurse into a nested stylesheet;
+  every other at-rule (`@keyframes`, `@font-face`, `@page`,
+  `@charset`, `@import`, `@namespace`) treats its body as opaque
+  and copies verbatim.
+- Selector transformer walks char-by-char. `.` followed by an
+  ident-start char captures the ident and emits
+  `.<ident>-<scope>`. `[...]` and strings and comments are
+  skipped (copied verbatim without transformation). Parens are
+  NOT skipped — selector-arg pseudos like `:not(.foo)` /
+  `:is(.a, .b)` / `:has(.c)` want their inner class tokens
+  scoped, and the naive walk handles them correctly by
+  transparently transforming `.<ident>` regardless of whether
+  we're inside parens. Non-selector-arg pseudos
+  (`:nth-child(2n+1)`, `:lang(en)`) don't have `.` inside, so the
+  walk doesn't touch them.
+- `,` at the top level of a selector list splits the list;
+  each selector is transformed independently and rejoined with
+  `,`. Commas inside `(...)`, `[...]`, strings, and comments are
+  respected via `capture_balanced_slice` / `capture_string_slice`
+  / `capture_comment_slice` scratch helpers that track their own
+  bounds.
+
+**45 unit tests + 1 doctest** cover: empty input; whitespace only;
+single class selector; compound class selectors (`.a.b`); class
+names with hyphens and underscores and digits; multiple rules;
+comma-separated selectors; each combinator (descendant, child,
+adjacent sibling, general sibling); pseudo-class after class;
+pseudo-element after class; `:not(.foo)` scoping the inner;
+`:nth-child(2n+1)` passing through; `:is(.a, .b)` scoping each
+inner independently; type selector NOT scoped; ID selector NOT
+scoped; attribute selector body NOT transformed
+(`[data-x="a.b"]`); class after attribute; declaration body
+copied verbatim (`.x { content: ".foo"; ... }`); `url(foo.png)`
+without quotes passing through in the declaration body; `@media`
+recursing; `@supports` recursing; nested `@media` recursing all
+the way; `@keyframes` opaque; `@font-face` opaque; `@import`
+terminated by `;`; block comment before a rule preserved; block
+comment inside a selector preserved; block comment inside a
+declaration body preserved; unterminated rule body errors;
+unterminated string in declaration errors; unterminated block
+comment errors; unterminated media body errors; universal
+selector passes through; descendant of type + class scopes only
+the class; compound type + class scopes only the class; class
+after ID gets scoped; multi-line rule preserves whitespace; dot
+without ident-start preserved (`padding: .5em`); scope string
+used verbatim.
+
+**Design decisions worth naming**:
+
+- **Pure standalone function, not a struct-based visitor**.
+  The `apply_scope` entry point takes an `&str` and returns an
+  owned `String`. No state escapes the call. Rationale: keeps
+  the API surface minimal, makes it testable in complete
+  isolation without setting up a `Component`, and lets 11.3.c
+  wire it into `expand` however it wants (probably by calling
+  `apply_scope(&component.style.css_raw, &scope_class)` and
+  storing the result on the new `ExpandedStyle` variant).
+- **Char-by-char, no regex, no crates**. Same posture as the HTML
+  sub-parser in `view::parser`. CSS is small enough at this
+  scope to hand-write, and the char-by-char walk gives precise
+  error positions and predictable perf without dep bloat. If we
+  ever need `:global(...)` handling or complex selector rewrites
+  (Vue-style attribute selectors), we can either extend this
+  parser or reach for `cssparser` (~40 KB, Servo project) as a
+  targeted upgrade.
+- **`@keyframes` treated as opaque**. Keyframe steps (`0%`,
+  `100%`, `from`, `to`) look nothing like selectors and don't
+  need scoping — a keyframe animation is a named entity that a
+  component references by name, and the animation targets
+  whatever element the CSS class was applied to. Recursing into
+  the body would either mis-scope the steps as if they were
+  class selectors (they're not) or need special-case handling
+  for percentage tokens. Opaque is honest and correct.
+- **Selector-arg pseudos handled by not special-casing parens**.
+  The naive walk transforms `.<ident>` regardless of whether
+  we're inside parens. For `:not(.foo)` / `:is(.a, .b)` /
+  `:has(.c)` this is exactly the right behaviour — the inner
+  classes should be scoped as part of the component's isolation.
+  Non-selector-arg pseudos happen to not contain `.` so the walk
+  leaves them alone. The corner case of `:nth-child(.foo)` (an
+  invalid CSS construct we'd nonetheless transform) is
+  acceptable — the CSS was broken before we touched it.
+- **At-rule prelude captured with balanced brackets + strings**.
+  `@media (min-width: 800px)`, `@supports (display: grid)`,
+  `@container (min-width: 400px)`, `@import url("foo.css")`,
+  `@charset "utf-8"` all need their parens / strings respected
+  while scanning for the terminating `;` or `{`. The
+  `copy_at_rule_prelude` helper handles this by delegating to
+  `copy_balanced_body` and `copy_string_body`, which also handle
+  nested comments.
+- **`is_class_start` refuses digits and other punctuation**. A
+  `.` followed by a digit (`.5em` inside a declaration, or
+  `.5` at the start of a selector — the latter is invalid CSS)
+  does NOT trigger class transformation. This keeps `padding:
+  .5em` in a declaration body from producing `padding:
+  .5em-<scope>` mid-value. (Declaration bodies are copied
+  verbatim anyway, but the selector transformer applies the same
+  rule for consistency.)
+
+**Verification** (delta at 11.3.b over 11.3.a's baseline of 3421
+unit + 3557 with `--features lsp`): `cargo test --lib` green
+(3466 total, +45 new in `view::css_parser::tests`), `cargo test
+--lib --features lsp` green (3602 total, same +45 mirrored),
+`cargo test --doc view::` green (1 new doctest for the
+`apply_scope` example), `cargo fmt --all --check` clean, `cargo
+clippy --lib --tests --bins -- -D warnings` clean, `cargo clippy
+--lib --tests --bins --features lsp -- -D warnings` clean. Full
+`cargo test` suite recommended before tagging a release that
+includes this change; deferred here since 11.3.b is internal to
+`src/view/css_parser.rs` with no user-facing surface (still no
+wiring into the `.fitzv` compilation entry point until 11.3.c +
+11.5).
+
+**Deuda residual** (does NOT block 11.3.c):
+
+- **`:global(...)` escape hatch**. A user with a scoped block
+  who wants one rule to leak outside (targeting descendants of a
+  slotted element, cross-component theming, etc.) has no way
+  today. Vue and Svelte both let a scoped block target beyond
+  its component via `:global(...)`. Refinable in a follow-up:
+  the walker learns "if we're inside `:global(...)`, skip the
+  `.<ident>` transformation AND drop the `:global(...)` wrapper
+  from the output". Small change to the selector transformer,
+  no ripple to expand or the template rewrite.
+- **Vue-style attribute-selector scoping as an alternative**. The
+  class-suffix strategy trades type-selector scoping for
+  simplicity. A future `<style scoped=deep>` opt-in could invoke
+  a different transformer that adds `[data-c-XXXX]` to each
+  compound. The `StyleKind` enum from 11.3.a would grow a third
+  variant (or `Scoped` would gain a strategy field). Refinable
+  behind demand.
+- **CSS Modules-style class rewriting**. Distinct from scoping —
+  the user writes `.card` and the compiler emits a fully
+  synthetic class name (`_XXXX_card`) that the template
+  references via a compile-time-generated JS object. Not in
+  Fitz's scope today; the interop path with existing CSS
+  Modules workflows would need its own design.
+- **Precise position mapping of transforms back into the
+  `.fitzv` source**. The `CssParseError.pos` is a char offset
+  into the CSS blob, not a `Loc` in the `.fitzv` file. 11.3.c
+  will map the base offset when wiring into `expand`. Full
+  per-transform tracking (e.g. "the `.card` at line 5 col 10
+  became `.card-c-XXXX`") stays deferred — no consumer needs
+  it yet.
+- **`@layer` at-rules recurse or opaque?** The MVP treats
+  `@layer` as opaque (not in the recurse allowlist). If a user
+  wraps their scoped rules inside `@layer components { ... }`,
+  the inner rules will NOT be scoped. Refinable by adding
+  `"layer"` to `at_rule_nests_selectors` if demand appears.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
+1/2/3 or the §7 follow-up or 11.2.c mini-commits 1/2/3 or
+11.3.a. `docs/fase-11-plan.md` gets the row update in §6 (11.3
+row carries "mini-commit 11.3.b CLOSED 2026-07-14" annotation)
+and this section.
 
 ---
 
