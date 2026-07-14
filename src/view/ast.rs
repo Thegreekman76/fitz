@@ -80,10 +80,14 @@ pub struct Template {
 ///   - `Interpolation` — `{expr}` — captured as raw source text.
 ///   - `Element` — `<tag attr="v" @click="ev">children</tag>` and
 ///     the self-closing variant `<tag/>`.
-///   - `If` — `{#if cond}...{/if}` — since 11.2.c mini-commit 1.
-///     The `cond` is captured raw and re-parsed as a classic Fitz
-///     `Expr` in `expand`; the `children` are the nodes between
-///     opener and closer, allowing arbitrary nesting.
+///   - `If` — `{#if cond}...{/if}` or `{#if cond}...{#else}...{/if}`
+///     since 11.2.c (mini-commit 1 added the base form, mini-commit
+///     3 added the `{#else}` branch). The `cond` is captured raw and
+///     re-parsed as a classic Fitz `Expr` in `expand`; the
+///     `children` are the then-branch nodes and `else_children` is
+///     `Some(...)` when the block has an `{#else}` branch, `None`
+///     for plain `{#if}...{/if}`. Nested if bodies work
+///     independently (each `{#if}` scopes its own `{#else}`).
 ///   - `For` — `{#for x in xs}...{/for}` — since 11.2.c mini-commit 2.
 ///     The binding `var` is a bare identifier; `iter_raw` is the raw
 ///     source text of the iter expression, re-parsed as a classic
@@ -91,13 +95,22 @@ pub struct Template {
 ///     the classic `Stmt::For` checker via synth-and-delegate.
 ///     Compound patterns (`(k, v)` for Map) and index bindings
 ///     (`(x, i)`) are deferred to later mini-commits.
+///   - `Slot` — `<slot />` or `<slot name="X" />` — since 11.2.c
+///     mini-commit 3. Opaque parent/child composition marker;
+///     `name` is `None` for the default slot, `Some("X")` for a
+///     named slot. Only the self-closing form is accepted today
+///     (fallback children `<slot>...</slot>` and cross-checking
+///     the slot set against the child component's declared slots
+///     land in Phase 11.5 when composition wires up).
 ///
-/// Deferred to 11.2.c mini-commit 3:
-///   - `{#if cond} ... {#else} ... {/if}` — `#else` branch
-///   - `<slot name="X" />` for component composition
+/// Deferred to later mini-commits (not blocking 11.2.c):
+///   - `<slot>...</slot>` with fallback children.
+///   - `{#elseif cond}` chains (Fitz stays at just `{#if}` /
+///     `{#else}` — the `elseif` shorthand is refinable if demand
+///     appears).
 ///
 /// Not planned for 11.2:
-///   - HTML doctype, XML processing instructions, CDATA
+///   - HTML doctype, XML processing instructions, CDATA.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TemplateNode {
     Text(String),
@@ -113,13 +126,17 @@ pub enum TemplateNode {
         self_closing: bool,
         loc: Loc,
     },
-    /// `{#if cond_raw} ... {/if}` — conditional inclusion of the
-    /// nested `children`. `cond_raw` is the raw source text between
-    /// `{#if ` and the matching `}` (trimmed). The `#else` branch is
-    /// deferred to 11.2.c mini-commit 3.
+    /// `{#if cond_raw} ... {/if}` — conditional inclusion. `cond_raw`
+    /// is the raw source text between `{#if ` and the matching `}`
+    /// (trimmed). `children` are the then-branch nodes;
+    /// `else_children` is `Some(...)` when the block has an
+    /// `{#else}` branch and `None` otherwise. Only one `{#else}` per
+    /// `{#if}` is allowed; nested if bodies scope their own
+    /// `{#else}` independently.
     If {
         cond_raw: String,
         children: Vec<TemplateNode>,
+        else_children: Option<Vec<TemplateNode>>,
         loc: Loc,
     },
     /// `{#for var in iter_raw} ... {/for}` — iterate over an iterable
@@ -132,6 +149,18 @@ pub enum TemplateNode {
         var: String,
         iter_raw: String,
         children: Vec<TemplateNode>,
+        loc: Loc,
+    },
+    /// `<slot />` (default) or `<slot name="X" />` (named) —
+    /// parent/child composition marker. Only self-closing today;
+    /// fallback children (`<slot>...</slot>`) are rejected with a
+    /// clear message. `name` is `None` for the default slot,
+    /// `Some("X")` for a named slot. This is an opaque marker in
+    /// the tree — the composition wiring (cross-checking parent
+    /// slots against child components' declared slots) lands in
+    /// Phase 11.5.
+    Slot {
+        name: Option<String>,
         loc: Loc,
     },
 }

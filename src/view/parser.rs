@@ -473,7 +473,7 @@ pub fn parse_template_body(
     base_col: usize,
 ) -> ViewParseResult<Vec<TemplateNode>> {
     let mut p = HtmlParser::new(raw, base_line, base_col);
-    let roots = p.parse_nodes(None, None)?;
+    let (roots, _terminated_by_else) = p.parse_nodes(None, None, false)?;
     Ok(roots)
 }
 
@@ -519,17 +519,26 @@ impl<'a> HtmlParser<'a> {
     /// Parse child nodes until:
     ///   - `</tag>` is found (when `parent` is `Some`), or
     ///   - `{/name}` is found (when `directive_parent` is `Some`), or
+    ///   - `{#else}` is found (when `accept_else` is true — the caller
+    ///     must be the then-body of an `{#if}` and knows to parse the
+    ///     else branch next), or
     ///   - the blob ends (when both are `None`).
     ///
     /// The two parents are independent: a template can nest an
     /// `{#if}` inside an element, or an element inside an `{#if}`,
     /// and the parser walks them uniformly. Recursion follows the
     /// same shape.
+    ///
+    /// The returned bool is `true` iff `parse_nodes` terminated by
+    /// encountering `{#else}` (only possible when `accept_else` was
+    /// `true`); `false` for every other termination reason. Callers
+    /// that don't accept `{#else}` can discard the bool safely.
     fn parse_nodes(
         &mut self,
         parent: Option<&str>,
         directive_parent: Option<&str>,
-    ) -> ViewParseResult<Vec<TemplateNode>> {
+        accept_else: bool,
+    ) -> ViewParseResult<(Vec<TemplateNode>, bool)> {
         let mut nodes = Vec::new();
         loop {
             if self.peek().is_none() {
@@ -547,7 +556,7 @@ impl<'a> HtmlParser<'a> {
                         column: self.column,
                     });
                 }
-                return Ok(nodes);
+                return Ok((nodes, false));
             }
 
             // Closing tag for parent? `</tag>`
@@ -575,7 +584,7 @@ impl<'a> HtmlParser<'a> {
                             column: self.column,
                         });
                     }
-                    return Ok(nodes);
+                    return Ok((nodes, false));
                 }
             }
 
@@ -598,7 +607,7 @@ impl<'a> HtmlParser<'a> {
                 }
                 self.advance();
                 match directive_parent {
-                    Some(expected) if expected == name => return Ok(nodes),
+                    Some(expected) if expected == name => return Ok((nodes, false)),
                     Some(expected) => {
                         return Err(ViewParseError {
                             message: format!(
@@ -626,8 +635,19 @@ impl<'a> HtmlParser<'a> {
                     nodes.push(el);
                 }
                 Some('{') if self.peek_at(1) == Some('#') => {
-                    // Directive opener: `{#if ...}`, `{#for ...}`
-                    // (future). Currently only `#if` is supported.
+                    // Directive opener: `{#if ...}`, `{#for ...}`, or
+                    // — when we're inside an if body and accepting
+                    // `{#else}` — the `{#else}` terminator itself.
+                    // Peek the directive name without consuming so we
+                    // can distinguish the terminator case.
+                    if accept_else {
+                        if let Some(peeked) = self.peek_directive_name() {
+                            if peeked == "else" {
+                                self.consume_else_marker()?;
+                                return Ok((nodes, true));
+                            }
+                        }
+                    }
                     let node = self.parse_directive_open()?;
                     nodes.push(node);
                 }
@@ -646,11 +666,61 @@ impl<'a> HtmlParser<'a> {
         }
     }
 
+    /// Peek the directive name that would follow a `{#` sequence
+    /// currently under the cursor, WITHOUT consuming any characters.
+    /// Returns `None` if the following identifier is empty. Used to
+    /// distinguish `{#else}` (an if-body terminator when
+    /// `accept_else` is true) from a regular directive opener.
+    fn peek_directive_name(&self) -> Option<String> {
+        debug_assert_eq!(self.peek(), Some('{'));
+        debug_assert_eq!(self.peek_at(1), Some('#'));
+        let mut i = self.pos + 2;
+        let mut s = String::new();
+        while let Some(&c) = self.chars.get(i) {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                s.push(c);
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    /// Consume the `{#else}` marker under the cursor. Called only
+    /// after `peek_directive_name` confirmed the directive name is
+    /// `"else"`. Emits a clear error if the closing `}` is missing.
+    fn consume_else_marker(&mut self) -> ViewParseResult<()> {
+        self.advance(); // `{`
+        self.advance(); // `#`
+        let name = self.read_directive_name();
+        debug_assert_eq!(name, "else");
+        self.skip_ws_inline();
+        if self.peek() != Some('}') {
+            return Err(ViewParseError {
+                message: "expected `}` closing `{#else}`".into(),
+                line: self.line,
+                column: self.column,
+            });
+        }
+        self.advance();
+        Ok(())
+    }
+
     /// Parse a directive opener like `{#if cond}` or `{#for x in
     /// xs}`. Recurses through `parse_nodes` with the matching
     /// `directive_parent` to collect children up to `{/if}` or
-    /// `{/for}`. `<slot>` and `{#else}` are deferred to 11.2.c
-    /// mini-commit 3.
+    /// `{/for}`. `{#else}` is not dispatched here: when a valid
+    /// `{#else}` appears inside an `{#if}` body, `parse_nodes`
+    /// intercepts it as a terminator BEFORE reaching this fn;
+    /// hitting `{#else}` inside `parse_directive_open` therefore
+    /// means either a stray `{#else}` outside any if or a double
+    /// `{#else}` inside an else branch — both are errors reported
+    /// with a targeted message.
     fn parse_directive_open(&mut self) -> ViewParseResult<TemplateNode> {
         let start_line = self.line;
         let start_col = self.column;
@@ -667,9 +737,14 @@ impl<'a> HtmlParser<'a> {
         match name.as_str() {
             "if" => self.parse_if_directive(start_line, start_col),
             "for" => self.parse_for_directive(start_line, start_col),
+            "else" => Err(ViewParseError {
+                message: "unexpected `{#else}` — must appear inside an `{#if}` body, and only one `{#else}` per `{#if}` is allowed".into(),
+                line: start_line,
+                column: start_col,
+            }),
             other => Err(ViewParseError {
                 message: format!(
-                    "unknown template directive `{{#{other}}}` — the POC supports `{{#if}}` and `{{#for}}` only; `{{#else}}` and `<slot>` land in 11.2.c mini-commit 3"
+                    "unknown template directive `{{#{other}}}` — the template supports `{{#if}}`, `{{#for}}` and `{{#else}}` (inside an `{{#if}}`)"
                 ),
                 line: start_line,
                 column: start_col,
@@ -677,8 +752,13 @@ impl<'a> HtmlParser<'a> {
         }
     }
 
-    /// Parse an `{#if cond} ... {/if}` block. Called after
-    /// `parse_directive_open` has consumed `{#if`.
+    /// Parse an `{#if cond} ... {/if}` or `{#if cond} ... {#else}
+    /// ... {/if}` block. Called after `parse_directive_open` has
+    /// consumed `{#if`. The then branch parses with
+    /// `accept_else = true`, so `{#else}` in that scope terminates
+    /// the branch; if hit, the else branch parses next with
+    /// `accept_else = false`, which turns any second `{#else}` into
+    /// a targeted error via `parse_directive_open`'s "else" arm.
     fn parse_if_directive(
         &mut self,
         start_line: usize,
@@ -690,11 +770,21 @@ impl<'a> HtmlParser<'a> {
         // don't stop at the wrong brace.
         self.skip_ws_inline();
         let cond_raw = self.capture_directive_arg_raw(start_line, start_col)?;
-        // Recurse for the body up to `{/if}`.
-        let children = self.parse_nodes(None, Some("if"))?;
+        // Recurse for the then-body up to `{/if}` or `{#else}`.
+        let (children, saw_else) = self.parse_nodes(None, Some("if"), true)?;
+        let else_children = if saw_else {
+            // Parse the else branch, up to `{/if}`. `accept_else =
+            // false` here rejects a second `{#else}` cleanly at
+            // `parse_directive_open`'s "else" arm.
+            let (else_kids, _) = self.parse_nodes(None, Some("if"), false)?;
+            Some(else_kids)
+        } else {
+            None
+        };
         Ok(TemplateNode::If {
             cond_raw: cond_raw.trim().to_string(),
             children,
+            else_children,
             loc: Loc::new(start_line, start_col),
         })
     }
@@ -748,7 +838,7 @@ impl<'a> HtmlParser<'a> {
                 column: start_col,
             });
         }
-        let children = self.parse_nodes(None, Some("for"))?;
+        let (children, _) = self.parse_nodes(None, Some("for"), false)?;
         Ok(TemplateNode::For {
             var,
             iter_raw: iter_trimmed.to_string(),
@@ -915,6 +1005,14 @@ impl<'a> HtmlParser<'a> {
                         });
                     }
                     self.advance();
+                    // `<slot ... />` is a distinct AST node (opaque
+                    // parent/child composition marker) — the only
+                    // attribute we accept is `name="X"`, no events,
+                    // no interpolations. Reject anything else with a
+                    // targeted message that points at 11.5.
+                    if tag == "slot" {
+                        return build_slot(attrs, start_line, start_col);
+                    }
                     return Ok(TemplateNode::Element {
                         tag,
                         attrs,
@@ -925,7 +1023,18 @@ impl<'a> HtmlParser<'a> {
                 }
                 Some('>') => {
                     self.advance();
-                    let children = self.parse_nodes(Some(&tag), None)?;
+                    // `<slot>...</slot>` (with fallback children) is
+                    // deferred — today `<slot>` must be self-closing.
+                    // Emit a clear message so the user doesn't try to
+                    // debug a mismatched-tag error further down.
+                    if tag == "slot" {
+                        return Err(ViewParseError {
+                            message: "`<slot>...</slot>` with fallback children is not supported yet — use `<slot />` or `<slot name=\"X\" />`. Fallback children land alongside 11.5 (composition wiring)".into(),
+                            line: start_line,
+                            column: start_col,
+                        });
+                    }
+                    let (children, _) = self.parse_nodes(Some(&tag), None, false)?;
                     return Ok(TemplateNode::Element {
                         tag,
                         attrs,
@@ -1084,6 +1193,68 @@ impl<'a> HtmlParser<'a> {
         }
         s
     }
+}
+
+/// Convert the attribute list captured for a self-closing `<slot />`
+/// element into a `TemplateNode::Slot`. Accepts at most one `name`
+/// attribute (`Static`), rejects everything else with a targeted
+/// message that points at 11.5 (composition wiring) as the sub-phase
+/// that will add richer slot APIs.
+fn build_slot(attrs: Vec<Attr>, line: usize, column: usize) -> ViewParseResult<TemplateNode> {
+    let mut name: Option<String> = None;
+    for attr in attrs {
+        match attr {
+            Attr::Static {
+                name: attr_name,
+                value,
+                ..
+            } if attr_name == "name" => {
+                if name.is_some() {
+                    return Err(ViewParseError {
+                        message: "`<slot>` accepts a single `name` attribute at most; duplicates are not allowed".into(),
+                        line,
+                        column,
+                    });
+                }
+                name = Some(value);
+            }
+            Attr::Static {
+                name: attr_name, ..
+            } => {
+                return Err(ViewParseError {
+                    message: format!(
+                        "`<slot>` accepts only the `name` attribute; got `{attr_name}` (11.5 will add richer slot APIs — props, defaults, scoped bindings)"
+                    ),
+                    line,
+                    column,
+                });
+            }
+            Attr::Interpolation {
+                name: attr_name, ..
+            } => {
+                return Err(ViewParseError {
+                    message: format!(
+                        "`<slot>` does not accept interpolated attributes — `{attr_name}` must be a plain string literal"
+                    ),
+                    line,
+                    column,
+                });
+            }
+            Attr::Event { event_name, .. } => {
+                return Err(ViewParseError {
+                    message: format!(
+                        "`<slot>` does not accept event bindings; `@{event_name}` is not allowed"
+                    ),
+                    line,
+                    column,
+                });
+            }
+        }
+    }
+    Ok(TemplateNode::Slot {
+        name,
+        loc: Loc::new(line, column),
+    })
 }
 
 /// Returns the inside of `"{...}"` when the value is 100%
@@ -1787,5 +1958,318 @@ mod tests {
             }
             other => panic!("expected For, got {other:?}"),
         }
+    }
+
+    // ---- 11.2.c mini-commit 3: `<slot />` + `{#else}` ----------------
+
+    #[test]
+    fn template_slot_self_closing_without_name_is_default_slot() {
+        // `<slot />` — the default (unnamed) slot.
+        let src = r#"component X {
+  <template><slot /></template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        let roots = &file.components[0].template.as_ref().unwrap().roots;
+        assert_eq!(roots.len(), 1);
+        match &roots[0] {
+            TemplateNode::Slot { name, .. } => assert!(name.is_none()),
+            other => panic!("expected Slot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_slot_self_closing_with_name_captures_the_slot_name() {
+        // `<slot name="header" />` — a named slot.
+        let src = r#"component X {
+  <template><slot name="header" /></template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::Slot { name, .. } => {
+                assert_eq!(name.as_deref(), Some("header"));
+            }
+            other => panic!("expected Slot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_slot_nested_inside_element_is_a_regular_child() {
+        // `<div><slot /></div>` — the `<div>` sees the Slot as its
+        // sole child, like any other node type.
+        let src = r#"component X {
+  <template><div><slot name="body" /></div></template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::Element { tag, children, .. } => {
+                assert_eq!(tag, "div");
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    TemplateNode::Slot { name, .. } => {
+                        assert_eq!(name.as_deref(), Some("body"));
+                    }
+                    other => panic!("expected Slot child, got {other:?}"),
+                }
+            }
+            other => panic!("expected <div>, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_slot_open_close_form_is_rejected_with_a_clear_message() {
+        // `<slot></slot>` — fallback-children form is not supported
+        // yet; the error must point at 11.5 (composition wiring).
+        let src = r#"component X {
+  <template><slot></slot></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("<slot>") && err.message.contains("fallback children"),
+            "unexpected error message: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("11.5") || err.message.contains("composition"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_slot_extra_static_attribute_is_rejected() {
+        // Any attribute other than `name` on `<slot />` is rejected.
+        let src = r#"component X {
+  <template><slot foo="bar" /></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("`name`") && err.message.contains("foo"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_slot_event_attribute_is_rejected() {
+        // `@click` (or any event binding) is meaningless on `<slot>`.
+        let src = r#"component X {
+  <template><slot @click="handle" /></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("event bindings")
+                && (err.message.contains("click") || err.message.contains("@click")),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_slot_interpolated_name_attribute_is_rejected() {
+        // `name="{dynamic}"` — MVP requires a static string literal
+        // for the slot name (11.5 may relax when demand appears).
+        let src = r#"component X {
+  <template><slot name="{header}" /></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("interpolated attributes") || err.message.contains("plain string"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_slot_duplicate_name_attribute_is_rejected() {
+        // `<slot name="a" name="b" />` — the HTML sub-parser accepts
+        // repeated attribute names generically; `<slot>` explicitly
+        // rejects duplicates on the `name` attr.
+        let src = r#"component X {
+  <template><slot name="a" name="b" /></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("duplicates") || err.message.contains("single `name`"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_if_else_captures_then_and_else_children() {
+        // `{#if a}<div>x</div>{#else}<span>y</span>{/if}` — the If
+        // node carries both `children` (then branch) and
+        // `else_children` (Some, one <span>).
+        let src = r#"component X {
+  <template>{#if a}<div>x</div>{#else}<span>y</span>{/if}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::If {
+                cond_raw,
+                children,
+                else_children,
+                ..
+            } => {
+                assert_eq!(cond_raw, "a");
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    TemplateNode::Element { tag, .. } => assert_eq!(tag, "div"),
+                    other => panic!("expected <div> in then, got {other:?}"),
+                }
+                let else_kids = else_children.as_ref().expect("else branch present");
+                assert_eq!(else_kids.len(), 1);
+                match &else_kids[0] {
+                    TemplateNode::Element { tag, .. } => assert_eq!(tag, "span"),
+                    other => panic!("expected <span> in else, got {other:?}"),
+                }
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_if_without_else_preserves_none_else_children() {
+        // Regression: the old shape `{#if x}<div/>{/if}` still parses
+        // and produces `else_children = None`.
+        let src = r#"component X {
+  <template>{#if x}<div/>{/if}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::If { else_children, .. } => {
+                assert!(else_children.is_none());
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_if_else_with_empty_else_body_is_legal() {
+        // `{#if x}<a/>{#else}{/if}` — an else branch with no
+        // children. Legal; `else_children = Some(vec![])`.
+        let src = r#"component X {
+  <template>{#if x}<a/>{#else}{/if}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::If { else_children, .. } => match else_children {
+                Some(v) => assert!(v.is_empty()),
+                None => panic!("expected Some(vec![]), got None"),
+            },
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_if_else_nested_each_if_scopes_its_own_else() {
+        // Two nested ifs each with their own else. Outer's else
+        // branch must not be captured by the inner's else, and vice
+        // versa.
+        let src = r#"component X {
+  <template>{#if a}{#if b}p{#else}q{/if}{#else}r{/if}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::If {
+                cond_raw: outer_cond,
+                children: outer_children,
+                else_children: outer_else,
+                ..
+            } => {
+                assert_eq!(outer_cond, "a");
+                // Outer then: contains the inner If.
+                assert_eq!(outer_children.len(), 1);
+                match &outer_children[0] {
+                    TemplateNode::If {
+                        cond_raw: inner_cond,
+                        children: inner_then,
+                        else_children: inner_else,
+                        ..
+                    } => {
+                        assert_eq!(inner_cond, "b");
+                        // Inner then: text "p"
+                        match &inner_then[0] {
+                            TemplateNode::Text(t) => assert!(t.contains("p")),
+                            other => panic!("expected Text 'p', got {other:?}"),
+                        }
+                        // Inner else: text "q"
+                        let inner_else = inner_else.as_ref().expect("inner else present");
+                        match &inner_else[0] {
+                            TemplateNode::Text(t) => assert!(t.contains("q")),
+                            other => panic!("expected Text 'q', got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected inner If, got {other:?}"),
+                }
+                // Outer else: text "r".
+                let outer_else = outer_else.as_ref().expect("outer else present");
+                match &outer_else[0] {
+                    TemplateNode::Text(t) => assert!(t.contains("r")),
+                    other => panic!("expected Text 'r', got {other:?}"),
+                }
+            }
+            other => panic!("expected outer If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_if_else_double_else_is_rejected() {
+        // Two `{#else}`s inside one `{#if}` — the second one lands
+        // during the else-branch parse (accept_else = false), so
+        // `parse_directive_open`'s "else" arm fires with a targeted
+        // message.
+        let src = r#"component X {
+  <template>{#if x}<a/>{#else}<b/>{#else}<c/>{/if}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("unexpected `{#else}`")
+                && (err.message.contains("one `{#else}` per")
+                    || err.message.contains("inside an `{#if}`")),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_else_outside_if_is_rejected() {
+        // Stray `{#else}` at template top-level — no enclosing
+        // `{#if}`.
+        let src = r#"component X {
+  <template>{#else}<div/>{/if}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("unexpected `{#else}`")
+                || err.message.contains("must appear inside"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_unknown_directive_error_message_mentions_else() {
+        // Regression: the mini-commit 2 error message pointed at
+        // "mini-commit 3 for `#else` and `<slot>`". Mini-commit 3
+        // closes both, so the message now names the supported
+        // directives directly.
+        let src = r#"component X {
+  <template>{#while cond}<li/>{/while}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("unknown template directive") && err.message.contains("while"),
+            "unexpected error message: {}",
+            err.message
+        );
+        // The message should list the supported directives explicitly.
+        assert!(
+            err.message.contains("{#if}")
+                && err.message.contains("{#for}")
+                && err.message.contains("{#else}"),
+            "unexpected error message: {}",
+            err.message
+        );
     }
 }

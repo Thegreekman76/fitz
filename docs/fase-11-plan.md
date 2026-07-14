@@ -202,7 +202,7 @@ Phase 11 promise.
 | **11.2** | Parse state defaults / event bodies / template interpolations as `crate::ast::Expr`/`Stmt`. Add `{#if}` / `{#for}` / `<slot>` to the template AST. Type-check every expression in `state` + `event` + `{...}` interpolations. | `fitz check my.fitzv` reports type errors for state field mismatches and template interpolation type errors, with source-accurate line/column pointing inside the `.fitzv` file. |
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
-| **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits. **Mini-commit 1 CLOSED 2026-07-14**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2 CLOSED 2026-07-14**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. Mini-commit 3 (`<slot>` — MVP marker for 11.5 composition, plus `{#else}` alongside `{#if}`) still open. | Nested control flow inside `<template>` parses, expands, type-checks. |
+| **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
@@ -823,6 +823,236 @@ pipeline, and the classic `crate::parser::parse()` is untouched.
 
 No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
 1/2/3 or the §7 follow-up or 11.2.c mini-commit 1.
+`docs/fase-11-plan.md` gets the row update in §6 and this
+section.
+
+---
+
+## 9.h Files touched by 11.2.c mini-commit 3 — `<slot />` + `{#else}`
+
+Third and last mini-commit inside 11.2.c. **Closes 11.2.c entire**
+— the template dialect now has the four directives promised for
+Phase 11.2 (`{#if}`, `{#for}`, `{#else}`, `<slot>`) end-to-end,
+and 11.2 itself is done. Two independent extensions folded into
+one commit because they both add template-AST variants without
+changing the scoping semantics that mini-commits 1 and 2 already
+paid for.
+
+- **`src/view/ast.rs`**
+  - `TemplateNode::If` gained a new field
+    `else_children: Option<Vec<TemplateNode>>`. `None` when the
+    block is `{#if}...{/if}`; `Some(vec![...])` when the block
+    has `{#else}` (with an empty vec when the else branch is
+    empty). Doc-comment on the `If` variant updated to describe
+    the extended shape.
+  - New variant `TemplateNode::Slot { name: Option<String>, loc: Loc }`.
+    `name` is `None` for the default (unnamed) slot,
+    `Some("X")` for a named slot. Opaque marker — the tree
+    carries it through expand + check but the semantic wiring
+    (cross-check against child components' declared slots) lands
+    in Phase 11.5.
+  - The enum-level doc updated: `{#else}` and `<slot />` move
+    from "deferred to mini-commit 3" to "supported"; the
+    "Deferred to later mini-commits" list now names `<slot>...</slot>`
+    fallback children and `{#elseif}` chains as the two follow-
+    up refinements (neither blocks 11.3+).
+
+- **`src/view/parser.rs`**
+  - `parse_nodes` signature refactor: gains an `accept_else: bool`
+    param and returns `(Vec<TemplateNode>, bool)` where the
+    second bool is `true` when the walk terminated on `{#else}`
+    (only possible when `accept_else` was `true`). All four
+    callers updated — three ignore the bool via `let (nodes, _)`,
+    one (`parse_if_directive`) matches on it.
+  - `parse_if_directive` parses the then-body with
+    `accept_else = true`; if the walk terminated on `{#else}`,
+    it parses the else-body with a second call at
+    `accept_else = false` (so a stray second `{#else}` inside
+    the else branch is caught cleanly by `parse_directive_open`'s
+    new "else" arm).
+  - `parse_directive_open` grew an `"else"` arm that emits
+    `"unexpected `{#else}` — must appear inside an `{#if}` body,
+    and only one `{#else}` per `{#if}` is allowed"`. This covers
+    both stray top-level `{#else}` and double `{#else}` inside
+    an else branch, since neither case ever reaches
+    `parse_nodes`' accept_else intercept.
+  - Two new helpers on `HtmlParser`:
+    `peek_directive_name(&self) -> Option<String>` reads the
+    identifier immediately after `{#` WITHOUT consuming — used
+    by `parse_nodes` to distinguish `{#else}` (an if-body
+    terminator) from a regular directive opener;
+    `consume_else_marker(&mut self) -> ViewParseResult<()>`
+    consumes the six chars of `{#else}` and the closing `}`,
+    validating brace balance with a clear error on the missing
+    `}`.
+  - `parse_element` gained two special cases for `<slot>`. In
+    the self-closing branch (`.../>`), a `slot` tag hands off to
+    a new free helper `build_slot(attrs, line, column)` which
+    accepts zero or one `Static { name: "name", value }` attr
+    and rejects everything else (extra static attrs,
+    interpolated attrs, `@event` bindings, duplicate `name`)
+    with targeted messages pointing at 11.5 for the richer
+    slot APIs. In the open-close branch (`<slot>...</slot>`),
+    the tag is rejected with the "fallback children not
+    supported yet" message pointing at 11.5.
+  - The mini-commit-2 "unknown directive" error message
+    updated: it now names `{#if}`, `{#for}`, and `{#else}` as
+    the supported directives rather than pointing at mini-commit 3
+    (which no longer exists — this IS mini-commit 3).
+  - 14 new unit tests: three `<slot>` shape tests (default slot,
+    named slot, slot inside an element), four `<slot>` rejection
+    tests (open-close form, extra static attr, event attr,
+    interpolated `name`), one duplicate-`name` rejection, one
+    basic `{#if...#else...}` shape test, one regression that
+    `{#if}` without `{#else}` produces `else_children = None`,
+    one legal `{#else}{/if}` (empty else body), one nested-if
+    scoping test (each if scopes its own else, outer's else
+    doesn't leak into inner and vice versa), two `{#else}`
+    rejection tests (double else inside one if, stray top-level
+    else), and one updated error-message test that names the
+    supported directives.
+
+- **`src/view/expand.rs`**
+  - `ExpandedTemplateNode::If` mirrors the raw AST — gains
+    `else_children: Option<Vec<ExpandedTemplateNode>>`.
+  - New `ExpandedTemplateNode::Slot { name, loc }` variant — the
+    expand pass copies the raw name verbatim (nothing to
+    re-parse, the slot is opaque here).
+  - `expand_template_node` gained a match arm that recursively
+    expands `else_children` when present. Slot arm is a leaf.
+  - 5 new unit tests: slot default expands with `name = None`;
+    slot with name preserves it through expand; if/else with
+    interpolations on both sides recurses through both
+    branches; if without else preserves `else_children = None`;
+    a bad interpolation inside the else branch reports the
+    correct expand context (proves the recursion).
+
+- **`src/view/check.rs`**
+  - All four collectors (`collect_if_conds`,
+    `collect_for_iters`, `collect_interpolations`,
+    `collect_event_attrs`) grew a match arm for `Slot { .. }`
+    (leaf — skipped) and extended the `If { ... }` arm to
+    recurse through `else_children` when present. The scoping
+    logic is unchanged: else branches see the same `for_scope`
+    chain as then branches, because `{#else}` doesn't introduce
+    new bindings (bindings come from `{#for}` and state fields).
+  - 7 new unit tests: interpolation inside else branch is
+    checked (proves `collect_interpolations` walks in); event
+    attr inside else is cross-checked; nested `{#if}` cond
+    inside else is checked; `{#for}` iter inside else is
+    checked; regression that plain `{#if}` (no else) still
+    checks the then branch; slot without other content produces
+    zero errors; slot mixed with interpolations + events +
+    if/else still produces zero errors when the rest is
+    well-formed.
+
+**Design decisions taken at kick-off**:
+
+- **`name` on `<slot>` is optional**. `<slot />` maps to the
+  default (unnamed) slot; `<slot name="X" />` to a named slot.
+  Matches Vue/Svelte/Web Components convention. Making `name`
+  mandatory would confuse users coming from those ecosystems
+  and would require a synthetic name for the default slot
+  ("default"?) that the compiler would have to invent —
+  brittle.
+- **Only self-closing `<slot />` today**. `<slot>...</slot>`
+  with fallback children is deferred to 11.5 (composition
+  wiring), where the actual semantics of "use the child's
+  slotted content if any, else render this default" become
+  meaningful. Today the slot is an opaque marker — accepting
+  fallback children would look like it works when nothing
+  consumes them. Cleaner to reject up front with a message
+  that names 11.5.
+- **`accept_else: bool` on `parse_nodes` vs a dedicated
+  `parse_if_body`**. The bool + `(nodes, terminated_by_else)`
+  return is ~30 LoC leaner than duplicating the parse_nodes
+  loop for a specialised if-body helper. All four call sites
+  update trivially (`let (nodes, _) = ...` for the callers
+  that don't accept else; only `parse_if_directive` matches on
+  the terminator). The alternative was cleaner conceptually
+  but bulkier in code, and this file already does the same
+  kind of orthogonal parent-tracking trick with `parent` and
+  `directive_parent`.
+- **`{#else}` sentinel intercepted in `parse_nodes` when
+  accept_else is true, dispatched as targeted error by
+  `parse_directive_open` otherwise**. Two paths reach a
+  `{#else}` in the source: legitimately as an if-body
+  terminator, or illegitimately (stray at top level, or
+  second `{#else}` inside an else branch). The first path is
+  handled by the intercept before it ever reaches
+  `parse_directive_open`; the second path always ends up in
+  `parse_directive_open` with the name "else" — so a
+  dedicated "else" arm with a friendly message covers both
+  illegitimate cases at once. `peek_directive_name` +
+  `consume_else_marker` are two tiny helpers that keep the
+  intercept clean.
+- **Slot handling folded into `parse_element` rather than a
+  separate top-level pass**. `<slot />` is syntactically an
+  element — same tag+attrs+self-closing shape — so the
+  cleanest place to intercept is right where `parse_element`
+  decides whether to construct an `Element` variant. The
+  conversion happens inside the self-closing branch (using
+  the collected attrs) and the open-close branch rejects
+  immediately. `build_slot` is a free helper (no self) so it
+  reads clearly at file scope near `extract_full_interp`.
+- **`else_children: Option<Vec<...>>` in the AST vs a
+  flattened representation**. The `Option` shape matches the
+  source: `{#if}...{/if}` has no else branch, `{#if}...{#else}...{/if}`
+  does. Turning that into e.g. `arms: Vec<(cond, children)>`
+  or `else_children: Vec<...>` (empty for the no-else case)
+  would gloss over a meaningful semantic distinction.
+  `{#elseif}` chains, when they come, would extend this to
+  `Vec<(cond, children)>` + `else_children: Option<...>`
+  (Svelte-style) — clean upgrade path.
+- **All four collectors recurse into `else_children`**.
+  Interpolations, `{#if}` conds, `{#for}` iters, and
+  `@event="handler"` refs inside the else branch all get
+  checked — no special treatment. The `for_scope` chain used
+  by the interpolations / conds / iters walks unchanged into
+  the else, because `{#else}` doesn't introduce new bindings.
+  Slot is a leaf in every collector (no expressions to
+  check, no cross-refs to make).
+
+**Verification** (delta at 11.2.c mini-commit 3 over mini-commit
+2's baseline of 3383 unit + 3519 with `--features lsp`): `cargo
+test --lib` green (3411 total, 173 in `view::*` — 66 in parser,
+25 in expand, 79 in check plus lexer + Loc tests), `cargo test
+--lib --features lsp` green (3547 total), `cargo fmt --all
+--check` clean, `cargo clippy --lib --tests --bins -- -D warnings`
+clean, `cargo clippy --lib --tests --bins --features lsp -- -D
+warnings` clean.
+
+**Deuda residual** (does NOT block 11.3+):
+
+- **`<slot>...</slot>` with fallback children**. Deferred with a
+  targeted rejection message that names 11.5. When composition
+  wiring lands, the fallback-children form becomes semantic:
+  "render this default if the parent provides no slot content".
+  Refinable then.
+- **`<slot>` cross-reference against child components' declared
+  slots**. Purely a marker today — no component knows what slots
+  its callers reference or vice versa. 11.5 (composition
+  wiring) is when the parent-child relation exists as an AST
+  concept; cross-checking rides that.
+- **`{#elseif cond}` chains**. Fitz stays at just `{#if}` and
+  `{#else}` for MVP. `{#elseif}` is a shorthand for `{#else}{#if
+  ...}{/if}` — nice to have, refinable behind demand. When it
+  lands, the `TemplateNode::If` shape probably grows a
+  `Vec<(cond, children)>` for chained branches + the existing
+  `else_children` for the final catch-all.
+- **Slot props / defaults / scoped bindings**. Vue and Svelte
+  both let slots forward data down to their content
+  (`<slot :prop="X" />`). Deferred to 11.5+ where the
+  composition model is real. Today `<slot>` accepts only the
+  `name` attribute and rejects everything else with a
+  targeted 11.5 message.
+- **Position mapping inside the raw blob for `{#else}` and
+  `<slot>`**. Same debt as the rest of 11.2 — positions are
+  approximate (blob-local + best-effort base). Precise offset
+  tracking still deferred to a dedicated commit.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
+1/2/3 or the §7 follow-up or 11.2.c mini-commits 1/2.
 `docs/fase-11-plan.md` gets the row update in §6 and this
 section.
 

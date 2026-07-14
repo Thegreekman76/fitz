@@ -437,13 +437,16 @@ fn collect_if_conds<'a>(
 ) {
     for node in nodes {
         match node {
-            ExpandedTemplateNode::Text(_) | ExpandedTemplateNode::Interpolation { .. } => {}
+            ExpandedTemplateNode::Text(_)
+            | ExpandedTemplateNode::Interpolation { .. }
+            | ExpandedTemplateNode::Slot { .. } => {}
             ExpandedTemplateNode::Element { children, .. } => {
                 collect_if_conds(children, out, for_scope);
             }
             ExpandedTemplateNode::If {
                 cond,
                 children,
+                else_children,
                 loc,
             } => {
                 out.push(IfCondRef {
@@ -451,9 +454,12 @@ fn collect_if_conds<'a>(
                     loc: *loc,
                     for_scope: for_scope.clone(),
                 });
-                // Recurse into children so nested `{#if}` conds are
-                // collected too.
+                // Recurse into both branches so nested `{#if}` conds
+                // (in either the then or else side) are collected too.
                 collect_if_conds(children, out, for_scope);
+                if let Some(else_kids) = else_children {
+                    collect_if_conds(else_kids, out, for_scope);
+                }
             }
             ExpandedTemplateNode::For {
                 var,
@@ -479,12 +485,21 @@ fn collect_for_iters<'a>(
 ) {
     for node in nodes {
         match node {
-            ExpandedTemplateNode::Text(_) | ExpandedTemplateNode::Interpolation { .. } => {}
+            ExpandedTemplateNode::Text(_)
+            | ExpandedTemplateNode::Interpolation { .. }
+            | ExpandedTemplateNode::Slot { .. } => {}
             ExpandedTemplateNode::Element { children, .. } => {
                 collect_for_iters(children, out, for_scope);
             }
-            ExpandedTemplateNode::If { children, .. } => {
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
                 collect_for_iters(children, out, for_scope);
+                if let Some(else_kids) = else_children {
+                    collect_for_iters(else_kids, out, for_scope);
+                }
             }
             ExpandedTemplateNode::For {
                 var,
@@ -640,7 +655,7 @@ fn collect_interpolations<'a>(
 ) {
     for node in nodes {
         match node {
-            ExpandedTemplateNode::Text(_) => {}
+            ExpandedTemplateNode::Text(_) | ExpandedTemplateNode::Slot { .. } => {}
             ExpandedTemplateNode::Interpolation { expr, loc } => {
                 out.push(InterpolationRef {
                     expr,
@@ -664,8 +679,15 @@ fn collect_interpolations<'a>(
                 }
                 collect_interpolations(children, out, for_scope);
             }
-            ExpandedTemplateNode::If { children, .. } => {
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
                 collect_interpolations(children, out, for_scope);
+                if let Some(else_kids) = else_children {
+                    collect_interpolations(else_kids, out, for_scope);
+                }
             }
             ExpandedTemplateNode::For {
                 var,
@@ -752,7 +774,9 @@ struct EventAttrRef<'a> {
 fn collect_event_attrs<'a>(nodes: &'a [ExpandedTemplateNode], out: &mut Vec<EventAttrRef<'a>>) {
     for node in nodes {
         match node {
-            ExpandedTemplateNode::Text(_) | ExpandedTemplateNode::Interpolation { .. } => {}
+            ExpandedTemplateNode::Text(_)
+            | ExpandedTemplateNode::Interpolation { .. }
+            | ExpandedTemplateNode::Slot { .. } => {}
             ExpandedTemplateNode::Element {
                 attrs, children, ..
             } => {
@@ -772,8 +796,17 @@ fn collect_event_attrs<'a>(nodes: &'a [ExpandedTemplateNode], out: &mut Vec<Even
                 }
                 collect_event_attrs(children, out);
             }
-            ExpandedTemplateNode::If { children, .. }
-            | ExpandedTemplateNode::For { children, .. } => {
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                collect_event_attrs(children, out);
+                if let Some(else_kids) = else_children {
+                    collect_event_attrs(else_kids, out);
+                }
+            }
+            ExpandedTemplateNode::For { children, .. } => {
                 collect_event_attrs(children, out);
             }
         }
@@ -1996,6 +2029,7 @@ component B {
                     roots: vec![crate::view::expand::ExpandedTemplateNode::If {
                         cond: Expr::Ident("maybe".into(), Span::new(1, 1)),
                         children: Vec::new(),
+                        else_children: None,
                         loc: Loc::new(2, 1),
                     }],
                     loc: Loc::new(2, 1),
@@ -2281,6 +2315,162 @@ component B {
         assert!(
             check_str(src).is_empty(),
             "no errors expected: {:#?}",
+            check_str(src)
+        );
+    }
+
+    // ---- 11.2.c mini-commit 3: `{#else}` + `<slot />` checker tests --
+
+    #[test]
+    fn if_else_interpolation_inside_else_branch_is_checked() {
+        // Interpolation `{missing}` inside the else branch must be
+        // reported — proves `collect_interpolations` walks into
+        // `else_children` and the classic checker sees it.
+        let src = r#"component X {
+  state {
+    ready: Bool = false
+    label: Str = "hi"
+  }
+  <template>{#if ready}<span>{label}</span>{#else}<span>{missing}</span>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("unknown variable") && e.message.contains("missing")),
+            "expected `unknown variable missing` error inside else branch: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_else_event_attr_inside_else_branch_is_checked() {
+        // A bad `@click` inside the else branch must be reported —
+        // proves `collect_event_attrs` walks into `else_children`.
+        let src = r#"component X {
+  event go() {}
+  <template>{#if true}<button @click="go">yes</button>{#else}<button @click="does_not_exist">no</button>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("does_not_exist")
+                    && e.message.contains("no such `event`")),
+            "expected event-attr error for `does_not_exist` in else branch: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_else_nested_if_cond_inside_else_is_checked() {
+        // A nested `{#if}` inside the else branch — its cond must
+        // be reported when non-Bool (proves `collect_if_conds`
+        // walks into `else_children`).
+        let src = r#"component X {
+  state {
+    a: Bool = false
+    n: Int = 3
+  }
+  <template>{#if a}<div/>{#else}{#if n}<div/>{/if}{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("`{#if}`") && e.message.contains("Bool")),
+            "expected `{{#if}}` cond error for Int-typed cond inside else branch: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_else_for_iter_inside_else_branch_is_checked() {
+        // A bad iter `{#for x in <Str>}` inside the else branch —
+        // must be reported (proves `collect_for_iters` walks into
+        // `else_children`).
+        let src = r#"component X {
+  state {
+    ready: Bool = false
+    label: Str = "hi"
+  }
+  <template>{#if ready}<div/>{#else}{#for x in label}<span/>{/for}{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("`{#for") && e.context.contains("iter")),
+            "expected for-iter error for iterating Str in else branch: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_without_else_still_checks_the_then_branch() {
+        // Regression: plain `{#if}...{/if}` (no else) still checks
+        // interpolations in the then branch.
+        let src = r#"component X {
+  state { ready: Bool = false }
+  <template>{#if ready}<span>{missing}</span>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("unknown variable") && e.message.contains("missing")),
+            "expected `unknown variable missing` error in then branch: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn slot_is_ignored_by_collectors_no_spurious_errors() {
+        // A component with a `<slot />` and NO other errors must
+        // return zero errors — the slot is an opaque marker, no
+        // expressions to check, no cross-refs.
+        let src = r#"component X {
+  <template><slot /></template>
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "expected no errors for a bare <slot />: {:#?}",
+            check_str(src)
+        );
+    }
+
+    #[test]
+    fn slot_with_name_ignored_by_collectors_no_spurious_errors() {
+        // Same with a named slot.
+        let src = r#"component X {
+  <template><slot name="header" /></template>
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "expected no errors for <slot name=\"header\" />: {:#?}",
+            check_str(src)
+        );
+    }
+
+    #[test]
+    fn slot_alongside_other_template_content_does_not_break_walks() {
+        // Slot mixed with interpolations, events, and an if/else —
+        // the slot is a leaf in every collector but the other
+        // content still gets checked. This catches accidental
+        // early-return in a collector arm.
+        let src = r#"component X {
+  state {
+    title: Str = "hi"
+    ready: Bool = false
+  }
+  event go() {}
+  <template>
+    <div>
+      <slot name="header" />
+      {title}
+      <button @click="go">go</button>
+      {#if ready}<span>on</span>{#else}<slot />{/if}
+    </div>
+  </template>
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "expected no errors for a well-formed component with slots: {:#?}",
             check_str(src)
         );
     }

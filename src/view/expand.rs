@@ -96,13 +96,16 @@ pub enum ExpandedTemplateNode {
         self_closing: bool,
         loc: Loc,
     },
-    /// `{#if cond}...{/if}` — conditional inclusion. `cond` is
-    /// parsed from the raw `cond_raw` captured by the HTML sub-
-    /// parser; `children` are expanded recursively. The `#else`
-    /// branch lands in 11.2.c mini-commit 3.
+    /// `{#if cond}...{/if}` or `{#if cond}...{#else}...{/if}` —
+    /// conditional inclusion. `cond` is parsed from the raw
+    /// `cond_raw` captured by the HTML sub-parser; `children` are
+    /// the then-branch, expanded recursively; `else_children` is
+    /// `Some(...)` when the raw AST carried an `{#else}` branch and
+    /// `None` otherwise. Since 11.2.c mini-commit 3.
     If {
         cond: fast::Expr,
         children: Vec<ExpandedTemplateNode>,
+        else_children: Option<Vec<ExpandedTemplateNode>>,
         loc: Loc,
     },
     /// `{#for var in iter}...{/for}` — iterate over `iter`. `iter`
@@ -114,6 +117,15 @@ pub enum ExpandedTemplateNode {
         var: String,
         iter: fast::Expr,
         children: Vec<ExpandedTemplateNode>,
+        loc: Loc,
+    },
+    /// `<slot />` (default) or `<slot name="X" />` (named) — opaque
+    /// parent/child composition marker copied from the raw AST as
+    /// is; there's nothing to re-parse here. The composition wiring
+    /// (cross-check against the child component's declared slots)
+    /// lands in Phase 11.5. Since 11.2.c mini-commit 3.
+    Slot {
+        name: Option<String>,
         loc: Loc,
     },
 }
@@ -299,6 +311,7 @@ fn expand_template_node(
         RawTemplateNode::If {
             cond_raw,
             children,
+            else_children,
             loc,
         } => {
             let ctx = format!("component '{component_name}': template `{{#if}}` condition");
@@ -307,9 +320,19 @@ fn expand_template_node(
                 .iter()
                 .map(|n| expand_template_node(n, component_name))
                 .collect::<ExpandResult<Vec<_>>>()?;
+            let else_children = match else_children {
+                Some(nodes) => Some(
+                    nodes
+                        .iter()
+                        .map(|n| expand_template_node(n, component_name))
+                        .collect::<ExpandResult<Vec<_>>>()?,
+                ),
+                None => None,
+            };
             Ok(ExpandedTemplateNode::If {
                 cond,
                 children,
+                else_children,
                 loc: *loc,
             })
         }
@@ -333,6 +356,10 @@ fn expand_template_node(
                 loc: *loc,
             })
         }
+        RawTemplateNode::Slot { name, loc } => Ok(ExpandedTemplateNode::Slot {
+            name: name.clone(),
+            loc: *loc,
+        }),
     }
 }
 
@@ -1011,5 +1038,115 @@ component B {
             },
             other => panic!("expected For, got {:?}", other),
         }
+    }
+
+    // ---- 11.2.c mini-commit 3: `<slot />` + `{#else}` expand tests ---
+
+    #[test]
+    fn expand_slot_without_name_becomes_expanded_slot_with_none() {
+        // `<slot />` — carries no name.
+        let src = r#"component X {
+  <template><slot /></template>
+}"#;
+        let file = expand_str(src).unwrap();
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            ExpandedTemplateNode::Slot { name, .. } => assert!(name.is_none()),
+            other => panic!("expected Slot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_slot_with_name_preserves_the_slot_name() {
+        // `<slot name="header" />` — captures "header".
+        let src = r#"component X {
+  <template><slot name="header" /></template>
+}"#;
+        let file = expand_str(src).unwrap();
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            ExpandedTemplateNode::Slot { name, .. } => {
+                assert_eq!(name.as_deref(), Some("header"));
+            }
+            other => panic!("expected Slot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_if_else_both_branches_expand_children_recursively() {
+        // Interpolations in BOTH the then and the else branch must
+        // expand into `ExpandedTemplateNode::Interpolation` — proves
+        // the else recursion goes through the same expand path.
+        let src = r#"component X {
+  state {
+    is_on: Bool = false
+    on_label: Str = "on"
+    off_label: Str = "off"
+  }
+  <template>{#if is_on}<span>{on_label}</span>{#else}<span>{off_label}</span>{/if}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                // then branch interpolation
+                match &children[0] {
+                    ExpandedTemplateNode::Element { children: c, .. } => match &c[0] {
+                        ExpandedTemplateNode::Interpolation { expr, .. } => match expr {
+                            fast::Expr::Ident(n, _) => assert_eq!(n, "on_label"),
+                            other => panic!("expected Ident interp, got {:?}", other),
+                        },
+                        other => panic!("expected Interpolation in then, got {:?}", other),
+                    },
+                    other => panic!("expected Element in then, got {:?}", other),
+                }
+                // else branch interpolation
+                let else_kids = else_children.as_ref().expect("else present");
+                match &else_kids[0] {
+                    ExpandedTemplateNode::Element { children: c, .. } => match &c[0] {
+                        ExpandedTemplateNode::Interpolation { expr, .. } => match expr {
+                            fast::Expr::Ident(n, _) => assert_eq!(n, "off_label"),
+                            other => panic!("expected Ident interp, got {:?}", other),
+                        },
+                        other => panic!("expected Interpolation in else, got {:?}", other),
+                    },
+                    other => panic!("expected Element in else, got {:?}", other),
+                }
+            }
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_if_without_else_leaves_else_children_as_none() {
+        // Regression: existing `{#if}...{/if}` (no else) still
+        // expands and `else_children` is `None`.
+        let src = r#"component X {
+  state { is_on: Bool = false }
+  <template>{#if is_on}<span/>{/if}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            ExpandedTemplateNode::If { else_children, .. } => assert!(else_children.is_none()),
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_if_else_with_bad_expr_inside_else_reports_context() {
+        // A malformed interpolation `{1 +}` inside the else branch
+        // must still be reported — proves the recursive expand
+        // walks into else_children.
+        let src = r#"component X {
+  state { is_on: Bool = false }
+  <template>{#if is_on}<span>ok</span>{#else}<span>{1 +}</span>{/if}</template>
+}"#;
+        let err = expand_str(src).unwrap_err();
+        assert!(
+            err.context.contains("template interpolation"),
+            "context = {:?}",
+            err.context
+        );
     }
 }
