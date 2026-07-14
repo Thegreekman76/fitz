@@ -1,14 +1,16 @@
 // view/check.rs — Phase 11.2.b — type-check an `ExpandedViewFile`
 // produced by `super::expand`.
 //
-// **Scope (mini-commit 2 of 11.2.b)**: state field defaults +
-// event handler bodies + template interpolations.
+// **Scope (mini-commit 3 of 11.2.b — closes 11.2.b entirely)**:
+// state field defaults + event handler bodies + template
+// interpolations + `@event="handler"` attr cross-refs.
 //
 // - State field defaults must be compatible with their declared
-//   `TypeExpr` (this is the mini-commit 1 rule, preserved).
+//   `TypeExpr` (mini-commit 1 rule, preserved).
 // - Event handler bodies are checked as `async fn`s with the
 //   component's state fields visible as let-bindings in the outer
-//   scope + the handler's own params inside the fn scope.
+//   scope + the handler's own params inside the fn scope
+//   (mini-commit 2).
 // - Template `{expr}` interpolations (both direct in text nodes and
 //   inside HTML attribute values) are checked in the same env as
 //   the handler bodies. Additionally, the result type must be
@@ -19,12 +21,16 @@
 //   `inner` is `Str`-friendly. Explicitly rejected: Function,
 //   Result<T,E>, Future<T>, WsConn, DbConn/DbRow, QueryBuilder,
 //   Aggregated, Secret<T> — those must be unwrapped/awaited/
-//   matched before rendering.
-//
-// Deferred to mini-commit 3:
-// - `@event="handler"` attrs cross-check: the referenced handler
-//   name must correspond to a declared `event ...` in the same
-//   component.
+//   matched before rendering (mini-commit 2).
+// - `@event="handler"` attrs on template elements reference a bare
+//   identifier that MUST name a declared `event ...` handler in
+//   the same component. When the reference is broken, the error
+//   suggests the nearest declared handler (Levenshtein distance
+//   ≤ 3) if one exists, or lists all available handlers when the
+//   set is small (≤ 5). Cross-refs are validated even when state
+//   defaults have errors — they don't depend on the classic
+//   checker and users benefit from seeing both categories together
+//   (mini-commit 3).
 //
 // **Strategy**: synth-and-delegate — build the smallest classic
 // Fitz program that expresses each check we want, run
@@ -94,14 +100,24 @@ impl std::error::Error for CheckError {}
 pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
     let mut errors = Vec::new();
     for component in &file.components {
-        let before = errors.len();
+        let state_before = errors.len();
         for field in &component.state {
             check_state_field(component.name.as_str(), field, &mut errors);
+        }
+        let state_errored = errors.len() > state_before;
+        // Event attr cross-refs are pure structural comparisons
+        // against the declared handler set — they don't route through
+        // the classic checker and don't depend on state validity, so
+        // they run even when state has errors. Reporting them here
+        // means a user with BOTH a broken state field AND a broken
+        // `@click="undeclared"` sees both categories together.
+        if let Some(template) = &component.template {
+            check_template_event_attrs(component, template, &mut errors);
         }
         // Cascade avoidance — only check handlers + interpolations
         // when the state is clean, so consequential errors don't
         // pile up on top of the actual bug.
-        if errors.len() == before {
+        if !state_errored {
             for handler in &component.events {
                 check_event_handler(component, handler, &mut errors);
             }
@@ -359,6 +375,143 @@ fn collect_interpolations<'a>(
             }
         }
     }
+}
+
+/// Cross-check every `@event="handler"` attr against the component's
+/// declared event handler set. Each reference to an unknown handler
+/// produces one `CheckError` naming both the event and the referenced
+/// handler; when there's a near-miss (Levenshtein distance ≤ 3) we
+/// append a "did you mean ...?" hint pointing at the closest
+/// declared handler. When the declared set is small (≤ 5) and no
+/// near-miss exists, we list every available handler so the user can
+/// pick without opening another file.
+///
+/// Runs independently of state validity — see the note in `check()`.
+fn check_template_event_attrs(
+    component: &ExpandedComponent,
+    template: &ExpandedTemplate,
+    errors: &mut Vec<CheckError>,
+) {
+    let mut event_attrs: Vec<EventAttrRef<'_>> = Vec::new();
+    collect_event_attrs(&template.roots, &mut event_attrs);
+    if event_attrs.is_empty() {
+        return;
+    }
+    let declared: Vec<&str> = component.events.iter().map(|h| h.name.as_str()).collect();
+    for attr in event_attrs {
+        if declared.contains(&attr.handler_name) {
+            continue;
+        }
+        let hint = suggestion_for(attr.handler_name, &declared);
+        let message = match hint {
+            Some(h) => format!(
+                "template attr @{}=\"{}\" references handler '{}' but no such `event` is declared in this component. Did you mean '{}'?",
+                attr.event_name, attr.handler_name, attr.handler_name, h,
+            ),
+            None if declared.is_empty() => format!(
+                "template attr @{}=\"{}\" references handler '{}' but this component declares no `event ...` handlers",
+                attr.event_name, attr.handler_name, attr.handler_name,
+            ),
+            None if declared.len() <= 5 => format!(
+                "template attr @{}=\"{}\" references handler '{}' but no such `event` is declared in this component. Available: {}",
+                attr.event_name,
+                attr.handler_name,
+                attr.handler_name,
+                declared.join(", "),
+            ),
+            None => format!(
+                "template attr @{}=\"{}\" references handler '{}' but no such `event` is declared in this component",
+                attr.event_name, attr.handler_name, attr.handler_name,
+            ),
+        };
+        errors.push(CheckError {
+            message,
+            loc: attr.loc,
+            context: format!(
+                "component '{}': template event attr '@{}'",
+                component.name, attr.event_name,
+            ),
+        });
+    }
+}
+
+/// Reference to a `@event="handler"` binding on a template element.
+struct EventAttrRef<'a> {
+    event_name: &'a str,
+    handler_name: &'a str,
+    loc: Loc,
+}
+
+fn collect_event_attrs<'a>(nodes: &'a [ExpandedTemplateNode], out: &mut Vec<EventAttrRef<'a>>) {
+    for node in nodes {
+        match node {
+            ExpandedTemplateNode::Text(_) | ExpandedTemplateNode::Interpolation { .. } => {}
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                for attr in attrs {
+                    if let ExpandedAttr::Event {
+                        event_name,
+                        handler_name,
+                        loc,
+                    } = attr
+                    {
+                        out.push(EventAttrRef {
+                            event_name,
+                            handler_name,
+                            loc: *loc,
+                        });
+                    }
+                }
+                collect_event_attrs(children, out);
+            }
+        }
+    }
+}
+
+/// Return the declared handler closest to `target` when the
+/// Levenshtein distance is ≤ 3, else `None`. The threshold catches
+/// realistic typos (`stat` for `start`, `saev` for `save`) without
+/// suggesting random matches on unrelated names.
+fn suggestion_for<'a>(target: &str, declared: &[&'a str]) -> Option<&'a str> {
+    let mut best: Option<(&'a str, usize)> = None;
+    for candidate in declared {
+        let d = levenshtein_distance(target, candidate);
+        if d > 3 {
+            continue;
+        }
+        match best {
+            None => best = Some((*candidate, d)),
+            Some((_, best_d)) if d < best_d => best = Some((*candidate, d)),
+            _ => {}
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// Iterative Levenshtein with two rolling rows — O(a·b) time,
+/// O(min(a,b)) space. Small enough to inline here; not worth pulling
+/// in a crate.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr: Vec<usize> = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        curr[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// A type is *`Str`-friendly* if the SSR/client target can convert
@@ -1123,5 +1276,188 @@ component B {
             ok: Box::new(Type::Int),
             err: Box::new(Type::Str)
         }))));
+    }
+
+    // ---- Mini-commit 3: @event="handler" cross-refs ---------------------
+
+    #[test]
+    fn event_attr_referencing_declared_handler_ok() {
+        // `@click="start"` and the component declares `event start()`
+        // — cross-ref must pass silently.
+        let src = r#"component X {
+  state { is_editing: Bool = false }
+  event start() { is_editing = true }
+  <template><button @click="start">Edit</button></template>
+}"#;
+        assert!(check_str(src).is_empty(), "declared handler must resolve");
+    }
+
+    #[test]
+    fn event_attr_referencing_undeclared_handler_reports_error() {
+        // `@click="missing"` but no `event missing() {...}` is
+        // declared. Must error with a context naming the event and
+        // the missing handler.
+        let src = r#"component X {
+  state { title: Str = "" }
+  event save() { title = "next" }
+  <template><button @click="missing">Go</button></template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty(), "undeclared handler must error");
+        let e = errs
+            .iter()
+            .find(|e| e.context.contains("template event attr '@click'"))
+            .expect("event attr error");
+        assert!(
+            e.message.contains("missing"),
+            "message should name the missing handler, got {:?}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn event_attr_typo_suggests_nearest_declared_handler() {
+        // `@click="stat"` — one letter off from declared `start`.
+        // Levenshtein 1 — the hint must recommend `start`.
+        let src = r#"component X {
+  state { is_editing: Bool = false }
+  event start() { is_editing = true }
+  <template><button @click="stat">Edit</button></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "one cross-ref error expected: {:?}", errs);
+        assert!(
+            errs[0].message.contains("Did you mean 'start'"),
+            "message must contain suggestion, got {:?}",
+            errs[0].message
+        );
+    }
+
+    #[test]
+    fn event_attr_unknown_handler_lists_available_when_small_set() {
+        // No near-miss (Levenshtein > 3) but the declared set is
+        // small (≤ 5), so the error lists every available handler.
+        let src = r#"component X {
+  state { title: Str = "" }
+  event save() { title = "s" }
+  event reset() { title = "" }
+  <template><button @click="totally_different_name">X</button></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1);
+        let msg = &errs[0].message;
+        assert!(
+            msg.contains("Available:"),
+            "should list available when no near-miss + small set, got {:?}",
+            msg,
+        );
+        assert!(msg.contains("save"));
+        assert!(msg.contains("reset"));
+    }
+
+    #[test]
+    fn event_attr_unknown_handler_no_declared_events_says_so() {
+        // Component declares zero handlers — the error should say so
+        // instead of listing an empty set.
+        let src = r#"component X {
+  state { title: Str = "" }
+  <template><button @click="save">Save</button></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1);
+        assert!(
+            errs[0].message.contains("declares no `event ...` handlers"),
+            "message = {:?}",
+            errs[0].message
+        );
+    }
+
+    #[test]
+    fn event_attr_cross_ref_runs_even_when_state_has_errors() {
+        // State field has a type mismatch AND the template references
+        // an undeclared handler. Both errors must surface — the
+        // event-attr check is deliberately independent of state
+        // validity.
+        let src = r#"component X {
+  state { count: Int = "bad" }
+  event tick() { count = 5 }
+  <template><button @click="undeclared_handler">Go</button></template>
+}"#;
+        let errs = check_str(src);
+        // Expect: state field error + event attr cross-ref error.
+        // (Handler body + interpolations skipped by cascade
+        // avoidance, but event attrs still surface.)
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("state field 'count'")),
+            "state error must surface: {:?}",
+            errs
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("template event attr '@click'")
+                    && e.message.contains("undeclared_handler")),
+            "event attr error must surface even with state error: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn event_attr_multiple_bad_refs_each_reported() {
+        // Two elements with two different bad `@event` refs. Each
+        // must produce its own CheckError with the right event name
+        // in the context.
+        let src = r#"component X {
+  state { title: Str = "" }
+  event save() { title = "s" }
+  <template>
+    <button @click="save">OK</button>
+    <button @click="nope1">Bad 1</button>
+    <input @input="nope2" />
+  </template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 2, "two cross-ref errors expected: {:?}", errs);
+        assert!(errs
+            .iter()
+            .any(|e| e.context.contains("'@click'") && e.message.contains("nope1")));
+        assert!(errs
+            .iter()
+            .any(|e| e.context.contains("'@input'") && e.message.contains("nope2")));
+    }
+
+    // ---- Mini-commit 3: helper unit tests -------------------------------
+
+    #[test]
+    fn levenshtein_distance_basic_cases() {
+        assert_eq!(levenshtein_distance("", ""), 0);
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+        assert_eq!(levenshtein_distance("same", "same"), 0);
+        assert_eq!(levenshtein_distance("stat", "start"), 1);
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+        assert_eq!(levenshtein_distance("saev", "save"), 2);
+    }
+
+    #[test]
+    fn suggestion_for_returns_closest_within_threshold() {
+        let declared = vec!["start", "save", "reset"];
+        // Distance 1 — clear winner.
+        assert_eq!(suggestion_for("stat", &declared), Some("start"));
+        // Distance 1 — winner.
+        assert_eq!(suggestion_for("sav", &declared), Some("save"));
+    }
+
+    #[test]
+    fn suggestion_for_none_when_too_far() {
+        let declared = vec!["start", "save"];
+        // Distance too far for any candidate.
+        assert_eq!(suggestion_for("completely_unrelated_name", &declared), None);
+    }
+
+    #[test]
+    fn suggestion_for_none_when_declared_empty() {
+        let declared: Vec<&str> = Vec::new();
+        assert_eq!(suggestion_for("anything", &declared), None);
     }
 }

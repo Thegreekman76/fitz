@@ -201,7 +201,7 @@ Phase 11 promise.
 | **11.1** | POC parser: recognise the SFC shape, capture bodies as raw. Isolated `src/view/` module. **CLOSED 2026-07-14** — this doc + `src/view/` + 19 unit tests. | Card component test parses cleanly; classic pipeline untouched (Invariants 1-5 verified). |
 | **11.2** | Parse state defaults / event bodies / template interpolations as `crate::ast::Expr`/`Stmt`. Add `{#if}` / `{#for}` / `<slot>` to the template AST. Type-check every expression in `state` + `event` + `{...}` interpolations. | `fitz check my.fitzv` reports type errors for state field mismatches and template interpolation type errors, with source-accurate line/column pointing inside the `.fitzv` file. |
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
-| **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits: **(1)** state field defaults compatible with declared type — **CLOSED 2026-07-14** (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params. Template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret). **CLOSED 2026-07-14** (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component. | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) surface a type error at the correct field/blob. |
+| **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. | Nested control flow inside `<template>` parses, expands, type-checks. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
@@ -395,6 +395,76 @@ green (3312 total, 39 in `view::check::tests`), `cargo test --lib
 regression outside `src/view/`.
 
 No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits 1/2.
+
+---
+
+## 9.d Files touched by 11.2.b mini-commit 3 — closes 11.2.b entirely
+
+`src/view/check.rs` grew from ~640 LoC to ~825 LoC (11 new unit
+tests, total 50 in `view::check::tests`). No new files; no
+changes outside `src/view/`; no changes to the classic pipeline.
+
+**New shape of `check()`**:
+
+- State field defaults still checked in isolation (mini-commit 1
+  behaviour, preserved).
+- Every `@event="handler"` attr in the template walks through
+  `collect_event_attrs` (parallel to `collect_interpolations`)
+  and gets compared against the component's declared handler
+  set. Broken references produce a `CheckError` with a context
+  like `"component 'Card': template event attr '@click'"`. The
+  cross-ref pass runs **independently of state validity** — it
+  doesn't route through the classic checker and doesn't depend
+  on state field types, so a component with a broken state
+  field AND a broken `@click="undeclared"` surfaces both errors
+  together instead of hiding the second behind cascade
+  avoidance. Cascade avoidance still applies to handler bodies +
+  interpolations for the same reason it did in mini-commit 2.
+
+**Additions to the public surface**:
+
+- No new pub API. `view::check` and `view::CheckError` re-export
+  paths from 9.b remain unchanged.
+
+**Design decisions worth naming**:
+
+- **Cross-refs run even when state has errors.** Reasoning:
+  the event-attr check is a pure structural comparison — no
+  `check_program` call, no type resolution. State errors don't
+  contaminate it and hiding the second category would confuse
+  users iterating on a template.
+- **"Did you mean ...?" hints via Levenshtein distance ≤ 3.**
+  Threshold chosen to catch realistic typos (`stat` ↔ `start`,
+  `saev` ↔ `save`, `strat` ↔ `start`) without suggesting
+  unrelated matches on longer identifiers. When the declared
+  set is small (≤ 5) and no near-miss exists, the error lists
+  every available handler so users don't have to open another
+  file.
+- **Zero declared handlers is its own message.** Component with
+  `@click="save"` but no `event ...` declarations at all gets
+  a distinct message ("this component declares no `event ...`
+  handlers") instead of an awkward empty available list.
+- **Levenshtein inlined, not a crate.** Standard two-row DP,
+  O(a·b) time, O(min(a,b)) space. Handler names are short (< 30
+  chars typical) and per-template counts are small, so
+  performance is trivially fine. Pulling in `strsim` (~30 KB
+  compiled) would be overkill.
+
+**Verification** (delta at 11.2.b mini-commit 3 over mini-commit
+2's baseline of 3312 unit + 39 `view::check`): `cargo test --lib`
+green (3323 total, 50 in `view::check::tests`), `cargo test --lib
+--features lsp` green (3459 total), `cargo fmt --all --check`,
+`cargo clippy --lib --tests --bins -- -D warnings`,
+`cargo clippy --lib --tests --bins --features lsp -- -D warnings`.
+Full `cargo test` suite from the "Fitz core — full test suite
+tras cada batch" memory (cli_e2e, openapi_e2e, compile_e2e,
+python feature when the local shim resolves) recommended before
+tagging a release that includes this change; deferred here since
+this is an internal-to-`src/view/` addition with no user-facing
+surface yet (the `.fitzv` compilation entry point is still
+gated behind Phase 11.5).
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits 1/2/3.
 
 ---
 
