@@ -203,7 +203,7 @@ Phase 11 promise.
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
-| **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
+| **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits: **11.3.a CLOSED 2026-07-14** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). Mini-commits 11.3.b (CSS mini-parser + `apply_scope(...)` helper) and 11.3.c (wire scoping into expand + template class-attr rewrite) still open. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
@@ -1055,6 +1055,170 @@ No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
 1/2/3 or the §7 follow-up or 11.2.c mini-commits 1/2.
 `docs/fase-11-plan.md` gets the row update in §6 and this
 section.
+
+---
+
+## 9.i Files touched by 11.3.a — `<style global>` syntax + `StyleKind` enum
+
+First of the three planned mini-commits inside 11.3. Opens the
+unscoped-style story with the smallest possible reversible change:
+a new sibling opener `<style global>` next to the existing
+`<style scoped>`, plus a `StyleKind { Scoped, Global }`
+discriminant on the AST + lexer token. Zero scoping is applied
+yet — that lands in 11.3.b (CSS mini-parser) and 11.3.c
+(expand wiring). The purpose of this mini-commit is to nail the
+surface syntax first so the CSS parser + expand can be written
+against a shape that won't shift.
+
+**Files touched**:
+
+- `src/view/ast.rs` — `Style` gains a `kind: StyleKind` field; new
+  `enum StyleKind { Scoped, Global }` next to it. Doc-comment on
+  `Style` rewritten to describe both shapes; doc-comment on
+  `StyleKind` documents the semantics of each variant (Scoped
+  gets class-prefix rewriting in 11.3.c, Global emits as-is). Both
+  types stay `pub` inside `view::ast`; no re-export at
+  `view::mod`'s `pub use` list because no external consumer needs
+  them yet.
+- `src/view/lexer.rs` — `Token::StyleScopedRaw(String)` refactored
+  to `Token::StyleRaw { kind: StyleKind, body: String }`. The
+  refactor was preferred over adding a parallel
+  `Token::StyleGlobalRaw` variant because the two shapes share the
+  same closer (`</style>`) and the same "opaque body" contract —
+  distinguishing them as a payload field reads clearer than as two
+  variants that would always be matched together. Detection in
+  `run()` adds a `<style global>` branch parallel to the existing
+  `<style scoped>` one; both delegate to the refactored
+  `consume_style_block(kind, opener, ...)` helper that now takes
+  the opener as a `&'static str` (so the "unterminated" error
+  message reproduces the exact tag the user typed). Bare `<style>`
+  or `<style anything-else>` is rejected at lex time with a
+  targeted error naming both accepted forms — Vue defaults to
+  global, Svelte to scoped, and Fitz refuses to pick a silent
+  default. 5 new unit tests: `<style global>` captures body,
+  `<style>` rejected, `<style foo>` rejected, unterminated
+  `<style scoped>` names the scoped opener, unterminated
+  `<style global>` names the global opener.
+- `src/view/parser.rs` — the match on `Token::StyleScopedRaw`
+  updated to `Token::StyleRaw { .. }` with a subsequent destructure
+  to extract both `kind` and `body`. Duplicate detection widened:
+  any second `<style>` block regardless of kind produces
+  `duplicate `<style>` block — only one `<style scoped>` or
+  `<style global>` per component`. The "expected `state`, `event`,
+  `<template>` or `<style scoped>`" fallback error message also
+  names both style forms now. `append_token_source` updated to
+  ignore the new token variant (paralelo al viejo — the raw blob
+  never appears inside `capture_*` calls). 5 new + 1 renamed unit
+  tests: `duplicate_scoped_style_block_errors_clearly` (renamed
+  from `duplicate_style_block_errors_clearly` — the message
+  assertion widened accordingly), `duplicate_global_style_block_errors_clearly`,
+  `scoped_and_global_style_together_rejected_as_duplicate`
+  (documents the MVP "one style block per component" rule and
+  points at the Vue/Svelte convention as a future refinement),
+  `global_style_parses_with_kind_global`,
+  `scoped_style_parses_with_kind_scoped`,
+  `expected_shape_error_names_both_style_forms`.
+- `src/view/expand.rs` — **no changes**. `ExpandedComponent.style`
+  is still `Option<RawStyle>` and the new `kind` field on
+  `RawStyle` rides through the `.clone()` transparently. When
+  11.3.c lands, the expand output will grow a dedicated
+  `ExpandedStyle { kind, css_scoped, scope_class }` variant that
+  replaces this passthrough — but that requires the CSS parser
+  (11.3.b) to exist first.
+- `src/view/check.rs` — **no changes**. The checker doesn't touch
+  CSS in the MVP (documented in §4). The `kind` field flows
+  through the tree unchanged.
+
+**Design decisions worth naming**:
+
+- **Explicit opt-in over silent default**. Vue's `<style>` defaults
+  to global, Svelte's defaults to scoped. Both work in their own
+  ecosystems because users know the convention, but a user coming
+  from the other framework hits surprising behavior on their first
+  `<style>` block. Rejecting bare `<style>` at lex time trades one
+  extra word (`scoped` or `global`) for zero ambiguity — the
+  scoping intent is legible from the source without needing to
+  know Fitz's default.
+- **One style block per component (MVP cap)**. Vue and Svelte
+  both allow "one scoped + one global" side by side. Fitz will
+  probably get there once demand appears (splitting resets from
+  component-specific rules is a real use case), but 11.3.a keeps
+  the cap at one to avoid deciding ordering / merge semantics
+  before the CSS parser + scoping wire land. If a user really
+  needs both today, they factor the global rules into a dedicated
+  global-only sibling component — clunky but workable, and the
+  error message points at both accepted forms so the user knows
+  the option exists in principle.
+- **`Token::StyleRaw { kind, body }` refactor over
+  `Token::StyleGlobalRaw` addition**. Additive would have been
+  smaller diff but asymmetric — the two shapes share
+  everything (closer, body semantics, downstream consumer) except
+  the kind, so treating the kind as a payload field reads
+  honester than treating it as a variant discriminator. The
+  `TemplateRaw(String)` variant stays single-payload because
+  templates have no "kind" concept and probably never will.
+- **`consume_style_block(kind, opener, ...)` over
+  hardcoded opener chars**. Passing the opener as
+  `&'static str` (`"<style scoped>"` / `"<style global>"`)
+  serves two purposes: (a) the "unterminated" error message
+  reproduces the exact tag the user typed instead of a generic
+  "unterminated `<style>` block" that would confuse users who
+  only wrote one of the two forms; (b) the char-count arithmetic
+  (`for _ in 0..opener.len()`) stays honest about what's being
+  consumed, no magic 14.
+- **No scoping applied yet**. 11.3.a is deliberately just the
+  syntax opt-in — no per-component class prefix, no template
+  attr rewrite, no CSS parsing. The next mini-commit (11.3.b)
+  writes the CSS mini-parser + `apply_scope(css_raw, prefix)`
+  helper as a pure standalone function, testable in isolation
+  without touching expand. Then 11.3.c wires everything into the
+  expand output. Splitting this way keeps each mini-commit
+  bisectable — a bug in the CSS parser won't touch the
+  syntax-opt-in shape and vice versa.
+
+**Verification** (delta at 11.3.a over 11.2.c mini-commit 3's
+baseline of 3411 unit + 3547 with `--features lsp`): `cargo test
+--lib` green (3421 total, +10 new tests — 5 in
+`view::lexer::tests`, 5 in `view::parser::tests`), `cargo test
+--lib --features lsp` green (3557 total, +10 mirroring the same
+new tests), `cargo fmt --all --check` clean, `cargo clippy --lib
+--tests --bins -- -D warnings` clean, `cargo clippy --lib --tests
+--bins --features lsp -- -D warnings` clean. Full `cargo test`
+suite (cli_e2e, openapi_e2e, compile_e2e, python feature when the
+local shim resolves) recommended before tagging a release that
+includes this change; deferred here since 11.3.a is internal to
+`src/view/` with no user-facing surface (the `.fitzv` compilation
+entry point still lives behind Phase 11.5 per the plan).
+
+**Deuda residual** (does NOT block 11.3.b):
+
+- **"One scoped + one global" side by side**. MVP caps at one
+  style block per component regardless of kind. Refinable if
+  demand appears — the AST already carries `kind` per block, so
+  extending `Component.style: Option<Style>` to
+  `Component.styles: Vec<Style>` with a max-of-two-of-different-kinds
+  invariant is straightforward. Ordering semantics (does scoped
+  win over global on the same selector? or is it declaration
+  order?) is the actual design question and is why the cap holds
+  today.
+- **`<style module>` for CSS Modules**. Not planned. If a third
+  opt-in ever lands (e.g. per-file CSS module isolation with
+  `import styles from './x.fitzv'` in a hypothetical companion
+  file), the `starts_with` cascade in the lexer + a new
+  `StyleKind` variant is the extension path. Nothing about
+  11.3.a forecloses this.
+- **`:global(...)` selector escape hatch inside `<style scoped>`**.
+  Vue and Svelte both let a scoped block target parent/child
+  elements via a `:global(...)` pseudo-class. Deferred to a
+  follow-up on the CSS parser (probably a 11.3.b refinement or a
+  11.3.d cosmetic pass) — the class-prefix strategy needs to
+  learn about `:global(...)` to skip suffixing.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
+1/2/3 or the §7 follow-up or 11.2.c mini-commits 1/2/3.
+`docs/fase-11-plan.md` gets the row update in §6 (11.3 row now
+carries a "mini-commit 11.3.a CLOSED 2026-07-14" annotation) and
+this section.
 
 ---
 

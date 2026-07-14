@@ -177,22 +177,24 @@ impl ViewParser {
                         loc: Loc::new(tok.line, tok.column),
                     });
                 }
-                Token::StyleScopedRaw(_) => {
+                Token::StyleRaw { .. } => {
                     if style.is_some() {
                         let cur = self.peek().clone();
                         return Err(ViewParseError {
-                            message: "duplicate `<style scoped>` block — only one per component"
+                            message: "duplicate `<style>` block — only one `<style scoped>` or \
+                                 `<style global>` per component"
                                 .into(),
                             line: cur.line,
                             column: cur.column,
                         });
                     }
                     let tok = self.advance();
-                    let css = match tok.token {
-                        Token::StyleScopedRaw(s) => s,
+                    let (kind, css) = match tok.token {
+                        Token::StyleRaw { kind, body } => (kind, body),
                         _ => unreachable!(),
                     };
                     style = Some(Style {
+                        kind,
                         css_raw: css,
                         loc: Loc::new(tok.line, tok.column),
                     });
@@ -201,7 +203,8 @@ impl ViewParser {
                     let cur = self.peek().clone();
                     return Err(ViewParseError {
                         message: format!(
-                            "expected `state`, `event`, `<template>` or `<style scoped>` inside component body, got {}",
+                            "expected `state`, `event`, `<template>`, `<style scoped>` or \
+                             `<style global>` inside component body, got {}",
                             cur.token
                         ),
                         line: cur.line,
@@ -420,7 +423,7 @@ fn append_token_source(out: &mut String, tok: &Token) {
         Token::Gt => out.push('>'),
         Token::Question => out.push('?'),
         Token::Newline => out.push('\n'),
-        Token::TemplateRaw(_) | Token::StyleScopedRaw(_) | Token::Eof => {
+        Token::TemplateRaw(_) | Token::StyleRaw { .. } | Token::Eof => {
             // Should not appear inside a `capture_*` call. If they
             // do (unreachable in practice), silently ignore.
         }
@@ -1471,13 +1474,86 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_style_block_errors_clearly() {
+    fn duplicate_scoped_style_block_errors_clearly() {
+        // Two `<style scoped>` in a row — the second one triggers
+        // the duplicate check. The message names both accepted
+        // opt-ins since 11.3.a so users know they can also use
+        // `<style global>` (just not more than one style block
+        // total per component).
         let src = r#"component X {
   <style scoped>a{}</style>
   <style scoped>b{}</style>
 }"#;
         let err = parse(src).unwrap_err();
-        assert!(err.message.contains("duplicate `<style scoped>`"));
+        assert!(err.message.contains("duplicate `<style>`"));
+        assert!(err.message.contains("<style scoped>"));
+        assert!(err.message.contains("<style global>"));
+    }
+
+    #[test]
+    fn duplicate_global_style_block_errors_clearly() {
+        let src = r#"component X {
+  <style global>a{}</style>
+  <style global>b{}</style>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("duplicate `<style>`"));
+    }
+
+    #[test]
+    fn scoped_and_global_style_together_rejected_as_duplicate() {
+        // MVP rule: one `<style>` block per component regardless of
+        // kind. Vue and Svelte both allow "one scoped + one global"
+        // side by side, and Fitz will get there once demand appears
+        // — but 11.3.a keeps the cap at one to avoid deciding
+        // ordering / merge semantics prematurely.
+        let src = r#"component X {
+  <style scoped>a{}</style>
+  <style global>b{}</style>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("duplicate `<style>`"));
+    }
+
+    #[test]
+    fn global_style_parses_with_kind_global() {
+        // Since 11.3.a: `<style global>` is a first-class style
+        // block; the parser reads the raw CSS and stores it on the
+        // component with `StyleKind::Global`.
+        let src = r#"component X {
+  <style global>body { margin: 0; }</style>
+}"#;
+        let file = parse(src).unwrap();
+        let style = file.components[0].style.as_ref().unwrap();
+        assert_eq!(style.kind, super::super::ast::StyleKind::Global);
+        assert_eq!(style.css_raw.trim(), "body { margin: 0; }");
+    }
+
+    #[test]
+    fn scoped_style_parses_with_kind_scoped() {
+        // Regression for the pre-11.3.a shape: what used to be the
+        // only style block form still parses correctly, and the
+        // `kind` field now carries `StyleKind::Scoped` explicitly.
+        let src = r#"component X {
+  <style scoped>.card { padding: 8px; }</style>
+}"#;
+        let file = parse(src).unwrap();
+        let style = file.components[0].style.as_ref().unwrap();
+        assert_eq!(style.kind, super::super::ast::StyleKind::Scoped);
+        assert_eq!(style.css_raw.trim(), ".card { padding: 8px; }");
+    }
+
+    #[test]
+    fn expected_shape_error_names_both_style_forms() {
+        // The "expected `state`, `event`, ..." error path — hit
+        // when a stray identifier or delimiter shows up at the top
+        // level of the component body — now names both accepted
+        // style shapes so users looking at the error see the two
+        // options at once.
+        let src = r#"component X { foo }"#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("<style scoped>"));
+        assert!(err.message.contains("<style global>"));
     }
 
     #[test]

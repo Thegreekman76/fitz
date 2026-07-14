@@ -35,6 +35,8 @@
 
 use std::fmt;
 
+use super::ast::StyleKind;
+
 /// Token kind. Position lives outside in `TokenWithLoc`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -69,9 +71,16 @@ pub enum Token {
     /// Raw content between `<template>` and `</template>` — without
     /// the tags. The HTML parser re-lexes it internally.
     TemplateRaw(String),
-    /// Raw content between `<style scoped>` and `</style>`. `scoped`
-    /// is mandatory in the POC (documented in the AST).
-    StyleScopedRaw(String),
+    /// Raw content between `<style scoped>` (or `<style global>`)
+    /// and `</style>` — without the tags. The `kind` field
+    /// discriminates the two shapes. A bare `<style>` (with no
+    /// opt-in) is rejected at lex time with a targeted error
+    /// pointing at the two accepted forms; requiring the explicit
+    /// opt-in keeps the tree honest about scoping intent.
+    StyleRaw {
+        kind: StyleKind,
+        body: String,
+    },
 
     Newline,
     Eof,
@@ -99,7 +108,14 @@ impl fmt::Display for Token {
             Token::Gt => write!(f, "`>`"),
             Token::Question => write!(f, "`?`"),
             Token::TemplateRaw(_) => write!(f, "<template> block"),
-            Token::StyleScopedRaw(_) => write!(f, "<style scoped> block"),
+            Token::StyleRaw {
+                kind: StyleKind::Scoped,
+                ..
+            } => write!(f, "<style scoped> block"),
+            Token::StyleRaw {
+                kind: StyleKind::Global,
+                ..
+            } => write!(f, "<style global> block"),
             Token::Newline => write!(f, "newline"),
             Token::Eof => write!(f, "end of file"),
         }
@@ -245,8 +261,38 @@ impl ViewLexer {
                     continue;
                 }
                 if self.starts_with("<style scoped>") {
-                    self.consume_style_block(start_line, start_col)?;
+                    self.consume_style_block(
+                        StyleKind::Scoped,
+                        "<style scoped>",
+                        start_line,
+                        start_col,
+                    )?;
                     continue;
+                }
+                if self.starts_with("<style global>") {
+                    self.consume_style_block(
+                        StyleKind::Global,
+                        "<style global>",
+                        start_line,
+                        start_col,
+                    )?;
+                    continue;
+                }
+                // Reject bare `<style>` and `<style anything-else>`
+                // with a targeted error naming the two accepted
+                // forms. Missing this catch would produce a
+                // confusing downstream "unexpected `<`" from the
+                // parser (since the plain `Lt` fallback below would
+                // fire, followed by `Ident("style")` inside the
+                // component body — meaningless in the shell).
+                if self.starts_with("<style") {
+                    return Err(ViewLexError {
+                        message: "`<style>` requires an explicit opt-in: use `<style scoped>` for \
+                             per-component CSS or `<style global>` for shared rules"
+                            .into(),
+                        line: start_line,
+                        column: start_col,
+                    });
                 }
                 self.advance();
                 self.tokens.push(TokenWithLoc {
@@ -517,9 +563,16 @@ impl ViewLexer {
         }
     }
 
-    fn consume_style_block(&mut self, start_line: usize, start_col: usize) -> ViewLexResult<()> {
-        // Consume `<style scoped>` — fixed 14 chars.
-        for _ in 0.."<style scoped>".len() {
+    fn consume_style_block(
+        &mut self,
+        kind: StyleKind,
+        opener: &'static str,
+        start_line: usize,
+        start_col: usize,
+    ) -> ViewLexResult<()> {
+        // Consume the opening tag (`<style scoped>` = 14 chars,
+        // `<style global>` = 14 chars).
+        for _ in 0..opener.len() {
             self.advance();
         }
         let mut body = String::new();
@@ -529,7 +582,7 @@ impl ViewLexer {
                     self.advance();
                 }
                 self.tokens.push(TokenWithLoc {
-                    token: Token::StyleScopedRaw(body),
+                    token: Token::StyleRaw { kind, body },
                     line: start_line,
                     column: start_col,
                 });
@@ -539,7 +592,7 @@ impl ViewLexer {
                 Some(c) => body.push(c),
                 None => {
                     return Err(ViewLexError {
-                        message: "unterminated `<style scoped>` block — expected `</style>`".into(),
+                        message: format!("unterminated `{opener}` block — expected `</style>`"),
                         line: start_line,
                         column: start_col,
                     });
@@ -611,10 +664,87 @@ mod tests {
         let src = "component X { <style scoped>.a { color: red; }</style> }";
         let toks = tokenize(src).unwrap();
         let style_tok = toks.iter().find_map(|t| match &t.token {
-            Token::StyleScopedRaw(s) => Some(s.clone()),
+            Token::StyleRaw {
+                kind: StyleKind::Scoped,
+                body,
+            } => Some(body.clone()),
             _ => None,
         });
         assert_eq!(style_tok.as_deref(), Some(".a { color: red; }"));
+    }
+
+    #[test]
+    fn captures_style_global_block_as_raw_string() {
+        // Since 11.3.a: `<style global>` is a first-class sibling of
+        // `<style scoped>`. The lexer distinguishes by the opener;
+        // the body is captured up to the same `</style>` closer.
+        let src = "component X { <style global>body { margin: 0; }</style> }";
+        let toks = tokenize(src).unwrap();
+        let style_tok = toks.iter().find_map(|t| match &t.token {
+            Token::StyleRaw {
+                kind: StyleKind::Global,
+                body,
+            } => Some(body.clone()),
+            _ => None,
+        });
+        assert_eq!(style_tok.as_deref(), Some("body { margin: 0; }"));
+    }
+
+    #[test]
+    fn bare_style_without_opt_in_is_rejected_at_lex_time() {
+        // Since 11.3.a: `<style>` without `scoped` or `global` is
+        // ambiguous — Vue defaults to global, Svelte to scoped, and
+        // Fitz refuses to pick a default. The lexer catches this
+        // early with a targeted message; letting it flow through
+        // would produce a confusing downstream "unexpected `<`" once
+        // the shell parser rejected `Lt` at the top level of a
+        // component body.
+        let src = "component X { <style>.a{}</style> }";
+        let err = tokenize(src).unwrap_err();
+        assert!(
+            err.message
+                .contains("`<style>` requires an explicit opt-in"),
+            "unexpected error message: {}",
+            err.message
+        );
+        assert!(err.message.contains("<style scoped>"));
+        assert!(err.message.contains("<style global>"));
+    }
+
+    #[test]
+    fn style_with_unknown_kind_is_rejected_at_lex_time() {
+        // `<style foo>` doesn't match either accepted opener, so the
+        // catch-all `starts_with("<style")` guard fires. Same error
+        // as bare `<style>` — the two accepted forms are named
+        // explicitly. `<style>` with a stray attribute never has
+        // meaning in Fitz today; if a third opt-in ever lands
+        // (e.g. `<style module>` for CSS Modules), it joins the
+        // `starts_with` cascade above.
+        let src = "component X { <style foo>a{}</style> }";
+        let err = tokenize(src).unwrap_err();
+        assert!(err
+            .message
+            .contains("`<style>` requires an explicit opt-in"));
+    }
+
+    #[test]
+    fn unterminated_style_scoped_block_errors_with_scoped_in_message() {
+        // Regression: after 11.3.a's `consume_style_block` refactor
+        // took a `kind` + `opener` arg, the unterminated error
+        // message now uses the opener verbatim. Users still see the
+        // exact tag they typed when the closer is missing.
+        let src = "component X { <style scoped>.a{ ";
+        let err = tokenize(src).unwrap_err();
+        assert!(err.message.contains("<style scoped>"));
+        assert!(err.message.contains("expected `</style>`"));
+    }
+
+    #[test]
+    fn unterminated_style_global_block_errors_with_global_in_message() {
+        let src = "component X { <style global>a{ ";
+        let err = tokenize(src).unwrap_err();
+        assert!(err.message.contains("<style global>"));
+        assert!(err.message.contains("expected `</style>`"));
     }
 
     #[test]

@@ -199,14 +199,47 @@ pub enum Attr {
     },
 }
 
-/// A `<style scoped>...</style>` block. POC captures the raw CSS
-/// text without parsing it. The `scoped` attribute is mandatory in
-/// the POC — un-scoped styles are deferred to 11.3+ pending a
-/// decision on the global-style story.
+/// A `<style scoped>...</style>` or `<style global>...</style>`
+/// block. The `kind` distinguishes the two shapes; `css_raw` is the
+/// CSS body without the tags.
+///
+/// Since Phase 11.3.a: the block MUST carry either `scoped` or
+/// `global` as its opt-in attribute — bare `<style>` is rejected at
+/// the lexer with a clear message pointing at the two accepted
+/// forms. Rationale: explicit intent is cheap to write once and
+/// removes ambiguity in the tree ("is this component's `<style>`
+/// scoped by default like Svelte, or global by default like Vue?").
+///
+/// The POC caps at ONE `<style>` block per component regardless of
+/// kind. Allowing "one scoped + one global" side by side (Vue /
+/// Svelte convention) is refinable in a follow-up if demand
+/// appears; today, if you need both, factor the global rules into a
+/// dedicated global-only component or use `@global(...)` targeted
+/// rules once that shape lands.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Style {
+    pub kind: StyleKind,
     pub css_raw: String,
     pub loc: Loc,
+}
+
+/// Discriminates a `<style ...>` block by its scoping opt-in.
+///
+///   - `Scoped` — `<style scoped>`. Since 11.3.c, its CSS gets a
+///     per-component class-prefix applied to every simple selector
+///     (`.foo` → `.foo-c-XXXXXXXX`), and every element in the
+///     component's template receives that same prefix class on its
+///     `class` attribute. The result is CSS that only applies to
+///     this component's markup, verified against a per-component
+///     hash of the CSS body.
+///   - `Global` — `<style global>`. The CSS is emitted as-is,
+///     shared across the whole document. Intended for cross-cutting
+///     rules like resets, base typography, or utility classes that
+///     the component owns but wants to expose beyond itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleKind {
+    Scoped,
+    Global,
 }
 
 /// 1-based (line, column). Mirrors `crate::ast::Span` but stays
