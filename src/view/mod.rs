@@ -25,10 +25,12 @@
 //   - `parser` — recursive parser + HTML sub-parser for `<template>`
 
 pub mod ast;
+pub mod check;
 pub mod expand;
 pub mod lexer;
 pub mod parser;
 
+pub use check::{check, CheckError};
 pub use expand::{
     expand, ExpandError, ExpandResult, ExpandedAttr, ExpandedComponent, ExpandedEventHandler,
     ExpandedStateField, ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
