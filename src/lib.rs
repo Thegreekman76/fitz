@@ -55,6 +55,7 @@ pub mod templates; // Phase 4 Y-B, Session 1.c — `fitz new --template <name>` 
 pub mod testing; // Phase 9.z.2 — built-in testing (registry + @test + asserts)
 pub mod types; // Phase 5.2 — resolved type system + base checker
 pub mod value; // Phase 2.4 — runtime values // Phase 9.z.5 — `fitz lint` (4 lints + suppression)
+pub mod view; // Phase 11 POC — Single-File Component parser for `.fitzv` files (isolated from classic pipeline)
 
 // Phase 8.1.2 — Python interop via PyO3 (opt-in `python` feature).
 // The module wraps `Python::with_gil` + `py.import(...)` and produces

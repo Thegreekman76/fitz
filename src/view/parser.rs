@@ -1,0 +1,1058 @@
+// view/parser.rs — recursive-descent parser for `.fitzv` (Phase 11 POC).
+//
+// Two layers:
+//
+//   1. **Component shell** — consumes tokens from `view::lexer` to
+//      recognise `component Name { state {...} event ... }`. State
+//      field defaults and event handler bodies are captured as raw
+//      source strings; the POC does not parse them as
+//      `crate::ast::Expr` yet (deferred to Phase 11.2, see
+//      `docs/fase-11-plan.md`).
+//
+//   2. **HTML sub-parser** — builds the `TemplateNode` tree from the
+//      raw blob returned by `Token::TemplateRaw(String)`. It is
+//      char-by-char and does NOT reuse the classic lexer. POC
+//      coverage: Text / Interpolation `{expr}` / Element
+//      `<tag attr...>...</tag>` with attrs of kind Static /
+//      Interpolation / Event (`@click="handler"`).
+//
+// The CSS inside `<style scoped>` stays as an opaque blob — CSS
+// parsing lands in 11.3+ (once the scoping strategy is settled).
+
+use super::ast::*;
+use super::lexer::{Token, TokenWithLoc, ViewLexError};
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewParseError {
+    pub message: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl fmt::Display for ViewParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "view parse error at {}:{} — {}",
+            self.line, self.column, self.message
+        )
+    }
+}
+
+impl std::error::Error for ViewParseError {}
+
+impl From<ViewLexError> for ViewParseError {
+    fn from(e: ViewLexError) -> Self {
+        Self {
+            message: e.message,
+            line: e.line,
+            column: e.column,
+        }
+    }
+}
+
+pub type ViewParseResult<T> = Result<T, ViewParseError>;
+
+pub fn parse(source: &str) -> ViewParseResult<ViewFile> {
+    let tokens = super::lexer::tokenize(source)?;
+    let mut parser = ViewParser::new(tokens);
+    parser.parse_view_file()
+}
+
+struct ViewParser {
+    tokens: Vec<TokenWithLoc>,
+    pos: usize,
+}
+
+impl ViewParser {
+    fn new(tokens: Vec<TokenWithLoc>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> &TokenWithLoc {
+        // Guaranteed: `tokenize` always appends Eof.
+        &self.tokens[self.pos.min(self.tokens.len() - 1)]
+    }
+
+    fn advance(&mut self) -> TokenWithLoc {
+        let t = self.tokens[self.pos].clone();
+        if self.pos < self.tokens.len() - 1 {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn skip_newlines(&mut self) {
+        while matches!(self.peek().token, Token::Newline) {
+            self.advance();
+        }
+    }
+
+    fn expect(&mut self, want: Token) -> ViewParseResult<TokenWithLoc> {
+        self.skip_newlines();
+        let cur = self.peek().clone();
+        if std::mem::discriminant(&cur.token) == std::mem::discriminant(&want) {
+            Ok(self.advance())
+        } else {
+            Err(ViewParseError {
+                message: format!("expected {want}, got {}", cur.token),
+                line: cur.line,
+                column: cur.column,
+            })
+        }
+    }
+
+    fn parse_view_file(&mut self) -> ViewParseResult<ViewFile> {
+        let mut components = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek().token {
+                Token::Eof => break,
+                Token::Component => {
+                    components.push(self.parse_component()?);
+                }
+                _ => {
+                    let cur = self.peek().clone();
+                    return Err(ViewParseError {
+                        message: format!(
+                            "expected `component` at the top level, got {}",
+                            cur.token
+                        ),
+                        line: cur.line,
+                        column: cur.column,
+                    });
+                }
+            }
+        }
+        Ok(ViewFile { components })
+    }
+
+    fn parse_component(&mut self) -> ViewParseResult<Component> {
+        let kw = self.expect(Token::Component)?;
+        let loc = Loc::new(kw.line, kw.column);
+        let name_tok = self.expect(Token::Ident(String::new()))?;
+        let name = match name_tok.token {
+            Token::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        self.expect(Token::LBrace)?;
+
+        let mut state = Vec::new();
+        let mut events = Vec::new();
+        let mut template: Option<Template> = None;
+        let mut style: Option<Style> = None;
+
+        loop {
+            self.skip_newlines();
+            match &self.peek().token {
+                Token::RBrace => {
+                    self.advance();
+                    break;
+                }
+                Token::State => {
+                    let block = self.parse_state_block()?;
+                    state.extend(block);
+                }
+                Token::Event => {
+                    events.push(self.parse_event_handler()?);
+                }
+                Token::TemplateRaw(_) => {
+                    if template.is_some() {
+                        let cur = self.peek().clone();
+                        return Err(ViewParseError {
+                            message: "duplicate `<template>` block — only one per component".into(),
+                            line: cur.line,
+                            column: cur.column,
+                        });
+                    }
+                    let tok = self.advance();
+                    let raw = match tok.token {
+                        Token::TemplateRaw(s) => s,
+                        _ => unreachable!(),
+                    };
+                    let roots = parse_template_body(&raw, tok.line, tok.column)?;
+                    template = Some(Template {
+                        roots,
+                        loc: Loc::new(tok.line, tok.column),
+                    });
+                }
+                Token::StyleScopedRaw(_) => {
+                    if style.is_some() {
+                        let cur = self.peek().clone();
+                        return Err(ViewParseError {
+                            message: "duplicate `<style scoped>` block — only one per component"
+                                .into(),
+                            line: cur.line,
+                            column: cur.column,
+                        });
+                    }
+                    let tok = self.advance();
+                    let css = match tok.token {
+                        Token::StyleScopedRaw(s) => s,
+                        _ => unreachable!(),
+                    };
+                    style = Some(Style {
+                        css_raw: css,
+                        loc: Loc::new(tok.line, tok.column),
+                    });
+                }
+                _ => {
+                    let cur = self.peek().clone();
+                    return Err(ViewParseError {
+                        message: format!(
+                            "expected `state`, `event`, `<template>` or `<style scoped>` inside component body, got {}",
+                            cur.token
+                        ),
+                        line: cur.line,
+                        column: cur.column,
+                    });
+                }
+            }
+        }
+
+        Ok(Component {
+            name,
+            loc,
+            state,
+            events,
+            template,
+            style,
+        })
+    }
+
+    fn parse_state_block(&mut self) -> ViewParseResult<Vec<StateField>> {
+        self.expect(Token::State)?;
+        self.expect(Token::LBrace)?;
+        let mut fields = Vec::new();
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek().token, Token::RBrace) {
+                self.advance();
+                break;
+            }
+            fields.push(self.parse_state_field()?);
+        }
+        Ok(fields)
+    }
+
+    fn parse_state_field(&mut self) -> ViewParseResult<StateField> {
+        let name_tok = self.expect(Token::Ident(String::new()))?;
+        let name = match name_tok.token {
+            Token::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        let loc = Loc::new(name_tok.line, name_tok.column);
+        self.expect(Token::Colon)?;
+        // Capture the type as raw text up to `=`. Enough for the POC
+        // — the real TypeExpr parser hooks up in 11.2.
+        let type_expr_raw = self.capture_raw_until(&[Token::Eq])?;
+        self.expect(Token::Eq)?;
+        // Capture the default as raw text up to the next stmt
+        // boundary (newline, comma, semicolon, or `}` of the state
+        // block).
+        let default_expr_raw =
+            self.capture_raw_until(&[Token::Newline, Token::Comma, Token::Semi, Token::RBrace])?;
+        // Consume the separator (except `}`, which the caller of
+        // the state block consumes).
+        if matches!(
+            self.peek().token,
+            Token::Newline | Token::Comma | Token::Semi
+        ) {
+            self.advance();
+        }
+        Ok(StateField {
+            name,
+            type_expr_raw: type_expr_raw.trim().to_string(),
+            default_expr_raw: default_expr_raw.trim().to_string(),
+            loc,
+        })
+    }
+
+    fn parse_event_handler(&mut self) -> ViewParseResult<EventHandler> {
+        let kw = self.expect(Token::Event)?;
+        let name_tok = self.expect(Token::Ident(String::new()))?;
+        let name = match name_tok.token {
+            Token::Ident(s) => s,
+            _ => unreachable!(),
+        };
+        let loc = Loc::new(kw.line, kw.column);
+        self.expect(Token::LParen)?;
+        let params_raw = self.capture_raw_until(&[Token::RParen])?.trim().to_string();
+        self.expect(Token::RParen)?;
+        // Handler bodies: capture EVERYTHING between the opening `{`
+        // and its matched `}` (brace-balanced). POC does not re-lex
+        // the body, so preserving chars verbatim is enough.
+        self.expect(Token::LBrace)?;
+        let body_raw = self.capture_balanced_body_raw()?;
+        // The closing `}` for the body was already consumed by
+        // `capture_balanced_body_raw`.
+        Ok(EventHandler {
+            name,
+            params_raw,
+            body_raw,
+            loc,
+        })
+    }
+
+    /// Capture raw text starting at the current position (excluding
+    /// separator tokens) up to (but NOT consuming) one of the tokens
+    /// in `stops`. Reconstructs an approximate source rendering from
+    /// the tokens — enough for opaque blobs that the POC does not
+    /// re-analyse.
+    fn capture_raw_until(&mut self, stops: &[Token]) -> ViewParseResult<String> {
+        let mut out = String::new();
+        loop {
+            let cur = self.peek();
+            if cur.token == Token::Eof {
+                return Err(ViewParseError {
+                    message: "unexpected end of file while capturing raw text".into(),
+                    line: cur.line,
+                    column: cur.column,
+                });
+            }
+            if stops
+                .iter()
+                .any(|s| std::mem::discriminant(s) == std::mem::discriminant(&cur.token))
+            {
+                return Ok(out);
+            }
+            let tok = self.advance();
+            append_token_source(&mut out, &tok.token);
+        }
+    }
+
+    /// Consume tokens until the enclosing `{` is closed (counting
+    /// nested `{`/`}` pairs — needed for nested map literals or if
+    /// bodies inside a default). Returns the body as raw source text
+    /// WITHOUT the outer braces.
+    fn capture_balanced_body_raw(&mut self) -> ViewParseResult<String> {
+        let mut out = String::new();
+        let mut depth = 1_usize;
+        loop {
+            let cur = self.peek();
+            match cur.token {
+                Token::Eof => {
+                    return Err(ViewParseError {
+                        message: "unterminated event handler body — expected `}`".into(),
+                        line: cur.line,
+                        column: cur.column,
+                    });
+                }
+                Token::LBrace => {
+                    depth += 1;
+                    let tok = self.advance();
+                    append_token_source(&mut out, &tok.token);
+                }
+                Token::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.advance(); // consume the closing `}` of the body
+                        return Ok(out);
+                    }
+                    let tok = self.advance();
+                    append_token_source(&mut out, &tok.token);
+                }
+                _ => {
+                    let tok = self.advance();
+                    append_token_source(&mut out, &tok.token);
+                }
+            }
+        }
+    }
+}
+
+fn append_token_source(out: &mut String, tok: &Token) {
+    if !out.is_empty() && needs_space_before(out, tok) {
+        out.push(' ');
+    }
+    match tok {
+        Token::Component => out.push_str("component"),
+        Token::State => out.push_str("state"),
+        Token::Event => out.push_str("event"),
+        Token::Ident(s) => out.push_str(s),
+        Token::Str(s) => {
+            out.push('"');
+            for c in s.chars() {
+                match c {
+                    '\\' => out.push_str("\\\\"),
+                    '"' => out.push_str("\\\""),
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\r' => out.push_str("\\r"),
+                    other => out.push(other),
+                }
+            }
+            out.push('"');
+        }
+        Token::LBrace => out.push('{'),
+        Token::RBrace => out.push('}'),
+        Token::LParen => out.push('('),
+        Token::RParen => out.push(')'),
+        Token::Comma => out.push(','),
+        Token::Colon => out.push(':'),
+        Token::Semi => out.push(';'),
+        Token::Eq => out.push('='),
+        Token::Newline => out.push('\n'),
+        Token::TemplateRaw(_) | Token::StyleScopedRaw(_) | Token::Eof => {
+            // Should not appear inside a `capture_*` call. If they
+            // do (unreachable in practice), silently ignore.
+        }
+    }
+}
+
+fn needs_space_before(prev_out: &str, tok: &Token) -> bool {
+    let last = prev_out.chars().last().unwrap();
+    if last == '\n' {
+        return false;
+    }
+    match tok {
+        Token::LParen
+        | Token::RParen
+        | Token::Comma
+        | Token::Colon
+        | Token::Semi
+        | Token::LBrace
+        | Token::RBrace => false,
+        _ => matches!(
+            last,
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | ')' | '}' | ']' | '"'
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTML sub-parser for the `<template>...` blob
+// ---------------------------------------------------------------------------
+
+/// Parse the raw `<template>` blob into a tree of `TemplateNode`s.
+/// The `base_line` / `base_col` offsets are used to emit `Loc`s
+/// close to the position of the `<template>` in the original
+/// source — the POC does not yet map precisely to the offset
+/// inside the blob (11.2 will add the fine mapping once the
+/// checker needs to locate errors).
+pub fn parse_template_body(
+    raw: &str,
+    base_line: usize,
+    base_col: usize,
+) -> ViewParseResult<Vec<TemplateNode>> {
+    let mut p = HtmlParser::new(raw, base_line, base_col);
+    let roots = p.parse_nodes(None)?;
+    Ok(roots)
+}
+
+struct HtmlParser<'a> {
+    chars: Vec<char>,
+    pos: usize,
+    line: usize,
+    column: usize,
+    _raw: &'a str,
+}
+
+impl<'a> HtmlParser<'a> {
+    fn new(raw: &'a str, base_line: usize, base_col: usize) -> Self {
+        Self {
+            chars: raw.chars().collect(),
+            pos: 0,
+            line: base_line,
+            column: base_col,
+            _raw: raw,
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.pos + offset).copied()
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.pos += 1;
+        if c == '\n' {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
+        Some(c)
+    }
+
+    /// Parse child nodes until `</tag>` is found (when `parent` is
+    /// `Some`) or the blob ends (when `parent` is `None`).
+    fn parse_nodes(&mut self, parent: Option<&str>) -> ViewParseResult<Vec<TemplateNode>> {
+        let mut nodes = Vec::new();
+        loop {
+            if self.peek().is_none() {
+                if let Some(tag) = parent {
+                    return Err(ViewParseError {
+                        message: format!("unterminated `<{tag}>` — expected `</{tag}>`"),
+                        line: self.line,
+                        column: self.column,
+                    });
+                }
+                return Ok(nodes);
+            }
+
+            // Closing tag for parent? `</tag>`
+            if let Some(parent_tag) = parent {
+                if self.peek() == Some('<') && self.peek_at(1) == Some('/') {
+                    // Consume `</`
+                    self.advance();
+                    self.advance();
+                    let closing = self.read_tag_name();
+                    self.skip_ws_inside_tag();
+                    if self.peek() != Some('>') {
+                        return Err(ViewParseError {
+                            message: format!("expected `>` closing `</{closing}>`"),
+                            line: self.line,
+                            column: self.column,
+                        });
+                    }
+                    self.advance();
+                    if closing != parent_tag {
+                        return Err(ViewParseError {
+                            message: format!(
+                                "mismatched closing tag `</{closing}>` — expected `</{parent_tag}>`"
+                            ),
+                            line: self.line,
+                            column: self.column,
+                        });
+                    }
+                    return Ok(nodes);
+                }
+            }
+
+            match self.peek() {
+                Some('<') => {
+                    let el = self.parse_element()?;
+                    nodes.push(el);
+                }
+                Some('{') => {
+                    let interp = self.parse_interpolation()?;
+                    nodes.push(interp);
+                }
+                Some(_) => {
+                    let text = self.read_text_until_special();
+                    if !text.is_empty() {
+                        nodes.push(TemplateNode::Text(text));
+                    }
+                }
+                None => unreachable!(),
+            }
+        }
+    }
+
+    fn parse_interpolation(&mut self) -> ViewParseResult<TemplateNode> {
+        let start_line = self.line;
+        let start_col = self.column;
+        self.advance(); // `{`
+        let mut expr = String::new();
+        let mut depth = 1_usize;
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(ViewParseError {
+                        message: "unterminated interpolation — expected `}`".into(),
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                Some('{') => {
+                    depth += 1;
+                    expr.push('{');
+                    self.advance();
+                }
+                Some('}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.advance();
+                        return Ok(TemplateNode::Interpolation {
+                            expr_raw: expr.trim().to_string(),
+                            loc: Loc::new(start_line, start_col),
+                        });
+                    }
+                    expr.push('}');
+                    self.advance();
+                }
+                Some(c) => {
+                    expr.push(c);
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    fn parse_element(&mut self) -> ViewParseResult<TemplateNode> {
+        let start_line = self.line;
+        let start_col = self.column;
+        self.advance(); // `<`
+        let tag = self.read_tag_name();
+        if tag.is_empty() {
+            return Err(ViewParseError {
+                message: "expected tag name after `<`".into(),
+                line: start_line,
+                column: start_col,
+            });
+        }
+        let mut attrs = Vec::new();
+        loop {
+            self.skip_ws_inside_tag();
+            match self.peek() {
+                Some('/') => {
+                    self.advance();
+                    if self.peek() != Some('>') {
+                        return Err(ViewParseError {
+                            message: format!("expected `>` after `/` in self-closing `<{tag}/>`"),
+                            line: self.line,
+                            column: self.column,
+                        });
+                    }
+                    self.advance();
+                    return Ok(TemplateNode::Element {
+                        tag,
+                        attrs,
+                        children: Vec::new(),
+                        self_closing: true,
+                        loc: Loc::new(start_line, start_col),
+                    });
+                }
+                Some('>') => {
+                    self.advance();
+                    let children = self.parse_nodes(Some(&tag))?;
+                    return Ok(TemplateNode::Element {
+                        tag,
+                        attrs,
+                        children,
+                        self_closing: false,
+                        loc: Loc::new(start_line, start_col),
+                    });
+                }
+                Some(_) => {
+                    let attr = self.parse_attribute()?;
+                    attrs.push(attr);
+                }
+                None => {
+                    return Err(ViewParseError {
+                        message: format!("unterminated `<{tag}...>` — expected `>` or `/>`"),
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+            }
+        }
+    }
+
+    fn parse_attribute(&mut self) -> ViewParseResult<Attr> {
+        let start_line = self.line;
+        let start_col = self.column;
+        let name = self.read_attr_name();
+        if name.is_empty() {
+            return Err(ViewParseError {
+                message: "expected attribute name".into(),
+                line: start_line,
+                column: start_col,
+            });
+        }
+        self.skip_ws_inside_tag();
+        if self.peek() != Some('=') {
+            return Err(ViewParseError {
+                message: format!(
+                    "attribute `{name}` requires a value in the POC — bare boolean attrs land in Phase 11.2+"
+                ),
+                line: self.line,
+                column: self.column,
+            });
+        }
+        self.advance(); // `=`
+        self.skip_ws_inside_tag();
+        if self.peek() != Some('"') {
+            return Err(ViewParseError {
+                message: format!("attribute `{name}` value must be double-quoted in the POC"),
+                line: self.line,
+                column: self.column,
+            });
+        }
+        self.advance(); // opening `"`
+        let raw_value = self.read_attr_value()?;
+
+        // Classify: `@click="handler"` -> Event, `="{expr}"` ->
+        // Interpolation, everything else -> Static.
+        if let Some(event_name) = name.strip_prefix('@') {
+            return Ok(Attr::Event {
+                event_name: event_name.to_string(),
+                handler_raw: raw_value,
+                loc: Loc::new(start_line, start_col),
+            });
+        }
+        if let Some(inner) = extract_full_interp(&raw_value) {
+            return Ok(Attr::Interpolation {
+                name,
+                expr_raw: inner.trim().to_string(),
+                loc: Loc::new(start_line, start_col),
+            });
+        }
+        Ok(Attr::Static {
+            name,
+            value: raw_value,
+            loc: Loc::new(start_line, start_col),
+        })
+    }
+
+    fn read_attr_value(&mut self) -> ViewParseResult<String> {
+        let mut s = String::new();
+        loop {
+            match self.peek() {
+                Some('"') => {
+                    self.advance();
+                    return Ok(s);
+                }
+                Some('\n') => {
+                    return Err(ViewParseError {
+                        message:
+                            "attribute value contains a raw newline — quote the value carefully"
+                                .into(),
+                        line: self.line,
+                        column: self.column,
+                    });
+                }
+                Some(c) => {
+                    s.push(c);
+                    self.advance();
+                }
+                None => {
+                    return Err(ViewParseError {
+                        message: "unterminated attribute value — expected closing `\"`".into(),
+                        line: self.line,
+                        column: self.column,
+                    });
+                }
+            }
+        }
+    }
+
+    fn read_tag_name(&mut self) -> String {
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                s.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    fn read_attr_name(&mut self) -> String {
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '@' || c == ':' {
+                s.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    fn skip_ws_inside_tag(&mut self) {
+        while let Some(c) = self.peek() {
+            if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn read_text_until_special(&mut self) -> String {
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if c == '<' || c == '{' {
+                break;
+            }
+            s.push(c);
+            self.advance();
+        }
+        s
+    }
+}
+
+/// Returns the inside of `"{...}"` when the value is 100%
+/// interpolation (no literal parts); `None` if it's a mix or pure
+/// static. The POC requires attribute values to be fully static or
+/// fully interpolated.
+fn extract_full_interp(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let stripped = trimmed.strip_prefix('{')?.strip_suffix('}')?;
+    // Reject `{a}{b}` mixed — if there's an unbalanced `{` or `}`
+    // inside, fall back to the Static path to avoid confusing the
+    // user.
+    let mut depth = 0_i32;
+    for c in stripped.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        Some(stripped)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The canonical Card SFC used across the POC:
+    ///   - state with 2 annotated fields + literal defaults
+    ///   - 2 event handlers, one without params and one with params
+    ///   - template with nested Elements + static attr + event attr + interpolation
+    ///   - opaque scoped style
+    const CARD_SRC: &str = r#"component Card {
+  state {
+    title: Str = "Untitled"
+    is_editing: Bool = false
+  }
+
+  event start() {
+    is_editing = true
+  }
+
+  event save(new_title: Str) {
+    title = new_title
+    is_editing = false
+  }
+
+  <template>
+    <div class="card">
+      <div class="title">{title}</div>
+      <button @click="start">Edit</button>
+    </div>
+  </template>
+
+  <style scoped>
+    .card { border: 1px solid #ccc; padding: 1rem; }
+    .title { font-weight: bold; }
+  </style>
+}
+"#;
+
+    #[test]
+    fn parses_the_card_component_shell() {
+        let file = parse(CARD_SRC).expect("Card parses cleanly");
+        assert_eq!(file.components.len(), 1);
+        let c = &file.components[0];
+        assert_eq!(c.name, "Card");
+        assert_eq!(c.state.len(), 2);
+        assert_eq!(c.events.len(), 2);
+        assert!(c.template.is_some());
+        assert!(c.style.is_some());
+    }
+
+    #[test]
+    fn state_fields_capture_type_and_default_raw() {
+        let file = parse(CARD_SRC).unwrap();
+        let c = &file.components[0];
+        assert_eq!(c.state[0].name, "title");
+        assert_eq!(c.state[0].type_expr_raw, "Str");
+        assert_eq!(c.state[0].default_expr_raw, "\"Untitled\"");
+        assert_eq!(c.state[1].name, "is_editing");
+        assert_eq!(c.state[1].type_expr_raw, "Bool");
+        assert_eq!(c.state[1].default_expr_raw, "false");
+    }
+
+    #[test]
+    fn event_handlers_capture_params_and_body_raw() {
+        let file = parse(CARD_SRC).unwrap();
+        let c = &file.components[0];
+        assert_eq!(c.events[0].name, "start");
+        assert_eq!(c.events[0].params_raw, "");
+        assert!(c.events[0].body_raw.contains("is_editing"));
+        assert!(c.events[0].body_raw.contains("true"));
+
+        assert_eq!(c.events[1].name, "save");
+        assert!(c.events[1].params_raw.contains("new_title"));
+        assert!(c.events[1].params_raw.contains(":"));
+        assert!(c.events[1].body_raw.contains("title"));
+        assert!(c.events[1].body_raw.contains("new_title"));
+    }
+
+    #[test]
+    fn template_body_produces_nested_element_tree() {
+        let file = parse(CARD_SRC).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        // Walking the roots ignores leading whitespace text nodes.
+        let outer_div = template
+            .roots
+            .iter()
+            .find(|n| matches!(n, TemplateNode::Element { tag, .. } if tag == "div"))
+            .expect("outer <div> exists");
+        let (children,) = match outer_div {
+            TemplateNode::Element { children, .. } => (children,),
+            _ => unreachable!(),
+        };
+        let inner_elements: Vec<_> = children
+            .iter()
+            .filter(|n| matches!(n, TemplateNode::Element { .. }))
+            .collect();
+        assert_eq!(
+            inner_elements.len(),
+            2,
+            "inner elements: title div + button"
+        );
+        // First inner is `<div class="title">{title}</div>`.
+        match inner_elements[0] {
+            TemplateNode::Element {
+                tag,
+                attrs,
+                children,
+                ..
+            } => {
+                assert_eq!(tag, "div");
+                assert_eq!(attrs.len(), 1);
+                assert!(matches!(&attrs[0], Attr::Static { name, value, .. }
+                    if name == "class" && value == "title"));
+                assert!(children
+                    .iter()
+                    .any(|c| matches!(c, TemplateNode::Interpolation { expr_raw, .. }
+                    if expr_raw == "title")));
+            }
+            _ => unreachable!(),
+        }
+        // Second inner is `<button @click="start">Edit</button>`.
+        match inner_elements[1] {
+            TemplateNode::Element {
+                tag,
+                attrs,
+                children,
+                ..
+            } => {
+                assert_eq!(tag, "button");
+                assert_eq!(attrs.len(), 1);
+                assert!(
+                    matches!(&attrs[0], Attr::Event { event_name, handler_raw, .. }
+                    if event_name == "click" && handler_raw == "start")
+                );
+                assert!(children
+                    .iter()
+                    .any(|c| matches!(c, TemplateNode::Text(s) if s.contains("Edit"))));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn style_scoped_body_captured_as_opaque_css() {
+        let file = parse(CARD_SRC).unwrap();
+        let css = &file.components[0].style.as_ref().unwrap().css_raw;
+        assert!(css.contains(".card"));
+        assert!(css.contains("border: 1px solid #ccc"));
+        assert!(css.contains(".title"));
+    }
+
+    #[test]
+    fn parse_prints_the_ast_for_inspection() {
+        // Run with `cargo test -- --nocapture` to see the AST.
+        let file = parse(CARD_SRC).unwrap();
+        println!("--- Parsed .fitzv AST (Phase 11 POC) ---\n{:#?}", file);
+    }
+
+    #[test]
+    fn empty_component_shell_parses() {
+        let file = parse("component Empty {}").unwrap();
+        assert_eq!(file.components.len(), 1);
+        assert_eq!(file.components[0].name, "Empty");
+        assert!(file.components[0].state.is_empty());
+        assert!(file.components[0].events.is_empty());
+        assert!(file.components[0].template.is_none());
+        assert!(file.components[0].style.is_none());
+    }
+
+    #[test]
+    fn duplicate_template_block_errors_clearly() {
+        let src = r#"component X {
+  <template><div>a</div></template>
+  <template><div>b</div></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("duplicate `<template>`"));
+    }
+
+    #[test]
+    fn duplicate_style_block_errors_clearly() {
+        let src = r#"component X {
+  <style scoped>a{}</style>
+  <style scoped>b{}</style>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("duplicate `<style scoped>`"));
+    }
+
+    #[test]
+    fn interpolation_with_dotted_expression_is_captured_raw() {
+        let src = r#"component X {
+  <template><span>{user.name}</span></template>
+}"#;
+        let file = parse(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        let span = &template.roots[0];
+        match span {
+            TemplateNode::Element { children, .. } => {
+                assert!(children
+                    .iter()
+                    .any(|c| matches!(c, TemplateNode::Interpolation { expr_raw, .. }
+                    if expr_raw == "user.name")));
+            }
+            _ => panic!("expected <span> element"),
+        }
+    }
+
+    #[test]
+    fn attribute_full_interpolation_becomes_interpolation_kind() {
+        let src = r#"component X {
+  <template><input value="{title}" /></template>
+}"#;
+        let file = parse(src).unwrap();
+        let input = &file.components[0].template.as_ref().unwrap().roots[0];
+        match input {
+            TemplateNode::Element {
+                attrs,
+                self_closing,
+                ..
+            } => {
+                assert!(*self_closing);
+                assert!(
+                    matches!(&attrs[0], Attr::Interpolation { name, expr_raw, .. }
+                    if name == "value" && expr_raw == "title")
+                );
+            }
+            _ => panic!("expected <input/> element"),
+        }
+    }
+
+    #[test]
+    fn mismatched_closing_tag_errors_clearly() {
+        let src = r#"component X {
+  <template><div><span></div></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(err.message.contains("mismatched closing tag"));
+    }
+}

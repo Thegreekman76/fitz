@@ -612,6 +612,20 @@ mod tests {
         Value::Secret(SecretInner(Box::new(inner)))
     }
 
+    /// Serialises tests that mutate `FITZ_LOG_FORMAT`. Env vars are
+    /// process-global, so running `detect_format_respects_env_override_*`
+    /// concurrently under `cargo test`'s default multi-threading races —
+    /// one test writes `"json"`, the other writes `"pretty"`, and each
+    /// can see the wrong value on the read. The Windows CI runner hit
+    /// this race intermittently (run 29330133205, 2026-07-14). The
+    /// lock forces the three tests to run one at a time.
+    ///
+    /// `unwrap_or_else(|p| p.into_inner())` opts out of poison
+    /// propagation: an assert failure in one test should not cascade
+    /// into "Mutex poisoned" for the others — the lock has no state
+    /// to corrupt.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn format_json_shape_flat_with_basic_kwargs() {
         let kvs = vec![
@@ -765,6 +779,7 @@ mod tests {
 
     #[test]
     fn detect_format_respects_env_override_json() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Save the previous value so we don't contaminate other tests.
         let prev = std::env::var("FITZ_LOG_FORMAT").ok();
         unsafe {
@@ -781,6 +796,7 @@ mod tests {
 
     #[test]
     fn detect_format_respects_env_override_pretty() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("FITZ_LOG_FORMAT").ok();
         unsafe {
             std::env::set_var("FITZ_LOG_FORMAT", "pretty");
@@ -795,6 +811,7 @@ mod tests {
 
     #[test]
     fn detect_format_invalid_override_falls_back_to_auto_detect() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("FITZ_LOG_FORMAT").ok();
         unsafe {
             std::env::set_var("FITZ_LOG_FORMAT", "yaml-no-existe");
