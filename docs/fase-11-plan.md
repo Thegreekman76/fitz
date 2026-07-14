@@ -1,13 +1,21 @@
 # Phase 11 — Native frontend in Fitz core
 
-**Status**: design + parser POC — 2026-07-14. No code paths in the
-`fitz` binary route to this yet. See `docs/stack.md` for the
-architectural constitution this plan implements.
+**Status**: sub-phases 11.1 + 11.2.a/b/c + view-lexer §7 + 11.3.a/b/c
+CLOSED — 2026-07-14. Parser + expand + checker + CSS scoping all
+work end-to-end on `.fitzv` files. No code paths in the `fitz`
+binary route to this yet (waiting on 11.5 CLI wiring). See
+`docs/stack.md` for the architectural constitution this plan
+implements.
 
-This document captures the decisions and the parser POC that
-kick off Phase 11. Its purpose is to make the next sub-phases
-concrete enough that they can be picked up in a fresh session
-without re-litigating shape.
+Sub-phases still open: 11.4 (client target — WASM vs JS-vanilla),
+11.5 (CLI wiring + multi-component composition), 11.6
+(fitz-liveviews migration), 11.7 (LSP support), 11.8 (pedagogic
+docs).
+
+This document captures the decisions and the sub-phases shipped
+so far, plus the shape of the ones still open. Its purpose is to
+make the next sub-phase concrete enough that it can be picked up
+in a fresh session without re-litigating shape.
 
 ---
 

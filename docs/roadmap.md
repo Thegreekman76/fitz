@@ -344,7 +344,7 @@ Detalle por sub-paso en [`CHANGELOG.md`](../CHANGELOG.md) → v0.16.0.
 2. **Tier C + D** (~17h): operadores SQL faltantes (ts_rank, expression indexes, JSON || merge) + DX/LSP (completion ORM methods en .where, hover @table → CREATE TABLE).
 3. **Tier E** (días-semanas, expansión del lenguaje): Decimal/Numeric, async streaming cursor-based, COPY FROM/TO, LISTEN/NOTIFY tipado, window functions, CTE/WITH, UNION/INTERSECT/EXCEPT.
 
-Alternativas no-ORM: nuevos boilerplates Dockerizados, contenido educativo (curso `Fitz de 0 a experto`), **Fase 11 (frontend en `.fitz`)** — única fase grande pendiente del roadmap, V6 (DAP — debugging interactivo en VSCode), deudas residuales menores del LSP/checker. Fases 12 (deployment) y 13 (CLI builder) ya están cerradas (v0.12.5+v0.13.0 y v0.11.0 respectivamente).
+Alternativas no-ORM: nuevos boilerplates Dockerizados, contenido educativo (curso `Fitz de 0 a experto`), **Fase 11 (frontend en `.fitz`)** — arrancada 2026-07-14 con `.fitzv` como extensión y parser + expand + checker + CSS scoping ya cerrados end-to-end (sub-fases 11.1 + 11.2.a/b/c + view-lexer §7 + 11.3.a/b/c); mini-fases 11.4 (client target WASM/JS decision) + 11.5 (CLI wiring) + 11.6 (fitz-liveviews migration) + 11.7 (LSP support) + 11.8 (pedagogic docs) siguen abiertas. Detalle exhaustivo en [`docs/fase-11-plan.md`](fase-11-plan.md). V6 (DAP — debugging interactivo en VSCode), deudas residuales menores del LSP/checker también en el backlog. Fases 12 (deployment) y 13 (CLI builder) ya están cerradas (v0.12.5+v0.13.0 y v0.11.0 respectivamente).
 
 Detalle exhaustivo de cada cierre en [`CHANGELOG.md`](../CHANGELOG.md) y deudas residuales en [`docs/deudas-post-5b.md`](deudas-post-5b.md).
 
@@ -9595,13 +9595,24 @@ release v0.10.17):
 
 ## Visión post-Fase 10 — Fase 11+ 🔮
 
-**Estado al cierre v0.15.0 (2026-06-05)**: de las 3 fases
-originalmente especulativas de esta sección, **2 ya cerraron**:
+**Estado al 2026-07-14**: de las 3 fases originalmente especulativas
+de esta sección, **2 ya cerraron y la tercera arrancó**:
 
 - ✅ **Fase 12 (Deployment ciudadano)** — CERRADA en v0.12.5 + v0.13.0.
 - ✅ **Fase 13 (CLI builder)** — CERRADA en v0.11.0 + v0.11.1.
-- 🔮 **Fase 11 (Frontend en `.fitz`)** — sigue como visión a futuro,
-  no arrancada.
+- 🟡 **Fase 11 (Frontend en `.fitz`)** — **arrancada 2026-07-14**.
+  Sub-fases cerradas: 11.1 (POC parser), 11.2.a (bridge classic AST),
+  11.2.b (checker mini-commits 1/2/3, 50 tests), 11.2.c (`{#if}` /
+  `{#for}` / `{#else}` / `<slot>`, 3 mini-commits), view-lexer §7
+  (state annotations no ASCII-limited), 11.3.a (`<style global>` +
+  `StyleKind`), 11.3.b (CSS mini-parser + `apply_scope(...)` helper),
+  11.3.c (wire scoping end-to-end en `expand` + template class-attr
+  rewrite). Sub-fases abiertas: 11.4 (client target decision — WASM
+  vs JS-vanilla), 11.5 (CLI wiring `fitz build --target <t>` +
+  multi-component composition), 11.6 (fitz-liveviews migration a
+  `.fitzv`), 11.7 (LSP support inside `.fitzv`), 11.8 (pedagogic
+  docs). Detalle exhaustivo en [`docs/fase-11-plan.md`](fase-11-plan.md)
+  con §9.a–9.k cubriendo cada mini-commit.
 
 Las secciones de Fase 12 y 13 abajo se mantienen como **referencia
 histórica** del diseño + cierre. La parte realmente especulativa del
@@ -9609,7 +9620,7 @@ roadmap se reduce hoy a:
 
 | Item futuro | Estimación |
 |---|---|
-| Fase 11 (Frontend `.fitz` SFC + SSR) | meses, requiere ronda de diseño |
+| Fase 11 sub-fases 11.4 → 11.8 | meses, cada una es sesión seria |
 | V6 (DAP — debugging interactivo VSCode) | ~2 semanas, anotada en backlog |
 | Fase 12.6+ targets extra (`fitz deploy fly/railway/k8s`) | 1-2 semanas por target |
 | Deuda residual técnica menor | ver `docs/deudas-post-5b.md` |
@@ -9618,36 +9629,86 @@ roadmap se reduce hoy a:
 > sección al cerrar — ver la sección dedicada **Fase 10 — Stack
 > DB nativo + ORM declarativo** arriba.
 
-### Fase 11 — Frontend en `.fitz` (SFC + SSR)
+### Fase 11 — Frontend en `.fitz` (SFC + SSR) 🟡 EN CURSO (arrancada 2026-07-14)
 
 **Promesa**: el mismo lenguaje en backend y frontend. Resuelve el
 problema del **doble tipado** que el autor sufre todos los días
 con Vue+FastAPI: definís `type User` en el backend, lo re-definís
 en TypeScript, los tipos divergen, bugs en producción.
 
-- **Single-file components**: `.fitz` con secciones
-  `<template>`/`<script>`/`<style>` estilo Vue SFC.
-- **Compilación a WASM o JS** — TBD según target. WASM para apps
-  grandes, JS para apps chicas + SEO.
+**Estado al 2026-07-14** — sub-fases 11.1 → 11.3 CERRADAS:
+
+- ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
+- ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
+  4 nuevos `pub fn parse_*_from_source` en `src/parser.rs` +
+  `src/view/expand.rs` (~660 LoC, 16 unit tests) (2026-07-14).
+- ✅ **11.2.b** Checker en 3 mini-commits — state field defaults,
+  event handler bodies + template interpolations con Str-friendly
+  rule, `@event="handler"` attrs cross-checked contra los `event`
+  declarados (~825 LoC totales + 50 unit tests) (2026-07-14).
+- ✅ **11.2.c** Extensión del template dialect con `{#if cond}`,
+  `{#for x in xs}`, `{#else}`, `<slot />` en 3 mini-commits —
+  parser + expand + checker end-to-end. **Closes 11.2** (2026-07-14).
+- ✅ **view-lexer §7** — state annotations con `List<T>`,
+  `Map<K, V>`, `Str?`, `List<T>?` round-trip a través del source
+  (2026-07-14).
+- ✅ **11.3.a** `<style global>` como sibling first-class de
+  `<style scoped>` en lexer + parser + AST, más
+  `StyleKind { Scoped, Global }` discriminant. Bare `<style>`
+  rechazado con targeted error (2026-07-14).
+- ✅ **11.3.b** CSS mini-parser standalone en
+  `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest)
+  con `apply_scope(css_raw, scope) -> Result<String, CssParseError>`.
+  Class-suffix strategy: `.foo` → `.foo-<scope>`. Recurse en
+  `@media`/`@supports`/`@container`; `@keyframes`/`@font-face`
+  opacos. Selector-arg pseudos (`:not(.foo)`) scope el inner
+  correctamente (2026-07-14).
+- ✅ **11.3.c** Wire scoping en `expand`: nuevo
+  `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc },
+  Global { css, loc } }` reemplaza el passthrough raw; scope class
+  synthesised via FNV-1a de `<component>::<css_raw>` truncado a 8
+  hex, forma `<component-kebab>-c-<8hex>`. Template rewrite
+  recursivo baja a Element children + If then/else + For bodies,
+  agrega variantes sufijadas de cada clase original (`class="card"`
+  → `class="card card-<scope>"`). **Closes 11.3 entire** (2026-07-14).
+
+**Sub-fases abiertas** (per §6 del plan):
+
+- **11.4** Client target decision (WASM vs JS-vanilla). Prototipo
+  contra un counter demo de dos páginas.
+- **11.5** CLI wiring (`fitz build` rutea `.fitzv` según
+  `[[bin]].target` / `--target` flag) + multi-component
+  composition (`<Child prop="v" />`).
+- **11.6** Migración de `fitz-liveviews` a `.fitzv`.
+- **11.7** LSP support inside `.fitzv` (hover, autocomplete,
+  template-attr completion).
+- **11.8** Pedagogic docs — capítulo en `docs/guide.md` + módulo
+  en `docs/curso/` (M9?) + update de `docs/architecture.md`.
+
+**Detalle exhaustivo** de cada mini-commit cerrado en
+[`docs/fase-11-plan.md`](fase-11-plan.md) — sección §9.a–9.k cubre
+lo shipped hasta hoy, sección §6 tiene la tabla de sub-fases con
+criterios de cierre.
+
+**Extensión del `.fitzv` file format**:
+
+- **Single-file components**: `.fitzv` con `component X { state {}
+  event ... <template>... </template> <style scoped|global>...
+  </style> }`.
+- **Compilación a WASM o JS** — decisión pendiente (11.4).
 - **SSR built-in** — el mismo handler `@get("/users")` puede
   devolver JSON (API) o HTML renderizado server-side (página)
   según headers.
 - **Sharing de `type`** entre backend y frontend — el
   `type User` se define una vez.
 - **Reactividad**: signals (estilo Solid.js) o ref/reactive
-  (estilo Vue 3). Decisión grande.
+  (estilo Vue 3). Decisión grande, a resolver en 11.4/11.5.
 
 **Por qué importa**: **la apuesta más ambiciosa de Fitz**. Si
 funciona, posiciona a Fitz como "el lenguaje que resuelve el
 split frontend/backend" — un nicho que ningún lenguaje moderno
 ataca de frente (Elixir + LiveView se acerca, Phoenix se acerca,
 pero ambos requieren mucha JS para apps ricas).
-
-**Por qué tarde**: es básicamente construir Fitz otra vez en el
-navegador. Implementación grande. Antes hay que tener: package
-manager (Fase 9.y), DX maduro (Fase 9.z), y al menos un stack DB
-nativo (Fase 10) para validar que el lenguaje sirve para apps
-completas.
 
 **Inspiración**: Vue SFC + Svelte + Solid + Phoenix LiveView +
 HTMX. Mezcla de las mejores ideas.

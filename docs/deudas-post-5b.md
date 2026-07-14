@@ -7571,3 +7571,94 @@ y aborta en la línea 10 sin llegar a los emojis ni CJK. El runtime
 SÍ soporta UTF-8 multibyte; lo que aborta es el parser por el `'`.
 Una vez aplicado el fix, todos los `print(...)` van a correr OK.
 
+---
+
+## Fase 11.3 — CSS scoping para `.fitzv` components — **CERRADO 2026-07-14**
+
+Tercera mini-fase completa de la Fase 11 (frontend nativo). Cierra
+end-to-end el pipeline `<style scoped>` / `<style global>` desde
+el source hasta el `ExpandedComponent.style` tipado.
+
+**Tres mini-commits** (todos en el mismo día, uno por decisión de
+diseño):
+
+- **11.3.a** — `<style global>` como sibling first-class de
+  `<style scoped>` en el lexer + parser + AST del view module.
+  Nuevo `enum StyleKind { Scoped, Global }` sobre `Style`.
+  Refactor `Token::StyleScopedRaw(String)` →
+  `Token::StyleRaw { kind, body }`. Bare `<style>` (sin opt-in)
+  rechazado con targeted error nombrando ambos forms aceptados
+  (Vue defaults to global, Svelte to scoped, Fitz refuses to pick
+  a silent default). +5 lexer tests + +5 parser tests.
+- **11.3.b** — CSS mini-parser standalone en
+  `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest)
+  con `apply_scope(css_raw, scope) -> Result<String, CssParseError>`.
+  Estrategia class-suffix: cada `.foo` en el CSS se convierte a
+  `.foo-<scope>`. Char-by-char, cero deps, cero regex. Recurse
+  en `@media`/`@supports`/`@container` bodies; `@keyframes` /
+  `@font-face` / `@import` / `@charset` / `@namespace` opacos.
+  Handles strings + block comments + attribute selectors.
+  Selector-arg pseudos (`:not(.foo)`, `:is(.a, .b)`, `:has(.c)`)
+  scope el inner correctamente por el walk transparente sobre
+  parens; non-selector-arg pseudos (`:nth-child(2n+1)`) no tienen
+  `.` así que no se tocan.
+- **11.3.c** — Wire scoping end-to-end en `expand`: nuevo
+  `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc },
+  Global { css, loc } }` reemplaza el passthrough raw. Scope class
+  synthesised via FNV-1a de `<component>::<css_raw>` truncado a
+  8 hex, forma `<component-kebab>-c-<8hex>`. Template rewrite
+  recursivo baja a Element children + If then/else + For bodies,
+  agrega variantes sufijadas de cada clase original preservando
+  las originales (`class="card"` → `class="card card-<scope>"`,
+  así JS externo querying `.card` sigue funcionando). Global
+  styles son passthrough puro (sin transform, sin rewrite).
+  Interpolated `class="{expr}"` queda intacto (limitación
+  documentada). Malformed CSS surface a `ExpandError` con el
+  contexto del componente. +21 unit tests. **Closes 11.3 entire**.
+
+**Detalle exhaustivo** de cada mini-commit vive en las secciones
+§9.i, §9.j y §9.k de [`docs/fase-11-plan.md`](fase-11-plan.md),
+incluyendo 8 decisiones nombradas + deudas residuales listadas
+por mini-commit.
+
+**Verificación pre-cierre** (baseline pre-11.3 = 3411 lib / 3547
+con `--features lsp`):
+
+- `cargo test --lib` verde: **3487** (+76 delta = +10 de 11.3.a
+  + +45 de 11.3.b + +21 de 11.3.c).
+- `cargo test --lib --features lsp` verde: **3623** (mismo
+  delta +76 espejado).
+- `cargo test --doc view::` verde (1 nuevo doctest en
+  `apply_scope`).
+- `cargo fmt --all --check` limpio.
+- `cargo clippy --lib --tests --bins -- -D warnings` limpio.
+- `cargo clippy --lib --tests --bins --features lsp -- -D warnings`
+  limpio.
+
+**Deudas residuales derivadas** (NO bloquean 11.4/11.5, cada una
+tiene fix propuesto en la sección §9.i/j/k correspondiente):
+
+- **`:global(...)` escape hatch** dentro de `<style scoped>` —
+  refinable en `apply_scope` sin ripple a expand ni al template
+  rewrite.
+- **Interpolated `class="{expr}"`** stays as-is — el rewrite
+  actual sólo toca `Attr::Static`. Refinable con un runtime
+  helper que suffijee on-the-fly.
+- **Type / ID / attribute selectors NOT scoped** (trade-off del
+  MVP class-suffix strategy). Refinable con un `<style
+  scoped=deep>` opt-in que swap el transformer + inyecte
+  `data-c-XXXX` en cada elemento.
+- **Precise position mapping de CSS errors** dentro del blob —
+  mismo debt que los otros blob parsers del view module.
+- **"Un scoped + un global" side-by-side** — MVP capa a uno
+  solo. Refinable ampliando `Component.style: Option<Style>`
+  a `Component.styles: Vec<Style>` cuando aparezca demanda.
+- **`@layer` at-rule opaque** — no recurse. Refinable
+  agregando `"layer"` al allowlist `at_rule_nests_selectors`.
+
+**Sin CHANGELOG entry** — la Fase 11 vive en fase-11-plan.md
+hasta que suficiente user-facing surface justifique un release
+bump (siguiendo la convención de 11.1/11.2). Los tres commits
+del día se ven en git log como `feat(view): Phase 11.3.<x>
+mini-commit — ...`.
+
