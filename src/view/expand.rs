@@ -96,6 +96,15 @@ pub enum ExpandedTemplateNode {
         self_closing: bool,
         loc: Loc,
     },
+    /// `{#if cond}...{/if}` — conditional inclusion. `cond` is
+    /// parsed from the raw `cond_raw` captured by the HTML sub-
+    /// parser; `children` are expanded recursively. The `#else`
+    /// branch lands in 11.2.c mini-commit 2.
+    If {
+        cond: fast::Expr,
+        children: Vec<ExpandedTemplateNode>,
+        loc: Loc,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -273,6 +282,23 @@ fn expand_template_node(
                 attrs,
                 children,
                 self_closing: *self_closing,
+                loc: *loc,
+            })
+        }
+        RawTemplateNode::If {
+            cond_raw,
+            children,
+            loc,
+        } => {
+            let ctx = format!("component '{component_name}': template `{{#if}}` condition");
+            let cond = parse_expr_at(cond_raw, *loc, ctx)?;
+            let children = children
+                .iter()
+                .map(|n| expand_template_node(n, component_name))
+                .collect::<ExpandResult<Vec<_>>>()?;
+            Ok(ExpandedTemplateNode::If {
+                cond,
+                children,
                 loc: *loc,
             })
         }
@@ -759,5 +785,104 @@ component B {
     fn shift_position_shifts_line_and_keeps_column_on_later_lines() {
         let base = Loc::new(10, 5);
         assert_eq!(shift_position(3, 8, base), (12, 8));
+    }
+
+    // ---- 11.2.c mini-commit 1: `{#if cond}...{/if}` expand ---------
+
+    #[test]
+    fn expand_if_block_parses_cond_as_classic_expr() {
+        // `{#if is_ready}` — the raw `is_ready` must expand into an
+        // `Expr::Ident("is_ready")`.
+        let src = r#"component X {
+  state { is_ready: Bool = false }
+  <template>{#if is_ready}<div>hi</div>{/if}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::If { cond, children, .. } => {
+                match cond {
+                    fast::Expr::Ident(name, _) => assert_eq!(name, "is_ready"),
+                    other => panic!("expected Ident cond, got {:?}", other),
+                }
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    ExpandedTemplateNode::Element { tag, .. } => assert_eq!(tag, "div"),
+                    other => panic!("expected Element child, got {:?}", other),
+                }
+            }
+            other => panic!("expected If root, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_if_block_cond_with_binop_parses() {
+        // `{#if count > 0}` — cond is a BinOp expression.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>{#if count > 0}<span/>{/if}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::If { cond, .. } => {
+                // Just assert it's not an Ident — the exact shape of
+                // BinOp is a classic-parser detail; the point here is
+                // that a non-trivial cond parses without error.
+                assert!(
+                    !matches!(cond, fast::Expr::Ident(_, _)),
+                    "expected BinOp-like expr, got {:?}",
+                    cond
+                );
+            }
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_if_block_bad_cond_syntax_produces_expand_error() {
+        // `{#if 1 +}` — malformed expression. The classic parser
+        // errors; expand shifts it into an ExpandError with the
+        // `{#if}` block's loc + context label.
+        let src = r#"component X {
+  <template>{#if 1 +}<span/>{/if}</template>
+}"#;
+        let err = expand_str(src).unwrap_err();
+        assert!(
+            err.context.contains("`{#if}`") && err.context.contains("condition"),
+            "context = {:?}",
+            err.context
+        );
+    }
+
+    #[test]
+    fn expand_if_block_children_expanded_recursively() {
+        // Interpolation `{title}` inside the If children must expand
+        // into an `ExpandedTemplateNode::Interpolation` — proves the
+        // recursion into children uses the same expand path.
+        let src = r#"component X {
+  state {
+    is_ready: Bool = false
+    title: Str = ""
+  }
+  <template>{#if is_ready}<div>{title}</div>{/if}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::If { children, .. } => match &children[0] {
+                ExpandedTemplateNode::Element {
+                    children: inner, ..
+                } => match &inner[0] {
+                    ExpandedTemplateNode::Interpolation { expr, .. } => match expr {
+                        fast::Expr::Ident(name, _) => assert_eq!(name, "title"),
+                        other => panic!("expected Ident interp, got {:?}", other),
+                    },
+                    other => panic!("expected Interpolation, got {:?}", other),
+                },
+                other => panic!("expected Element, got {:?}", other),
+            },
+            other => panic!("expected If, got {:?}", other),
+        }
     }
 }

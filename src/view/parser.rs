@@ -473,7 +473,7 @@ pub fn parse_template_body(
     base_col: usize,
 ) -> ViewParseResult<Vec<TemplateNode>> {
     let mut p = HtmlParser::new(raw, base_line, base_col);
-    let roots = p.parse_nodes(None)?;
+    let roots = p.parse_nodes(None, None)?;
     Ok(roots)
 }
 
@@ -516,15 +516,33 @@ impl<'a> HtmlParser<'a> {
         Some(c)
     }
 
-    /// Parse child nodes until `</tag>` is found (when `parent` is
-    /// `Some`) or the blob ends (when `parent` is `None`).
-    fn parse_nodes(&mut self, parent: Option<&str>) -> ViewParseResult<Vec<TemplateNode>> {
+    /// Parse child nodes until:
+    ///   - `</tag>` is found (when `parent` is `Some`), or
+    ///   - `{/name}` is found (when `directive_parent` is `Some`), or
+    ///   - the blob ends (when both are `None`).
+    ///
+    /// The two parents are independent: a template can nest an
+    /// `{#if}` inside an element, or an element inside an `{#if}`,
+    /// and the parser walks them uniformly. Recursion follows the
+    /// same shape.
+    fn parse_nodes(
+        &mut self,
+        parent: Option<&str>,
+        directive_parent: Option<&str>,
+    ) -> ViewParseResult<Vec<TemplateNode>> {
         let mut nodes = Vec::new();
         loop {
             if self.peek().is_none() {
                 if let Some(tag) = parent {
                     return Err(ViewParseError {
                         message: format!("unterminated `<{tag}>` — expected `</{tag}>`"),
+                        line: self.line,
+                        column: self.column,
+                    });
+                }
+                if let Some(name) = directive_parent {
+                    return Err(ViewParseError {
+                        message: format!("unterminated `{{#{name}}}` — expected `{{/{name}}}`"),
                         line: self.line,
                         column: self.column,
                     });
@@ -561,10 +579,57 @@ impl<'a> HtmlParser<'a> {
                 }
             }
 
+            // Closing directive for parent? `{/name}` — an opening
+            // `{` followed by `/` at any nesting level of the parent
+            // directive expects to match the directive_parent name.
+            if self.peek() == Some('{') && self.peek_at(1) == Some('/') {
+                let start_line = self.line;
+                let start_col = self.column;
+                self.advance(); // `{`
+                self.advance(); // `/`
+                let name = self.read_directive_name();
+                self.skip_ws_inline();
+                if self.peek() != Some('}') {
+                    return Err(ViewParseError {
+                        message: format!("expected `}}` closing `{{/{name}}}`"),
+                        line: self.line,
+                        column: self.column,
+                    });
+                }
+                self.advance();
+                match directive_parent {
+                    Some(expected) if expected == name => return Ok(nodes),
+                    Some(expected) => {
+                        return Err(ViewParseError {
+                            message: format!(
+                                "mismatched closing directive `{{/{name}}}` — expected `{{/{expected}}}`"
+                            ),
+                            line: start_line,
+                            column: start_col,
+                        });
+                    }
+                    None => {
+                        return Err(ViewParseError {
+                            message: format!(
+                                "unexpected `{{/{name}}}` — no matching `{{#{name}}}` opener"
+                            ),
+                            line: start_line,
+                            column: start_col,
+                        });
+                    }
+                }
+            }
+
             match self.peek() {
                 Some('<') => {
                     let el = self.parse_element()?;
                     nodes.push(el);
+                }
+                Some('{') if self.peek_at(1) == Some('#') => {
+                    // Directive opener: `{#if ...}`, `{#for ...}`
+                    // (future). Currently only `#if` is supported.
+                    let node = self.parse_directive_open()?;
+                    nodes.push(node);
                 }
                 Some('{') => {
                     let interp = self.parse_interpolation()?;
@@ -577,6 +642,119 @@ impl<'a> HtmlParser<'a> {
                     }
                 }
                 None => unreachable!(),
+            }
+        }
+    }
+
+    /// Parse a directive opener like `{#if cond}` (currently the
+    /// only supported one). Recurses through `parse_nodes` with
+    /// `directive_parent = Some("if")` to collect children up to
+    /// the matching `{/if}`. `{#for}` and `<slot>` are deferred to
+    /// 11.2.c mini-commits 2 and 3.
+    fn parse_directive_open(&mut self) -> ViewParseResult<TemplateNode> {
+        let start_line = self.line;
+        let start_col = self.column;
+        self.advance(); // `{`
+        self.advance(); // `#`
+        let name = self.read_directive_name();
+        if name.is_empty() {
+            return Err(ViewParseError {
+                message: "expected directive name after `{#`".into(),
+                line: start_line,
+                column: start_col,
+            });
+        }
+        if name != "if" {
+            return Err(ViewParseError {
+                message: format!(
+                    "unknown template directive `{{#{name}}}` — the POC supports `{{#if}}` only; `{{#for}}` lands in 11.2.c mini-commit 2"
+                ),
+                line: start_line,
+                column: start_col,
+            });
+        }
+        // Capture the cond expression as raw text up to the
+        // matching `}` at directive-open depth 0. Nested `{}` (e.g.
+        // struct or map literals inside the cond) are tracked so we
+        // don't stop at the wrong brace.
+        self.skip_ws_inline();
+        let cond_raw = self.capture_directive_arg_raw(start_line, start_col)?;
+        // Recurse for the body up to `{/if}`.
+        let children = self.parse_nodes(None, Some("if"))?;
+        Ok(TemplateNode::If {
+            cond_raw: cond_raw.trim().to_string(),
+            children,
+            loc: Loc::new(start_line, start_col),
+        })
+    }
+
+    /// Read the identifier following `{#` or `{/` — restricted to
+    /// ASCII alphanumeric + `_`. Matches the shape of the view
+    /// lexer's `read_ident`, kept separate because the HTML sub-
+    /// parser walks char-by-char instead of holding tokens.
+    fn read_directive_name(&mut self) -> String {
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                s.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    /// Skip inline whitespace (space + tab) but NOT newlines.
+    /// Directive openers like `{#if cond}` must fit on the "logical
+    /// line" between the opener and its closing `}` — a newline in
+    /// the middle is legal, but we don't want to swallow one when
+    /// looking for the `}` boundary.
+    fn skip_ws_inline(&mut self) {
+        while matches!(self.peek(), Some(' ') | Some('\t')) {
+            self.advance();
+        }
+    }
+
+    /// Capture the raw argument of a directive opener up to the
+    /// matching `}` at depth 0. Tracks nested `{}` so a struct or
+    /// map literal inside the cond doesn't terminate early. On EOF
+    /// before the closer, error with the directive opener's
+    /// position.
+    fn capture_directive_arg_raw(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+    ) -> ViewParseResult<String> {
+        let mut out = String::new();
+        let mut depth: usize = 0;
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(ViewParseError {
+                        message: "unterminated directive opener — expected `}`".into(),
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                Some('{') => {
+                    depth += 1;
+                    out.push('{');
+                    self.advance();
+                }
+                Some('}') if depth > 0 => {
+                    depth -= 1;
+                    out.push('}');
+                    self.advance();
+                }
+                Some('}') => {
+                    self.advance();
+                    return Ok(out);
+                }
+                Some(c) => {
+                    out.push(c);
+                    self.advance();
+                }
             }
         }
     }
@@ -657,7 +835,7 @@ impl<'a> HtmlParser<'a> {
                 }
                 Some('>') => {
                     self.advance();
-                    let children = self.parse_nodes(Some(&tag))?;
+                    let children = self.parse_nodes(Some(&tag), None)?;
                     return Ok(TemplateNode::Element {
                         tag,
                         attrs,
@@ -1090,5 +1268,197 @@ mod tests {
 }"#;
         let err = parse(src).unwrap_err();
         assert!(err.message.contains("mismatched closing tag"));
+    }
+
+    // ---- 11.2.c mini-commit 1: `{#if cond}...{/if}` -----------------
+
+    #[test]
+    fn template_if_block_captured_with_cond_raw_and_children() {
+        // Basic `{#if}` opener + child text + `{/if}` closer.
+        let src = r#"component X {
+  <template>{#if is_ready}<div>hi</div>{/if}</template>
+}"#;
+        let file = parse(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        assert_eq!(template.roots.len(), 1, "one root If node expected");
+        match &template.roots[0] {
+            TemplateNode::If {
+                cond_raw, children, ..
+            } => {
+                assert_eq!(cond_raw, "is_ready");
+                // Expect one Element("div") child.
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    TemplateNode::Element { tag, .. } => assert_eq!(tag, "div"),
+                    other => panic!("expected Element child, got {:?}", other),
+                }
+            }
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_if_block_cond_captures_nested_braces_in_expr() {
+        // The cond expression contains a struct-literal-ish `{...}`
+        // inside a function call — the capture must respect brace
+        // depth and not stop at the inner `}`.
+        let src = r#"component X {
+  <template>{#if has_key(m, "x")}<span/>{/if}</template>
+}"#;
+        let file = parse(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            TemplateNode::If { cond_raw, .. } => {
+                assert_eq!(cond_raw, "has_key(m, \"x\")");
+            }
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_if_block_nested_inside_element() {
+        // `{#if}` living inside an `<ul>`. The element sees the If
+        // as one of its children; walk asserts both layers.
+        let src = r#"component X {
+  <template><ul>{#if any}<li>x</li>{/if}</ul></template>
+}"#;
+        let file = parse(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            TemplateNode::Element {
+                tag: outer,
+                children: outer_children,
+                ..
+            } => {
+                assert_eq!(outer, "ul");
+                assert_eq!(outer_children.len(), 1);
+                match &outer_children[0] {
+                    TemplateNode::If {
+                        cond_raw,
+                        children: inner,
+                        ..
+                    } => {
+                        assert_eq!(cond_raw, "any");
+                        assert_eq!(inner.len(), 1);
+                    }
+                    other => panic!("expected If inside <ul>, got {:?}", other),
+                }
+            }
+            other => panic!("expected <ul>, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_if_block_element_nested_inside_if() {
+        // Reverse: `<div>` nested inside `{#if}`.
+        let src = r#"component X {
+  <template>{#if any}<div><span/></div>{/if}</template>
+}"#;
+        let file = parse(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            TemplateNode::If { children, .. } => match &children[0] {
+                TemplateNode::Element {
+                    tag,
+                    children: inner,
+                    ..
+                } => {
+                    assert_eq!(tag, "div");
+                    assert_eq!(inner.len(), 1);
+                }
+                other => panic!("expected <div> inside If, got {:?}", other),
+            },
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_if_block_nested_if_inside_if() {
+        // Two levels of `{#if}` nesting. Each closes at its own
+        // `{/if}` in the right order.
+        let src = r#"component X {
+  <template>{#if a}{#if b}<span/>{/if}{/if}</template>
+}"#;
+        let file = parse(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            TemplateNode::If {
+                cond_raw: outer_cond,
+                children: outer_children,
+                ..
+            } => {
+                assert_eq!(outer_cond, "a");
+                match &outer_children[0] {
+                    TemplateNode::If {
+                        cond_raw: inner_cond,
+                        ..
+                    } => {
+                        assert_eq!(inner_cond, "b");
+                    }
+                    other => panic!("expected inner If, got {:?}", other),
+                }
+            }
+            other => panic!("expected outer If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_if_block_unterminated_errors_clearly() {
+        // Opener without matching closer.
+        let src = r#"component X {
+  <template>{#if x}<div/></template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("unterminated `{#if}`")
+                || err.message.contains("expected `{/if}`"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_if_block_mismatched_directive_close_errors_clearly() {
+        // `{#if}` opened, closed with `{/for}` (wrong name).
+        let src = r#"component X {
+  <template>{#if x}<div/>{/for}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("mismatched closing directive") && err.message.contains("if"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_directive_close_without_opener_errors_clearly() {
+        // Only a closer, no opener. Should error at the closer's
+        // position, not silently pass.
+        let src = r#"component X {
+  <template>{/if}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("no matching") && err.message.contains("if"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn template_unknown_directive_name_errors_clearly() {
+        // `{#for ...}` — not supported in mini-commit 1. The message
+        // should point at 11.2.c mini-commit 2 so the user knows this
+        // is a planned feature, not a bug.
+        let src = r#"component X {
+  <template>{#for x in xs}<li/>{/for}</template>
+}"#;
+        let err = parse(src).unwrap_err();
+        assert!(
+            err.message.contains("unknown template directive") && err.message.contains("for"),
+            "unexpected error message: {}",
+            err.message
+        );
     }
 }

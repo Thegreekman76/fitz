@@ -80,11 +80,17 @@ pub struct Template {
 ///   - `Interpolation` — `{expr}` — captured as raw source text.
 ///   - `Element` — `<tag attr="v" @click="ev">children</tag>` and
 ///     the self-closing variant `<tag/>`.
+///   - `If` — `{#if cond}...{/if}` — since 11.2.c mini-commit 1.
+///     The `cond` is captured raw and re-parsed as a classic Fitz
+///     `Expr` in `expand`; the `children` are the nodes between
+///     opener and closer, allowing arbitrary nesting.
 ///
-/// Deferred to 11.2+:
-///   - `{#if cond} ... {#else} ... {/if}` blocks
+/// Deferred to 11.2.c mini-commits 2/3:
+///   - `{#if cond} ... {#else} ... {/if}` — `#else` branch
 ///   - `{#for x in xs} ... {/for}` blocks
 ///   - `<slot name="X" />` for component composition
+///
+/// Not planned for 11.2:
 ///   - HTML doctype, XML processing instructions, CDATA
 #[derive(Debug, Clone, PartialEq)]
 pub enum TemplateNode {
@@ -99,6 +105,15 @@ pub enum TemplateNode {
         attrs: Vec<Attr>,
         children: Vec<TemplateNode>,
         self_closing: bool,
+        loc: Loc,
+    },
+    /// `{#if cond_raw} ... {/if}` — conditional inclusion of the
+    /// nested `children`. `cond_raw` is the raw source text between
+    /// `{#if ` and the matching `}` (trimmed). The `#else` branch is
+    /// deferred to 11.2.c mini-commit 2.
+    If {
+        cond_raw: String,
+        children: Vec<TemplateNode>,
         loc: Loc,
     },
 }

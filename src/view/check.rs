@@ -123,6 +123,7 @@ pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
             }
             if let Some(template) = &component.template {
                 check_template_interpolations(component, template, &mut errors);
+                check_template_if_conds(component, template, &mut errors);
             }
         }
     }
@@ -272,6 +273,113 @@ fn check_template_interpolations(
     }
 }
 
+/// Check every `{#if cond}` condition. Each cond must (a) type-check
+/// in the state-seeded env (same as interpolations + handler bodies),
+/// and (b) resolve to `Bool` (or `Any`/`Nullable(Bool)`/`PyAny` under
+/// gradual escapes). The nested `children` of an `{#if}` are already
+/// walked by `collect_interpolations` + `collect_event_attrs`, so
+/// interpolations inside `{#if}` bodies get checked by their own
+/// passes — this function only validates the cond itself.
+fn check_template_if_conds(
+    component: &ExpandedComponent,
+    template: &ExpandedTemplate,
+    errors: &mut Vec<CheckError>,
+) {
+    let mut conds: Vec<IfCondRef<'_>> = Vec::new();
+    collect_if_conds(&template.roots, &mut conds);
+
+    for (idx, cond_ref) in conds.iter().enumerate() {
+        let check_var = format!("__view_if_cond_check_{}", idx);
+        let cond_span = cond_ref.cond.span();
+        let program = build_env_program(
+            component,
+            None,
+            Some(Stmt::Assign {
+                target: AssignTarget::Ident(check_var, Span::ZERO),
+                type_: None,
+                value: cond_ref.cond.clone(),
+                span: Span::ZERO,
+            }),
+        );
+        let (env, type_info, _defs, classic_errors) = check_program(&program);
+        for e in classic_errors {
+            errors.push(CheckError {
+                message: e.message,
+                loc: cond_ref.loc,
+                context: cond_ref.context(component),
+            });
+        }
+        // Cond must be Bool (or a compatible gradual type). If we
+        // can't infer the type, upstream classic errors above will
+        // already have surfaced — silently skip like the interp path.
+        if let Some(ty) = type_info.type_at(cond_span) {
+            if !is_bool_compatible(ty) {
+                errors.push(CheckError {
+                    message: format!(
+                        "`{{#if}}` condition must evaluate to Bool; type `{}` is not compatible (unwrap Result with `match`, await Future, or compare/negate before using in `{{#if}}`)",
+                        ty.display(&env),
+                    ),
+                    loc: cond_ref.loc,
+                    context: cond_ref.context(component),
+                });
+            }
+        }
+    }
+}
+
+/// Reference to an `{#if cond}` block, carrying enough context to
+/// attribute errors correctly.
+struct IfCondRef<'a> {
+    cond: &'a Expr,
+    loc: Loc,
+}
+
+impl IfCondRef<'_> {
+    fn context(&self, component: &ExpandedComponent) -> String {
+        format!(
+            "component '{}': template `{{#if}}` condition",
+            component.name
+        )
+    }
+}
+
+fn collect_if_conds<'a>(nodes: &'a [ExpandedTemplateNode], out: &mut Vec<IfCondRef<'a>>) {
+    for node in nodes {
+        match node {
+            ExpandedTemplateNode::Text(_) | ExpandedTemplateNode::Interpolation { .. } => {}
+            ExpandedTemplateNode::Element { children, .. } => {
+                collect_if_conds(children, out);
+            }
+            ExpandedTemplateNode::If {
+                cond,
+                children,
+                loc,
+            } => {
+                out.push(IfCondRef { cond, loc: *loc });
+                // Recurse into children so nested `{#if}` conds are
+                // collected too.
+                collect_if_conds(children, out);
+            }
+        }
+    }
+}
+
+/// A type is `Bool`-compatible for `{#if}` when it's the concrete
+/// `Bool`, or a gradual escape (`Any`/`PyAny`), or `Nullable<Bool>`
+/// (JS-style truthiness on the null branch is deliberately NOT
+/// modelled — the user must handle null explicitly with `?` or a
+/// match; but the checker can't distinguish "null is falsy" from
+/// "programmer made a mistake" without more context, so we accept
+/// `Bool?` and let the runtime's semantics decide. Same rationale
+/// as classic `if` — see `types.rs`).
+fn is_bool_compatible(ty: &Type) -> bool {
+    match ty {
+        Type::Bool | Type::Any | Type::PyAny => true,
+        Type::Nullable(inner) => matches!(**inner, Type::Bool | Type::Any | Type::PyAny),
+        _ => false,
+    }
+}
+
 /// Build the component's synth env — state field let-bindings plus
 /// every declared handler as an `async fn`. Handlers other than the
 /// one identified by `include_body_for` (if any) are emitted with
@@ -373,6 +481,9 @@ fn collect_interpolations<'a>(
                 }
                 collect_interpolations(children, out);
             }
+            ExpandedTemplateNode::If { children, .. } => {
+                collect_interpolations(children, out);
+            }
         }
     }
 }
@@ -463,6 +574,9 @@ fn collect_event_attrs<'a>(nodes: &'a [ExpandedTemplateNode], out: &mut Vec<Even
                         });
                     }
                 }
+                collect_event_attrs(children, out);
+            }
+            ExpandedTemplateNode::If { children, .. } => {
                 collect_event_attrs(children, out);
             }
         }
@@ -1560,5 +1674,196 @@ component B {
             check_str(src).is_empty(),
             "List<Str>? = null must round-trip through source"
         );
+    }
+
+    // ---- 11.2.c mini-commit 1: `{#if cond}...{/if}` checker --------
+
+    #[test]
+    fn if_cond_bool_state_field_ok() {
+        // `{#if is_ready}` where `is_ready: Bool` is declared. Cond
+        // resolves in the state env and types as Bool.
+        let src = r#"component X {
+  state { is_ready: Bool = false }
+  <template>{#if is_ready}<div>hi</div>{/if}</template>
+}"#;
+        assert!(check_str(src).is_empty(), "Bool cond must pass silently");
+    }
+
+    #[test]
+    fn if_cond_binop_int_gt_int_is_bool_ok() {
+        // `{#if count > 0}` — BinOp on Int fields yields Bool.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>{#if count > 0}<span/>{/if}</template>
+}"#;
+        assert!(check_str(src).is_empty(), "count > 0 is Bool");
+    }
+
+    #[test]
+    fn if_cond_non_bool_type_reports_error() {
+        // `{#if title}` where title: Str — cond is not Bool. Must
+        // error with the `{#if}` cond context label.
+        let src = r#"component X {
+  state { title: Str = "" }
+  <template>{#if title}<span/>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "one cond-type error expected: {:?}", errs);
+        let e = &errs[0];
+        assert!(
+            e.context.contains("`{#if}` condition"),
+            "context = {:?}",
+            e.context
+        );
+        assert!(
+            e.message.contains("must evaluate to Bool") && e.message.contains("Str"),
+            "message = {:?}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn if_cond_undefined_ident_reports_error() {
+        // `{#if missing}` — no such state field / var. Classic
+        // checker's "unknown variable" propagates with the cond
+        // context label.
+        let src = r#"component X {
+  state { flag: Bool = false }
+  <template>{#if missing}<span/>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty(), "undefined ident must error");
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("`{#if}` condition") && e.message.contains("missing")),
+            "errors = {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_cond_interpolation_inside_body_is_checked() {
+        // `{title}` inside `{#if}` body — the interpolation walker
+        // must recurse into If children. Broken interpolation surfaces
+        // as an interpolation error, not silently.
+        let src = r#"component X {
+  state { flag: Bool = false }
+  <template>{#if flag}<div>{missing_var}</div>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("template interpolation")
+                    && e.message.contains("missing_var")),
+            "interpolation inside If must be checked: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_cond_event_attr_inside_body_is_checked() {
+        // `@click="undeclared"` inside `{#if}` body — the
+        // event-attr walker must recurse into If children.
+        let src = r#"component X {
+  state { flag: Bool = false }
+  event save() { flag = true }
+  <template>{#if flag}<button @click="undeclared">X</button>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.context.contains("template event attr '@click'")
+                    && e.message.contains("undeclared")),
+            "event attr inside If must be checked: {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_cond_nullable_bool_is_accepted() {
+        // `Bool?` cond is accepted (see `is_bool_compatible` doc).
+        // Direct construction — the view lexer tokenizes `Bool?` at
+        // source level since view-lexer §7 but for defaults `false`
+        // is easier to write than a full Bool? source-level path.
+        let file = ExpandedViewFile {
+            components: vec![ExpandedComponent {
+                name: "X".into(),
+                loc: Loc::new(1, 1),
+                state: vec![synth_state_field(
+                    "maybe",
+                    TypeExpr::Nullable(Box::new(TypeExpr::Named("Bool".into()))),
+                    Expr::Null(Span::ZERO),
+                )],
+                events: Vec::new(),
+                template: Some(crate::view::expand::ExpandedTemplate {
+                    roots: vec![crate::view::expand::ExpandedTemplateNode::If {
+                        cond: Expr::Ident("maybe".into(), Span::new(1, 1)),
+                        children: Vec::new(),
+                        loc: Loc::new(2, 1),
+                    }],
+                    loc: Loc::new(2, 1),
+                }),
+                style: None,
+            }],
+        };
+        assert!(check(&file).is_empty(), "Bool? is accepted as cond");
+    }
+
+    #[test]
+    fn if_cond_int_type_is_not_bool_compatible() {
+        // Int cond is NOT accepted (no JS-style truthiness). User
+        // must write `count > 0` explicitly.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>{#if count}<span/>{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty(), "Int cond must error");
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("Int") && e.message.contains("must evaluate to Bool")),
+            "errors = {:#?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn if_cond_nested_if_conds_each_checked() {
+        // Two nested `{#if}`. The outer cond is Bool (ok); the inner
+        // cond is Str (bad). Only the inner errors.
+        let src = r#"component X {
+  state {
+    flag: Bool = false
+    title: Str = ""
+  }
+  <template>{#if flag}{#if title}<span/>{/if}{/if}</template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "one cond error expected: {:?}", errs);
+        assert!(
+            errs[0].context.contains("`{#if}` condition") && errs[0].message.contains("Str"),
+            "errors = {:#?}",
+            errs
+        );
+    }
+
+    // ---- 11.2.c mini-commit 1: is_bool_compatible unit tests -------
+
+    #[test]
+    fn is_bool_compatible_accepts_bool_and_gradual_and_nullable_bool() {
+        assert!(is_bool_compatible(&Type::Bool));
+        assert!(is_bool_compatible(&Type::Any));
+        assert!(is_bool_compatible(&Type::PyAny));
+        assert!(is_bool_compatible(&Type::Nullable(Box::new(Type::Bool))));
+        assert!(is_bool_compatible(&Type::Nullable(Box::new(Type::Any))));
+    }
+
+    #[test]
+    fn is_bool_compatible_rejects_other_types() {
+        assert!(!is_bool_compatible(&Type::Int));
+        assert!(!is_bool_compatible(&Type::Str));
+        assert!(!is_bool_compatible(&Type::Null));
+        assert!(!is_bool_compatible(&Type::List(Box::new(Type::Int))));
+        assert!(!is_bool_compatible(&Type::Nullable(Box::new(Type::Str))));
     }
 }

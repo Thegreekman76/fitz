@@ -202,7 +202,7 @@ Phase 11 promise.
 | **11.2** | Parse state defaults / event bodies / template interpolations as `crate::ast::Expr`/`Stmt`. Add `{#if}` / `{#for}` / `<slot>` to the template AST. Type-check every expression in `state` + `event` + `{...}` interpolations. | `fitz check my.fitzv` reports type errors for state field mismatches and template interpolation type errors, with source-accurate line/column pointing inside the `.fitzv` file. |
 | **11.2.a** | *Sub-step of 11.2.* Parse state defaults / event bodies / template interpolations / event params / attr interpolations as classic Fitz AST. Introduce `crate::view::expand` bridging the raw view AST back through the classic lexer + parser via 4 new pub entry points in `crate::parser`. **CLOSED 2026-07-14** — `src/view/expand.rs` (~660 LoC) + 4 pub fns `parse_expression_from_source` / `parse_type_expression_from_source` / `parse_statements_from_source` / `parse_parameters_from_source` in `src/parser.rs` + 16 unit tests. No checker yet — that lands in 11.2.b. Positions inside spans are shifted approximately (blob-local + best-effort base); precise offset tracking still deferred. | Card component `expand()`s end-to-end producing `Expr::Str` / `Expr::Bool` state defaults, `Vec<Stmt::Assign>` event bodies, `Vec<Param>` event params, and `Expr::Ident` template interpolations. Two error cases (bad default, bad body) carry the naming context so users can find the wrong blob. |
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
-| **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. | Nested control flow inside `<template>` parses, expands, type-checks. |
+| **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits. **Mini-commit 1 CLOSED 2026-07-14**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. Mini-commits 2 (`{#for}` — introduces a scoped binding for the loop variable) and 3 (`<slot>` — MVP marker for 11.5 composition) still open. | Nested control flow inside `<template>` parses, expands, type-checks. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
@@ -544,6 +544,126 @@ green (3334 total, 57 in `view::check::tests`, 11 in
 
 No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
 1/2/3 or the §7 follow-up.
+
+---
+
+## 9.f Files touched by 11.2.c mini-commit 1 — `{#if cond}...{/if}`
+
+First of the three mini-commits inside 11.2.c. Adds `{#if}` end-to-
+end (raw AST + HTML sub-parser + expand + checker) without touching
+mini-commits 2 (`{#for}`) or 3 (`<slot>`) — those will land
+separately because they raise independent design questions
+(`{#for}` needs a scoped binding for the loop variable; `<slot>`
+is mostly a marker until 11.5 wires component composition).
+
+**Files touched**:
+
+- `src/view/ast.rs` — new `TemplateNode::If { cond_raw, children, loc }`
+  variant. Doc-comment updated to name mini-commits 2/3 for the
+  remaining directives.
+- `src/view/parser.rs` — HTML sub-parser refactor:
+  - `parse_nodes(&mut self, parent, directive_parent)` gained a
+    second parent-tracking parameter (`directive_parent: Option<&str>`
+    holds the name of the enclosing `{#...}` block, `if` today).
+    Elements and directives nest orthogonally: an element inside
+    an `{#if}` and vice versa both walk uniformly.
+  - Dispatch inside `parse_nodes` when the next char is `{`:
+    `#` → new `parse_directive_open` (parses cond raw + recurses
+    for children up to `{/name}`); `/` → close directive (validate
+    match against `directive_parent`); otherwise → the existing
+    `parse_interpolation`.
+  - `parse_directive_open` restricts to `if` today; `for` is
+    rejected with a message pointing at 11.2.c mini-commit 2, so
+    the user knows it's planned, not a bug.
+  - `capture_directive_arg_raw` reads the cond up to the matching
+    `}` with brace-depth counting so a struct or map literal
+    inside the cond doesn't terminate early.
+  - `read_directive_name`, `skip_ws_inline` — small char-by-char
+    helpers matching the shape of the existing `read_tag_name`.
+  - 9 new unit tests: happy-path capture, nested braces in cond,
+    element inside If, If inside element, nested If inside If,
+    unterminated opener, mismatched closer, closer without opener,
+    unknown directive name.
+- `src/view/expand.rs` — new `ExpandedTemplateNode::If { cond, children, loc }`
+  variant. `expand_template_node` gains an arm that parses
+  `cond_raw` via `parse_expr_at` with a `component 'X': template
+  \`{#if}\` condition` context label, then recurses `children`.
+  4 new unit tests: cond parses as `Expr::Ident`, cond parses as
+  BinOp, bad cond syntax produces `ExpandError` with correct
+  context, children expand recursively (interpolation inside If).
+- `src/view/check.rs` — new pass `check_template_if_conds` +
+  helper `collect_if_conds` + struct `IfCondRef`:
+  - Each `{#if}` cond gets its own synth-and-delegate check
+    parallel to interpolations: build the state-seeded env,
+    bind the cond to `__view_if_cond_check_N`, run `check_program`,
+    then check `TypeInfo::type_at(cond.span())` against
+    `is_bool_compatible` (accepts `Bool`, `Any`, `PyAny`,
+    `Nullable<Bool/Any/PyAny>`).
+  - `collect_interpolations` and `collect_event_attrs` grow an
+    `If { children, .. }` arm so interpolations + event attrs
+    inside `{#if}` bodies get checked by their existing passes —
+    no separate walk.
+  - Runs inside the existing cascade-avoidance guard (skipped when
+    state has errors, like handler bodies + interpolations).
+  - 9 behavior tests (Bool state, BinOp Int > Int, non-Bool
+    reports, undefined ident, interp inside body, event attr
+    inside body, Bool? accepted, Int not accepted, nested If
+    conds each checked) + 2 helper unit tests (`is_bool_compatible`
+    accepts/rejects).
+
+**Design decisions worth naming**:
+
+- **Bool-compatibility instead of strict Bool**. Accept `Bool`,
+  gradual escapes (`Any`, `PyAny`), and `Nullable<Bool/Any/PyAny>`.
+  The classic `if` in the checker has the same posture — see
+  `types.rs`. Rejecting Int explicitly means the user must write
+  `count > 0`, avoiding JS-style truthiness surprises.
+- **Two independent parent trackers in `parse_nodes`**. An enum
+  (`ParseCtx::Root | Element(&str) | Directive(&str)`) would be
+  slightly more idiomatic but the two axes are truly orthogonal
+  and the pair of `Option<&str>` reads clearly. Preserving the
+  original `parent: Option<&str>` shape also kept the diff to
+  `parse_element` a single-line change.
+- **Directive dispatch inside `parse_nodes`, not `parse_interpolation`**.
+  `{#if}` looks like an interpolation opener but it isn't — it
+  opens a new node type, not an expression. Rerouting at the
+  `parse_nodes` layer keeps `parse_interpolation` focused on its
+  original job (single `{expr}` node) and mirrors how HTML tags
+  vs `<template>`/`<style>` are distinguished at the view-lexer
+  layer.
+- **Cascade avoidance still applies** to `{#if}` cond checks.
+  Reason: cond checks route through the classic checker (like
+  handler bodies + interpolations) and depend on state field
+  types. When state is broken, running conds would flood the
+  output with "undefined variable `X`" errors for every state
+  field the cond references. Users fix state, then re-run — same
+  ergonomics as mini-commits 2 and 3.
+
+**Verification** (delta at 11.2.c mini-commit 1 over view-lexer
+§7's baseline of 3334 unit + 96 view tests): `cargo test --lib`
+green (3358 total, 68 in `view::check::tests`, 20 in
+`view::expand::tests`, 21 in `view::parser::tests`), `cargo test
+--lib --features lsp` green (3494 total), `cargo fmt --all
+--check`, `cargo clippy --lib --tests --bins -- -D warnings`,
+`cargo clippy --lib --tests --bins --features lsp -- -D warnings`.
+
+**Deuda residual** (does NOT block 11.2.c mini-commit 2):
+
+- **`{#else}` branch**. Not modelled today — a `{#if}` has one
+  set of children, no else path. When mini-commit 2 lands with
+  `{#for}`, we'll likely revisit and add `{#else}` alongside
+  since both involve extending `{#if}`'s AST shape.
+- **Truthiness on `Nullable<Bool>` is deliberately loose**. We
+  accept `Bool?` as a cond but don't force the user to unwrap
+  the null case explicitly. Same posture as classic `if`; may
+  tighten later if lint feedback demands it (e.g. "always
+  compare `Bool?` to `null` or `true`").
+- **`is_bool_compatible` for `Result<Bool, _>`**. We reject it —
+  the user must `match` or `?` first. Same rule as classic Fitz.
+
+No other files touched by 11.1 / 11.2.a / 11.2.b mini-commits
+1/2/3 or the §7 follow-up. `docs/fase-11-plan.md` gets the row
+update in §5 and this section.
 
 ---
 
