@@ -15,9 +15,18 @@ migration as the 11.6 deliverable set, with client-side dynamic
 capabilities re-scoped to 11.7 (see §9.u). See `docs/stack.md`
 for the architectural constitution this plan implements.
 
-Sub-phases still open: 11.6.b/c/d/e (SSR emitter + fitz-
-liveviews migration), 11.7 (client-side dynamic capabilities +
-kanban SPA port), 11.8 (LSP support), 11.9 (pedagogic docs).
+Sub-phases still open: 11.6.c continuation (`{#if}`/`{#for}`
+template directives via Vec<TemplatePiece> refactor) +
+11.6.d (module loader integration + `<Child />` composition)
++ 11.6.e (fitz-liveviews migration), 11.7 (client-side
+dynamic capabilities + kanban SPA port), 11.8 (LSP support),
+11.9 (pedagogic docs).
+
+**11.6.b + 11.6.c partial CLOSED 2026-07-15** — `view::emit_module_ssr`
+emits classic Fitz source with widened grammar (full RHS
+expression walker + template interpolation richer + `<style>`
+inline with CSS-brace escaping). Round-trip tests validate
+that emitted source lexes + parses through classic Fitz.
 
 This document captures the decisions and the sub-phases shipped
 so far, plus the shape of the ones still open. Its purpose is to
@@ -3990,12 +3999,38 @@ on the state type, the `@render_for` fn returns
   11.5 emitter test pattern). E2E test: view pipeline on a
   synthetic `.fitzv` produces classic Fitz text that
   lexer+parser accept.
-- **11.6.c** — Full event body lowering: multi-mutation event
-  bodies build the final struct literal correctly, `{#if}` /
-  `{#for}` template directives lower to string concatenation
-  or embedded conditionals in the HTML string, `<style
-  scoped>` blocks get inlined as `<style>` tags. Unit tests
-  per feature.
+- **11.6.c** — Full event body lowering + template
+  interpolation richer + `<style>` inline + `{#if}` /
+  `{#for}` template directive lowering. Split into two
+  coordinated commits given size:
+    - **11.6.c partial CLOSED 2026-07-15** (see §9.w) — RHS
+      expression walker `format_fitz_expr_scoped` with
+      state-field rewriting AND closure-param local-scope
+      tracking (params shadow same-named state fields); the
+      same walker powers event body RHS + template
+      interpolation + state field defaults. Grammar: BinOp
+      / UnaryOp / Call / Field / Index / StrInterp / List
+      / Map / Range / Ok / Err / arrow FnExpr. `<style
+      scoped>` and `<style global>` blocks now inline at the
+      top of the render body's HTML string, with CSS-brace
+      escaping (`{`/`}` → `\{`/`\}`) so the CSS syntax
+      doesn't collide with classic Fitz's string
+      interpolation. Visible view-lexer debt discovered
+      during 11.6.c: the view lexer doesn't tokenise `.`
+      inside event body context, blocking users from
+      writing method calls / field access in `.fitzv`
+      source (verified by unit tests that construct the
+      `ExpandedComponent` AST directly). Fix belongs to a
+      dedicated view-lexer cleanup or to 11.6.c
+      continuation.
+    - **11.6.c continuation** — `{#if}` and `{#for}`
+      template directives. Requires a `Vec<TemplatePiece>`
+      refactor of `emit_template_node_to_html` so directive
+      nodes plug in as `Expr` pieces alongside literal
+      `Text` pieces. `{#for}` also needs an emitted helper
+      fn (`__fitz_view_str_join`) at the module header
+      since classic Fitz's `List<Str>` built-in methods
+      don't include `.join()`.
 - **11.6.d** — Module loader integration: `from ./Comp
   import X` triggers view pipeline when `Comp.fitzv` exists.
   Auto-add `fitz-liveviews` dep resolution when a `.fitzv`
@@ -4224,6 +4259,189 @@ structure:
 row refresh in §6, and the memoria update. Next: 11.6.c
 (full event body lowering + `{#if}`/`{#for}` template
 lowering + `<style scoped>` inline emission).
+
+---
+
+## 9.w 11.6.c (partial) — Full RHS lowering + `<style>` inline
+
+Third commit of 11.6, closing PART of the 11.6.c work
+promised in §9.u's sub-phase plan. The RHS expression walker
++ style inline emission ship together as one cohesive
+extension of the SSR emitter's shape. Template directives
+(`{#if}` / `{#for}`) stay rejected in this commit — they
+need a `Vec<TemplatePiece>` refactor of the emit path that
+belongs in its own commit ("11.6.c continuation").
+
+**Design decisions**
+
+- **One walker for every expression context.** The new
+  `format_fitz_expr_scoped` handles event body RHS,
+  template `{expr}` interpolations, AND state-field
+  defaults. Same grammar, same rewriting rules, same
+  rejection surface. The three wrappers
+  (`format_event_rhs`, `format_template_interpolation`,
+  `format_expr_source`) become thin adapters.
+- **State-field rewrite + local-scope tracking.** The
+  walker takes two identifier slices:
+    - `state_field_names` — declared state fields; matching
+      `Ident(name)` rewrites as `state.<name>`.
+    - `local_scope` — identifiers introduced by enclosing
+      `FnExpr`s (closure params). Matching `Ident(name)`
+      emits verbatim, taking precedence over
+      state-field rewrite (params shadow same-named state
+      fields).
+  Anything else (free var) rejects with a 11.7+ pointer.
+- **BinOp / UnaryOp always wrapped in outer parens.** Fitz
+  and Rust have similar precedence but not identical; the
+  safe choice is to parenthesise every non-leaf sub-
+  expression. `count + 1` becomes `(state.count + 1)`,
+  `-x` becomes `(-x)`. Slightly noisy but correctness-
+  preserving.
+- **StrInterp preserves `{expr}` semantics via recursive
+  walk.** `"count is {count}"` in an event RHS becomes
+  `"count is {state.count}"` in the emitted source
+  (bare-ident state-field rewrite happens inside the
+  interpolated segment).
+- **FnExpr arrow form only.** `fn(x) => x + 1` works;
+  multi-statement bodies (`fn(x) { let y = x; return y }`)
+  reject with a 11.7+ pointer. Real event body statement
+  lowering — `if x { count = 1 } else { count = 0 }` —
+  belongs in the 11.6.c continuation or 11.7+.
+- **Async closures rejected.** `async fn(...) => ...`
+  makes no sense inside a synchronous render / event body;
+  reject with a 11.7+ pointer.
+- **Slice / ListComp / MapComp / Match / If-as-expression
+  / StructLit / Await / Try / NamedArg / Bytes / Tuple**
+  all reject with 11.7+ pointers (11.6.d for StructLit
+  specifically — needed for the state-construction case).
+  This closes off the walker's grammar with clear future-
+  sub-phase pointers on every rejection.
+- **`<style>` inline at the top of the render body's
+  HTML.** The compiled CSS (with 11.3.b's `apply_scope`
+  applied for `scoped`, verbatim for `global`) prepends
+  the template output as `<style>...</style>`. Braces get
+  escaped (`{` → `\{`, `}` → `\}`) so the CSS syntax
+  doesn't collide with classic Fitz's string
+  interpolation `{expr}` inside `html("""...""")`.
+- **`<style>` inline: fail-fast rejection removed.**
+  11.6.b failed the entire component when a `<style>`
+  block was declared. 11.6.c partial inlines it.
+- **Visible view-lexer debt: `.` in event body context.**
+  Discovered during 11.6.c testing: `event bump() { count
+  = state.count + 1 }` fails at `view::parse` because the
+  view lexer refuses to tokenise `.` outside template
+  contexts. The SSR walker itself supports method calls +
+  field access — verified by unit tests that construct the
+  `ExpandedComponent` directly. The lexer fix is a
+  dedicated view-lexer cleanup (add `.` to the accepted
+  character set inside event body raw-capture) and lands
+  alongside the 11.6.c continuation or as a separate
+  view-lexer follow-up. Documented in the module doc
+  comment and in this section.
+
+**Files touched**
+
+- `src/view/codegen_ssr.rs` (~250 LoC net):
+  - New `format_fitz_expr(&Expr, &[&str], &str, &str) ->
+    SsrEmitResult<String>` — public thin wrapper.
+  - New `format_fitz_expr_scoped(&Expr, &[&str], &[&str],
+    &str, &str) -> SsrEmitResult<String>` — inner walker
+    with `local_scope` for closure params.
+  - Old `format_event_rhs` and `format_template_interpolation`
+    become thin delegates over the walker.
+  - `format_expr_source` (state field defaults) also
+    delegates, passing empty `state_field_names` (defaults
+    can't reference state fields — that's circular).
+  - `emit_component_ssr_into` no longer fails on `<style>`;
+    the fail-fast rejection is removed.
+  - `emit_render_fn` prepends `<style>` inline into the
+    HTML body when `component.style` is `Some`.
+  - New helper `escape_css_braces_for_fitz_interp` for the
+    `{`/`}` → `\{`/`\}` rewrite on the CSS body.
+  - New helpers `format_binop_source`, `format_unaryop_source`,
+    `expr_kind_label` for the walker.
+  - Old rejection tests for BinOp / scoped style inverted
+    to positive `phase_11_6_c_emit_accepts_*` tests.
+  - 10 new unit tests under `phase_11_6_c_*`:
+    - `emit_accepts_binop_rhs_in_event_body` — precedence
+      parens verified.
+    - `emit_accepts_arithmetic_rhs_multiple_ops` — nested
+      BinOp with correct grouping.
+    - `emit_accepts_str_interp_rhs_with_field_rewrite` —
+      `"{count}"` → `"{state.count}"` inside interpolation.
+    - `emit_accepts_method_call_via_direct_expr_construction`
+      — AST-constructed fixture that bypasses the view
+      lexer's `.` limitation.
+    - `emit_accepts_arrow_closure_via_direct_expr_construction`
+      — same, verifying local-scope tracking on closure
+      params.
+    - `emit_accepts_richer_template_interpolation` —
+      `{count + 1}` in template → `{(state.count + 1)}`
+      inside emitted HTML.
+    - `emit_accepts_field_access_in_template_interp` —
+      `{name.upper()}` works in template context (view
+      lexer accepts `.` inside `{...}`).
+    - `emit_inlines_scoped_style_at_top_of_render_body`
+      — verifies `<style>` tag + ordering vs template
+      content.
+    - `emit_inlines_global_style_with_escaped_braces` —
+      global CSS inline with `\{`/`\}` escapes.
+    - `still_rejects_if_directive_pending_continuation` +
+      `still_rejects_for_directive_pending_continuation`
+      — regression guards for the deferred directives.
+    - `round_trip_end_to_end_with_widened_grammar` —
+      counter fixture with BinOp arithmetic + template
+      interpolation of two state fields + scoped style;
+      the emitted source must lex + parse cleanly through
+      classic Fitz.
+
+**Debt / gotchas visible from 11.6.c (partial)**
+
+- **View lexer doesn't tokenise `.` in event body raw
+  context.** Blocks `.fitzv` authors from writing method
+  calls / field access in event bodies. Real fix: extend
+  the view lexer's event-body char set. Not part of 11.6.c
+  scope; deferred to a dedicated view-lexer cleanup or
+  folded into 11.6.c continuation.
+- **Template directives `{#if}` / `{#for}` still reject.**
+  Belongs to 11.6.c continuation — needs Vec<TemplatePiece>
+  refactor + emitted helper fn (`__fitz_view_str_join`) at
+  module header for `{#for}` since classic Fitz's
+  `List<Str>` methods don't include `.join()`.
+- **Multi-statement event bodies with non-assignment
+  statements still reject.** `if x { count = 1 } else {
+  count = 0 }` inside an event body would need statement
+  lowering to a struct literal with an if-as-expression on
+  each mutated field. Deferred to 11.6.c continuation
+  alongside `{#if}` (same infrastructure).
+- **StrInterp `FormatSpec` (e.g. `{x:0.2f}`) not
+  preserved.** The walker drops the format spec and emits
+  bare `{state.<field>}`. Format specs on state-field
+  interpolations are rare in .fitzv real-world usage; the
+  fix is a `format_format_spec` helper if pressure
+  appears.
+- **StrInterp Lit segment escapes: only `"` and `\`.** No
+  `\n` / `\t` escaping — a Lit segment containing a
+  newline gets emitted verbatim, which classic Fitz's
+  single-quoted string might reject. Deferred until a real
+  fixture reveals the case.
+
+**Files NOT touched**
+
+- `src/view/expand.rs` / `src/view/check.rs` — the pipeline
+  shape is unchanged. 11.6.c widens the emitter's
+  ACCEPTED grammar, not the checker's or the expander's.
+- `src/main.rs` — no CLI wiring; SSR emitter is still
+  invoked only by tests. Module loader integration is
+  11.6.d.
+- `fitz-liveviews/*` — no migration yet. Migration lands
+  in 11.6.e once the emitter closes 11.6.c continuation +
+  11.6.d.
+
+11.6.c (partial) CLOSED with this §9.w section, the
+corresponding row refresh in §6, and the memoria update.
+Next: 11.6.c continuation (`{#if}`/`{#for}` template
+directives via `Vec<TemplatePiece>` refactor).
 
 ---
 

@@ -9687,9 +9687,24 @@ con targeted 11.6.c/d/7+ pointers): non-literal RHS,
 non-state-field ident en interpolación. Acceptance criterion:
 round-trip test `emit_output_round_trips_through_classic_fitz_lexer_and_parser`
 prueba que el emitted source lexea + parsea limpio. See §9.v.
-Próximo norte: **11.6.c** — full event body lowering +
-`{#if}`/`{#for}` template lowering + `<style scoped>` inline
-emission.
+**Sub-paso 11.6.c partial CERRADO 2026-07-15** — RHS
+expression walker `format_fitz_expr_scoped` (~250 LoC net)
+con state-field rewriting + closure-param local-scope
+tracking. Delegado desde `format_event_rhs` +
+`format_template_interpolation` + `format_expr_source`.
+Soporta BinOp / UnaryOp / Call / Field / Index / StrInterp
+/ List / Map / Range / Ok / Err / arrow FnExpr. `<style
+scoped>` / `<style global>` inline al top del render body
+con CSS-brace escape (`{`/`}` → `\{`/`\}` para no colisionar
+con classic Fitz's string interp). Old rejection tests
+invertidos a `phase_11_6_c_emit_accepts_*` positive tests.
+10 tests nuevos + round-trip end-to-end verde. Debt visible:
+view lexer no tokeniza `.` en event body context (blockea
+method calls/field access en `.fitzv` source; fix en
+view-lexer cleanup dedicado o 11.6.c continuation). See §9.w.
+Próximo norte: **11.6.c continuation** — `{#if}`/`{#for}`
+template directives via `Vec<TemplatePiece>` refactor +
+emitted `__fitz_view_str_join` helper para `{#for}`.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
