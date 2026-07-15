@@ -9781,11 +9781,24 @@ como próximo norte):
     (multi-bin `[[bin]]`)** — memoria + `docs/deudas-post-5b.md`
     updated. 23 new unit tests in `manifest::tests` + 7 new
     `cli_e2e` tests. CLOSED 2026-07-15. See §9.q.
-  - 🔵 **11.5.c** — Single-component `wasm-client` build: emit
-    `wasm-crate/` scaffold + Cargo.toml `wasm-opt` metadata knob
-    + `#[wasm_bindgen(start)]` wrapper + `wasm-pack build
-    --release --target web` invoke + copy `pkg/` to
-    `target/wasm/<bin_name>/`.
+  - ✅ **11.5.c** — Single-component `wasm-client` build.
+    CLOSED 2026-07-15. New module `src/view/wasm_build.rs`
+    owns the composition helpers (`compose_lib_rs` +
+    `compose_cargo_toml` + `sanitise_wasm_pkg_name` +
+    `write_wasm_crate_scaffold`), 15 unit tests including
+    bit-for-bit against the counter Cargo.toml baseline. CLI
+    dispatch: `Commands::Build` routes `WasmClient` to
+    `build_wasm_client_cmd` which scaffolds under
+    `target/wasm-build/<bin>/`, invokes `wasm-pack build
+    --release --target web`, and copies `pkg/` to
+    `target/wasm/<bin>/`. `.fitz` sources with wasm-client
+    rejected with 11.5.d pointer (composition case). Missing
+    `wasm-pack` emits install pointer. Smoke harness
+    `tests/view_counter_wasm_smoke.rs` refactored to route
+    through the same helpers, so the counter baseline is
+    bit-for-bit what the CLI produces. 3 new cli_e2e tests
+    (scaffold shape + `.fitz` + wasm-client rejection + empty
+    `.fitzv` rejection). See §9.r.
   - 🔵 **11.5.d** — Multi-component composition:
     `<Child prop="v" />` in a template mounts a nested component
     with static props.

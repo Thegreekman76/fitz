@@ -213,7 +213,7 @@ Phase 11 promise.
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits, ALL **CLOSED 2026-07-14**: **11.3.a** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container`, keeps other at-rules opaque, handles strings + comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class) (see §9.j). **11.3.c** — wire scoping end-to-end in `expand`: new `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc }, Global { css, loc } }` replaces the raw-passthrough `Option<RawStyle>`; scope class synthesised via FNV-1a of `<component>::<css_raw>` truncated to 8 hex, shape `<component-kebab>-c-<8hex>`; `apply_scope(...)` runs on the CSS body; every Element with a static `class` attribute gets suffixed variants added (`class="card"` → `class="card card-<scope>"`) via a recursive walker that descends into If then/else branches + For bodies; interpolated `class` attributes left alone as a documented limitation. Global styles are pure passthrough — no CSS transform, no template rewrite. Includes 21 new unit tests + `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (see §9.k). **Closes 11.3 entire** — Phase 11.3 shipped end-to-end. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **CLOSED 2026-07-14** — `src/view/codegen_wasm.rs` (~1500 LoC + 23 unit tests) emits Rust source for one component (struct + `new()` + event fns + `mount()` + `render()` + scoped/global style helper) via `pub fn emit_component(&ExpandedComponent) -> EmitResult<String>` and a whole `.rs` module via `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`. Naive re-render on state mutation (D1), two-fn public API (D2), strictly conservative subset (D3 — Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/Slot/non-click/Str/Bool/Nominal/handler-params reject with `EmitError` citing 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml` gains opt-in feature `client-wasm` with `wasm-bindgen`/`web-sys`/`console_error_panic_hook`; `cargo build` default dep tree unchanged. Verification: 3510 lib tests green (3487 baseline + 23 new), fmt + clippy `-D warnings` clean in both default and `--features client-wasm` modes. See §9.m. Deuda derivada VISIBLE that gated 11.4.c (now CLOSED via §9.n follow-up 2026-07-14): view lexer arithmetic gap. **11.4.c** — counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded against the 40 KB gate. **CLOSED 2026-07-15** — `examples/view/counter/{Counter.fitzv, index.html, README.md, wasm-crate/}` shipped end-to-end. Harness lives in `tests/view_counter_wasm_smoke.rs`: `regenerate_counter_lib_rs` (always runs on `cargo test`, keeps `wasm-crate/src/lib.rs` in sync with the emitter output + validates structural invariants) + `build_counter_wasm_and_measure` (`#[ignore]`, opt-in via `-- --ignored`, runs `wasm-pack build --release --target web` and measures gzipped size against the 40 KB gate). `flate2 = "1"` added as `dev-dependency` for the size measurement. Composed entry point (`#[wasm_bindgen(start)] pub fn start()`) lives at the tail of the harness, NOT in `view::emit_module()` — same posture Phase 11.5 CLI will inherit. Verification: 3517 lib tests green (unchanged baseline, no regressions), fmt + clippy default + clippy `--features client-wasm` all clean. See §9.o. **MEASUREMENT CLOSED 2026-07-15** — measured on Windows 11 with `rustc + rust-std wasm32-unknown-unknown + wasm-pack 0.15.0`: raw `.wasm` 26.1 KB / **gzipped 11.4 KB** (28.6 KB headroom under the 40 KB gate). A2 (hand-rolled `wasm-bindgen`) validated as the primary WASM target; no pivot to JS-vanilla needed, `docs/stack.md` lines 99-101 remain accurate. `wasm-pack` requires `wasm-opt = ['-O', '--enable-bulk-memory']` metadata on the wasm-crate to accept modern rustc output — recorded in `wasm-crate/Cargo.toml` with the reason inline. Two cosmetic emitter warnings surfaced (`unused_parens` in BinOp assignment RHS + `non_snake_case` in style-injection helpers) and are documented as deuda derivada in §9.o Debt residual — not correctness bugs; deferred to the 11.5 emitter cleanup pass. **11.4.d** — cierre formal + roadmap refresh. **CLOSED 2026-07-15** — this doc's row + §9.o Result subsection + `docs/roadmap.md` Fase 11 section refreshed to reflect the gate outcome. Browser smoke validated manually on Windows 11 / Chrome (2026-07-15): counter renders in `#app` with initial `0`, `+`/`-`/`reset` mutate the value and re-render is scoped to the component's subtree (no full-body redraw, per §9.m D1 naive-render policy). Two cosmetic emitter warnings (`unused_parens` + `non_snake_case`) intentionally deferred to the 11.5 CLI cleanup pass (see §9.o Debt residual). **Closes 11.4 entirely** — A2 (hand-rolled `wasm-bindgen` + `web-sys` under opt-in feature `client-wasm`) confirmed as the primary WASM target for Fitz, no pivot to JS-vanilla needed. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
-| **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). Split into five sub-commits: **11.5.a** — research + decision (docs-only, no code). **CLOSED 2026-07-15** — decision recorded is **hybrid manifest + flag** (`[[bin]]` multi-bin closes debt 9.y.8+ as a side-effect; `target = "native"` \| `"wasm-client"` \| `"ssr"` with `ssr` reserved for 11.6+; `mount = "#app"` required for `wasm-client`; `--bin <name>` selector + `--target <t>` override; legacy `[bin]` singular auto-migrates). See §9.p. **11.5.b** — manifest extension: `[[bin]]` array-of-tables + `name`/`target`/`mount` fields + `--bin`/`--target` flags + auto-migration of legacy `[bin]` singular. Rejects `target = "ssr"` with targeted 11.6+ message. **CLOSED 2026-07-15** — `src/manifest.rs` now models `Manifest.bins: Vec<ManifestBin>` (was `Option<Bin>`) with new fields `name`/`target`/`mount`, new `Target` enum (kebab-case serde: `Native`/`WasmClient`/`Ssr`), new `ManifestWarning::SsrTargetReserved` surface for the CLI to display. Custom `Deserialize` via `RawManifest` + untagged `RawBinField { Single | Multiple }` auto-migrates legacy `[bin]` singular (fills `name` from `package.name` when omitted). Cross-field validation eagerly rejects `.fitzv` + `target = "native"` (both explicit and default) and `wasm-client` without `mount`. Custom `Serialize` preserves the visual `[bin]` singular shape for the common scaffolded case. CLI: `Commands::Build` gains `--bin <name>` + `--target <t>` (clap); new `resolve_entry_with_bin` propagates the selection + override into `ResolvedEntry.target_override` and `ManifestCtx.selected_bin`; helper `enforce_build_target_supported` rejects `wasm-client` citing 11.5.c and `ssr` citing 11.6+ before touching disk. 23 new unit tests in `manifest::tests` (legacy migration, multi-bin parse, target enum roundtrip, mount validation, `.fitzv` + native rejection, SSR warning, `select_bin`) + 7 new `cli_e2e` tests (`--bin` selector on multi-bin, wasm-client + 11.5.c rejection, ssr + 11.6+ rejection, unknown target value, legacy `[bin]` regression, `.fitzv` + native rejection). **Closes debt 9.y.8+ (multi-bin `[[bin]]`)** — noted in `docs/deudas-post-5b.md`. See §9.q. **11.5.c** — single-component `wasm-client` build: emit `wasm-crate/` scaffold + Cargo.toml with `wasm-opt` metadata knob (§9.o gotcha) + `#[wasm_bindgen(start)]` wrapper that calls `<Root>::new().mount("#mount-sel")` + `wasm-pack build --release --target web` invoke + copy `pkg/` to `<manifest_dir>/target/wasm/<bin_name>/`. E2E test: bit-for-bit against the counter demo baseline. **11.5.d** — multi-component composition: `<Child prop="v" />` in a template mounts a nested component with static props; checker validates that `Child` is a declared component in the same file and coerces static attr values to the child's `state` field types; emitter instantiates children. Reject dynamic props (`prop={expr}`), fallthrough attrs, `<slot>` fill-in with targeted 11.6 messages. **11.5.e** — cierre formal: kanban rewrite (`examples/view/kanban/`) compiles under 5s + docs + refresh §6 + roadmap + memory. Cosmetic emitter warnings (`unused_parens` + `non_snake_case` from §9.o Debt residual) fixed in the same pass. | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
+| **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). Split into five sub-commits: **11.5.a** — research + decision (docs-only, no code). **CLOSED 2026-07-15** — decision recorded is **hybrid manifest + flag** (`[[bin]]` multi-bin closes debt 9.y.8+ as a side-effect; `target = "native"` \| `"wasm-client"` \| `"ssr"` with `ssr` reserved for 11.6+; `mount = "#app"` required for `wasm-client`; `--bin <name>` selector + `--target <t>` override; legacy `[bin]` singular auto-migrates). See §9.p. **11.5.b** — manifest extension: `[[bin]]` array-of-tables + `name`/`target`/`mount` fields + `--bin`/`--target` flags + auto-migration of legacy `[bin]` singular. Rejects `target = "ssr"` with targeted 11.6+ message. **CLOSED 2026-07-15** — `src/manifest.rs` now models `Manifest.bins: Vec<ManifestBin>` (was `Option<Bin>`) with new fields `name`/`target`/`mount`, new `Target` enum (kebab-case serde: `Native`/`WasmClient`/`Ssr`), new `ManifestWarning::SsrTargetReserved` surface for the CLI to display. Custom `Deserialize` via `RawManifest` + untagged `RawBinField { Single | Multiple }` auto-migrates legacy `[bin]` singular (fills `name` from `package.name` when omitted). Cross-field validation eagerly rejects `.fitzv` + `target = "native"` (both explicit and default) and `wasm-client` without `mount`. Custom `Serialize` preserves the visual `[bin]` singular shape for the common scaffolded case. CLI: `Commands::Build` gains `--bin <name>` + `--target <t>` (clap); new `resolve_entry_with_bin` propagates the selection + override into `ResolvedEntry.target_override` and `ManifestCtx.selected_bin`; helper `enforce_build_target_supported` rejects `wasm-client` citing 11.5.c and `ssr` citing 11.6+ before touching disk. 23 new unit tests in `manifest::tests` (legacy migration, multi-bin parse, target enum roundtrip, mount validation, `.fitzv` + native rejection, SSR warning, `select_bin`) + 7 new `cli_e2e` tests (`--bin` selector on multi-bin, wasm-client + 11.5.c rejection, ssr + 11.6+ rejection, unknown target value, legacy `[bin]` regression, `.fitzv` + native rejection). **Closes debt 9.y.8+ (multi-bin `[[bin]]`)** — noted in `docs/deudas-post-5b.md`. See §9.q. **11.5.c** — single-component `wasm-client` build. **CLOSED 2026-07-15** — new module `src/view/wasm_build.rs` (~430 LoC + 15 unit tests) owns the composition helpers: `compose_lib_rs(expanded, mount_selector, source_label)` runs `emit_module` and appends the `#[wasm_bindgen(start)]` wrapper (first-declared component = root, per §9.p); `compose_cargo_toml(pkg_name)` renders the wasm-crate Cargo.toml with the crucial `[package.metadata.wasm-pack.profile.release] wasm-opt = ['-O', '--enable-bulk-memory']` metadata knob (§9.o gotcha) + the exact `web-sys` feature subset the emitter uses; `sanitise_wasm_pkg_name` converts kebab-case bin names to snake_case Rust crate names; `write_wasm_crate_scaffold(dst, expanded, bin_name, mount, source_label)` materialises the scaffold on disk. `Manifest.warnings()` + the cross-field validation from 11.5.b keep the wasm-client path fail-fast. CLI: `Commands::Build` now dispatches `WasmClient` to `build_wasm_client_cmd(&resolved)` (in `src/main.rs`) which loads the `.fitzv`, runs the view pipeline (parse → expand → check), writes the scaffold under `<manifest_dir>/target/wasm-build/<bin_name>/`, shells `wasm-pack build --release --target web` inside it, and recursively copies `pkg/` to `<manifest_dir>/target/wasm/<bin_name>/`. Classic `.fitz` sources with `target = "wasm-client"` are rejected with a targeted 11.5.d pointer (composition case). Missing `wasm-pack` on the runner emits an actionable install pointer. The smoke harness `tests/view_counter_wasm_smoke.rs` now routes through `view::compose_lib_rs` — same helper the CLI uses — so the committed `examples/view/counter/wasm-crate/src/lib.rs` baseline is bit-for-bit what `fitz build --bin counter --target wasm-client` would produce. Added 3 new cli_e2e tests: (a) scaffold shape verification WITHOUT `wasm-pack` (checks `Cargo.toml` + `src/lib.rs` present with the composed wrapper and the wasm-opt knob); (b) `.fitz` + wasm-client rejected citing 11.5.d; (c) empty `.fitzv` (zero components) rejected with a targeted "no component to mount" error. The `[[bin]] name = "web"` + `mount = "#app"` path is now the canonical way to emit a browser WASM bundle from a `.fitzv`. See §9.r. **11.5.d** — multi-component composition: `<Child prop="v" />` in a template mounts a nested component with static props; checker validates that `Child` is a declared component in the same file and coerces static attr values to the child's `state` field types; emitter instantiates children. Reject dynamic props (`prop={expr}`), fallthrough attrs, `<slot>` fill-in with targeted 11.6 messages. **11.5.e** — cierre formal: kanban rewrite (`examples/view/kanban/`) compiles under 5s + docs + refresh §6 + roadmap + memory. Cosmetic emitter warnings (`unused_parens` + `non_snake_case` from §9.o Debt residual) fixed in the same pass. | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
 | **11.7** | LSP support inside `.fitzv` — hover over `{expr}` shows the type, autocomplete inside `state { }` and `event ...` bodies, template-attr completion knows about the declared event handlers of the enclosing component. | VSCode extension bumped with the new grammar + LSP config; typing `{sta` inside a template completes to `state field name` when the component has that field. |
 | **11.8** | Pedagogic docs — chapter in `docs/guide.md` covering `.fitzv` from scratch. Chapter in `docs/curso/` (new module M9?) mirroring the pedagogic style of M1-M8. Update `docs/architecture.md` with the two-parser split. | Chapter runs someone from zero to a working counter component. Course module has runnable examples. Neither confuses the reader about what's classic Fitz vs what's `.fitzv`. |
@@ -3146,6 +3146,188 @@ row refresh in §6, and the debt line update in
 `docs/deudas-post-5b.md`. Next: 11.5.c (single-component
 `wasm-client` build — emit `wasm-crate/` scaffold + shell out
 to `wasm-pack`).
+
+---
+
+## 9.r 11.5.c — single-component `wasm-client` build (scaffold + wasm-pack + copy pkg)
+
+Third commit of 11.5. **The CLI can now emit a browser WASM
+bundle from a `.fitzv`.** `fitz build --bin <web>` on a bin
+with `target = "wasm-client"` and `main = "src/App.fitzv"`
+walks the view pipeline, scaffolds a temporary wasm-crate,
+shells out to `wasm-pack`, and copies the produced `pkg/` to
+`<manifest_dir>/target/wasm/<bin_name>/`. Bit-for-bit
+equivalent to the smoke harness `tests/view_counter_wasm_smoke.rs`
+in the counter demo.
+
+**Design decisions**
+
+- **Composition helpers live in `src/view/wasm_build.rs`, not
+  in the CLI.** Both the smoke harness and the CLI orchestrator
+  in `main.rs` route through the same `view::compose_lib_rs` +
+  `view::compose_cargo_toml` + `view::write_wasm_crate_scaffold`
+  helpers. This is the invariant that makes the counter baseline
+  `examples/view/counter/wasm-crate/src/lib.rs` a valid E2E
+  reference for the CLI (it is bit-for-bit what the CLI would
+  emit for `[[bin]] name = "counter"` + `mount = "#app"`).
+- **First-declared component is the root.** Per §9.p (the
+  11.5.a decision), the composer takes `expanded.components[0]`
+  and instantiates it in the `#[wasm_bindgen(start)]` wrapper.
+  Explicit `entry_component = "X"` field on `[[bin]]` is
+  reserved for 11.6+.
+- **`.fitzv`-only in MVP.** Classic `.fitz` sources with
+  `target = "wasm-client"` are rejected with a targeted
+  11.5.d pointer (composition case). The 11.5.b manifest
+  cross-field validation only rejects the other direction
+  (`.fitzv` with `native`), so the extension check lives in
+  the CLI orchestrator.
+- **Output layout: `target/wasm-build/<bin>/` for the scaffold,
+  `target/wasm/<bin>/` for the final `pkg/` copy.** Cargo-style
+  (analogous to `target/release/`). The scaffold dir contains
+  the emitted crate; the `pkg/` copy is what the browser
+  consumes. Keeping the two separate lets `wasm-pack` overwrite
+  its own intermediate output freely without touching the
+  end-user-facing `target/wasm/`.
+- **Sanitised package name.** Bin names allow `-` (kebab-case
+  per `is_valid_package_name`), but wasm-pack maps `-` to `_`
+  in the artefact filename which is confusing. The CLI
+  sanitises upfront via `sanitise_wasm_pkg_name(bin.name)` and
+  uses the result for both the scaffold dir name and the
+  `[package].name` in the emitted `Cargo.toml`.
+- **`wasm-pack` missing → clean install pointer.** The CLI
+  invokes `std::process::Command::new("wasm-pack")` directly;
+  on `NotFound` errors it emits an actionable message with the
+  `cargo install wasm-pack` command + the docs URL. No
+  auto-install: users control their tooling.
+- **`--target web`, not `--target bundler`.** The `web`
+  target produces a bundle loadable via `<script type="module">`
+  without a bundler (webpack/vite/parcel), which matches the
+  counter demo's HTML shim and keeps the "Fitz por sí solo"
+  promise (docs/stack.md invariant 1).
+- **Idempotent `pkg/` copy.** `wasm-pack` writes deterministic
+  filenames (`<pkg>_bg.wasm`, `<pkg>_bg.js`, `<pkg>.js`,
+  `package.json`, etc.), so a recursive copy that overwrites
+  existing files is safe. Files under `target/wasm/<bin>/`
+  that are NOT under `pkg/` are preserved (rare in practice,
+  but avoids surprise deletions).
+
+**Files touched**
+
+- `src/view/wasm_build.rs` (~430 LoC + 15 unit tests):
+  - `pub fn compose_lib_rs(expanded, mount_selector, source_label) -> EmitResult<String>`
+    — runs `emit_module` and appends the composed
+    `#[wasm_bindgen(start)]` wrapper. Header comment cites
+    the source label. Errors early with a targeted message
+    when the `.fitzv` declares zero components (no root to
+    mount).
+  - `pub fn compose_cargo_toml(package_name) -> String` — the
+    canonical `Cargo.toml` for the wasm-crate. Includes the
+    `[package.metadata.wasm-pack.profile.release] wasm-opt`
+    knob + the exact `web-sys` feature subset the emitter
+    uses. Test `compose_cargo_toml_bit_for_bit_matches_
+    counter_baseline_when_named_counter` pins the shape
+    against the committed baseline.
+  - `pub fn sanitise_wasm_pkg_name(bin_name) -> String` —
+    Rust crate name normalisation (lowercase, hyphens → `_`,
+    non-alphanumeric stripped, fallback `"wasm_bundle"`).
+  - `pub struct ScaffoldResult { crate_dir, lib_rs, cargo_toml }`
+    — return shape of `write_wasm_crate_scaffold`. Callers
+    that want to inspect the artefacts (E2E tests) use the
+    absolute paths directly.
+  - `pub enum ScaffoldError { Io(io::Error, PathBuf), Emit(EmitError) }`.
+  - `pub fn write_wasm_crate_scaffold(crate_dir, expanded, bin_name, mount_selector, source_label) -> Result<ScaffoldResult, ScaffoldError>`
+    — materialises the scaffold on disk. Idempotent (overwrites
+    existing files).
+- `src/view/mod.rs` — new `pub mod wasm_build;` + re-exports.
+- `src/main.rs` (~250 LoC net):
+  - New `fn build_wasm_client_cmd(&ResolvedEntry)` — the
+    orchestrator. Loads the `.fitzv`, runs the view pipeline,
+    materialises the scaffold, shells `wasm-pack build
+    --release --target web`, copies `pkg/` to
+    `target/wasm/<bin>/`. Aborts with clean messages on any
+    failure. Requires manifest mode (single-file mode
+    rejected — needs `mount` from the bin entry AND a stable
+    output layout).
+  - `fn copy_dir_tree_overwriting(src, dst)` — recursive
+    copy helper. Overwrites existing files under `dst`;
+    doesn't delete unrelated files.
+  - `enforce_build_target_supported` now accepts `WasmClient`
+    (the dispatch happens in `Commands::Build` above); only
+    `Ssr` still errors with the 11.6+ pointer.
+- `tests/view_counter_wasm_smoke.rs` — refactored to route
+  through `fitz::view::compose_lib_rs` (removes duplicated
+  entry-point composition). Structural invariants updated to
+  match the composer's generic `let root = ...` binding.
+- `tests/cli_e2e.rs` — 3 new tests:
+  - `phase_11_5_c_build_wasm_client_scaffolds_before_invoking_wasm_pack`
+    — verifies the scaffold artefacts (Cargo.toml + src/lib.rs)
+    exist with the expected content, regardless of whether
+    `wasm-pack` succeeds on the runner. Fixture uses
+    `main = "src/App.fitzv"` with a component named `App`.
+  - `phase_11_5_c_build_with_bin_wasm_client_and_fitz_main_rejects_citing_11_5_d`
+    — replaces the pre-11.5.c test that expected an outright
+    rejection; now checks the classic `.fitz` composition
+    case still rejects with the 11.5.d pointer.
+  - `phase_11_5_c_build_wasm_client_with_empty_fitzv_errors_before_wasm_pack`
+    — verifies the "no component to mount" error path fires
+    before any subprocess.
+- `examples/view/counter/wasm-crate/Cargo.toml` — cosmetic
+  comment tweak so the composer output matches bit-for-bit.
+  (Content is functionally identical.)
+
+**Debt / gotchas visible from 11.5.c**
+
+- **Single-file mode (`fitz build src/App.fitzv --target
+  wasm-client`) rejected.** The wasm-client path requires
+  manifest mode because the mount selector lives in
+  `[[bin]] mount = "..."`. Adding a `--mount` CLI flag for
+  single-file mode is a natural refinement — deferred until
+  demand appears.
+- **`.fitz` composition rejected.** The 11.5.d work item
+  covers composing multiple `.fitz`/`.fitzv` sources into a
+  single wasm bundle. Today the CLI enforces "one `.fitzv`,
+  one bundle".
+- **CI without `wasm-pack`.** The 3 new cli_e2e tests do
+  NOT require `wasm-pack` on the runner (they exercise
+  scaffolding + validation paths that abort before subprocess
+  invocation). The full end-to-end (scaffold → `wasm-pack`
+  → `pkg/` → measured bundle size) still lives behind
+  `tests/view_counter_wasm_smoke.rs::build_counter_wasm_and_measure`
+  which is `#[ignore]`. If CI adds `wasm-pack`, opt-in that
+  test via `-- --ignored`.
+- **No incremental scaffold cache.** Every `fitz build --bin
+  <web>` re-writes `Cargo.toml` + `src/lib.rs` even if
+  neither changed. `wasm-pack` + `cargo` already handle
+  their own incremental compilation, so the CLI overhead is
+  negligible. If it becomes visible, the composer could
+  `write_if_changed` (matching the smoke harness) to keep
+  `cargo`'s incremental cache maximally warm.
+- **`--emit-only` flag not implemented.** A "scaffold and
+  stop" flag would help testing (skip `wasm-pack`, inspect
+  the scaffold in isolation) — the 3 new cli_e2e tests
+  already cover the scaffold shape by running the full CLI
+  and ignoring the `wasm-pack` exit. Deferred until a real
+  use case appears.
+- **Multi-`.fitzv` root selection.** A `.fitzv` file with
+  multiple `component X { ... }` blocks silently picks the
+  first as the root. Per §9.p that's the convention; if the
+  user wants explicit control, `entry_component` on `[[bin]]`
+  lands with 11.6+ (or earlier if pressure appears).
+
+**Files NOT touched by 11.5.c**
+
+- `src/codegen.rs` — unchanged. The native `fitz build` path
+  routes through the classic codegen; `wasm-client` bypasses
+  it entirely.
+- `src/manifest.rs` — unchanged from 11.5.b. The cross-field
+  validation and `Target` enum already model the wasm-client
+  shape.
+- `src/view/codegen_wasm.rs` — unchanged. The emitter output
+  is consumed by the new composer without modifications.
+
+11.5.c fully CLOSED with this §9.r section, the corresponding
+row refresh in §6, and the memoria update. Next: 11.5.d
+(multi-component composition — `<Child prop="v" />` templates).
 
 ---
 

@@ -8,10 +8,10 @@ publish = false
 crate-type = ["cdylib"]
 
 # Sizing knobs — el gate de Phase 11.4 es 40 KB gzipped sobre el
-# `counter_bg.wasm` producido por `wasm-pack build --release`.
-# `opt-level = "z"` + `lto = true` es la config canónica del
-# ecosistema wasm-bindgen para minimizar el bundle. `wasm-pack`
-# invoca `wasm-opt` automáticamente en modo release.
+# `.wasm` producido por `wasm-pack build --release`. `opt-level =
+# "z"` + `lto = true` es la config canónica del ecosistema
+# wasm-bindgen para minimizar el bundle. `wasm-pack` invoca
+# `wasm-opt` automáticamente en modo release.
 [profile.release]
 opt-level = "z"
 lto = true

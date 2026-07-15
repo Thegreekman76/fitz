@@ -31,6 +31,7 @@ pub mod css_parser;
 pub mod expand;
 pub mod lexer;
 pub mod parser;
+pub mod wasm_build;
 
 pub use check::{check, CheckError};
 pub use codegen_wasm::{emit_component, emit_module, EmitError, EmitResult};
@@ -40,3 +41,7 @@ pub use expand::{
     ExpandedStateField, ExpandedStyle, ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
 };
 pub use parser::{parse, ViewParseError, ViewParseResult};
+pub use wasm_build::{
+    compose_cargo_toml, compose_lib_rs, sanitise_wasm_pkg_name, write_wasm_crate_scaffold,
+    ScaffoldError, ScaffoldResult,
+};

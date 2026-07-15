@@ -7,7 +7,7 @@
 use fitz::{
     ast, codegen, cron_jobs, db, deploy, docker, error, evaluator, fmt, http, launcher_template,
     lexer, lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, templates,
-    testing, types,
+    testing, types, view,
 };
 
 // `fitz py-types` sub-command (Phase 8.5) — only with the `python` feature.
@@ -656,13 +656,24 @@ fn main() {
             // per invocation (the CLI is a good place; the parser
             // itself must stay side-effect-free).
             emit_manifest_warnings(&resolved);
-            // Phase 11.5.b — reject targets that Phase 11.5.b does
-            // NOT know how to build yet, with the specific
-            // sub-phase reference.
+            // Phase 11.5.b — reject targets that the current codegen
+            // does NOT know how to build yet, with the specific
+            // sub-phase reference. Phase 11.5.c dispatches
+            // `WasmClient` to `build_wasm_client_cmd` below; `Ssr`
+            // still errors out with the 11.6+ pointer.
             let effective_target = resolved.effective_target();
             if let Err(msg) = enforce_build_target_supported(effective_target) {
                 eprintln!("✗ {msg}");
                 std::process::exit(1);
+            }
+            // Phase 11.5.c — WASM client target routes to a
+            // separate orchestrator (view pipeline + wasm-crate
+            // scaffold + `wasm-pack build`). Ends the process on
+            // success/failure — no fallthrough to the native
+            // path.
+            if effective_target == manifest::Target::WasmClient {
+                build_wasm_client_cmd(&resolved);
+                return;
             }
             sync_lockfile_if_needed(&resolved);
             // In manifest mode, output goes to
@@ -1048,26 +1059,237 @@ fn emit_manifest_warnings(resolved: &ResolvedEntry) {
     }
 }
 
-/// Phase 11.5.b — rejects targets that the current codegen does
-/// not know how to emit yet. `WasmClient` lands with 11.5.c;
-/// `Ssr` with 11.6+. `Native` is always accepted.
+/// Phase 11.5.b + 11.5.c — validates that the requested target
+/// is supported by the current codegen. `Native` and `WasmClient`
+/// build; `Ssr` errors with the 11.6+ pointer. The `WasmClient`
+/// path routes through `build_wasm_client_cmd` (Phase 11.5.c),
+/// separate from the native `build_file` path.
 fn enforce_build_target_supported(target: manifest::Target) -> Result<(), String> {
     match target {
-        manifest::Target::Native => Ok(()),
-        manifest::Target::WasmClient => Err(
-            "`target = \"wasm-client\"` — the WASM emitter for `fitz build` \
-             is scheduled for Phase 11.5.c. Track progress at \
-             `docs/fase-11-plan.md` §9.p (11.5.b closed the manifest \
-             shape; 11.5.c wires the codegen). For a peek at the \
-             emitter output today, run `cargo test --test view_counter_wasm_smoke`."
-                .to_string(),
-        ),
+        manifest::Target::Native | manifest::Target::WasmClient => Ok(()),
         manifest::Target::Ssr => Err("`target = \"ssr\"` — the server-side rendering emitter is \
              scheduled for Phase 11.6+. The manifest accepts the field \
              so you can declare intent today; the emitter itself has \
              not landed. Track progress at `docs/fase-11-plan.md` §9.p."
             .to_string()),
     }
+}
+
+/// Phase 11.5.c — build orchestrator for the `wasm-client`
+/// target. Reads the selected `.fitzv` (or `.fitz` — MVP only
+/// handles `.fitzv`), runs the view pipeline (parse → expand →
+/// check → `emit_module`), composes the `#[wasm_bindgen(start)]`
+/// wrapper, materialises the scaffold at
+/// `<manifest_dir>/target/wasm-build/<bin_name>/`, shells out
+/// to `wasm-pack build --release --target web` inside it, and
+/// copies `pkg/` to `<manifest_dir>/target/wasm/<bin_name>/`.
+///
+/// Aborts the process on any failure (bad extension, view
+/// pipeline error, wasm-pack missing, non-zero wasm-pack exit,
+/// or filesystem error). Single-file mode (no manifest ctx) is
+/// rejected here — the wasm-client path currently requires a
+/// manifest because it needs `mount` from the `[[bin]]` entry
+/// AND a fixed output layout.
+fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
+    let ctx = match &resolved.manifest_ctx {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "✗ `--target wasm-client` requires a manifest with a `[[bin]]` \
+                 entry (needs `mount = \"<selector>\"`). Single-file mode \
+                 is not yet supported — declare the bin in `fitz.toml`."
+            );
+            std::process::exit(1);
+        }
+    };
+    let bin = match &ctx.selected_bin {
+        Some(b) => b,
+        None => {
+            // Should not happen — resolve_entry_with_bin sets
+            // selected_bin whenever the manifest has one — but
+            // we guard for completeness.
+            eprintln!("✗ internal error: manifest ctx has no selected bin");
+            std::process::exit(1);
+        }
+    };
+
+    // `mount` is REQUIRED by Manifest::parse cross-field
+    // validation when target = WasmClient. This unwrap is safe.
+    let mount = match &bin.mount {
+        Some(m) => m.as_str(),
+        None => {
+            eprintln!(
+                "✗ internal error: `[[bin]] name = \"{}\"` has `target = \
+                 \"wasm-client\"` but no `mount` (cross-field validation \
+                 should have caught this at parse time).",
+                bin.name
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Extension check — the emitter is `.fitzv`-only in Phase
+    // 11.5.c. Classic `.fitz` composition lands with 11.5.d
+    // (`<Child />` wire-up).
+    let ext_view = resolved
+        .entry
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("fitzv"))
+        .unwrap_or(false);
+    if !ext_view {
+        eprintln!(
+            "✗ `[[bin]] name = \"{}\"` targets `wasm-client` but its `main = \
+             \"{}\"` is not a `.fitzv` file. Phase 11.5.c only wires the \
+             single-component wasm-client emit for `.fitzv` sources; \
+             composing classic `.fitz` files as WASM roots is 11.5.d work.",
+            bin.name, bin.main
+        );
+        std::process::exit(1);
+    }
+
+    // Load + run the view pipeline.
+    let src_text = match fs::read_to_string(&resolved.entry) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ could not read `{}`: {e}", resolved.entry.display());
+            std::process::exit(1);
+        }
+    };
+    let raw = match view::parse(&src_text) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("✗ view::parse on `{}`: {e}", resolved.entry.display());
+            std::process::exit(1);
+        }
+    };
+    let expanded = match view::expand(&raw) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("✗ view::expand on `{}`: {e}", resolved.entry.display());
+            std::process::exit(1);
+        }
+    };
+    let check_errs = view::check(&expanded);
+    if !check_errs.is_empty() {
+        eprintln!(
+            "✗ view::check on `{}` reported {} error(s):",
+            resolved.entry.display(),
+            check_errs.len()
+        );
+        for err in &check_errs {
+            eprintln!("  - {err}");
+        }
+        std::process::exit(1);
+    }
+
+    // Materialise the scaffold. Path is Cargo-style —
+    // `target/wasm-build/<bin>/` for the temporary crate,
+    // `target/wasm/<bin>/` for the final `pkg/` copy that the
+    // browser consumes.
+    let sanitised_pkg = view::sanitise_wasm_pkg_name(&bin.name);
+    let scaffold_dir = ctx
+        .manifest_dir
+        .join("target")
+        .join("wasm-build")
+        .join(&sanitised_pkg);
+    let final_pkg_dir = ctx
+        .manifest_dir
+        .join("target")
+        .join("wasm")
+        .join(&sanitised_pkg);
+
+    let source_label = bin.main.clone();
+    let scaffold = match view::write_wasm_crate_scaffold(
+        &scaffold_dir,
+        &expanded,
+        &sanitised_pkg,
+        mount,
+        Some(&source_label),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ wasm-crate scaffold at `{}`: {e}", scaffold_dir.display());
+            std::process::exit(1);
+        }
+    };
+
+    println!(
+        "  scaffold ready at `{}` (Cargo.toml + src/lib.rs)",
+        scaffold.crate_dir.display()
+    );
+
+    // Shell out to `wasm-pack build --release --target web`.
+    println!("  running `wasm-pack build --release --target web` ...");
+    let status = std::process::Command::new("wasm-pack")
+        .args(["build", "--release", "--target", "web"])
+        .current_dir(&scaffold.crate_dir)
+        .status();
+    let status = match status {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "✗ could not invoke `wasm-pack`: {e}\n\
+                 (install with `cargo install wasm-pack`, or grab the installer \
+                 from https://rustwasm.github.io/wasm-pack/)"
+            );
+            std::process::exit(1);
+        }
+    };
+    if !status.success() {
+        eprintln!(
+            "✗ `wasm-pack build --release --target web` exited with {status} at `{}`. \
+             See the wasm-pack output above.",
+            scaffold.crate_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Copy `<scaffold>/pkg/` → `<manifest>/target/wasm/<bin>/`.
+    // Overwrite whatever is there so re-builds are idempotent.
+    let src_pkg = scaffold.crate_dir.join("pkg");
+    if !src_pkg.is_dir() {
+        eprintln!(
+            "✗ wasm-pack succeeded but did not produce `pkg/` at `{}`",
+            src_pkg.display()
+        );
+        std::process::exit(1);
+    }
+    if let Err(e) = copy_dir_tree_overwriting(&src_pkg, &final_pkg_dir) {
+        eprintln!(
+            "✗ copying `{}` → `{}`: {e}",
+            src_pkg.display(),
+            final_pkg_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    println!("✓ wasm bundle at `{}`", final_pkg_dir.display());
+    println!(
+        "  serve it with: `python -m http.server` (or any static server) \
+         and point `<script type=\"module\">` at `{}/{}.js`",
+        final_pkg_dir.display(),
+        sanitised_pkg
+    );
+}
+
+/// Recursively copies `src` to `dst`, overwriting existing files
+/// under `dst`. Creates `dst` if missing. Does NOT delete files
+/// that exist under `dst` but not under `src` (rare in practice —
+/// `wasm-pack` produces the same set of files every run).
+fn copy_dir_tree_overwriting(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let dst_child = dst.join(entry.file_name());
+        if ft.is_dir() {
+            copy_dir_tree_overwriting(&entry.path(), &dst_child)?;
+        } else {
+            fs::copy(entry.path(), &dst_child)?;
+        }
+    }
+    Ok(())
 }
 
 /// Phase 9.y.3.b — builds the `DepRegistry` (map `dep-name →

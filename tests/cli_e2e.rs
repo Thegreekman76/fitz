@@ -2442,18 +2442,117 @@ fn phase_11_5_b_build_with_bin_missing_name_errors_listing_available() {
 }
 
 #[test]
-fn phase_11_5_b_build_with_bin_wasm_client_rejects_citing_11_5_c() {
+fn phase_11_5_c_build_with_bin_wasm_client_and_fitz_main_rejects_citing_11_5_d() {
+    // The multi-bin fixture uses `main = "src/app.fitz"` (a
+    // classic `.fitz`) with `target = "wasm-client"`. Phase 11.5.c
+    // only wires the single-component `.fitzv` emit; composing
+    // classic `.fitz` as WASM roots is 11.5.d work. The CLI
+    // aborts before touching `wasm-pack` with a targeted
+    // 11.5.d pointer.
     let tmp = tempfile::tempdir().unwrap();
     scaffold_multi_bin_project(tmp.path(), "multi-app");
     let (_stdout, stderr, code) = run_fitz(&["build", "--bin", "web"], tmp.path());
-    assert_ne!(code, 0, "expected build to reject wasm-client in 11.5.b");
+    assert_ne!(code, 0, "expected build to reject .fitz + wasm-client");
+    assert!(stderr.contains(".fitzv"), "stderr: {stderr}");
     assert!(
-        stderr.contains("wasm-client"),
-        "stderr should name the target: {stderr}"
+        stderr.contains("11.5.d"),
+        "stderr should cite 11.5.d: {stderr}"
+    );
+}
+
+#[test]
+fn phase_11_5_c_build_wasm_client_scaffolds_before_invoking_wasm_pack() {
+    // A wasm-client bin pointing at a valid `.fitzv` should
+    // successfully write the wasm-crate scaffold under
+    // `target/wasm-build/<bin>/` BEFORE invoking `wasm-pack`.
+    // We assert the scaffold artefacts exist regardless of whether
+    // `wasm-pack` succeeds (the CLI may exit non-zero on missing
+    // toolchain — that's a separate concern covered by another test).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        tmp.path().join("fitz.toml"),
+        "[package]\nname = \"webapp\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [[bin]]\nname = \"web\"\nmain = \"src/App.fitzv\"\ntarget = \"wasm-client\"\nmount = \"#app\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("App.fitzv"),
+        "component App {\n  state { n: Int = 0 }\n  event tap() { n = n + 1 }\n  <template><button @click=\"tap\">{n}</button></template>\n}\n",
+    )
+    .unwrap();
+
+    // Exit code is best-effort — we only care that the scaffold got
+    // written. `wasm-pack` may not be on the runner.
+    let _ = run_fitz(&["build", "--bin", "web"], tmp.path());
+
+    let scaffold_dir = tmp.path().join("target").join("wasm-build").join("web");
+    assert!(
+        scaffold_dir.is_dir(),
+        "scaffold dir was not created: {}",
+        scaffold_dir.display()
+    );
+    let cargo_toml = scaffold_dir.join("Cargo.toml");
+    assert!(
+        cargo_toml.is_file(),
+        "Cargo.toml missing at {}",
+        cargo_toml.display()
+    );
+    let cargo_txt = std::fs::read_to_string(&cargo_toml).unwrap();
+    assert!(
+        cargo_txt.contains(r#"name = "web""#),
+        "Cargo.toml must have package.name = \"web\": {cargo_txt}"
     );
     assert!(
-        stderr.contains("11.5.c"),
-        "stderr should cite 11.5.c: {stderr}"
+        cargo_txt.contains("[package.metadata.wasm-pack.profile.release]"),
+        "Cargo.toml must have the wasm-opt metadata knob: {cargo_txt}"
+    );
+    let lib_rs = scaffold_dir.join("src").join("lib.rs");
+    assert!(
+        lib_rs.is_file(),
+        "src/lib.rs missing at {}",
+        lib_rs.display()
+    );
+    let lib_txt = std::fs::read_to_string(&lib_rs).unwrap();
+    assert!(
+        lib_txt.contains("#[wasm_bindgen(start)]"),
+        "src/lib.rs must have the composed entry point"
+    );
+    assert!(
+        lib_txt.contains("let root = App::new();"),
+        "src/lib.rs must mount the first-declared component `App`"
+    );
+    assert!(
+        lib_txt.contains("root.mount(\"#app\")"),
+        "src/lib.rs must interpolate the `#app` mount selector"
+    );
+    assert!(
+        lib_txt.contains("Source: src/App.fitzv"),
+        "src/lib.rs header must cite the bin's `main`"
+    );
+}
+
+#[test]
+fn phase_11_5_c_build_wasm_client_with_empty_fitzv_errors_before_wasm_pack() {
+    // A `.fitzv` file with zero components declared errors at
+    // `compose_lib_rs` — the composer needs a root component to
+    // mount. The message must explain the requirement.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        tmp.path().join("fitz.toml"),
+        "[package]\nname = \"empty\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [[bin]]\nname = \"web\"\nmain = \"src/Empty.fitzv\"\ntarget = \"wasm-client\"\nmount = \"#app\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("Empty.fitzv"), "// no components\n").unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["build", "--bin", "web"], tmp.path());
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("no `component X { ... }` block"),
+        "stderr should explain the empty file: {stderr}"
     );
 }
 
