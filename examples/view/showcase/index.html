@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — multi-component showcase (Phase 11.5.e)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 900px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz multi-component showcase — Phase 11.5.e smoke</h1>
+    <p>
+      A <code>Dashboard.fitzv</code> with a <code>Board</code>
+      root component composing three
+      <code>&lt;MetricCard title="X" value="N" trend="Y" /&gt;</code>
+      children. Static props coerce through the checker; each
+      child gets its own <code>__fitz-child-MetricCard</code>
+      wrapper in the DOM. Click any card's button to see the
+      child's internal state mutate — the composition wiring
+      does <em>not</em> propagate state up to the parent (that's
+      11.6+ event bubbling work), but children retain their own
+      state between their own re-renders.
+    </p>
+    <div id="app"><!-- Board mounts here --></div>
+    <p>
+      If you see this text but no cards above, either the WASM
+      bundle failed to load (check the DevTools console for a
+      stack trace forwarded by
+      <code>console_error_panic_hook</code>) or the page was
+      opened over <code>file://</code>. ES modules require an
+      HTTP origin — serve with
+      <code>python -m http.server 8000</code> or equivalent.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/showcase.js';
+      init().catch((err) => {
+        console.error('Failed to load showcase WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,83 @@
+// Phase 11.5.e — canonical multi-component showcase (`.fitzv`).
+//
+// Demonstrates the composition surface that Phase 11.5.d wired
+// end-to-end: a `Board` root component that mounts three
+// `<MetricCard />` children with static Str + Int props. The
+// checker validates each child exists and each prop coerces
+// against the declared state field types; the emitter creates a
+// `__fitz-child-MetricCard` wrapper per site, instantiates the
+// child, sets its state via `RefCell::borrow_mut()`, and mounts
+// it with the new `mount_into(root)` API (11.5.d) instead of the
+// selector-based `mount(...)`.
+//
+// This is NOT a "real" kanban port (see `docs/fase-11-plan.md`
+// §9.s Debt residual — a real kanban needs dynamic props +
+// event bubbling + cross-file composition + persistent child
+// state, all of which are 11.6+ work). It IS the largest
+// composition that the 11.5.d subset permits, and it validates
+// the pipeline end-to-end for multi-component fixtures.
+//
+// Contract of shape (respects 11.5.d subset):
+//   - Every child prop is a static string value.
+//   - Every prop type is a primitive scalar (`Str` / `Int` /
+//     `Float` / `Bool`) or `Nullable<T>` of a primitive.
+//   - `<MetricCard />` is always self-closing (no fallback
+//     children via `<slot>`, which is 11.6+ work).
+//   - The MetricCard has an internal event (its own state
+//     mutation), demonstrating that children still work as
+//     interactive units even when their config comes from the
+//     parent.
+//
+// Anything outside this subset (dynamic `title={expr}` props,
+// `@click="handler"` on the child, compound-type props like
+// `List` / nominal types) is rejected at expand time with
+// targeted 11.6+ pointers.
+
+component Board {
+  state {}
+
+  <template>
+    <div class="board">
+      <h2>Metrics</h2>
+      <div class="grid">
+        <MetricCard title="Requests" value="1240" trend="up" />
+        <MetricCard title="Errors" value="7" trend="down" />
+        <MetricCard title="Latency" value="42" trend="flat" />
+      </div>
+    </div>
+  </template>
+
+  <style scoped>
+    .board { font-family: sans-serif; padding: 24px; }
+    h2 { margin: 0 0 16px; font-size: 1.1em; color: #333; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  </style>
+}
+
+component MetricCard {
+  state {
+    title: Str = "Untitled"
+    value: Int = 0
+    trend: Str = "flat"
+    clicks: Int = 0
+  }
+
+  event tap() { clicks = clicks + 1 }
+
+  <template>
+    <div class="card">
+      <div class="title">{title}</div>
+      <div class="value">{value}</div>
+      <div class="trend">trend: {trend}</div>
+      <button @click="tap">tapped {clicks} times</button>
+    </div>
+  </template>
+
+  <style scoped>
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; background: #fafafa; }
+    .title { font-size: 0.85em; text-transform: uppercase; color: #666; }
+    .value { font-size: 2em; font-weight: bold; margin: 8px 0; }
+    .trend { font-size: 0.85em; color: #888; margin-bottom: 12px; }
+    button { padding: 6px 12px; border: 1px solid #999; border-radius: 4px; background: white; cursor: pointer; }
+  </style>
+}

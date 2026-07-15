@@ -9642,7 +9642,7 @@ roadmap se reduce hoy a:
 
 | Item futuro | Estimación |
 |---|---|
-| Fase 11 sub-fases 11.5 → 11.8 | meses, cada una es sesión seria (11.4 ya cerrada 2026-07-15) |
+| Fase 11 sub-fases 11.6 → 11.8 | meses, cada una es sesión seria (11.4 + 11.5 completas al 2026-07-15) |
 | V6 (DAP — debugging interactivo VSCode) | ~2 semanas, anotada en backlog |
 | Fase 12.6+ targets extra (`fitz deploy fly/railway/k8s`) | 1-2 semanas por target |
 | Deuda residual técnica menor | ver `docs/deudas-post-5b.md` |
@@ -9658,9 +9658,17 @@ problema del **doble tipado** que el autor sufre todos los días
 con Vue+FastAPI: definís `type User` en el backend, lo re-definís
 en TypeScript, los tipos divergen, bugs en producción.
 
-**Estado al 2026-07-15** — sub-fases 11.1 → 11.4 CERRADAS
-entera (browser smoke manual validado 2026-07-15; 11.5 unblocked
-como próximo norte):
+**Estado al 2026-07-15** — sub-fases 11.1 → 11.4 CERRADAS +
+Phase 11.5 CERRADA ENTERA (11.5.a research + 11.5.b manifest
+`[[bin]]` + 11.5.c wasm-client emit + 11.5.d multi-component
+composition + 11.5.e cierre formal — todas al 2026-07-15).
+`fitz build --bin <web>` sobre un `.fitzv` con
+`target = "wasm-client"` produce un bundle WASM browser end-to-
+end para fixtures single-component (counter) y multi-component
+(showcase Dashboard con `Board` root + 3 `<MetricCard />`
+children estáticos). Próximo norte: **Phase 11.6** — kanban
+port real como deliverable concreto que gate a dynamic props +
+event bubbling + cross-file composition + SSR emitter.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
@@ -9821,9 +9829,26 @@ como próximo norte):
     green. Rejections cite 11.6+: fallback children,
     dynamic props, event bubbling on children, compound-type
     props. See §9.s.
-  - 🔵 **11.5.e** — Cierre formal: kanban rewrite +
-    docs/roadmap/memoria refresh + fix cosmetic emitter warnings
-    (`unused_parens` + `non_snake_case` from §9.o).
+  - ✅ **11.5.e** — Cierre formal. CLOSED 2026-07-15. Three
+    coordinated pieces: (a) cosmetic emitter warnings from §9.o
+    fixed via crate-level `#![allow(non_snake_case,
+    unused_parens)]` prepended by `emit_module_header` (kills
+    both uniformly across the emitted crate); (b) multi-
+    component showcase fixture at `examples/view/showcase/`
+    (`Dashboard.fitzv` with a `Board` root composing 3 static
+    `<MetricCard title="X" value="N" trend="Y" />` children +
+    per-child interactive state via `tap()` events, plus
+    wasm-crate scaffold + index.html + README documenting
+    build/serve recipe + honest limits); (c) new smoke test
+    `tests/view_showcase_wasm_smoke.rs` with structural
+    invariants (3 composition sites + 5 total mount_into
+    calls). Counter baseline regenerated with the new
+    `#![allow]` header (functionally identical). Kanban port
+    re-scoped to 11.6+ — the original criterion needed
+    dynamic props + event bubbling + cross-file composition
+    (all documented 11.6+ debt in §9.s), so the showcase
+    fixture is the LARGEST validation the 11.5.d subset
+    permits. See §9.t. **Closes Phase 11.5 entirely.**
 - **11.6** Migración de `fitz-liveviews` a `.fitzv`.
 - **11.7** LSP support inside `.fitzv` (hover, autocomplete,
   template-attr completion).
