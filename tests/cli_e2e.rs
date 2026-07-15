@@ -2391,3 +2391,144 @@ fn new_template_and_http_are_mutually_exclusive() {
         "stderr: {stderr}",
     );
 }
+
+// ---- Phase 11.5.b — multi-bin `[[bin]]` + --bin / --target flags ----
+
+/// Helper: scaffolds a multi-bin project with a native server bin
+/// and a wasm-client web bin.
+fn scaffold_multi_bin_project(tmp: &Path, pkg: &str) {
+    let src = tmp.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        tmp.join("fitz.toml"),
+        format!(
+            "[package]\nname = \"{pkg}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [[bin]]\nname = \"server\"\nmain = \"src/main.fitz\"\n\n\
+             [[bin]]\nname = \"web\"\nmain = \"src/app.fitz\"\ntarget = \"wasm-client\"\nmount = \"#app\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(src.join("main.fitz"), "print(\"server bin\")\n").unwrap();
+    std::fs::write(src.join("app.fitz"), "print(\"web bin\")\n").unwrap();
+}
+
+#[test]
+fn phase_11_5_b_build_multi_bin_without_flag_errors_listing_bins() {
+    let tmp = tempfile::tempdir().unwrap();
+    scaffold_multi_bin_project(tmp.path(), "multi-app");
+    let (_stdout, stderr, code) = run_fitz(&["build"], tmp.path());
+    assert_ne!(code, 0, "expected build to reject ambiguous multi-bin");
+    // The error must list ALL bin names so the user knows what to pick.
+    assert!(stderr.contains("server"), "stderr: {stderr}");
+    assert!(stderr.contains("web"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("--bin"),
+        "stderr should mention --bin: {stderr}"
+    );
+}
+
+#[test]
+fn phase_11_5_b_build_with_bin_missing_name_errors_listing_available() {
+    let tmp = tempfile::tempdir().unwrap();
+    scaffold_multi_bin_project(tmp.path(), "multi-app");
+    let (_stdout, stderr, code) = run_fitz(&["build", "--bin", "does-not-exist"], tmp.path());
+    assert_ne!(code, 0, "expected build to reject unknown bin");
+    assert!(
+        stderr.contains("does-not-exist"),
+        "stderr should quote the requested name: {stderr}"
+    );
+    assert!(stderr.contains("server"), "stderr: {stderr}");
+    assert!(stderr.contains("web"), "stderr: {stderr}");
+}
+
+#[test]
+fn phase_11_5_b_build_with_bin_wasm_client_rejects_citing_11_5_c() {
+    let tmp = tempfile::tempdir().unwrap();
+    scaffold_multi_bin_project(tmp.path(), "multi-app");
+    let (_stdout, stderr, code) = run_fitz(&["build", "--bin", "web"], tmp.path());
+    assert_ne!(code, 0, "expected build to reject wasm-client in 11.5.b");
+    assert!(
+        stderr.contains("wasm-client"),
+        "stderr should name the target: {stderr}"
+    );
+    assert!(
+        stderr.contains("11.5.c"),
+        "stderr should cite 11.5.c: {stderr}"
+    );
+}
+
+#[test]
+fn phase_11_5_b_build_target_override_ssr_rejects_citing_11_6() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Single-bin project. `--target ssr` overrides the default native.
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        tmp.path().join("fitz.toml"),
+        "[package]\nname = \"srv\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("main.fitz"), "print(\"x\")\n").unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["build", "--target", "ssr"], tmp.path());
+    assert_ne!(code, 0);
+    assert!(stderr.contains("ssr"), "stderr: {stderr}");
+    assert!(stderr.contains("11.6"), "stderr should cite 11.6: {stderr}");
+}
+
+#[test]
+fn phase_11_5_b_build_unknown_target_value_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        tmp.path().join("fitz.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("main.fitz"), "print(\"x\")\n").unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["build", "--target", "bogus-target"], tmp.path());
+    assert_ne!(code, 0);
+    assert!(stderr.contains("bogus-target"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("native") && stderr.contains("wasm-client") && stderr.contains("ssr"),
+        "stderr should list accepted targets: {stderr}"
+    );
+}
+
+#[test]
+fn phase_11_5_b_legacy_bin_singular_still_works_no_flag_needed() {
+    // Regression: pre-11.5.b manifests (with `[bin]` singular)
+    // must keep building without --bin.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        tmp.path().join("fitz.toml"),
+        "[package]\nname = \"legacy\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("main.fitz"), "print(\"ok\")\n").unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["check"], tmp.path());
+    assert_eq!(code, 0, "check must accept legacy [bin]: {stderr}");
+}
+
+#[test]
+fn phase_11_5_b_manifest_fitzv_native_rejected_at_parse() {
+    // Cross-field validation: `.fitzv` entry with target = native
+    // errors at Manifest::parse — surfaces via any subcommand that
+    // reads the manifest.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        tmp.path().join("fitz.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[[bin]]\nname = \"web\"\nmain = \"src/counter.fitzv\"\n",
+    )
+    .unwrap();
+    // Body doesn't matter — parse aborts on the manifest itself.
+    std::fs::write(src.join("counter.fitzv"), "component X {}\n").unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["check"], tmp.path());
+    assert_ne!(code, 0);
+    assert!(stderr.contains(".fitzv"), "stderr: {stderr}");
+    assert!(stderr.contains("wasm-client"), "stderr: {stderr}");
+}

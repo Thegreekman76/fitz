@@ -4,6 +4,71 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 Multi-bin (`[[bin]]` array-of-tables) — **CERRADO por Fase 11.5.b (2026-07-15)**
+
+Deuda 9.y.8+ arrastrada desde Fase 9.y.1 (2026-05-16). El
+manifest MVP aceptaba solamente `[bin]` singular; multi-bin
+quedaba explícito como "sub-paso futuro" hasta que apareciera
+demanda real.
+
+**Disparador**: Fase 11.5.a (research + decision para el CLI
+routing de `.fitzv`) concluyó que la forma más limpia de
+distinguir un binario nativo de un bundle WASM del browser en
+un mismo proyecto es multi-bin (`[[bin]]` con `target = "native"`
+vs `target = "wasm-client"`). Cerrar 9.y.8+ como side-effect
+salió más barato que inventar una convención dedicada.
+
+**Fix (Fase 11.5.b, 2026-07-15)**:
+
+- `src/manifest.rs`: `Manifest.bin: Option<Bin>` → `Manifest.bins:
+  Vec<ManifestBin>` con nuevos campos `name`/`target`/`mount`.
+  Nueva enum `Target { Native, WasmClient, Ssr }` con serde
+  kebab-case y `Default = Native`.
+- Custom `Deserialize` via `RawManifest` + untagged
+  `RawBinField { Single | Multiple }` auto-migra legacy `[bin]`
+  singular (rellena `name` desde `package.name` cuando se omite).
+  `[[bin]]` array-of-tables exige `name` explícito por entry +
+  unicidad.
+- Custom `Serialize` preserva el shape visual `[bin]` singular
+  para el caso scaffolded común (un bin, `name == package.name`,
+  sin `target`/`mount`) — cero cambio visible en los ~40
+  boilerplates + course examples existentes.
+- Cross-field validation eagerly rechaza `.fitzv` + `native`
+  (explícito o el default) y `wasm-client` sin `mount`, con
+  mensajes que citan el fix específico. `target = "ssr"` parsea
+  OK y surfacea via `Manifest::warnings()` (consume el CLI al
+  arrancar `fitz build`).
+- `src/main.rs`: `Commands::Build` gana `--bin <name>` y
+  `--target <t>` (kebab-case). Nueva API pública
+  `resolve_entry_with_bin` con el selector + override; helper
+  `enforce_build_target_supported` rechaza `wasm-client` citando
+  11.5.c y `ssr` citando 11.6+ ANTES de tocar disco.
+- Tests: 23 unit nuevos en `manifest::tests` (legacy migration,
+  multi-bin parse, target enum roundtrip, mount validation,
+  `.fitzv` + native rejection, SSR warning, `select_bin`) + 7
+  cli_e2e nuevos (`phase_11_5_b_*`).
+
+Detalle completo en `docs/fase-11-plan.md` §9.q. Refleja en
+`docs/roadmap.md` (Fase 9.y sub-pasos + Fase 11 sub-fase 11.5.b).
+
+### Deudas residuales derivadas (NO bloquean)
+
+- **Run/Check sobre multi-bin**: `--bin` está solo en
+  `Commands::Build` por scope de 11.5.b (siguiendo la decisión
+  de 11.5.a). Multi-bin projects que corren `fitz run` /
+  `fitz check` sin selector reciben `BinAmbiguous` — el fix es
+  pasar archivo explícito (`fitz run src/main.fitz`). Si aparece
+  presión real, promover `--bin` a Run/Check/Test/etc. en un
+  follow-up.
+- **`fitz test --bin`**: hoy `discover_test_sources_from_manifest`
+  toma el primer bin. Multi-bin projects que quieran granularidad
+  por bin abren refinamiento visible.
+- **`--mount` CLI flag**: pendiente hasta 11.5.c (donde el
+  emitter realmente consume `mount`). Single-file mode default:
+  `"#app"` (documentado adonde aterrice el emitter).
+
+---
+
 ## 🟢 LSP marca false positives sobre built-ins del lenguaje no registrados — `smtp` + `Response` — **CERRADO 2026-06-28 (H1 confirmado)**
 
 > **CERRADO** el mismo día del descubrimiento (sesión nocturna 2026-06-28

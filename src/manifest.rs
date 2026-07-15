@@ -1,22 +1,26 @@
-//! Project manifest (`fitz.toml`) — Phase 9.y.1.
+//! Project manifest (`fitz.toml`) — Phase 9.y.1 + Phase 11.5.b.
 //!
 //! First piece of the package manager. Defines the file format that
 //! describes a Fitz project (name, version, entry point, deps) and the
 //! minimal API to read it, write it, and resolve it from an arbitrary
 //! directory.
 //!
-//! In 9.y.1 the manifest does not yet affect `fitz run`/`build`/`check`
-//! — those consumers land in 9.y.2. Here we only deliver the format
-//! + `fitz new`/`fitz init` that create it.
-//!
 //! Conventions closed in 9.y.1 (see `docs/roadmap.md` → 9.y):
 //! - Format: TOML (`fitz.toml`).
 //! - Structure: `src/main.fitz` as the default entry point.
 //! - Versioned field: `edition = "2026"` (Cargo-style year).
-//! - Single bin in MVP (`[bin] main = "..."`). Multi-bin with `[[bin]]`
-//!   stays as debt 9.y.8+.
 //! - Name validation: `^[a-z][a-z0-9_-]{0,63}$` (crates.io policy:
 //!   lowercase + alphanumeric + `-`/`_`).
+//!
+//! Phase 11.5.b (2026-07-15) — closed debt 9.y.8+ (multi-bin):
+//! - `[[bin]]` array-of-tables is now the canonical shape.
+//! - Legacy `[bin]` singular auto-migrates to a single-entry
+//!   `[[bin]]` — zero breaking change for the ~40 boilerplates +
+//!   course examples that use it today.
+//! - Each entry gains `name` / `target` / `mount` fields.
+//! - `target` accepts `"native"` (default), `"wasm-client"`, or
+//!   `"ssr"` (reserved for 11.6+, accepted at parse but rejected
+//!   at build with a targeted message).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -37,14 +41,18 @@ pub const MANIFEST_FILE: &str = "fitz.toml";
 /// executable (`[bin]`), library (`[lib]`), or both. `fitz run`/
 /// `build` require `[bin]`. Path deps from OTHER projects require
 /// `[lib]` (a bin-only project cannot be imported from another).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// **Multi-bin** (Phase 11.5.b): `bins` is `Vec<ManifestBin>`. The
+/// TOML shape accepts BOTH legacy `[bin]` singular AND `[[bin]]`
+/// array-of-tables — see `parse` for the migration.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub package: Package,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bin: Option<Bin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Zero, one, or many bins. Legacy `[bin]` singular parses to a
+    /// single-entry Vec (with `name` inferred from `package.name` if
+    /// omitted). Multi-bin `[[bin]]` requires `name` on each entry.
+    pub bins: Vec<ManifestBin>,
     pub lib: Option<Lib>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
     /// Phase 12.8 — Feature flags declared in the manifest. Section
     /// `[flags]` maps `flag-name = bool` for compile-time defaults.
@@ -57,7 +65,6 @@ pub struct Manifest {
     /// ```
     /// The binary loaded by `fitz run`/`build` reads this section at
     /// boot and passes it to `evaluator::set_flag_defaults`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flags: BTreeMap<String, bool>,
 }
 
@@ -74,9 +81,100 @@ pub struct Package {
     pub license: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Bin {
+/// A `[[bin]]` entry (or the sole `[bin]` after auto-migration).
+///
+/// Phase 11.5.b introduced this shape. `name` is always populated
+/// after parse — legacy `[bin]` singular omits it and the parser
+/// fills in `package.name`; `[[bin]]` requires it explicitly.
+///
+/// `target` distinguishes what artefact the codegen emits:
+/// - `Native` — default. Rust source via `codegen.rs` +
+///   `cargo build --release` → native binary.
+/// - `WasmClient` — SFC (`.fitzv`) or composing `.fitz` compiled
+///   to a WASM bundle for the browser. Requires `mount`.
+/// - `Ssr` — reserved for 11.6+. Parse accepts; build rejects.
+///
+/// See `docs/fase-11-plan.md` §9.p for the full decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestBin {
+    /// Bin identifier used by `fitz build --bin <name>`. Unique per
+    /// manifest in multi-bin projects. In legacy `[bin]` singular
+    /// without an explicit `name`, filled from `package.name`.
+    pub name: String,
+    /// Path to the entry, relative to the manifest dir.
     pub main: String,
+    /// Compilation target. `None` means "not set explicitly, treat
+    /// as `Native`". `Target::Native` (explicit) is equivalent.
+    pub target: Option<Target>,
+    /// CSS selector where the WASM bundle mounts its root
+    /// component. Required when `target = Target::WasmClient`;
+    /// ignored otherwise. Convention: `"#app"`.
+    pub mount: Option<String>,
+}
+
+impl ManifestBin {
+    /// Effective target: `Native` when `target` is `None`.
+    pub fn effective_target(&self) -> Target {
+        self.target.unwrap_or(Target::Native)
+    }
+}
+
+/// Compilation target of a `[[bin]]` entry. Introduced in Phase
+/// 11.5.b. TOML serialisation is kebab-case:
+///
+/// - `Native` → `"native"` (default)
+/// - `WasmClient` → `"wasm-client"`
+/// - `Ssr` → `"ssr"` (reserved for 11.6+)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Target {
+    #[default]
+    Native,
+    WasmClient,
+    Ssr,
+}
+
+impl Target {
+    /// Human-readable name matching the TOML rendering.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::Native => "native",
+            Target::WasmClient => "wasm-client",
+            Target::Ssr => "ssr",
+        }
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Non-fatal notice emitted by `Manifest::warnings()`. The manifest
+/// parses successfully; the caller (typically the CLI at build
+/// time) decides whether to show, log, or escalate.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifestWarning {
+    /// A `[[bin]]` entry declares `target = "ssr"`. Reserved in
+    /// the vocabulary since Phase 11.5.a but the SSR emitter
+    /// arrives in 11.6+. `fitz build` on this bin rejects with a
+    /// targeted "coming in 11.6+" message; other commands ignore.
+    SsrTargetReserved { bin_name: String },
+}
+
+impl fmt::Display for ManifestWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ManifestWarning::SsrTargetReserved { bin_name } => write!(
+                f,
+                "bin `{bin_name}` declares `target = \"ssr\"` — reserved \
+                 vocabulary in Phase 11.5. The SSR emitter arrives in \
+                 Phase 11.6+; `fitz build --bin {bin_name}` will reject \
+                 it with a targeted message until then."
+            ),
+        }
+    }
 }
 
 /// Section `[lib]` of the manifest. Marks the project as a library
@@ -171,6 +269,27 @@ pub enum ManifestError {
     /// edit path — `fitz add`/`remove`). Separate from `Parse` because
     /// that one comes from the serde-toml flow.
     EditParse(toml_edit::TomlError),
+    /// A `[[bin]]` entry has no `name`. Only legacy `[bin]` singular
+    /// allows omitting `name` (it defaults to `package.name`);
+    /// `[[bin]]` array-of-tables must set it explicitly.
+    BinMissingName { index: usize },
+    /// Two or more `[[bin]]` entries share the same `name`.
+    BinDuplicateName { name: String },
+    /// A bin's fields form an incoherent shape. `reason` is already
+    /// formatted for the user (mentions the specific mismatch and
+    /// suggests a fix — e.g. `mount` missing for `wasm-client`, or
+    /// `.fitzv` entry with `target = "native"`).
+    BinInvalidShape { name: String, reason: String },
+    /// `fitz build --bin <name>` did not match any declared bin.
+    /// Available names are provided for the message.
+    BinNotFound {
+        requested: String,
+        available: Vec<String>,
+    },
+    /// The manifest declares more than one `[[bin]]` and the
+    /// command did not select one. The list of available names
+    /// is included so the message can list them explicitly.
+    BinAmbiguous { available: Vec<String> },
 }
 
 impl fmt::Display for ManifestError {
@@ -217,6 +336,53 @@ impl fmt::Display for ManifestError {
                 write!(f, "dep `{name}` (git): {source}")
             }
             ManifestError::EditParse(e) => write!(f, "error parseando manifest: {e}"),
+            ManifestError::BinMissingName { index } => write!(
+                f,
+                "the `[[bin]]` entry at index {index} has no `name`. \
+                 Multi-bin projects require a unique `name` per entry \
+                 (only the legacy `[bin]` singular can omit it and \
+                 default to `package.name`)."
+            ),
+            ManifestError::BinDuplicateName { name } => write!(
+                f,
+                "two `[[bin]]` entries share the name `{name}`. Every \
+                 bin must have a unique `name` — `fitz build --bin \
+                 <name>` selects by it."
+            ),
+            ManifestError::BinInvalidShape { name, reason } => {
+                write!(f, "bin `{name}`: {reason}")
+            }
+            ManifestError::BinNotFound {
+                requested,
+                available,
+            } => {
+                let list = if available.is_empty() {
+                    "(the manifest declares no bins)".to_string()
+                } else {
+                    available
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                write!(
+                    f,
+                    "no bin named `{requested}` in the manifest. \
+                     Available: {list}."
+                )
+            }
+            ManifestError::BinAmbiguous { available } => {
+                let list = available
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "this project declares more than one `[[bin]]` \
+                     ({list}). Pass `--bin <name>` to pick one."
+                )
+            }
         }
     }
 }
@@ -227,7 +393,7 @@ impl Manifest {
     /// Builds a default manifest for a new project:
     /// - version `0.1.0`
     /// - current edition
-    /// - bin with entry `src/main.fitz`
+    /// - bin with entry `src/main.fitz` (name = `package.name`)
     /// - no deps
     ///
     /// Validates the name.
@@ -244,9 +410,12 @@ impl Manifest {
                 description: None,
                 license: None,
             },
-            bin: Some(Bin {
+            bins: vec![ManifestBin {
+                name: name.to_string(),
                 main: "src/main.fitz".to_string(),
-            }),
+                target: None,
+                mount: None,
+            }],
             lib: None,
             dependencies: BTreeMap::new(),
             flags: BTreeMap::new(),
@@ -254,13 +423,296 @@ impl Manifest {
     }
 
     /// Parses a manifest from TOML text.
+    ///
+    /// Phase 11.5.b: accepts BOTH legacy `[bin]` singular AND
+    /// `[[bin]]` array-of-tables. Legacy singular fills `name` from
+    /// `package.name` when omitted; array requires it explicitly.
+    /// Runs cross-field validation on each bin (rejects
+    /// `.fitzv` + `target = "native"`, `wasm-client` without
+    /// `mount`, etc.). Accepts `target = "ssr"` at parse; the
+    /// warning surfaces via `warnings()` for the caller.
     pub fn parse(input: &str) -> Result<Self, ManifestError> {
-        toml::from_str(input).map_err(ManifestError::Parse)
+        let raw: RawManifest = toml::from_str(input).map_err(ManifestError::Parse)?;
+        let bins = normalize_bins(raw.bin, &raw.package.name)?;
+        Ok(Manifest {
+            package: raw.package,
+            bins,
+            lib: raw.lib,
+            dependencies: raw.dependencies,
+            flags: raw.flags,
+        })
     }
 
     /// Serializes the manifest to TOML.
+    ///
+    /// Preserves legacy `[bin]` singular output for the common case
+    /// (one bin, `name = package.name`, no target override, no
+    /// mount) — that keeps `fitz new` / `fitz init` scaffolds
+    /// visually identical to pre-11.5.b. All other shapes emit as
+    /// `[[bin]]` array-of-tables.
     pub fn to_toml_string(&self) -> Result<String, ManifestError> {
-        toml::to_string(self).map_err(ManifestError::Serialize)
+        let bin_wire: Option<BinFieldOut<'_>> = if self.bins.is_empty() {
+            None
+        } else if self.bins.len() == 1
+            && self.bins[0].name == self.package.name
+            && self.bins[0].target.is_none()
+            && self.bins[0].mount.is_none()
+        {
+            Some(BinFieldOut::Legacy(LegacyBinOut {
+                main: &self.bins[0].main,
+            }))
+        } else {
+            Some(BinFieldOut::Multi(&self.bins))
+        };
+
+        let wire = ManifestWire {
+            package: &self.package,
+            bin: bin_wire,
+            lib: self.lib.as_ref(),
+            dependencies: &self.dependencies,
+            flags: &self.flags,
+        };
+        toml::to_string(&wire).map_err(ManifestError::Serialize)
+    }
+
+    /// Non-fatal warnings for this manifest. Consumed by the CLI at
+    /// build time (see `fitz build` in `src/main.rs`). Empty when
+    /// the manifest is fully in-scope for the current MVP.
+    pub fn warnings(&self) -> Vec<ManifestWarning> {
+        let mut out = Vec::new();
+        for b in &self.bins {
+            if b.target == Some(Target::Ssr) {
+                out.push(ManifestWarning::SsrTargetReserved {
+                    bin_name: b.name.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Finds a bin by name. Returns `None` if no bin has that name.
+    pub fn bin_by_name(&self, name: &str) -> Option<&ManifestBin> {
+        self.bins.iter().find(|b| b.name == name)
+    }
+
+    /// Selects a bin according to a `--bin <name>` selector. If
+    /// `selector` is `Some`, must match a declared bin. If `None`,
+    /// picks the sole bin when there is exactly one; ambiguous when
+    /// there are more; `Ok(None)` when the manifest declares no
+    /// bins (caller decides whether that is an error).
+    pub fn select_bin(
+        &self,
+        selector: Option<&str>,
+    ) -> Result<Option<&ManifestBin>, ManifestError> {
+        match (selector, self.bins.len()) {
+            (Some(name), _) => {
+                self.bin_by_name(name)
+                    .map(Some)
+                    .ok_or_else(|| ManifestError::BinNotFound {
+                        requested: name.to_string(),
+                        available: self.bins.iter().map(|b| b.name.clone()).collect(),
+                    })
+            }
+            (None, 0) => Ok(None),
+            (None, 1) => Ok(Some(&self.bins[0])),
+            (None, _) => Err(ManifestError::BinAmbiguous {
+                available: self.bins.iter().map(|b| b.name.clone()).collect(),
+            }),
+        }
+    }
+}
+
+// ---- Phase 11.5.b — internal wire structs for parse + serialize ----
+
+/// Wire representation used by `Manifest::parse`. Deserialised by
+/// serde-toml; the caller (`Manifest::parse`) normalises `bin` into
+/// the public `Vec<ManifestBin>` shape.
+#[derive(Deserialize)]
+struct RawManifest {
+    package: Package,
+    #[serde(default)]
+    bin: Option<RawBinField>,
+    #[serde(default)]
+    lib: Option<Lib>,
+    #[serde(default)]
+    dependencies: BTreeMap<String, Dependency>,
+    #[serde(default)]
+    flags: BTreeMap<String, bool>,
+}
+
+/// Discriminates the two TOML shapes for the `bin` field:
+/// - Legacy `[bin] main = "..."` → `Single(...)`
+/// - `[[bin]] main = "..."` (array-of-tables) → `Multiple(...)`
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawBinField {
+    Single(RawManifestBin),
+    Multiple(Vec<RawManifestBin>),
+}
+
+/// Raw shape of a bin entry as it lives in TOML before normalisation.
+/// Deserialised with all fields optional so that legacy `[bin]`
+/// without `name` still parses; the normalisation step (see
+/// `normalize_bins`) fills the default `name` and validates.
+#[derive(Deserialize)]
+struct RawManifestBin {
+    #[serde(default)]
+    name: Option<String>,
+    main: String,
+    #[serde(default)]
+    target: Option<Target>,
+    #[serde(default)]
+    mount: Option<String>,
+}
+
+fn normalize_bins(
+    field: Option<RawBinField>,
+    package_name: &str,
+) -> Result<Vec<ManifestBin>, ManifestError> {
+    match field {
+        None => Ok(Vec::new()),
+        Some(RawBinField::Single(raw)) => {
+            // Legacy [bin]: name defaults to package.name.
+            let bin = ManifestBin {
+                name: raw.name.unwrap_or_else(|| package_name.to_string()),
+                main: raw.main,
+                target: raw.target,
+                mount: raw.mount,
+            };
+            validate_bin_cross_fields(&bin)?;
+            Ok(vec![bin])
+        }
+        Some(RawBinField::Multiple(raws)) => {
+            let mut bins: Vec<ManifestBin> = Vec::with_capacity(raws.len());
+            for (i, raw) in raws.into_iter().enumerate() {
+                let name = raw.name.ok_or(ManifestError::BinMissingName { index: i })?;
+                let bin = ManifestBin {
+                    name,
+                    main: raw.main,
+                    target: raw.target,
+                    mount: raw.mount,
+                };
+                validate_bin_cross_fields(&bin)?;
+                bins.push(bin);
+            }
+            // Unique names.
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for b in &bins {
+                if !seen.insert(b.name.as_str()) {
+                    return Err(ManifestError::BinDuplicateName {
+                        name: b.name.clone(),
+                    });
+                }
+            }
+            Ok(bins)
+        }
+    }
+}
+
+/// Enforces cross-field invariants on a single bin:
+/// - `.fitzv` entry rejects `target = Native` (both explicit and
+///   the default) — the classic codegen cannot process view files.
+/// - `target = WasmClient` requires `mount` (the WASM bundle needs
+///   a DOM selector to mount its root component).
+/// - `target = Ssr` parses OK (reserved for 11.6+); no error here,
+///   the caller pulls `Manifest::warnings()` if it cares.
+fn validate_bin_cross_fields(bin: &ManifestBin) -> Result<(), ManifestError> {
+    let main_lower = bin.main.to_lowercase();
+    let is_view = main_lower.ends_with(".fitzv");
+    let effective = bin.effective_target();
+
+    match effective {
+        Target::Native => {
+            if is_view {
+                return Err(ManifestError::BinInvalidShape {
+                    name: bin.name.clone(),
+                    reason: format!(
+                        "`main = \"{}\"` is a `.fitzv` (view file) but \
+                         `target = \"native\"`. Native binaries compile \
+                         classic `.fitz` sources. Set `target = \
+                         \"wasm-client\"` and `mount = \"#app\"` to \
+                         emit a browser WASM bundle instead.",
+                        bin.main
+                    ),
+                });
+            }
+        }
+        Target::WasmClient => {
+            if bin.mount.is_none() {
+                return Err(ManifestError::BinInvalidShape {
+                    name: bin.name.clone(),
+                    reason: "`target = \"wasm-client\"` requires \
+                             `mount = \"<selector>\"` (typically \
+                             `mount = \"#app\"`) to know where to \
+                             mount the root component in the DOM."
+                        .to_string(),
+                });
+            }
+        }
+        Target::Ssr => {
+            // Reserved vocabulary. Warning is surfaced via
+            // `Manifest::warnings()`; parse succeeds.
+        }
+    }
+
+    Ok(())
+}
+
+/// Wire representation used by `Manifest::to_toml_string`. Mirrors
+/// the shape of the manifest but with the flexible `bin` field
+/// (legacy singular vs multi array).
+#[derive(Serialize)]
+struct ManifestWire<'a> {
+    package: &'a Package,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bin: Option<BinFieldOut<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lib: Option<&'a Lib>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    dependencies: &'a BTreeMap<String, Dependency>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    flags: &'a BTreeMap<String, bool>,
+}
+
+/// Two-shaped serialisation of the `bin` field. `untagged` picks by
+/// the variant we hand it. `Legacy` renders as `[bin] main = "..."`;
+/// `Multi` renders as `[[bin]] ...` array-of-tables.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum BinFieldOut<'a> {
+    Legacy(LegacyBinOut<'a>),
+    Multi(&'a Vec<ManifestBin>),
+}
+
+#[derive(Serialize)]
+struct LegacyBinOut<'a> {
+    main: &'a str,
+}
+
+impl Serialize for ManifestBin {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        // Field count: name + main + (target?) + (mount?).
+        let mut extra = 0;
+        if self.target.is_some() {
+            extra += 1;
+        }
+        if self.mount.is_some() {
+            extra += 1;
+        }
+        let mut s = serializer.serialize_struct("ManifestBin", 2 + extra)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("main", &self.main)?;
+        if let Some(t) = &self.target {
+            s.serialize_field("target", t)?;
+        }
+        if let Some(m) = &self.mount {
+            s.serialize_field("mount", m)?;
+        }
+        s.end()
     }
 }
 
@@ -765,7 +1217,11 @@ mod tests {
         assert_eq!(m.package.version, "0.1.0");
         assert_eq!(m.package.edition, CURRENT_EDITION);
         assert!(m.package.authors.is_empty());
-        assert_eq!(m.bin.as_ref().unwrap().main, "src/main.fitz");
+        assert_eq!(m.bins.len(), 1);
+        assert_eq!(m.bins[0].name, "mi-app");
+        assert_eq!(m.bins[0].main, "src/main.fitz");
+        assert!(m.bins[0].target.is_none());
+        assert!(m.bins[0].mount.is_none());
         assert!(m.dependencies.is_empty());
     }
 
@@ -808,7 +1264,7 @@ edition = "2026"
 "#;
         let m = Manifest::parse(toml_text).unwrap();
         assert_eq!(m.package.name, "mi-app");
-        assert!(m.bin.is_none());
+        assert!(m.bins.is_empty());
         assert!(m.dependencies.is_empty());
     }
 
@@ -836,12 +1292,424 @@ http-helpers = "0.3.2"
         assert_eq!(m.package.authors.len(), 2);
         assert_eq!(m.package.description.as_deref(), Some("una app de prueba"));
         assert_eq!(m.package.license.as_deref(), Some("MIT"));
-        assert_eq!(m.bin.unwrap().main, "src/main.fitz");
+        assert_eq!(m.bins.len(), 1);
+        // Legacy `[bin]` singular: name is filled from package.name.
+        assert_eq!(m.bins[0].name, "mi-app");
+        assert_eq!(m.bins[0].main, "src/main.fitz");
+        assert!(m.bins[0].target.is_none());
+        assert!(m.bins[0].mount.is_none());
         assert_eq!(m.dependencies.len(), 2);
         match m.dependencies.get("fitz-uuid").unwrap() {
             Dependency::Version(v) => assert_eq!(v, "1.0.0"),
             other => panic!("expected Version, got {other:?}"),
         }
+    }
+
+    // ---- Phase 11.5.b — multi-bin, targets, mount validation ----
+
+    #[test]
+    fn parse_legacy_bin_without_name_defaults_to_package_name() {
+        let toml_text = r#"
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2026"
+
+[bin]
+main = "src/main.fitz"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert_eq!(m.bins.len(), 1);
+        assert_eq!(m.bins[0].name, "server");
+        assert_eq!(m.bins[0].main, "src/main.fitz");
+        assert!(m.bins[0].target.is_none());
+    }
+
+    #[test]
+    fn parse_legacy_bin_with_explicit_name_keeps_it() {
+        let toml_text = r#"
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2026"
+
+[bin]
+name = "custom"
+main = "src/main.fitz"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert_eq!(m.bins.len(), 1);
+        assert_eq!(m.bins[0].name, "custom");
+    }
+
+    #[test]
+    fn parse_multi_bin_array_of_tables() {
+        let toml_text = r##"
+[package]
+name = "full-stack"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "server"
+main = "src/main.fitz"
+
+[[bin]]
+name = "web"
+main = "src/counter.fitzv"
+target = "wasm-client"
+mount = "#app"
+"##;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert_eq!(m.bins.len(), 2);
+        assert_eq!(m.bins[0].name, "server");
+        assert_eq!(m.bins[0].main, "src/main.fitz");
+        assert!(m.bins[0].target.is_none());
+        assert_eq!(m.bins[0].effective_target(), Target::Native);
+        assert_eq!(m.bins[1].name, "web");
+        assert_eq!(m.bins[1].main, "src/counter.fitzv");
+        assert_eq!(m.bins[1].target, Some(Target::WasmClient));
+        assert_eq!(m.bins[1].mount.as_deref(), Some("#app"));
+    }
+
+    #[test]
+    fn parse_multi_bin_without_name_errors_with_index() {
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+main = "src/a.fitz"
+
+[[bin]]
+main = "src/b.fitz"
+"#;
+        let err = Manifest::parse(toml_text).unwrap_err();
+        match err {
+            ManifestError::BinMissingName { index } => assert_eq!(index, 0),
+            other => panic!("expected BinMissingName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_multi_bin_duplicate_names_errors() {
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "server"
+main = "src/a.fitz"
+
+[[bin]]
+name = "server"
+main = "src/b.fitz"
+"#;
+        let err = Manifest::parse(toml_text).unwrap_err();
+        match err {
+            ManifestError::BinDuplicateName { name } => assert_eq!(name, "server"),
+            other => panic!("expected BinDuplicateName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_fitzv_entry_with_native_target_errors() {
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "web"
+main = "src/counter.fitzv"
+target = "native"
+"#;
+        let err = Manifest::parse(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("web"), "msg: {msg}");
+        assert!(msg.contains(".fitzv"), "msg: {msg}");
+        assert!(msg.contains("wasm-client"), "msg: {msg}");
+    }
+
+    #[test]
+    fn parse_fitzv_entry_with_default_target_errors_too() {
+        // The default target is Native; omitting it must trigger the
+        // same rejection as writing `target = "native"` explicitly.
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "web"
+main = "src/counter.fitzv"
+"#;
+        let err = Manifest::parse(toml_text).unwrap_err();
+        assert!(matches!(err, ManifestError::BinInvalidShape { .. }));
+    }
+
+    #[test]
+    fn parse_wasm_client_without_mount_errors() {
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "web"
+main = "src/counter.fitzv"
+target = "wasm-client"
+"#;
+        let err = Manifest::parse(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("web"), "msg: {msg}");
+        assert!(msg.contains("mount"), "msg: {msg}");
+        assert!(msg.contains("#app"), "msg: {msg}");
+    }
+
+    #[test]
+    fn parse_wasm_client_with_classic_fitz_and_mount_ok() {
+        // A `.fitz` file with `target = "wasm-client"` is legal — it
+        // is the composition case (11.5.d will wire multi-component
+        // roots). Parse should accept.
+        let toml_text = r##"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "web"
+main = "src/app.fitz"
+target = "wasm-client"
+mount = "#root"
+"##;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert_eq!(m.bins.len(), 1);
+        assert_eq!(m.bins[0].target, Some(Target::WasmClient));
+        assert_eq!(m.bins[0].mount.as_deref(), Some("#root"));
+    }
+
+    #[test]
+    fn parse_ssr_target_accepted_and_surfaces_warning() {
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "srv"
+main = "src/main.fitz"
+target = "ssr"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert_eq!(m.bins[0].target, Some(Target::Ssr));
+        // Warnings surface Ssr as reserved for 11.6+.
+        let warnings = m.warnings();
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            ManifestWarning::SsrTargetReserved { bin_name } => assert_eq!(bin_name, "srv"),
+        }
+    }
+
+    #[test]
+    fn target_enum_serialises_kebab_case() {
+        // Round-trip a multi-bin manifest through parse+emit and
+        // verify the target strings are canonical.
+        let toml_text = r##"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "srv"
+main = "src/main.fitz"
+
+[[bin]]
+name = "web"
+main = "src/counter.fitzv"
+target = "wasm-client"
+mount = "#app"
+"##;
+        let m = Manifest::parse(toml_text).unwrap();
+        let emitted = m.to_toml_string().unwrap();
+        assert!(
+            emitted.contains("target = \"wasm-client\""),
+            "emitted:\n{emitted}"
+        );
+        // Roundtrip through parse must give equal manifests.
+        let m2 = Manifest::parse(&emitted).unwrap();
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn select_bin_none_ambiguous_when_multi_bin() {
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "a"
+main = "src/a.fitz"
+
+[[bin]]
+name = "b"
+main = "src/b.fitz"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        let err = m.select_bin(None).unwrap_err();
+        match err {
+            ManifestError::BinAmbiguous { available } => {
+                assert_eq!(available, vec!["a".to_string(), "b".to_string()]);
+            }
+            other => panic!("expected BinAmbiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_bin_by_name_picks_the_right_one() {
+        let toml_text = r##"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "server"
+main = "src/main.fitz"
+
+[[bin]]
+name = "web"
+main = "src/counter.fitzv"
+target = "wasm-client"
+mount = "#app"
+"##;
+        let m = Manifest::parse(toml_text).unwrap();
+        let picked = m.select_bin(Some("web")).unwrap().unwrap();
+        assert_eq!(picked.name, "web");
+        assert_eq!(picked.effective_target(), Target::WasmClient);
+    }
+
+    #[test]
+    fn select_bin_missing_name_errors_listing_available() {
+        let toml_text = r##"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "server"
+main = "src/main.fitz"
+
+[[bin]]
+name = "web"
+main = "src/w.fitz"
+target = "wasm-client"
+mount = "#app"
+"##;
+        let m = Manifest::parse(toml_text).unwrap();
+        let err = m.select_bin(Some("nope")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("nope"), "msg: {msg}");
+        assert!(msg.contains("server"), "msg: {msg}");
+        assert!(msg.contains("web"), "msg: {msg}");
+    }
+
+    #[test]
+    fn select_bin_single_no_selector_picks_the_only_one() {
+        let m = Manifest::new_default("mi-app").unwrap();
+        let picked = m.select_bin(None).unwrap().unwrap();
+        assert_eq!(picked.name, "mi-app");
+    }
+
+    #[test]
+    fn select_bin_empty_manifest_returns_ok_none() {
+        let toml_text = r#"
+[package]
+name = "lib-only"
+version = "0.1.0"
+edition = "2026"
+
+[lib]
+entry = "src/lib.fitz"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert!(m.select_bin(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn serialise_single_legacy_shape_stays_visually_legacy() {
+        // A single bin with default name and no target/mount emits
+        // `[bin]` singular (not `[[bin]]`) — preserves the look of
+        // pre-11.5.b scaffolded manifests.
+        let m = Manifest::new_default("mi-app").unwrap();
+        let emitted = m.to_toml_string().unwrap();
+        assert!(
+            emitted.contains("[bin]\n") && emitted.contains("main = \"src/main.fitz\""),
+            "expected legacy [bin] shape, got:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("[[bin]]"),
+            "should NOT be array-of-tables:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn serialise_multi_bin_emits_array_of_tables() {
+        let toml_text = r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "a"
+main = "src/a.fitz"
+
+[[bin]]
+name = "b"
+main = "src/b.fitz"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        let emitted = m.to_toml_string().unwrap();
+        assert!(
+            emitted.contains("[[bin]]"),
+            "expected array-of-tables:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn serialise_single_bin_with_custom_name_emits_array_of_tables() {
+        // Even one bin, if it has a name != package.name, emits as
+        // `[[bin]]` so the name is preserved verbatim on re-parse.
+        let toml_text = r#"
+[package]
+name = "srv"
+version = "0.1.0"
+edition = "2026"
+
+[bin]
+name = "custom"
+main = "src/main.fitz"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        let emitted = m.to_toml_string().unwrap();
+        assert!(
+            emitted.contains("[[bin]]") && emitted.contains("name = \"custom\""),
+            "expected [[bin]] preserving custom name:\n{emitted}"
+        );
     }
 
     // ---- Phase 12.8 — [flags] section ----
@@ -1022,7 +1890,7 @@ entry = "src/lib.fitz"
 "#;
         let m = Manifest::parse(toml_text).unwrap();
         assert_eq!(m.lib.as_ref().unwrap().entry, "src/lib.fitz");
-        assert!(m.bin.is_none());
+        assert!(m.bins.is_empty());
     }
 
     /// Helper: creates a candidate path-dep project (manifest with

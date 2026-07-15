@@ -56,9 +56,28 @@ enum Commands {
     /// `<manifest>/target/release/` with the package name.
     Build {
         /// File to compile. If omitted, looks for `fitz.toml` and
-        /// compiles its `[bin].main` with output at
+        /// compiles the selected bin (`--bin <name>` in multi-bin
+        /// projects, or the only bin otherwise). Output goes to
         /// `<manifest_dir>/target/release/<pkg-name>`.
         file: Option<PathBuf>,
+        /// Phase 11.5.b — Selects which `[[bin]]` to build when the
+        /// manifest declares more than one. In single-bin projects
+        /// the flag is optional (defaults to the only bin). Errors
+        /// out listing the available bins when the requested name
+        /// does not match any.
+        #[arg(long = "bin", value_name = "NAME")]
+        bin: Option<String>,
+        /// Phase 11.5.b — Overrides the selected bin's `target`
+        /// field for this build only. Accepts `native`,
+        /// `wasm-client`, or `ssr` (kebab-case, matching the TOML
+        /// vocabulary). Useful for one-shot experiments without
+        /// editing `fitz.toml`. Cross-field validation still
+        /// applies (`.fitzv` sources reject `native`, `wasm-client`
+        /// requires `mount`, etc.). In single-file mode, the target
+        /// is inferred from the extension (`.fitz` → `native`,
+        /// `.fitzv` → `wasm-client`) and `--target` overrides.
+        #[arg(long = "target", value_name = "TARGET")]
+        target: Option<String>,
         /// Phase 8.b — Bundle CPython embedded into the final
         /// binary. The output is a standalone binary that does NOT
         /// require Python installed on the destination. Internally:
@@ -613,11 +632,38 @@ fn main() {
         }
         Commands::Build {
             file,
+            bin,
+            target,
             bundle_python,
             bundle_pip,
             bundle_pip_requirements,
         } => {
-            let resolved = resolve_entry(file);
+            // Phase 11.5.b — parse --target early so we can pass it
+            // to resolve_entry and reject unknown values with a
+            // clean message before touching the manifest.
+            let target_override = match target.as_deref() {
+                Some(t) => match parse_target_flag(t) {
+                    Ok(tg) => Some(tg),
+                    Err(msg) => {
+                        eprintln!("✗ {msg}");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            let resolved = resolve_entry_with_bin(file, bin.as_deref(), target_override);
+            // Phase 11.5.b — surface reserved-target warnings once
+            // per invocation (the CLI is a good place; the parser
+            // itself must stay side-effect-free).
+            emit_manifest_warnings(&resolved);
+            // Phase 11.5.b — reject targets that Phase 11.5.b does
+            // NOT know how to build yet, with the specific
+            // sub-phase reference.
+            let effective_target = resolved.effective_target();
+            if let Err(msg) = enforce_build_target_supported(effective_target) {
+                eprintln!("✗ {msg}");
+                std::process::exit(1);
+            }
             sync_lockfile_if_needed(&resolved);
             // In manifest mode, output goes to
             // `<manifest_dir>/target/release/<pkg-name>(.exe)`
@@ -798,34 +844,88 @@ struct ManifestCtx {
     /// `sync_lockfile_if_needed`. Phase 9.y.3.b: also used to build
     /// the `dep_registry` passed to the evaluator / codegen.
     resolved_deps: Vec<manifest::ResolvedDep>,
+    /// Phase 11.5.b — Which `[[bin]]` was selected for this
+    /// invocation. `None` when the manifest has no `[bin]` section
+    /// (lib-only project); consumers that require a bin (`fitz
+    /// run`/`build`) reject before this point.
+    selected_bin: Option<manifest::ManifestBin>,
 }
 
 /// Result of resolving the command's entry point. `entry` points to
 /// the `.fitz` to process; `manifest_ctx` is present when we got
-/// here via `fitz.toml` (manifest mode).
+/// here via `fitz.toml` (manifest mode). Phase 11.5.b:
+/// `target_override` carries the `--target` flag (if any) so
+/// `effective_target()` can compute what the codegen should emit
+/// without re-walking the CLI.
 struct ResolvedEntry {
     entry: PathBuf,
     manifest_ctx: Option<ManifestCtx>,
+    /// Explicit `--target` override from the CLI. `None` means
+    /// "use the selected bin's `target` field (or infer from
+    /// extension in single-file mode)".
+    target_override: Option<manifest::Target>,
 }
 
-/// Resolves the subcommand's entry point:
+impl ResolvedEntry {
+    /// Computes what target the caller should build. Precedence:
+    /// 1. `--target` CLI flag (if passed).
+    /// 2. Selected bin's `target` field (manifest mode).
+    /// 3. Extension-based inference (single-file mode): `.fitzv`
+    ///    → `WasmClient`, everything else → `Native`.
+    fn effective_target(&self) -> manifest::Target {
+        if let Some(t) = self.target_override {
+            return t;
+        }
+        if let Some(ctx) = &self.manifest_ctx {
+            if let Some(b) = &ctx.selected_bin {
+                return b.effective_target();
+            }
+        }
+        // Single-file mode: infer from extension.
+        let ext_view = self
+            .entry
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("fitzv"))
+            .unwrap_or(false);
+        if ext_view {
+            manifest::Target::WasmClient
+        } else {
+            manifest::Target::Native
+        }
+    }
+}
+
+/// Legacy entry point: resolves without honouring `--bin`/`--target`
+/// (`fitz run`/`check`/etc). Multi-bin manifests error out here
+/// (they only work through `fitz build --bin <name>` in 11.5.b MVP).
+fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
+    resolve_entry_with_bin(file_opt, None, None)
+}
+
+/// Phase 11.5.b — resolves the subcommand's entry point with
+/// optional bin selector and target override:
 ///
-/// - If `file_opt.is_some()`, **single-file** mode (pre-9.y.2
-///   compatibility): returns the path as-is, with no manifest ctx.
+/// - If `file_opt.is_some()`, **single-file** mode: returns the path
+///   as-is. `bin_selector` is ignored (single-file mode has no
+///   manifest). `target_override` is honoured (extension inference
+///   happens later via `ResolvedEntry::effective_target`).
 /// - If `file_opt.is_none()`, **manifest** mode: searches for
 ///   `fitz.toml` walking up from the cwd (Cargo-style), parses it,
-///   and returns `<manifest_dir>/[bin].main` as the entry. Exits the
-///   process with a clear message if:
-///   - there is no `fitz.toml` above the cwd (suggests `fitz new` or
-///     passing an explicit file);
-///   - the manifest fails to parse;
-///   - the manifest has no `[bin]` section (the 9.y MVP requires
-///     one; multi-bin is 9.y.8+).
-fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
+///   selects a bin via `Manifest::select_bin(bin_selector)`, and
+///   returns `<manifest_dir>/<bin>.main` as the entry. Exits with a
+///   clear message on: missing manifest, parse error, missing/
+///   ambiguous bin, or unresolvable deps.
+fn resolve_entry_with_bin(
+    file_opt: Option<PathBuf>,
+    bin_selector: Option<&str>,
+    target_override: Option<manifest::Target>,
+) -> ResolvedEntry {
     if let Some(entry) = file_opt {
         return ResolvedEntry {
             entry,
             manifest_ctx: None,
+            target_override,
         };
     }
 
@@ -863,9 +963,12 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| cwd.clone());
 
-    let bin = match &manifest.bin {
-        Some(b) => b,
-        None => {
+    // Phase 11.5.b — pick the right bin (or single-bin, or first,
+    // depending on selector state). Errors are ManifestError with
+    // formatted messages already prefixed by the caller.
+    let selected_bin = match manifest.select_bin(bin_selector) {
+        Ok(Some(b)) => b.clone(),
+        Ok(None) => {
             eprintln!(
                 "✗ `{}` has no `[bin]` section with a `main`. The package \
                  manager MVP (Phase 9.y) requires one. Add:\n\n[bin]\nmain = \"src/main.fitz\"\n",
@@ -873,9 +976,13 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
             );
             std::process::exit(1);
         }
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
     };
 
-    let entry = manifest_dir.join(&bin.main);
+    let entry = manifest_dir.join(&selected_bin.main);
 
     // Phase 9.y.3.a — eager dep resolution (fail-fast with the
     // resolver's message). On errors, abort before touching the
@@ -905,7 +1012,61 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
             manifest,
             manifest_dir,
             resolved_deps,
+            selected_bin: Some(selected_bin),
         }),
+        target_override,
+    }
+}
+
+/// Phase 11.5.b — parses the `--target <t>` CLI flag into
+/// `manifest::Target`. Same vocabulary as the TOML field:
+/// `native` / `wasm-client` / `ssr`. Returns a formatted user-facing
+/// error message on unknown values.
+fn parse_target_flag(raw: &str) -> Result<manifest::Target, String> {
+    match raw {
+        "native" => Ok(manifest::Target::Native),
+        "wasm-client" => Ok(manifest::Target::WasmClient),
+        "ssr" => Ok(manifest::Target::Ssr),
+        other => Err(format!(
+            "unknown `--target` value: `{other}`. Accepted: \
+             `native`, `wasm-client`, `ssr`."
+        )),
+    }
+}
+
+/// Phase 11.5.b — emit reserved-target warnings to stderr. Called
+/// from `fitz build` right after `resolve_entry_with_bin` so the
+/// user sees the notice ONCE per invocation, before any long
+/// operation kicks off.
+fn emit_manifest_warnings(resolved: &ResolvedEntry) {
+    let ctx = match &resolved.manifest_ctx {
+        Some(c) => c,
+        None => return,
+    };
+    for w in ctx.manifest.warnings() {
+        eprintln!("⚠ notice: {w}");
+    }
+}
+
+/// Phase 11.5.b — rejects targets that the current codegen does
+/// not know how to emit yet. `WasmClient` lands with 11.5.c;
+/// `Ssr` with 11.6+. `Native` is always accepted.
+fn enforce_build_target_supported(target: manifest::Target) -> Result<(), String> {
+    match target {
+        manifest::Target::Native => Ok(()),
+        manifest::Target::WasmClient => Err(
+            "`target = \"wasm-client\"` — the WASM emitter for `fitz build` \
+             is scheduled for Phase 11.5.c. Track progress at \
+             `docs/fase-11-plan.md` §9.p (11.5.b closed the manifest \
+             shape; 11.5.c wires the codegen). For a peek at the \
+             emitter output today, run `cargo test --test view_counter_wasm_smoke`."
+                .to_string(),
+        ),
+        manifest::Target::Ssr => Err("`target = \"ssr\"` — the server-side rendering emitter is \
+             scheduled for Phase 11.6+. The manifest accepts the field \
+             so you can declare intent today; the emitter itself has \
+             not landed. Track progress at `docs/fase-11-plan.md` §9.p."
+            .to_string()),
     }
 }
 
@@ -3557,7 +3718,12 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
         // **"Inline tests only" mode**: we load the `[lib]` (or
         // `[bin]`) directly because it's the only place that
         // can have `@test`.
-        let entry_rel: Option<String> = match (&parsed_manifest.lib, &parsed_manifest.bin) {
+        // Phase 11.5.b — `bins` may hold zero, one, or many; we
+        // pick the first bin as the discovery source for inline
+        // tests when the manifest has no `[lib]`. Multi-bin
+        // projects that want per-bin `@test` selection are a
+        // deferred refinement (visible debt for `fitz test --bin`).
+        let entry_rel: Option<String> = match (&parsed_manifest.lib, parsed_manifest.bins.first()) {
             (Some(lib), _) => Some(lib.entry.clone()),
             (None, Some(bin)) => Some(bin.main.clone()),
             (None, None) => None,
@@ -5044,7 +5210,11 @@ fn resolve_db_entry(file: Option<PathBuf>) -> Result<PathBuf, String> {
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("reading `{}`: {e}", manifest_path.display()))?;
     let m = manifest::Manifest::parse(&manifest_text).map_err(|e| format!("manifest: {e}"))?;
-    let bin_main = m.bin.as_ref().map(|b| b.main.clone()).ok_or_else(|| {
+    // Phase 11.5.b — multi-bin manifests pass `--file` explicitly
+    // in `fitz db`; here we accept the first `[[bin]]` entry as a
+    // convenience for single-bin projects. If more granularity is
+    // needed later (`--bin` for `fitz db`), it lands on demand.
+    let bin_main = m.bins.first().map(|b| b.main.clone()).ok_or_else(|| {
         "the manifest has no `[bin].main` — pass an explicit `<file.fitz>`".to_string()
     })?;
     let manifest_dir = manifest_path

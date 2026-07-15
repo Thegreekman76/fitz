@@ -5965,8 +5965,12 @@ que se rompa.
 - **Formato**: TOML (`fitz.toml`). Lean del bloque cerrada.
 - **Estructura**: `src/main.fitz`. Lean del bloque cerrada.
 - **Field versionado**: `edition = "2026"` (Cargo-style year).
-- **Bin único** (`[bin]`, no `[[bin]]` array). Multi-bin queda
-  como sub-paso 9.y.8+ post-MVP.
+- **Bin único** (`[bin]`, no `[[bin]]` array). Multi-bin fue
+  deuda 9.y.8+ **cerrada por Fase 11.5.b (2026-07-15)** — el
+  manifest ahora acepta `[[bin]]` array-of-tables con `name`/
+  `target`/`mount`; legacy `[bin]` auto-migra. `fitz build --bin
+  <name>` selecciona en proyectos multi-bin. Ver
+  `docs/fase-11-plan.md` §9.q para el detalle.
 - **Validación de nombre**: `^[a-z][a-z0-9_-]{0,63}$` (política
   crates.io: lowercase + alfanumérico + `-`/`_`, máx 64). Regex
   implementada a mano para no agregar dep `regex` por algo tan
@@ -6012,8 +6016,8 @@ Archivos:
 
 #### Decisiones residuales (NO bloquean 9.y.2)
 
-- **Multi-bin (`[[bin]]`)**: sin `[[bin]]` array todavía. Sub-paso
-  9.y.8+ post-MVP.
+- **Multi-bin (`[[bin]]`)**: cerrada por Fase 11.5.b
+  (2026-07-15). Ver `docs/fase-11-plan.md` §9.q.
 - **`--lib` template**: sin template `--lib` todavía. Aterriza
   cuando library publishing sea real (9.y.5+).
 - **Repo público pre-existente con `git init`**: `git init` sobre
@@ -6068,7 +6072,11 @@ directorio actual o en padres (Cargo-style).
   guide/02-hola.fitz`. La promesa "sin breaking" del bloque 9.y
   se cumple bit-a-bit.
 - **Manifest sin `[bin]`**: error claro con la sección sugerida
-  inline. Multi-bin (`[[bin]]` array) sigue siendo deuda 9.y.8+.
+  inline. Multi-bin (`[[bin]]` array) era deuda 9.y.8+ — **cerrada
+  por Fase 11.5.b (2026-07-15)**: el manifest ahora modela
+  `Manifest.bins: Vec<ManifestBin>` y acepta ambas formas TOML
+  (`[bin]` legacy singular + `[[bin]]` array-of-tables). Legacy
+  auto-migra. `fitz build --bin <name>` selecciona en multi-bin.
 - **TOML corrupto**: error explícito via `ManifestError::Parse`
   (delegado al mensaje de `toml::de::Error`).
 - **`find_manifest` ya estaba en 9.y.1**: ahora tiene consumidor,
@@ -6109,7 +6117,11 @@ Archivos:
 - **Configuración del output dir**: `[build] target = "..."`
   hardcodeable post-MVP. Hoy `target/release/` adyacente al
   manifest, Cargo-style.
-- **Multi-bin (`[[bin]]` array)**: sigue siendo deuda 9.y.8+.
+- **Multi-bin (`[[bin]]` array)**: **cerrada por Fase 11.5.b
+  (2026-07-15)** — el manifest acepta `[[bin]]` array-of-tables
+  con campos nuevos `name`/`target`/`mount`; `fitz build --bin
+  <name>` selecciona en proyectos multi-bin y `fitz build
+  --target <t>` overridea el target. Legacy `[bin]` auto-migra.
 - **`fitz build` con `--release`/`--debug`**: hoy siempre release
   (idem comportamiento pre-9.y.2). Modo debug llega cuando aparezca
   presión.
@@ -6685,7 +6697,7 @@ Cierra el ciclo: ahora el usuario puede compartir.
 ### Deuda anticipada (NO bloquea cierre del bloque)
 
 - **Workspaces** (multi-paquete bajo manifest raíz) — sub-paso
-  futuro 9.y.8+.
+  futuro 9.y.9+ (distinto de multi-bin, que ya cerró en 11.5.b).
 - **Build scripts** (ejecutar tooling externo desde manifest) —
   futuro.
 - **Vendoring** (`fitz vendor` para offline builds) — futuro.
@@ -9753,7 +9765,33 @@ como próximo norte):
 
 - **11.5** CLI wiring (`fitz build` rutea `.fitzv` según
   `[[bin]].target` / `--target` flag) + multi-component
-  composition (`<Child prop="v" />`).
+  composition (`<Child prop="v" />`). Progresa:
+  - ✅ **11.5.a** — Research + decision (docs-only). CLOSED
+    2026-07-15. Recorded hybrid manifest + flag, `[[bin]]`
+    multi-bin closes 9.y.8+ as a side-effect. See §9.p.
+  - ✅ **11.5.b** — Manifest extension: `[[bin]]` array-of-tables
+    + `name`/`target`/`mount` on `ManifestBin` + `Target` enum
+    (`native`/`wasm-client`/`ssr`) + `--bin`/`--target` flags on
+    `Commands::Build`. Legacy `[bin]` singular auto-migrates.
+    Cross-field validation eagerly rejects `.fitzv` + native
+    (both explicit and default) and `wasm-client` without
+    `mount`. `Ssr` reserved (parse accepts, build rejects
+    citing 11.6+). `wasm-client` builds reject citing 11.5.c
+    BEFORE any Cargo invocation. **Closes debt 9.y.8+
+    (multi-bin `[[bin]]`)** — memoria + `docs/deudas-post-5b.md`
+    updated. 23 new unit tests in `manifest::tests` + 7 new
+    `cli_e2e` tests. CLOSED 2026-07-15. See §9.q.
+  - 🔵 **11.5.c** — Single-component `wasm-client` build: emit
+    `wasm-crate/` scaffold + Cargo.toml `wasm-opt` metadata knob
+    + `#[wasm_bindgen(start)]` wrapper + `wasm-pack build
+    --release --target web` invoke + copy `pkg/` to
+    `target/wasm/<bin_name>/`.
+  - 🔵 **11.5.d** — Multi-component composition:
+    `<Child prop="v" />` in a template mounts a nested component
+    with static props.
+  - 🔵 **11.5.e** — Cierre formal: kanban rewrite +
+    docs/roadmap/memoria refresh + fix cosmetic emitter warnings
+    (`unused_parens` + `non_snake_case` from §9.o).
 - **11.6** Migración de `fitz-liveviews` a `.fitzv`.
 - **11.7** LSP support inside `.fitzv` (hover, autocomplete,
   template-attr completion).

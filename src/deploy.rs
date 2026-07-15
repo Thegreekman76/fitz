@@ -311,7 +311,7 @@ fn invoke_command(bin: &str, args: &[String], cwd: &Path) -> Result<i32, DeployE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{Bin, Manifest, Package};
+    use crate::manifest::{Manifest, ManifestBin, Package};
     use tempfile::tempdir;
 
     fn dummy_manifest(name: &str) -> Manifest {
@@ -324,9 +324,12 @@ mod tests {
                 license: None,
                 authors: Vec::new(),
             },
-            bin: Some(Bin {
+            bins: vec![ManifestBin {
+                name: name.to_string(),
                 main: "src/main.fitz".to_string(),
-            }),
+                target: None,
+                mount: None,
+            }],
             lib: None,
             dependencies: Default::default(),
             flags: Default::default(),
