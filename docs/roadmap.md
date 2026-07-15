@@ -9596,7 +9596,7 @@ release v0.10.17):
 ## Visión post-Fase 10 — Fase 11+ 🔮
 
 **Estado al 2026-07-15**: de las 3 fases originalmente especulativas
-de esta sección, **2 ya cerraron y la tercera avanzó a 11.4.c**:
+de esta sección, **2 ya cerraron y la tercera cerró 11.4 entera**:
 
 - ✅ **Fase 12 (Deployment ciudadano)** — CERRADA en v0.12.5 + v0.13.0.
 - ✅ **Fase 13 (CLI builder)** — CERRADA en v0.11.0 + v0.11.1.
@@ -9613,13 +9613,16 @@ de esta sección, **2 ya cerraron y la tercera avanzó a 11.4.c**:
   operators en la view lexer + balance-aware capture), **11.4.c**
   (counter demo runnable + wasm-pack smoke + **bundle-size gate
   cerrado 2026-07-15: 11.4 KB gzipped sobre 40 KB — 28.6 KB
-  headroom**, A2 validated as primary WASM target). Sub-fases
-  abiertas: **11.4.d** (cierre formal + roadmap refresh, en curso
-  esta sesión), 11.5 (CLI wiring `fitz build --target <t>` +
-  multi-component composition), 11.6 (fitz-liveviews migration a
-  `.fitzv`), 11.7 (LSP support inside `.fitzv`), 11.8 (pedagogic
-  docs). Detalle exhaustivo en [`docs/fase-11-plan.md`](fase-11-plan.md)
-  con §9.a–9.o cubriendo cada mini-commit.
+  headroom**, A2 validated as primary WASM target), **11.4.d**
+  (cierre formal + roadmap refresh + browser smoke manual validado
+  en Windows 11 / Chrome 2026-07-15, re-render scoped al subtree
+  del componente confirmado bit-a-bit con §9.m D1 naive-render
+  policy — **cierra 11.4 entera**). Sub-fases abiertas: 11.5 (CLI
+  wiring `fitz build --target <t>` + multi-component composition),
+  11.6 (fitz-liveviews migration a `.fitzv`), 11.7 (LSP support
+  inside `.fitzv`), 11.8 (pedagogic docs). Detalle exhaustivo en
+  [`docs/fase-11-plan.md`](fase-11-plan.md) con §9.a–9.o cubriendo
+  cada mini-commit.
 
 Las secciones de Fase 12 y 13 abajo se mantienen como **referencia
 histórica** del diseño + cierre. La parte realmente especulativa del
@@ -9627,7 +9630,7 @@ roadmap se reduce hoy a:
 
 | Item futuro | Estimación |
 |---|---|
-| Fase 11 sub-fases 11.5 → 11.8 | meses, cada una es sesión seria (11.4 ya cerrando) |
+| Fase 11 sub-fases 11.5 → 11.8 | meses, cada una es sesión seria (11.4 ya cerrada 2026-07-15) |
 | V6 (DAP — debugging interactivo VSCode) | ~2 semanas, anotada en backlog |
 | Fase 12.6+ targets extra (`fitz deploy fly/railway/k8s`) | 1-2 semanas por target |
 | Deuda residual técnica menor | ver `docs/deudas-post-5b.md` |
@@ -9643,8 +9646,9 @@ problema del **doble tipado** que el autor sufre todos los días
 con Vue+FastAPI: definís `type User` en el backend, lo re-definís
 en TypeScript, los tipos divergen, bugs en producción.
 
-**Estado al 2026-07-15** — sub-fases 11.1 → 11.4.c CERRADAS
-(11.4.d en curso esta sesión):
+**Estado al 2026-07-15** — sub-fases 11.1 → 11.4 CERRADAS
+entera (browser smoke manual validado 2026-07-15; 11.5 unblocked
+como próximo norte):
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
@@ -9732,11 +9736,21 @@ en TypeScript, los tipos divergen, bugs en producción.
   del plan para el detalle + measurement recipe + debt residual
   (2026-07-15).
 
+- ✅ **11.4.d** Cierre formal + roadmap refresh + browser smoke
+  manual (2026-07-15). Row 11.4 del plan + §9.o Result subsection
+  + esta sección + memoria del proyecto refreshed en la misma sesión
+  que corrió el gate. Smoke manual en Windows 11 / Chrome validó
+  el flow canónico (`0 → +1 → +2 → -1 → 0`) y que el re-render
+  queda scoped al subtree del componente montado en `#app` sin
+  tocar el `<body>` entero — cumple bit-a-bit el §9.m D1
+  naive-render policy. Warnings cosméticos del emitter
+  (`unused_parens` + `non_snake_case`) intencionalmente deferred
+  al 11.5 CLI cleanup pass. **Closes 11.4 entera** — A2
+  (hand-rolled `wasm-bindgen` + `web-sys` bajo feature opt-in
+  `client-wasm`) confirmado como primary WASM target de Fitz.
+
 **Sub-fases abiertas** (per §6 del plan):
 
-- **11.4.d** Cierre formal + roadmap refresh. **En curso esta sesión
-  (2026-07-15)** — updates a §9.o + row 11.4 + esta sección + memoria
-  del proyecto.
 - **11.5** CLI wiring (`fitz build` rutea `.fitzv` según
   `[[bin]].target` / `--target` flag) + multi-component
   composition (`<Child prop="v" />`).
