@@ -18,6 +18,14 @@ lto = true
 codegen-units = 1
 strip = true
 
+# wasm-opt (bundled with wasm-pack) uses an older binaryen that rejects
+# bulk-memory ops emitted by recent rustc. Pass `--enable-bulk-memory`
+# so the size-optimization pass still runs. Without this, `wasm-pack
+# build --release` fails at the wasm-opt step with a `wasm-validator
+# error ... Bulk memory operations require bulk memory` panic.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O', '--enable-bulk-memory']
+
 [dependencies]
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"

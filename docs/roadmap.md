@@ -9595,8 +9595,8 @@ release v0.10.17):
 
 ## Visión post-Fase 10 — Fase 11+ 🔮
 
-**Estado al 2026-07-14**: de las 3 fases originalmente especulativas
-de esta sección, **2 ya cerraron y la tercera arrancó**:
+**Estado al 2026-07-15**: de las 3 fases originalmente especulativas
+de esta sección, **2 ya cerraron y la tercera avanzó a 11.4.c**:
 
 - ✅ **Fase 12 (Deployment ciudadano)** — CERRADA en v0.12.5 + v0.13.0.
 - ✅ **Fase 13 (CLI builder)** — CERRADA en v0.11.0 + v0.11.1.
@@ -9607,12 +9607,19 @@ de esta sección, **2 ya cerraron y la tercera arrancó**:
   (state annotations no ASCII-limited), 11.3.a (`<style global>` +
   `StyleKind`), 11.3.b (CSS mini-parser + `apply_scope(...)` helper),
   11.3.c (wire scoping end-to-end en `expand` + template class-attr
-  rewrite). Sub-fases abiertas: 11.4 (client target decision — WASM
-  vs JS-vanilla), 11.5 (CLI wiring `fitz build --target <t>` +
+  rewrite), **11.4.a** (research + decisión A2 WASM-first hand-rolled
+  `wasm-bindgen`), **11.4.b** (POC emitter `src/view/codegen_wasm.rs`
+  ~1500 LoC + 23 unit tests), **view-lexer §9.n follow-up** (`+`/`-`/`*`/`/`
+  operators en la view lexer + balance-aware capture), **11.4.c**
+  (counter demo runnable + wasm-pack smoke + **bundle-size gate
+  cerrado 2026-07-15: 11.4 KB gzipped sobre 40 KB — 28.6 KB
+  headroom**, A2 validated as primary WASM target). Sub-fases
+  abiertas: **11.4.d** (cierre formal + roadmap refresh, en curso
+  esta sesión), 11.5 (CLI wiring `fitz build --target <t>` +
   multi-component composition), 11.6 (fitz-liveviews migration a
   `.fitzv`), 11.7 (LSP support inside `.fitzv`), 11.8 (pedagogic
   docs). Detalle exhaustivo en [`docs/fase-11-plan.md`](fase-11-plan.md)
-  con §9.a–9.k cubriendo cada mini-commit.
+  con §9.a–9.o cubriendo cada mini-commit.
 
 Las secciones de Fase 12 y 13 abajo se mantienen como **referencia
 histórica** del diseño + cierre. La parte realmente especulativa del
@@ -9620,7 +9627,7 @@ roadmap se reduce hoy a:
 
 | Item futuro | Estimación |
 |---|---|
-| Fase 11 sub-fases 11.4 → 11.8 | meses, cada una es sesión seria |
+| Fase 11 sub-fases 11.5 → 11.8 | meses, cada una es sesión seria (11.4 ya cerrando) |
 | V6 (DAP — debugging interactivo VSCode) | ~2 semanas, anotada en backlog |
 | Fase 12.6+ targets extra (`fitz deploy fly/railway/k8s`) | 1-2 semanas por target |
 | Deuda residual técnica menor | ver `docs/deudas-post-5b.md` |
@@ -9636,7 +9643,8 @@ problema del **doble tipado** que el autor sufre todos los días
 con Vue+FastAPI: definís `type User` en el backend, lo re-definís
 en TypeScript, los tipos divergen, bugs en producción.
 
-**Estado al 2026-07-14** — sub-fases 11.1 → 11.3 CERRADAS:
+**Estado al 2026-07-15** — sub-fases 11.1 → 11.4.c CERRADAS
+(11.4.d en curso esta sesión):
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
@@ -9671,11 +9679,64 @@ en TypeScript, los tipos divergen, bugs en producción.
   recursivo baja a Element children + If then/else + For bodies,
   agrega variantes sufijadas de cada clase original (`class="card"`
   → `class="card card-<scope>"`). **Closes 11.3 entire** (2026-07-14).
+- ✅ **11.4.a** Research + decisión de client target. Docs-only, cero
+  código. §9.l analiza 5 aproximaciones (A1 framework delegation /
+  A2 hand-roll `wasm-bindgen` / A3 in-tree runtime crate / B1
+  JS-vanilla / B2 JS compiler delegation) y elige **A2** (WASM-first,
+  hand-rolled `wasm-bindgen` + `web-sys` bajo feature opt-in
+  `client-wasm`). Preserva el commitment de `docs/stack.md` v1
+  ("WASM primero, JS/vanilla secundario"), la filosofía
+  "Fitz-por-sí-solo" (cero framework, cero `npm`), y la Invariant 4
+  (emitter isolated en `src/view/codegen_wasm.rs`, `cargo build`
+  default sin cambios) (2026-07-14).
+- ✅ **11.4.b** POC emitter en `src/view/codegen_wasm.rs` (~1500 LoC
+  + 23 unit tests). `pub fn emit_component(&ExpandedComponent) ->
+  EmitResult<String>` emite Rust source por componente (struct +
+  `new()` + event fns + `mount()` + `render()` + scoped/global style
+  helper); `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`
+  emite el `.rs` module completo. Naive re-render on state mutation
+  (D1), two-fn public API (D2), strictly conservative subset (D3 —
+  Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/
+  Slot/non-click/Str/Bool/Nominal/handler-params reject con `EmitError`
+  citando 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml`
+  gana opt-in feature `client-wasm` con `wasm-bindgen`/`web-sys`/
+  `console_error_panic_hook`; `cargo build` default sin cambios
+  (2026-07-14).
+- ✅ **view-lexer §9.n follow-up** — `+`/`-`/`*`/`/` operators en la
+  view lexer + balance-aware capture (destraba `count = count + 1` en
+  event bodies del Counter demo). Sin este follow-up, 11.4.c no
+  arrancaba (el POC del emitter necesitaba ejercitar el arithmetic
+  lowering, no solo literal reassignment) (2026-07-14).
+- ✅ **11.4.c** Counter demo runnable + wasm-pack smoke +
+  bundle-size gate. INFRA cerrada 2026-07-15:
+  `examples/view/counter/{Counter.fitzv, index.html, README.md,
+  wasm-crate/}` shipped end-to-end. Harness en
+  `tests/view_counter_wasm_smoke.rs` con dos tests
+  (`regenerate_counter_lib_rs` always-on que mantiene el `lib.rs`
+  sync con el emitter + `build_counter_wasm_and_measure`
+  `#[ignore]` que corre `wasm-pack build --release --target web`
+  y mide gzipped contra el gate). `flate2 = "1"` sumado como
+  `dev-dependency` para el size measurement.
+  **MEASUREMENT CLOSED 2026-07-15**: raw `.wasm` 26.1 KB / **gzipped
+  11.4 KB** (28.6 KB headroom sobre el gate de 40 KB) en Windows 11
+  con `rustc + wasm32-unknown-unknown + wasm-pack 0.15.0`. A2
+  validated as primary WASM target; no pivot to JS-vanilla needed.
+  Fix descubierto durante la medición: `wasm-pack 0.15.0` bundlea un
+  `binaryen` (wasm-opt) que rechaza `memory.copy` ops emitidas por
+  rustc reciente. Workaround recorded en `wasm-crate/Cargo.toml`:
+  `[package.metadata.wasm-pack.profile.release] wasm-opt = ['-O',
+  '--enable-bulk-memory']`. Dos warnings cosméticos del emitter
+  (`unused_parens` en BinOp assignment RHS + `non_snake_case` en
+  style-injection helpers) documented como deuda derivada — no bugs
+  de correctness, deferred al 11.5 emitter cleanup pass. Ver §9.o
+  del plan para el detalle + measurement recipe + debt residual
+  (2026-07-15).
 
 **Sub-fases abiertas** (per §6 del plan):
 
-- **11.4** Client target decision (WASM vs JS-vanilla). Prototipo
-  contra un counter demo de dos páginas.
+- **11.4.d** Cierre formal + roadmap refresh. **En curso esta sesión
+  (2026-07-15)** — updates a §9.o + row 11.4 + esta sección + memoria
+  del proyecto.
 - **11.5** CLI wiring (`fitz build` rutea `.fitzv` según
   `[[bin]].target` / `--target` flag) + multi-component
   composition (`<Child prop="v" />`).
@@ -9686,7 +9747,7 @@ en TypeScript, los tipos divergen, bugs en producción.
   en `docs/curso/` (M9?) + update de `docs/architecture.md`.
 
 **Detalle exhaustivo** de cada mini-commit cerrado en
-[`docs/fase-11-plan.md`](fase-11-plan.md) — sección §9.a–9.k cubre
+[`docs/fase-11-plan.md`](fase-11-plan.md) — sección §9.a–9.o cubre
 lo shipped hasta hoy, sección §6 tiene la tabla de sub-fases con
 criterios de cierre.
 
