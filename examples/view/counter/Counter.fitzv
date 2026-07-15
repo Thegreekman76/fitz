@@ -1,0 +1,43 @@
+// Phase 11.4.c — canonical counter demo (`.fitzv`).
+//
+// Este `.fitzv` es el input del pipeline view completo:
+// parse → expand → check → emit_module (Fase 11.4.b).
+//
+// El emitter WASM produce Rust que, buildeado con
+// `wasm-pack build --target web --release`, monta el componente
+// en el nodo `#app` del `index.html` de al lado.
+//
+// Contrato de shape (respeta el subset POC de 11.4.b + view-lexer
+// arithmetic follow-up 11.4.n):
+//
+//   - state con campos `Int` primitivos + default literal
+//   - event handlers sync sin params + body = un solo `Stmt::Assign`
+//     al state field con RHS `Int` literal o `BinOp` arithmetic
+//   - template con Text / Element / Interpolation / Static attr /
+//     @click event attr
+//   - <style scoped> con reglas class-based (el scoping añade el
+//     sufijo `-<hash>` automático en runtime)
+//
+// Cambios fuera del subset arriba deben esperar a 11.4.c+ / 11.5.
+
+component Counter {
+  state { count: Int = 0 }
+
+  event increment() { count = count + 1 }
+  event decrement() { count = count - 1 }
+  event reset() { count = 0 }
+
+  <template>
+    <div class="counter">
+      <button @click="decrement">-</button>
+      <span class="value">{count}</span>
+      <button @click="increment">+</button>
+      <button @click="reset">reset</button>
+    </div>
+  </template>
+
+  <style scoped>
+    .counter { display: flex; gap: 8px; align-items: center; font-family: sans-serif; }
+    .value { min-width: 3ch; text-align: center; font-weight: bold; font-size: 1.5em; }
+  </style>
+}

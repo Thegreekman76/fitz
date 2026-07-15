@@ -212,7 +212,7 @@ Phase 11 promise.
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits, ALL **CLOSED 2026-07-14**: **11.3.a** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container`, keeps other at-rules opaque, handles strings + comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class) (see §9.j). **11.3.c** — wire scoping end-to-end in `expand`: new `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc }, Global { css, loc } }` replaces the raw-passthrough `Option<RawStyle>`; scope class synthesised via FNV-1a of `<component>::<css_raw>` truncated to 8 hex, shape `<component-kebab>-c-<8hex>`; `apply_scope(...)` runs on the CSS body; every Element with a static `class` attribute gets suffixed variants added (`class="card"` → `class="card card-<scope>"`) via a recursive walker that descends into If then/else branches + For bodies; interpolated `class` attributes left alone as a documented limitation. Global styles are pure passthrough — no CSS transform, no template rewrite. Includes 21 new unit tests + `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (see §9.k). **Closes 11.3 entire** — Phase 11.3 shipped end-to-end. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
-| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **CLOSED 2026-07-14** — `src/view/codegen_wasm.rs` (~1500 LoC + 23 unit tests) emits Rust source for one component (struct + `new()` + event fns + `mount()` + `render()` + scoped/global style helper) via `pub fn emit_component(&ExpandedComponent) -> EmitResult<String>` and a whole `.rs` module via `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`. Naive re-render on state mutation (D1), two-fn public API (D2), strictly conservative subset (D3 — Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/Slot/non-click/Str/Bool/Nominal/handler-params reject with `EmitError` citing 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml` gains opt-in feature `client-wasm` with `wasm-bindgen`/`web-sys`/`console_error_panic_hook`; `cargo build` default dep tree unchanged. Verification: 3510 lib tests green (3487 baseline + 23 new), fmt + clippy `-D warnings` clean in both default and `--features client-wasm` modes. See §9.m. Deuda derivada VISIBLE that gated 11.4.c (now CLOSED via §9.n follow-up 2026-07-14): view lexer arithmetic gap. **11.4.c** — counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded against the 40 KB gate. **11.4.d** — cierre formal + roadmap refresh. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
+| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **CLOSED 2026-07-14** — `src/view/codegen_wasm.rs` (~1500 LoC + 23 unit tests) emits Rust source for one component (struct + `new()` + event fns + `mount()` + `render()` + scoped/global style helper) via `pub fn emit_component(&ExpandedComponent) -> EmitResult<String>` and a whole `.rs` module via `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`. Naive re-render on state mutation (D1), two-fn public API (D2), strictly conservative subset (D3 — Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/Slot/non-click/Str/Bool/Nominal/handler-params reject with `EmitError` citing 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml` gains opt-in feature `client-wasm` with `wasm-bindgen`/`web-sys`/`console_error_panic_hook`; `cargo build` default dep tree unchanged. Verification: 3510 lib tests green (3487 baseline + 23 new), fmt + clippy `-D warnings` clean in both default and `--features client-wasm` modes. See §9.m. Deuda derivada VISIBLE that gated 11.4.c (now CLOSED via §9.n follow-up 2026-07-14): view lexer arithmetic gap. **11.4.c** — counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded against the 40 KB gate. **INFRA CLOSED 2026-07-15** — `examples/view/counter/{Counter.fitzv, index.html, README.md, wasm-crate/}` shipped end-to-end. Harness lives in `tests/view_counter_wasm_smoke.rs`: `regenerate_counter_lib_rs` (always runs on `cargo test`, keeps `wasm-crate/src/lib.rs` in sync with the emitter output + validates structural invariants) + `build_counter_wasm_and_measure` (`#[ignore]`, opt-in via `-- --ignored`, runs `wasm-pack build --release --target web` and measures gzipped size against the 40 KB gate). `flate2 = "1"` added as `dev-dependency` for the size measurement. Composed entry point (`#[wasm_bindgen(start)] pub fn start()`) lives at the tail of the harness, NOT in `view::emit_module()` — same posture Phase 11.5 CLI will inherit. Verification: 3517 lib tests green (unchanged baseline, no regressions), fmt + clippy default + clippy `--features client-wasm` all clean. See §9.o. **MEASUREMENT PENDING** — the 40 KB gzipped gate hasn't been measured yet on any host; the dev machine that shipped 11.4.c infra had neither `wasm-pack` nor `wasm32-unknown-unknown` installed. Any contributor with those pre-reqs can close the gate by running `cargo test --test view_counter_wasm_smoke -- --ignored` from the repo root. The test either prints "OK ({headroom} B under the gate)" and passes, or fails with the exact overshoot + a pointer to §9.l for the pivot decision. **11.4.d** — cierre formal + roadmap refresh (pending 11.4.c measurement gate closure). | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
 | **11.7** | LSP support inside `.fitzv` — hover over `{expr}` shows the type, autocomplete inside `state { }` and `event ...` bodies, template-attr completion knows about the declared event handlers of the enclosing component. | VSCode extension bumped with the new grammar + LSP config; typing `{sta` inside a template completes to `state field name` when the component has that field. |
@@ -2350,6 +2350,259 @@ error at lex time.
 No other files touched by §9.n. 11.4.c is now unblocked: the
 canonical counter shape parses, expands, checks, and emits
 end-to-end.
+
+---
+
+## 9.o Files touched by 11.4.c — counter demo runnable + bundle-size measurement harness
+
+11.4.c ships the first runnable end-to-end demo of the `.fitzv` →
+WASM pipeline. Everything the emitter needed to prove — that it
+produces valid, compilable Rust that a real browser can load and
+interact with — is now instrumented. The **infrastructure** is
+CLOSED; the **bundle-size gate measurement** against 40 KB
+gzipped is a one-command opt-in that a contributor with
+`wasm-pack` + `wasm32-unknown-unknown` installed can execute at
+any time (see the "Measurement recipe" subsection below).
+
+**Files added**:
+
+- `examples/view/counter/Counter.fitzv` (~45 LoC counting
+  comments) — the canonical counter source. Respects the POC
+  subset of 11.4.b exactly (Int state + `@click`-only + literal
+  or BinOp-arithmetic event bodies + Text/Element/Interpolation/
+  Static-attr template + `<style scoped>`). Uses the arithmetic
+  operators unblocked by §9.n (`count = count + 1` /
+  `count = count - 1`) so the demo exercises the arithmetic
+  lowering, not just literal reassignment.
+- `examples/view/counter/index.html` (~55 LoC) — mount point
+  `<div id="app">` + `<script type="module">` that imports
+  `./wasm-crate/pkg/counter.js` and calls `init()`. Includes a
+  tiny inline `<style>` for the surrounding page frame so the
+  demo doesn't look raw in the browser, plus a helpful error
+  message if the module fails to load (typically `file://` vs
+  HTTP origin confusion).
+- `examples/view/counter/README.md` (~130 LoC) — instructions
+  covering: layout, source of truth (`Counter.fitzv`),
+  regeneration workflow, `wasm-pack build` recipe, browser smoke
+  recipe with `python -m http.server`, bundle-size measurement
+  recipe, and the composition split (why
+  `#[wasm_bindgen(start)]` lives in the harness, not in
+  `view::emit_module()`).
+- `examples/view/counter/wasm-crate/Cargo.toml` (~35 LoC) — the
+  crate that wraps the generated `lib.rs`. `crate-type =
+  ["cdylib"]`, deps limited to `wasm-bindgen`, `web-sys` (with
+  the exact features list that mirrors the root `Cargo.toml`
+  `client-wasm` feature — see §9.m), and
+  `console_error_panic_hook`. `[profile.release]` set to
+  `opt-level = "z"` + `lto = true` + `codegen-units = 1` + `strip
+  = true` — the canonical wasm-bindgen size-tuning knobs. Not a
+  `[workspace]` member (deliberately — see design decisions
+  below).
+- `examples/view/counter/wasm-crate/.gitignore` — excludes
+  `target/`, `pkg/` (wasm-pack output), and `Cargo.lock` (the
+  demo crate treats itself as a POC scaffold that anyone can
+  blow away + rebuild; the top-level `fitz/Cargo.lock` is the
+  canonical lockfile for reproducibility).
+- `examples/view/counter/wasm-crate/src/lib.rs` (~140 LoC,
+  **AUTO-GENERATED**) — the emitter's output for
+  `Counter.fitzv` + the composed `#[wasm_bindgen(start)]` entry
+  point at the tail. Committed in-tree so `wasm-pack build`
+  works out of the box for a fresh clone. Kept in sync by the
+  `regenerate_counter_lib_rs` test (see below); running the
+  test after any `Counter.fitzv` edit or any change to
+  `src/view/codegen_wasm.rs` will refresh this file.
+- `tests/view_counter_wasm_smoke.rs` (~260 LoC + doc comments)
+  — top-level integration test file with two tests:
+  - `regenerate_counter_lib_rs` (always runs): loads
+    `Counter.fitzv`, runs the full pipeline (`view::parse` →
+    `view::expand` → `view::check` → `view::emit_module`),
+    appends the composed entry point, validates 8 structural
+    invariants (struct decl, state field type, each event
+    handler, `#[wasm_bindgen(start)]`, mount selector, style
+    helper referenced), and writes the result to `lib.rs` iff
+    the content changed. Zero external dependencies — this
+    runs on every `cargo test` and keeps the committed baseline
+    fresh automatically.
+  - `build_counter_wasm_and_measure` (`#[ignore]`): same
+    regeneration + shells out to `wasm-pack build --release
+    --target web` inside `wasm-crate/`, reads
+    `pkg/counter_bg.wasm`, computes raw + gzipped sizes (gzip
+    via `flate2::write::GzEncoder` with `Compression::best()`
+    so the measurement matches what a CDN typically serves),
+    prints a verdict, and fails the test if gzipped size
+    exceeds `40 * 1024 = 40960` bytes. Panics with a targeted
+    message pointing at §9.l for the pivot decision when the
+    gate is breached.
+
+**Files touched**:
+
+- `Cargo.toml` — one line added under `[dev-dependencies]`:
+  `flate2 = "1"`. Reasoning: `wasm-pack`/browsers serve gzipped
+  by default and the 40 KB gate is defined against the gzipped
+  size, so we need an in-process way to compute it. Alternative
+  considered: shell out to `gzip -c`, which works on Linux/macOS
+  but is not consistently in `PATH` on Windows. `flate2` is a
+  small, universally-supported crate that keeps the smoke
+  cross-platform. `dev-dependency` only — the `fitz` release
+  binary does not link it.
+- `docs/fase-11-plan.md` — this §9.o added + row 11.4 in §6
+  refreshed to mark 11.4.c INFRA CLOSED with measurement
+  pending. §9.m's "Debt residual" bullet about
+  `#[wasm_bindgen(start)]` being unemitted is left as-is: it's
+  a Phase 11.5 CLI concern that 11.4.c handles ad-hoc in the
+  harness, not a debt that 11.4.c "closes" (the CLI still needs
+  to be written).
+
+**Design decisions worth naming**:
+
+- **Two smoke tests, not one, with the always-on test being the
+  regeneration**. The temptation was a single `#[ignore]` test
+  that regenerates AND builds. Splitting them means: (a) every
+  `cargo test` verifies the pipeline still produces valid,
+  compilable-looking Rust and the committed `lib.rs` matches
+  the current emitter, catching drift the moment a PR touches
+  `src/view/codegen_wasm.rs`; (b) the expensive step
+  (wasm-pack, ~30-60s cold, several deps download on first
+  run) stays opt-in for contributors who have the toolchain.
+  Trade-off: the always-on regeneration test WRITES to
+  `wasm-crate/src/lib.rs`, which is a mildly surprising side
+  effect for a test. Mitigated by `write_if_changed` (no-op if
+  the content matches) and by the file being marked
+  AUTO-GENERATED in its header + `.gitignore` covering the
+  build artefacts around it.
+- **`wasm-crate/` NOT a `[workspace]` member of the root
+  `Cargo.toml`**. Adding it as a workspace member would let
+  `cargo build --workspace` build the wasm crate as part of the
+  normal build, which sounds convenient but is actually bad:
+  (a) it forces every `cargo build` to require the
+  `wasm32-unknown-unknown` target to be installed OR emit a
+  cryptic linker error; (b) it wires the demo's Cargo.lock into
+  the workspace lock, coupling the demo's deps to the release
+  binary's dep versions — the demo should be free to bump its
+  own `wasm-bindgen` version independently. Keeping it out-of-
+  tree from the workspace makes it a genuinely standalone POC
+  scaffold. `wasm-pack build` from inside `wasm-crate/`
+  resolves deps against `wasm-crate/Cargo.toml` alone.
+- **The composed entry point (`#[wasm_bindgen(start)]`) lives
+  in the harness that generates `lib.rs`, NOT in
+  `view::emit_module()`**. `emit_module()` remains agnostic
+  about how a component wires into the browser lifecycle —
+  which mount selector, whether N components share a single
+  `start()`, whether the entry point does other init (routing,
+  analytics, state hydration). Phase 11.5 CLI (`fitz build
+  --target wasm --entry Counter --mount '#app'`) will emit the
+  equivalent wrapper per invocation. Handling the composition
+  in the harness for 11.4.c is a deliberate throw-away of the
+  ergonomics: it wires the demo end-to-end without prejudging
+  the shape of the CLI flag surface.
+- **Structural invariants in `regenerate_counter_lib_rs`
+  duplicate coverage from `codegen_wasm::tests`**. The
+  unit tests over there already assert most of these substrings.
+  The invariants here catch a different failure mode: `emit_module`
+  starts producing valid Rust that DIFFERS from the committed
+  `lib.rs` (e.g. a refactor changes an ident name or the order
+  of impls). Without the invariants, that drift would only
+  surface when someone next runs `wasm-pack build` — much
+  later than we'd like. The list is deliberately small (8
+  items) so it doesn't duplicate the ~23 unit tests point-by-
+  point.
+- **`counter_bg.wasm` as the measurement target, not the whole
+  `pkg/` directory**. The 40 KB gate is defined against the
+  WASM binary specifically, not the JS glue or `.d.ts` file.
+  `counter.js` in `pkg/` is ~15-20 KB uncompressed but browsers
+  cache it separately, and it's not the interesting variable —
+  the interesting variable is "how much WASM does one Fitz
+  component compile to". Measuring just `counter_bg.wasm`
+  isolates that question.
+
+**Verification pre-close of §9.o**:
+
+- `cargo test --lib --release`: **3517 passed / 0 failed** in
+  2.99s (unchanged from post-§9.n baseline — no new lib tests
+  added; the smoke tests live in `tests/view_counter_wasm_smoke.rs`
+  as an integration test file, not adding to the lib count).
+- `cargo test --test view_counter_wasm_smoke regenerate_counter_lib_rs`:
+  **1 passed / 0 failed** in <1s (compile time ~30s cold for
+  the new `flate2` dep chain; incremental thereafter). The
+  test regenerated `wasm-crate/src/lib.rs` from
+  `Counter.fitzv`, ran all 8 structural invariants clean, and
+  wrote the file exactly once.
+- `cargo fmt --all --check`: clean (one line-length reflow in
+  the smoke file applied automatically by `cargo fmt --all`
+  during the first pass; the checked state is stable).
+- `cargo clippy --lib --tests --bins -- -D warnings` (default):
+  clean in 43.03s.
+- `cargo clippy --lib --tests --bins --features client-wasm --
+  -D warnings`: clean in 45.78s. Same warnings-free posture as
+  §9.m and §9.n confirmed.
+- Classic `.fitz` pipeline untouched. Invariants 1-5 all hold.
+  The `flate2` dev-dep addition does NOT touch the release
+  binary — `cargo build --release` links the same set of
+  crates as before v0.20.1 baseline.
+
+**Measurement recipe (how to close 11.4.c fully)**:
+
+1. Install prereqs (one-time per machine):
+   ```
+   rustup target add wasm32-unknown-unknown
+   cargo install wasm-pack
+   ```
+2. From the repo root:
+   ```
+   cargo test --test view_counter_wasm_smoke -- --ignored
+   ```
+3. Read the "Phase 11.4.c bundle size" section printed by the
+   test. Three outcomes:
+   - **Under 40 KB gzipped**: 11.4.c fully closes. Refresh
+     this §9.o with the measured number under a "Result"
+     subsection, mark 11.4.c CLOSED in §6, and move to 11.4.d.
+   - **Over 40 KB gzipped**: PIVOT to JS-vanilla (approach B1
+     in §9.l). Refresh `docs/stack.md` lines 99-101 with the
+     evidence + open a §9.o.pivot section documenting the
+     decision + the new approach. The `codegen_wasm.rs` module
+     stays as reference / point of future comparison, not
+     deleted.
+   - **`wasm-pack` build error**: something in the emitted
+     `lib.rs` doesn't compile (typo in an emitted helper,
+     `web-sys` feature missing, wasm-bindgen API mismatch).
+     Fix the emitter in `src/view/codegen_wasm.rs`, re-run the
+     smoke to regenerate `lib.rs`, iterate. Add a targeted
+     unit test in `codegen_wasm::tests` for the shape that
+     broke to prevent regression.
+
+**Debt residual from 11.4.c INFRA**:
+
+- **Bundle-size measurement not yet recorded**. See recipe
+  above. Blocking on `wasm-pack` install on a machine where
+  someone is willing to run the smoke. Not a bug — the
+  infrastructure is complete; only the specific numeric answer
+  is missing.
+- **Browser smoke not automated**. The manual browser flow
+  (open `index.html` via `python -m http.server` and click the
+  buttons) is documented in the README but not tested by CI or
+  anything in-tree. Automating this would require headless
+  browser instrumentation (Playwright / wasm-bindgen-test with
+  `--target chromium`), which is a much larger investment for
+  11.5 CLI/LSP-adjacent work, not for 11.4.c.
+- **`Closure::wrap(...).forget()` leaks closures on each
+  `render()`** (documented in §9.m Debt residual). Confirmed
+  present in the emitted `lib.rs` from `Counter.fitzv` — every
+  click adds three fresh closures to `document`'s event
+  listener table. Acceptable for POC per §9.m; refinement to
+  a per-instance `Closure` cache falls under approach A3 (in-
+  tree runtime crate), not 11.4.c.
+- **`wasm-crate/src/lib.rs` scope-class hash is emitter-derived
+  and will drift if the FNV-1a input format changes**. Today
+  the hash comes from `<Counter>::<css_raw>` (see §9.k). If
+  §9.k's hash input changes, the committed baseline
+  `lib.rs` becomes stale and `wasm-pack build` breaks until
+  someone runs the regeneration smoke. The regeneration smoke
+  is always-on precisely to prevent this from lasting more
+  than one PR cycle — anyone running `cargo test` will
+  regenerate; git will show the diff.
+
+No other files touched by 11.4.c. 11.4.d (cierre formal +
+roadmap refresh) blocks on the measurement gate closure.
 
 ---
 

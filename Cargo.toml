@@ -456,6 +456,13 @@ tower = { version = "0.5", features = ["util"] }
 # de axum, pero la pinneamos por claridad.
 http-body-util = "0.1"
 
+# Fase 11.4.c — gzip para medir el tamaño gzipped del `.wasm` producido
+# por el counter demo (`tests/view_counter_wasm_smoke.rs`). Compression
+# best (`Compression::best()`) matchea lo que un CDN típico sirve, así
+# que la medición reproduce el bundle real que llega al navegador.
+# Solo dev-dep — el binario `fitz` release no la necesita.
+flate2 = "1"
+
 [profile.release]
 opt-level = 3
 lto = true
