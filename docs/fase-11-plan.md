@@ -212,7 +212,7 @@ Phase 11 promise.
 | **11.2.b** | *Sub-step of 11.2.* Type-check every parsed AST from 11.2.a. Split into three mini-commits, ALL **CLOSED 2026-07-14**: **(1)** state field defaults compatible with declared type (`src/view/check.rs` ~325 LoC + 16 unit tests). **(2)** event handler bodies checked in an env seeded with state fields as let-bindings + params; template `{expr}` interpolations checked in the state env with the additional Str-friendly rule (rejected: Function, Result, Future, WsConn, DbConn/DbRow, QueryBuilder, Aggregated, Secret) (`src/view/check.rs` ~640 LoC total + 23 new unit tests). **(3)** `@event="handler"` attrs cross-check that `handler` names a declared event handler in the same component; broken references get a "did you mean ...?" hint via Levenshtein distance ≤ 3, or the full available handler list when the declared set is small (≤ 5) (`src/view/check.rs` ~825 LoC total + 11 new unit tests). **Closes 11.2.b entirely — 50 view::check tests all green.** | `.fitzv` files with mismatched types (e.g. `count: Int = "hi"`) or broken `@click="handler"` references surface at the correct field/blob with a friendly suggestion. |
 | **11.2.c** | *Sub-step of 11.2.* Extend the template AST with `{#if cond}`, `{#for x in xs}`, `{#else}`, and `<slot name="X" />`. Update the HTML sub-parser + expand + checker to handle them. Split into three mini-commits, ALL **CLOSED 2026-07-14**. **Mini-commit 1**: `{#if cond}...{/if}` end-to-end (raw AST + HTML sub-parser directive dispatch + expand parses cond as classic Expr + checker validates cond is Bool-compatible and recurses walkers into If children). ~450 LoC + 24 new unit tests (9 parser + 4 expand + 11 checker). See §9.f. **Mini-commit 2**: `{#for x in xs}...{/for}` end-to-end (raw AST + HTML sub-parser dispatch on `for` + expand parses iter as classic Expr + `check_template_for_iters` pass delegating to the classic `Stmt::For` checker for iterable typing + refactor of the 3 collectors to track a `for_scope` chain so interps and `{#if}` conds nested inside a for see the binding, wrapped in the corresponding `Stmt::For` chain when synthesising). ~570 LoC + 25 new unit tests (10 parser + 4 expand + 11 checker). Binding restricted to a single bare identifier — compound patterns `(k, v)` for Map and index bindings `(x, i)` deferred. See §9.g. **Mini-commit 3**: `{#if cond}...{#else}...{/if}` (extend `TemplateNode::If` with `else_children: Option<...>` + refactor `parse_nodes` with `accept_else: bool` returning `(nodes, terminated_by_else)` + `{#else}` sentinel intercepted by `parse_nodes` when accepting, dispatched as targeted error by `parse_directive_open` otherwise) and `<slot />` / `<slot name="X" />` (new `TemplateNode::Slot { name: Option<String>, loc }` variant intercepted in `parse_element`'s self-closing branch; open-close form `<slot>...</slot>` rejected with a 11.5-pointer message; only the `name` attribute accepted, everything else rejected with targeted messages). All 4 checker collectors (`collect_if_conds` / `collect_for_iters` / `collect_interpolations` / `collect_event_attrs`) recurse through `else_children` when present; `Slot` is a leaf that every collector skips. ~740 LoC + 26 new unit tests (14 parser + 5 expand + 7 checker). **Closes 11.2.c entirely** — the template dialect now has the full set of directives promised for 11.2, and 11.2 itself is done. See §9.h. | Nested control flow inside `<template>` parses, expands, type-checks; `<slot>` markers survive the pipeline so 11.5 composition can consume them. |
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits, ALL **CLOSED 2026-07-14**: **11.3.a** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container`, keeps other at-rules opaque, handles strings + comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class) (see §9.j). **11.3.c** — wire scoping end-to-end in `expand`: new `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc }, Global { css, loc } }` replaces the raw-passthrough `Option<RawStyle>`; scope class synthesised via FNV-1a of `<component>::<css_raw>` truncated to 8 hex, shape `<component-kebab>-c-<8hex>`; `apply_scope(...)` runs on the CSS body; every Element with a static `class` attribute gets suffixed variants added (`class="card"` → `class="card card-<scope>"`) via a recursive walker that descends into If then/else branches + For bodies; interpolated `class` attributes left alone as a documented limitation. Global styles are pure passthrough — no CSS transform, no template rewrite. Includes 21 new unit tests + `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (see §9.k). **Closes 11.3 entire** — Phase 11.3 shipped end-to-end. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
-| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **CLOSED 2026-07-14** — `src/view/codegen_wasm.rs` (~1500 LoC + 23 unit tests) emits Rust source for one component (struct + `new()` + event fns + `mount()` + `render()` + scoped/global style helper) via `pub fn emit_component(&ExpandedComponent) -> EmitResult<String>` and a whole `.rs` module via `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`. Naive re-render on state mutation (D1), two-fn public API (D2), strictly conservative subset (D3 — Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/Slot/non-click/Str/Bool/Nominal/handler-params reject with `EmitError` citing 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml` gains opt-in feature `client-wasm` with `wasm-bindgen`/`web-sys`/`console_error_panic_hook`; `cargo build` default dep tree unchanged. Verification: 3510 lib tests green (3487 baseline + 23 new), fmt + clippy `-D warnings` clean in both default and `--features client-wasm` modes. See §9.m. Deuda derivada VISIBLE that gates 11.4.c: view lexer does NOT tokenise `+`/`-`/`*`/`/`/`%` — event bodies like `count = count + 1` fail at lex time before `capture_balanced_body_raw` runs. Must close in a mini-commit before the browser smoke of 11.4.c. **11.4.c** — pre-req view-lexer arithmetic gap fix + counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded against the 40 KB gate. **11.4.d** — cierre formal + roadmap refresh. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
+| **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **CLOSED 2026-07-14** — `src/view/codegen_wasm.rs` (~1500 LoC + 23 unit tests) emits Rust source for one component (struct + `new()` + event fns + `mount()` + `render()` + scoped/global style helper) via `pub fn emit_component(&ExpandedComponent) -> EmitResult<String>` and a whole `.rs` module via `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`. Naive re-render on state mutation (D1), two-fn public API (D2), strictly conservative subset (D3 — Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/Slot/non-click/Str/Bool/Nominal/handler-params reject with `EmitError` citing 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml` gains opt-in feature `client-wasm` with `wasm-bindgen`/`web-sys`/`console_error_panic_hook`; `cargo build` default dep tree unchanged. Verification: 3510 lib tests green (3487 baseline + 23 new), fmt + clippy `-D warnings` clean in both default and `--features client-wasm` modes. See §9.m. Deuda derivada VISIBLE that gated 11.4.c (now CLOSED via §9.n follow-up 2026-07-14): view lexer arithmetic gap. **11.4.c** — counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded against the 40 KB gate. **11.4.d** — cierre formal + roadmap refresh. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). | Kanban example (currently in `fitz-liveviews/examples/kanban/`) rewritten to `.fitzv`, compiles + runs bit-for-bit equivalent via SSR. Compile times acceptable (<5s for the kanban rewrite). |
 | **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
 | **11.7** | LSP support inside `.fitzv` — hover over `{expr}` shows the type, autocomplete inside `state { }` and `event ...` bodies, template-attr completion knows about the declared event handlers of the enclosing component. | VSCode extension bumped with the new grammar + LSP config; typing `{sta` inside a template completes to `state field name` when the component has that field. |
@@ -2146,19 +2146,16 @@ construction for the arithmetic subset that requires operators.
 
 **Debt residual visible from 11.4.b**:
 
-- **View lexer arithmetic gap — BLOCKS 11.4.c browser smoke**.
-  The view lexer does NOT tokenise `+`/`-`/`*`/`/`/`%`. Any
-  `.fitzv` source with an arithmetic operator inside an event
-  body (`event increment() { count = count + 1 }`) errors at
-  lex time with "unexpected character `+` at the top level of
-  a component" — before the parser's `capture_balanced_body_raw`
-  ever runs. §7's balance-aware capture only handles bracket
-  pairs. Fix scope: extend the view lexer with `Token::Plus` /
-  `Token::Minus` / `Token::Star` / `Token::Slash` / `Token::Percent`
-  emitted as bare tokens that `capture_balanced_body_raw`
-  serialises verbatim. Should be ~40 LoC + a handful of tests.
-  Must land as a dedicated pre-req sub-commit before 11.4.c's
-  counter demo can `parse → expand → check → emit` end-to-end.
+- **View lexer arithmetic gap — CLOSED 2026-07-14 via §9.n
+  follow-up**. Previously the view lexer did NOT tokenise
+  `+`/`-`/`*`/`/`/`%`; any `.fitzv` source with an arithmetic
+  operator inside an event body errored at lex time before the
+  parser's `capture_balanced_body_raw` ran. Closed by adding the
+  5 arithmetic Token variants to `src/view/lexer.rs` + serializer
+  arms to `src/view/parser.rs::append_token_source` +
+  `needs_space_before` audit (`=` also added for consistent
+  spacing). See §9.n for the full breakdown. The 11.4.c counter
+  demo can now `parse → expand → check → emit` end-to-end.
 - **Closure leak via `.forget()`**. Documented in Design
   decisions above. Refinement path: A3 (in-tree runtime crate)
   with pooled closures per event kind, or reuse-closures-on-
@@ -2198,6 +2195,161 @@ No other files touched by 11.4.b. The next sub-commit (11.4.c)
 must first close the view lexer arithmetic gap (dedicated pre-req
 mini-commit) before it can build the runnable counter demo end-
 to-end.
+
+## 9.n Files touched by view-lexer arithmetic follow-up (closes the operator gap blocking 11.4.c)
+
+Dedicated pre-req mini-commit between 11.4.b and 11.4.c, mirroring
+the shape of §9.e (view-lexer §7 follow-up between 11.2.b.3 and
+11.2.c.1). **Closes the debt residual documented in §9.m** —
+event bodies with arithmetic operators (`count = count + 1`,
+`n = n * 2`, etc.) now lex, round-trip through
+`capture_balanced_body_raw`, and re-lex successfully via the
+classic Fitz parser inside `expand::parse_statements_from_source`.
+The 11.4.c counter demo can now be built end-to-end from a
+`.fitzv` source without hitting a "unexpected character `+`"
+error at lex time.
+
+**Files touched**:
+
+- `src/view/lexer.rs` — five new `Token` variants (`Plus`,
+  `Minus`, `Star`, `Slash`, `Percent`) with matching `Display`
+  impl arms and five new arms in the main match block of `run()`
+  emitting them from the corresponding chars. The `/` arm sits
+  AFTER `skip_ws_and_comments` so `//` line comments are still
+  intercepted first — a single `/` reaches the main match only
+  when it's not the start of a comment. Comments preserved
+  entirely (line comment content NEVER appears as a `Token::Ident`
+  in the emitted stream — regression test covers that). +3 unit
+  tests in `view::lexer::tests`:
+  - `arithmetic_ops_lex_as_dedicated_tokens` — one component
+    with all 5 ops in one body, confirms each token appears in
+    the stream.
+  - `line_comment_still_works_after_slash_arm` — regression
+    ensuring exactly one `Slash` is emitted for `a / b // hi`
+    (the `//` is a comment) AND the comment content (`"ignored"`
+    ident) does not leak into the token stream.
+  - `counter_shape_with_arithmetic_body_lexes_clean` — the
+    canonical counter source with `count = count + 1` /
+    `count = count - 1` lexes without error.
+- `src/view/parser.rs` — five new arms in `append_token_source`
+  serialising each Token variant to its literal char, plus an
+  extension to `needs_space_before`'s "space-triggers" set:
+  `+`, `-`, `*`, `/`, `%`, and `=`. The `=` was implicit before
+  the follow-up (event bodies never contained anything but
+  simple literal assigns, so nobody noticed the missing space
+  after `=`); once bodies gained arithmetic, `count =count + 1`
+  looked jarring next to the tidy `count + 1` fragment. Adding
+  `=` there produces `count = count + 1` — idiomatic + consistent
+  with how the arithmetic ops space out. +3 unit tests in
+  `view::parser::tests`:
+  - `event_body_with_add_round_trips_verbatim` — asserts
+    `body_raw` for `event increment() { count = count + 1 }`
+    trims to exactly `"count = count + 1"`.
+  - `event_body_with_all_arithmetic_ops_round_trips` — same
+    with all 5 ops in one body.
+  - `arithmetic_body_re_lexes_through_classic_parser` — takes
+    the `body_raw` and runs it through
+    `crate::parser::parse_statements_from_source`, asserting
+    the resulting `Vec<Stmt>` matches the expected
+    `Stmt::Assign { value: Expr::BinOp { op: Add, left:
+    Ident("count"), right: Int(1), .. }, .. }` shape. Proves
+    the round-trip is functionally faithful, not just
+    string-equal.
+- `src/view/codegen_wasm.rs` — +1 unit test in
+  `view::codegen_wasm::tests`:
+  - `arithmetic_body_lowering_end_to_end_via_parse_expand` —
+    full pipeline (parse → expand → emit) on a counter source
+    with `count = count + 1` and `count = count - 1`. Asserts
+    the emitted Rust contains the same lowering as the
+    direct-AST tests (`__rhs = ((*self.count.borrow()) + 1i64);`
+    for increment, `- 1i64` for decrement, plus interpolation
+    `format!("{}", ...)`). Distinct from the direct-AST tests
+    that already existed in 11.4.b — this one proves the WHOLE
+    path (view lexer + parser + expand + emitter) is unblocked,
+    not just the emitter in isolation.
+- `docs/fase-11-plan.md` — §9.m updated (the "View lexer
+  arithmetic gap" bullet under Debt residual gets a "CLOSED
+  2026-07-14 via §9.n follow-up" annotation with cross-link)
+  + this §9.n section added.
+
+**Design decisions worth naming**:
+
+- **Only the 5 arithmetic ops + `=` — not comparisons, logical,
+  bitwise, or unary `!`**. `==` / `!=` / `<=` / `>=` / `&&` /
+  `||` / `!` / bitwise are not needed by any current
+  `.fitzv` shape (event bodies of the counter demo, state
+  defaults, template interpolations). Comparisons will land the
+  moment `{#if cond}` stops rejecting at emit time in 11.4.c+ —
+  a targeted follow-up when that need arrives, mirroring the
+  posture of this one.
+- **`/` guarded by the existing `skip_ws_and_comments`
+  ordering**. The comment handler runs first in the tokenise
+  loop; a bare `/` only reaches the main match when NOT
+  followed by another `/`. Zero risk of `//` comments now
+  being misparsed as two Slash tokens — regression test
+  covers this explicitly. No new deuda opened.
+- **`Token::Star` name (not `Asterisk` or `Times`)**. Matches
+  the naming convention of the classic Fitz `crate::lexer`,
+  which uses `Star` for `*` (see `crate::ast::BinOpKind::Mul`
+  emitted from a `Star` token classic-side). Keeps the two
+  lexers reading similarly for anyone context-switching between
+  them.
+- **`=` added to `needs_space_before`'s space-triggers set**.
+  Discovered as a bystander deuda while writing the arithmetic
+  tests — the first test's `assert_eq!(body.trim(), "count = count
+  + 1")` failed because `count =count + 1` was produced instead.
+  Root cause: `=` was never in the trigger set because pre-
+  arithmetic bodies had shapes like `x = true` where the space
+  before `=` (from the `x` alpha) plus the raw `=` char left the
+  output as `x =true` — and no existing test asserted that shape.
+  Adding `=` here is safe (both spacings lex-equivalent for the
+  classic parser) and improves readability of error messages
+  that quote raw blob content.
+- **Tests split across three files instead of consolidated**.
+  Each layer's test lives in its own module: the lexer test
+  asserts the token stream shape, the parser test asserts the
+  round-trip string + AST shape, the codegen_wasm test asserts
+  the emitted Rust. Follows the isolation posture of `view/` —
+  each layer testable in isolation, plus one end-to-end
+  integration test in the top-most layer that proves they
+  compose.
+
+**Verification pre-close of §9.n**:
+
+- `cargo test --lib --release`: **3517 passed / 0 failed** in
+  2.99s (3510 baseline pre-arithmetic + 7 new: 3 lexer + 3
+  parser + 1 codegen_wasm end-to-end).
+- `cargo fmt --all --check`: clean.
+- `cargo clippy --lib --tests -- -D warnings` (default): clean
+  in 24.58s.
+- `cargo clippy --lib --tests --features client-wasm -- -D
+  warnings`: clean.
+- Classic `.fitz` pipeline untouched (0 changes to `src/lexer.rs`,
+  `src/parser.rs`, `src/ast.rs`, `src/types.rs`, `src/evaluator.rs`,
+  `src/codegen.rs`). Invariants 1-5 all hold.
+
+**Debt residual from §9.n**:
+
+- **Comparison ops (`==` / `!=` / `<=` / `>=`) still error**.
+  `{#if cond}` currently rejects at emit time, so this doesn't
+  bite yet. Follow-up when 11.4.c wires If bodies into the
+  emitter; probably ~30 LoC + a handful of tests, same posture
+  as this one.
+- **Logical `&&` / `||` unsupported**. Fitz uses `and` / `or` /
+  `not` keywords (lex as `Ident` and re-lex correctly through
+  the classic parser), so this only bites for users who write
+  `&&` / `||` — a lesser priority since Fitz idiom prefers the
+  keyword form. Deferred until real demand appears.
+- **Float literals still tokenise wrongly**. `0.5` lexes as
+  `Ident("0")` then hits `.` which is unhandled → error. State
+  fields of type `Float` are already rejected by
+  `codegen_wasm.rs` anyway, so no immediate bite. Fix would
+  extend the digit-reader in the view lexer to accept `.` as a
+  continuation when preceded by digits — small delta.
+
+No other files touched by §9.n. 11.4.c is now unblocked: the
+canonical counter shape parses, expands, checks, and emits
+end-to-end.
 
 ---
 

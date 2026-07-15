@@ -1074,6 +1074,44 @@ mod tests {
         assert!(out.contains("self.render();"), "auto-render:\n{}", out);
     }
 
+    /// End-to-end pipeline test: after the view-lexer arithmetic
+    /// follow-up (§9.n of `docs/fase-11-plan.md`), a full counter
+    /// source with `count = count + 1` parses, expands, AND emits
+    /// the expected WASM lowering. Distinct from the direct-AST
+    /// tests above — this proves the whole path is unblocked, not
+    /// just the emitter in isolation.
+    #[test]
+    fn arithmetic_body_lowering_end_to_end_via_parse_expand() {
+        let src = r#"component Counter {
+  state { count: Int = 0 }
+  event increment() { count = count + 1 }
+  event decrement() { count = count - 1 }
+
+  <template>
+    <div><span>{count}</span></div>
+  </template>
+}"#;
+        let expanded = parse_expand(src);
+        let out = emit_component(&expanded.components[0]).unwrap();
+        // The full pipeline should produce the exact same lowering
+        // as the direct-AST arithmetic tests.
+        assert!(
+            out.contains("let __rhs = ((*self.count.borrow()) + 1i64);"),
+            "increment arithmetic lowering via full pipeline:\n{}",
+            out
+        );
+        assert!(
+            out.contains("let __rhs = ((*self.count.borrow()) - 1i64);"),
+            "decrement arithmetic lowering via full pipeline:\n{}",
+            out
+        );
+        assert!(
+            out.contains(r#"= format!("{}", (*self.count.borrow()));"#),
+            "state interpolation in template:\n{}",
+            out
+        );
+    }
+
     #[test]
     fn arithmetic_body_lowering_binop_sub_direct() {
         use crate::ast::{Span, Stmt};

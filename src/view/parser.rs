@@ -422,6 +422,11 @@ fn append_token_source(out: &mut String, tok: &Token) {
         Token::Lt => out.push('<'),
         Token::Gt => out.push('>'),
         Token::Question => out.push('?'),
+        Token::Plus => out.push('+'),
+        Token::Minus => out.push('-'),
+        Token::Star => out.push('*'),
+        Token::Slash => out.push('/'),
+        Token::Percent => out.push('%'),
         Token::Newline => out.push('\n'),
         Token::TemplateRaw(_) | Token::StyleRaw { .. } | Token::Eof => {
             // Should not appear inside a `capture_*` call. If they
@@ -456,6 +461,21 @@ fn needs_space_before(prev_out: &str, tok: &Token) -> bool {
         _ => matches!(
             last,
             'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | ')' | '}' | ']' | '"' | '>' | '?'
+            // Arithmetic operators added to the space-triggers set so
+            // round-trips like `count = count + 1` reconstruct as
+            // `count = count + 1` (with the space after the `+`), not
+            // `count = count +1`. Both forms are lex-equivalent for the
+            // classic Fitz lexer, but the spaced form reads clean when
+            // the raw blob shows up in an error message.
+            | '+' | '-' | '*' | '/' | '%'
+            // `=` was implicit before the arithmetic follow-up (event
+            // bodies never contained anything but simple literal
+            // assigns, so nobody noticed the missing space after `=`).
+            // Once bodies gained arithmetic, `count =count + 1` looked
+            // jarring next to the tidy `count + 1` fragment. Adding
+            // `=` here produces `count = count + 1` — idiomatic and
+            // consistent with how the arithmetic ops space out.
+            | '='
         ),
     }
 }
@@ -2347,5 +2367,82 @@ mod tests {
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Arithmetic body round-trip — pre-req follow-up of 11.4.b (§9.n)
+    // -----------------------------------------------------------------
+
+    /// An event body with a `count = count + 1` statement round-trips
+    /// through `capture_balanced_body_raw` to a raw string that
+    /// `append_token_source` reconstructs with tidy spacing around
+    /// each operator. Before the follow-up, the `+` char failed at
+    /// lex time before the parser ever ran.
+    #[test]
+    fn event_body_with_add_round_trips_verbatim() {
+        let src = r#"component X {
+  state { count: Int = 0 }
+  event increment() { count = count + 1 }
+}"#;
+        let file = parse(src).expect("counter with `+` should parse");
+        assert_eq!(file.components.len(), 1);
+        assert_eq!(file.components[0].events.len(), 1);
+        let body = &file.components[0].events[0].body_raw;
+        // Spaces around the `=` and the `+` come from
+        // `needs_space_before` triggers (Ident before `=`, `+`, and
+        // literal digits).
+        assert_eq!(body.trim(), "count = count + 1", "body_raw:\n{}", body);
+    }
+
+    #[test]
+    fn event_body_with_all_arithmetic_ops_round_trips() {
+        let src = r#"component X {
+  state { n: Int = 0 }
+  event mix() { n = n + 1 - 2 * 3 / 4 % 5 }
+}"#;
+        let file = parse(src).expect("all-ops body should parse");
+        let body = &file.components[0].events[0].body_raw;
+        assert_eq!(
+            body.trim(),
+            "n = n + 1 - 2 * 3 / 4 % 5",
+            "body_raw:\n{}",
+            body
+        );
+    }
+
+    /// The captured raw body must be re-lexable by the classic Fitz
+    /// lexer + parser via `expand::parse_statements_from_source`
+    /// (that's what `expand::expand_event_handler` calls). Rather
+    /// than pulling in `expand` here, delegate to the classic
+    /// re-lex entry point directly.
+    #[test]
+    fn arithmetic_body_re_lexes_through_classic_parser() {
+        use crate::ast::{BinOpKind, Expr, Stmt};
+        use crate::parser::parse_statements_from_source;
+
+        let src = r#"component X {
+  state { count: Int = 0 }
+  event increment() { count = count + 1 }
+}"#;
+        let file = parse(src).expect("parse OK");
+        let body = &file.components[0].events[0].body_raw;
+        // The classic parser must accept the reconstructed body.
+        let stmts = parse_statements_from_source(body).expect("classic parser accepts round-trip");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::Assign {
+                target: _, value, ..
+            } => match value {
+                Expr::BinOp {
+                    op, left, right, ..
+                } => {
+                    assert_eq!(*op, BinOpKind::Add);
+                    assert!(matches!(left.as_ref(), Expr::Ident(name, _) if name == "count"));
+                    assert!(matches!(right.as_ref(), Expr::Int(1, _)));
+                }
+                other => panic!("expected BinOp, got {:?}", other),
+            },
+            other => panic!("expected Assign, got {:?}", other),
+        }
     }
 }

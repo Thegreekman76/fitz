@@ -66,6 +66,21 @@ pub enum Token {
     Lt,       // < (only when not opening a `<template>`/`<style scoped>` block)
     Gt,       // >
     Question, // ?
+    // Arithmetic operators — pre-req of 11.4.c (closes the deuda
+    // documented in §9.m of `docs/fase-11-plan.md`). Emitted as bare
+    // tokens so `capture_balanced_body_raw` can serialise them verbatim
+    // into event handler bodies (`count = count + 1`, `n = n * 2`),
+    // which the classic Fitz lexer then re-tokenises correctly when
+    // `expand::parse_statements_from_source` runs on the raw blob.
+    // Comparisons (`==`/`!=`/`<=`/`>=`) and logical / bitwise ops stay
+    // out until a future sub-commit needs them (e.g. `{#if x > 0}`
+    // when that directive stops rejecting at emit time in 11.4.c+).
+    Plus,  // +
+    Minus, // -
+    Star,  // *
+    Slash, // / (only when not the start of a `//` line comment;
+    // `skip_ws_and_comments` intercepts that case first)
+    Percent, // %
 
     // Blocks captured raw by the lexer.
     /// Raw content between `<template>` and `</template>` — without
@@ -107,6 +122,11 @@ impl fmt::Display for Token {
             Token::Lt => write!(f, "`<`"),
             Token::Gt => write!(f, "`>`"),
             Token::Question => write!(f, "`?`"),
+            Token::Plus => write!(f, "`+`"),
+            Token::Minus => write!(f, "`-`"),
+            Token::Star => write!(f, "`*`"),
+            Token::Slash => write!(f, "`/`"),
+            Token::Percent => write!(f, "`%`"),
             Token::TemplateRaw(_) => write!(f, "<template> block"),
             Token::StyleRaw {
                 kind: StyleKind::Scoped,
@@ -404,6 +424,49 @@ impl ViewLexer {
                     self.advance();
                     self.tokens.push(TokenWithLoc {
                         token: Token::Question,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '+' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Plus,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '-' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Minus,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '*' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Star,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '/' => {
+                    // `//` is already caught by `skip_ws_and_comments`
+                    // before we reach this branch, so a bare `/` here
+                    // is guaranteed to be the division operator.
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Slash,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '%' => {
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Percent,
                         line: start_line,
                         column: start_col,
                     });
@@ -861,5 +924,96 @@ mod tests {
         assert!(toks
             .iter()
             .any(|t| matches!(t, Token::Str(s) if s == "hello \"world\"")));
+    }
+
+    // -----------------------------------------------------------------
+    // Arithmetic operators — pre-req follow-up of 11.4.b (§9.n)
+    // -----------------------------------------------------------------
+
+    /// The 5 arithmetic operators (`+ - * / %`) each lex as their
+    /// own dedicated token so `capture_balanced_body_raw` can round-
+    /// trip an event body like `count = count + 1` verbatim through
+    /// to `expand::parse_statements_from_source`. Before this fix,
+    /// hitting a `+` at the "top level of a component" (i.e. anywhere
+    /// outside a `<template>` / `<style>` block, including inside an
+    /// `event { ... }` body — because the lexer runs *before* the
+    /// parser's `capture_balanced_body_raw` gets to filter the body
+    /// as raw) errored out with "unexpected character `+`".
+    #[test]
+    fn arithmetic_ops_lex_as_dedicated_tokens() {
+        let src = "component X { event bump() { x = x + 1 - 2 * 3 / 4 % 5 } }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        assert!(
+            toks.contains(&Token::Plus),
+            "Plus token expected: {:?}",
+            toks
+        );
+        assert!(
+            toks.contains(&Token::Minus),
+            "Minus token expected: {:?}",
+            toks
+        );
+        assert!(
+            toks.contains(&Token::Star),
+            "Star token expected: {:?}",
+            toks
+        );
+        assert!(
+            toks.contains(&Token::Slash),
+            "Slash token expected: {:?}",
+            toks
+        );
+        assert!(
+            toks.contains(&Token::Percent),
+            "Percent token expected: {:?}",
+            toks
+        );
+    }
+
+    /// Regression check: a single `/` NOT followed by another `/`
+    /// tokenises as `Slash`, but `//` still starts a line comment
+    /// (consumed by `skip_ws_and_comments` before the main match
+    /// block sees the char). The comment `// hi` between two idents
+    /// disappears entirely from the token stream; the `Slash` in
+    /// `a / b` survives.
+    #[test]
+    fn line_comment_still_works_after_slash_arm() {
+        let src = "component X { event go() { a / b // ignored comment\nc = 1 } }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        // One and only one Slash — from `a / b`, NOT from the `//`
+        assert_eq!(
+            toks.iter().filter(|t| **t == Token::Slash).count(),
+            1,
+            "expected exactly one Slash token: {:?}",
+            toks
+        );
+        // The word "ignored" should NOT appear as an Ident — the
+        // comment ate it.
+        assert!(
+            !toks
+                .iter()
+                .any(|t| matches!(t, Token::Ident(s) if s == "ignored")),
+            "comment content leaked as Ident: {:?}",
+            toks
+        );
+    }
+
+    /// Guarantee the classic Fitz lexer accepts what the view lexer
+    /// captures: parse a counter-shape .fitzv source with arithmetic
+    /// in its event bodies. This tests the round-trip end-to-end at
+    /// the lexer level only (no shell parser yet — that test lives
+    /// in `view::parser::tests`). Before the arithmetic follow-up,
+    /// this source failed to lex at all.
+    #[test]
+    fn counter_shape_with_arithmetic_body_lexes_clean() {
+        let src = r#"component Counter {
+  state { count: Int = 0 }
+  event increment() { count = count + 1 }
+  event decrement() { count = count - 1 }
+}"#;
+        assert!(
+            tokenize(src).is_ok(),
+            "counter with arithmetic body should lex clean"
+        );
     }
 }
