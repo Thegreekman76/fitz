@@ -9706,6 +9706,27 @@ Próximo norte: **11.6.c continuation** — `{#if}`/`{#for}`
 template directives via `Vec<TemplatePiece>` refactor +
 emitted `__fitz_view_str_join` helper para `{#for}`.
 
+**Sub-paso 11.6.c continuation CERRADO 2026-07-15** — cierra
+11.6.c entera. Template directives (`{#if}` con/sin `{#else}`,
+`{#for x in xs} <body> {/for}`) ahora lower a Fitz
+expression pieces via nuevo `Vec<TemplatePiece>` model.
+`{#if}` → `if (cond) { <then as Str> } else { <else as Str,
+or ""> }`. `{#for}` → `__fitz_view_str_join(<iter>.map(fn(x)
+=> <body>))` con `x` shadowing state fields dentro del body
+via local_scope tracking. Helper `__fitz_view_str_join(xs:
+List<Str>) -> Str` emitted al module header
+unconditionally. Render fn's `html(...)` argument usa
+**pretty form** (triple-string) cuando todas las pieces
+son Text, y **chain form** (`"txt" + (expr) + ...`) cuando
+hay directives. **View lexer gains `Token::Dot`** — destraba
+method calls (`state.count.upper()`) y field access en event
+body raw-capture; 2 tests que necesitaban AST-construction
+migran a natural `.fitzv` source. See §9.x. Próximo norte:
+**11.6.d** — module loader integration para que `from
+./Comp import X` triggerea la view pipeline transparente
+cuando `Comp.fitzv` existe + `<Child />` composition inline-
+render para SSR.
+
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
   4 nuevos `pub fn parse_*_from_source` en `src/parser.rs` +

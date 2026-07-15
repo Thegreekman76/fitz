@@ -81,6 +81,17 @@ pub enum Token {
     Slash, // / (only when not the start of a `//` line comment;
     // `skip_ws_and_comments` intercepts that case first)
     Percent, // %
+    /// Phase 11.6.c continuation — the `.` character. Emitted as
+    /// a bare token so `capture_balanced_body_raw` can serialise
+    /// method calls (`state.count.upper()`) and field access
+    /// (`user.email`) in event body raw blobs. Without this,
+    /// event bodies with `.` reject at lex time with "unexpected
+    /// character" at the top level of a component, blocking
+    /// method calls / field access. The classic Fitz lexer
+    /// re-tokenises the round-tripped source correctly when
+    /// `expand::parse_statements_from_source` runs on the raw
+    /// blob.
+    Dot, // .
 
     // Blocks captured raw by the lexer.
     /// Raw content between `<template>` and `</template>` — without
@@ -127,6 +138,7 @@ impl fmt::Display for Token {
             Token::Star => write!(f, "`*`"),
             Token::Slash => write!(f, "`/`"),
             Token::Percent => write!(f, "`%`"),
+            Token::Dot => write!(f, "`.`"),
             Token::TemplateRaw(_) => write!(f, "<template> block"),
             Token::StyleRaw {
                 kind: StyleKind::Scoped,
@@ -467,6 +479,18 @@ impl ViewLexer {
                     self.advance();
                     self.tokens.push(TokenWithLoc {
                         token: Token::Percent,
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+                '.' => {
+                    // Phase 11.6.c continuation — emit `.` so event
+                    // body raw-capture round-trips method calls
+                    // and field access verbatim into the classic
+                    // Fitz lexer that runs on the raw blob.
+                    self.advance();
+                    self.tokens.push(TokenWithLoc {
+                        token: Token::Dot,
                         line: start_line,
                         column: start_col,
                     });

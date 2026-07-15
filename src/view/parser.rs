@@ -427,6 +427,7 @@ fn append_token_source(out: &mut String, tok: &Token) {
         Token::Star => out.push('*'),
         Token::Slash => out.push('/'),
         Token::Percent => out.push('%'),
+        Token::Dot => out.push('.'),
         Token::Newline => out.push('\n'),
         Token::TemplateRaw(_) | Token::StyleRaw { .. } | Token::Eof => {
             // Should not appear inside a `capture_*` call. If they
@@ -457,7 +458,14 @@ fn needs_space_before(prev_out: &str, tok: &Token) -> bool {
         // captured raw blob gets logged in an error message.
         | Token::Lt
         | Token::Gt
-        | Token::Question => false,
+        | Token::Question
+        // `.` binds tightly to the surrounding identifier so
+        // that `state.count`, `xs.map(fn)`, `msg.upper()`
+        // reconstruct verbatim from `Ident("state") Dot
+        // Ident("count")` etc. — no stray whitespace that
+        // would break the classic Fitz lexer's re-tokenisation
+        // of the raw blob.
+        | Token::Dot => false,
         _ => matches!(
             last,
             'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | ')' | '}' | ']' | '"' | '>' | '?'

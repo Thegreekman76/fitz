@@ -15,18 +15,23 @@ migration as the 11.6 deliverable set, with client-side dynamic
 capabilities re-scoped to 11.7 (see §9.u). See `docs/stack.md`
 for the architectural constitution this plan implements.
 
-Sub-phases still open: 11.6.c continuation (`{#if}`/`{#for}`
-template directives via Vec<TemplatePiece> refactor) +
-11.6.d (module loader integration + `<Child />` composition)
-+ 11.6.e (fitz-liveviews migration), 11.7 (client-side
-dynamic capabilities + kanban SPA port), 11.8 (LSP support),
-11.9 (pedagogic docs).
+Sub-phases still open: 11.6.d (module loader integration
++ `<Child />` composition + `.fitzv` transparent handling
+in `from ./Comp import X`), 11.6.e (fitz-liveviews
+migration), 11.7 (client-side dynamic capabilities +
+kanban SPA port), 11.8 (LSP support), 11.9 (pedagogic
+docs).
 
-**11.6.b + 11.6.c partial CLOSED 2026-07-15** — `view::emit_module_ssr`
-emits classic Fitz source with widened grammar (full RHS
-expression walker + template interpolation richer + `<style>`
-inline with CSS-brace escaping). Round-trip tests validate
-that emitted source lexes + parses through classic Fitz.
+**11.6.b + 11.6.c CLOSED ENTIRELY 2026-07-15** —
+`view::emit_module_ssr` emits classic Fitz source with the
+FULL template grammar (Text, Interpolation, Element, static
++ interpolated + event attrs, `{#if}` + `{#else}`, `{#for}`,
+`<style>` inline) + full expression grammar (BinOp, UnaryOp,
+Call, Field, Index, StrInterp, List, Map, Range, Ok, Err,
+arrow FnExpr) with state-field rewriting + closure-param
+local-scope tracking. View lexer accepts `.` in event body
+context. Round-trip tests validate that emitted source lexes
++ parses through classic Fitz.
 
 This document captures the decisions and the sub-phases shipped
 so far, plus the shape of the ones still open. Its purpose is to
@@ -4023,14 +4028,29 @@ on the state type, the `@render_for` fn returns
       `ExpandedComponent` AST directly). Fix belongs to a
       dedicated view-lexer cleanup or to 11.6.c
       continuation.
-    - **11.6.c continuation** — `{#if}` and `{#for}`
-      template directives. Requires a `Vec<TemplatePiece>`
-      refactor of `emit_template_node_to_html` so directive
-      nodes plug in as `Expr` pieces alongside literal
-      `Text` pieces. `{#for}` also needs an emitted helper
-      fn (`__fitz_view_str_join`) at the module header
-      since classic Fitz's `List<Str>` built-in methods
-      don't include `.join()`.
+    - **11.6.c continuation CLOSED 2026-07-15** (see §9.x)
+      — `{#if}` / `{#for}` template directives + view
+      lexer `.` fix + `emit_template_node_to_html`
+      refactored to `emit_template_node_to_pieces` (writes
+      `Vec<TemplatePiece>` where `Text` pieces are literal
+      HTML and `Expr` pieces are Fitz expressions yielding
+      `Str`). Render fn's `html(...)` argument uses **pretty
+      form** (triple-string) when all pieces are `Text` and
+      **chain form** (`"txt" + (expr) + ...`) when any
+      directive is present. `{#if cond}` → `if (cond) {
+      <then as Str> } else { <else as Str, or ""> }`.
+      `{#if}` / `{#else}` supported. `{#for x in xs}` →
+      `__fitz_view_str_join(<iter>.map(fn(x) => <body as
+      Str>))` with the `x` binding shadowing any same-named
+      state field inside the body. The
+      `__fitz_view_str_join(xs: List<Str>) -> Str` helper is
+      emitted at module header unconditionally (dead-code
+      when unused). View lexer gains `Token::Dot` so method
+      calls (`state.count.upper()`) and field access work in
+      event body raw-capture; two pre-existing tests that
+      needed AST-construction now use natural `.fitzv`
+      source. 5 new + 4 inverted-from-rejection tests. See
+      §9.x.
 - **11.6.d** — Module loader integration: `from ./Comp
   import X` triggers view pipeline when `Comp.fitzv` exists.
   Auto-add `fitz-liveviews` dep resolution when a `.fitzv`
@@ -4442,6 +4462,188 @@ belongs in its own commit ("11.6.c continuation").
 corresponding row refresh in §6, and the memoria update.
 Next: 11.6.c continuation (`{#if}`/`{#for}` template
 directives via `Vec<TemplatePiece>` refactor).
+
+---
+
+## 9.x 11.6.c continuation — `{#if}` / `{#for}` template directives + view lexer `.` fix
+
+Fourth commit of Phase 11.6, closing the SECOND half of
+11.6.c. Template directive support lands together with the
+view lexer's `.` fix — packaged in one commit because the
+lexer fix destraba pre-existing tests that had to
+AST-construct their fixtures.
+
+**Design decisions**
+
+- **`Vec<TemplatePiece>` model for render body.** The
+  render fn's HTML string is built as a list of pieces
+  where each piece is either literal `Text(String)` (may
+  contain Fitz `{state.<field>}` interpolation syntax and
+  backslash-escaped `\{` / `\}` from CSS pre-escape) or
+  `Expr(String)` holding a Fitz expression that evaluates
+  to `Str` (produced by the `{#if}` / `{#for}` lowerings).
+  `push_text` merges consecutive Text pieces so the pretty
+  form emits as one contiguous string when possible.
+- **Two serialisation forms.**
+    - **Pretty form (triple-string)** — when every piece
+      is `Text` (no directives), emit as `html("""<full
+      HTML>""")`. Preserves the readable shape that 11.6.b
+      and 11.6.c partial produced.
+    - **Chain form** — when any directive is present, emit
+      as `"txt1" + (expr1) + "txt2" + (expr2) + ...`. Each
+      `Text` piece becomes a single-quoted Fitz string
+      literal (only `"`, `\n`, `\r` escaped —
+      backslash-prefixed sequences like `\{` / `\}` from
+      CSS pre-escape pass through verbatim). Each `Expr`
+      piece wraps in parens for precedence safety.
+- **`{#if cond}` lowering.** Emits as `Expr("if (<cond>)
+  { <then as Str> } else { <else as Str, or ""> }")`. Both
+  branches recursively emit pieces + serialise via
+  `serialize_pieces_as_html_arg` so nested directives work
+  naturally. `{#if}` without `{#else}` yields an empty
+  string in the else branch.
+- **`{#for x in xs}` lowering.** Emits as `Expr(
+  "__fitz_view_str_join(<iter>.map(fn(x) => <body as
+  Str>))")`. The `x` binding is pushed to the walker's
+  `local_scope` when walking the body so `Ident("x")`
+  emits verbatim rather than being rewritten as
+  `state.x` (which would be wrong).
+- **`__fitz_view_str_join(xs: List<Str>) -> Str` helper.**
+  Classic Fitz's `List<T>` built-in methods do not
+  include `.join()`, so `{#for}` lowering needs a helper.
+  Emitted at module header unconditionally (dead code
+  when the module doesn't use `{#for}`, but the cost is
+  negligible and the unconditional emit keeps the
+  pipeline simple).
+- **View lexer gains `Token::Dot`.** The view lexer's
+  top-level char set now includes `.`. Emitted as a bare
+  `Token::Dot` and re-serialised by
+  `capture_balanced_body_raw` via `append_token_source`.
+  Tight-binding rule in `needs_space_before` keeps
+  `state.count.upper()` reconstructing as one token
+  sequence rather than `state . count . upper ()`. Two
+  pre-existing tests (`emit_accepts_method_call_via_
+  direct_expr_construction` + `emit_accepts_arrow_
+  closure_via_direct_expr_construction`) drop the
+  AST-construction dance in favour of natural `.fitzv`
+  source — the tests survive as `emit_accepts_method_
+  call_rhs` and `emit_accepts_arrow_closure_rhs`.
+
+**Files touched**
+
+- `src/view/lexer.rs`:
+  - New `Token::Dot` variant.
+  - Match arm in the top-level lexer that emits
+    `Token::Dot` on `.`.
+- `src/view/parser.rs`:
+  - `append_token_source` handles `Token::Dot` by pushing
+    `.`.
+  - `needs_space_before` adds `Token::Dot` to the
+    tight-binding set so `state.count` reconstructs
+    without stray whitespace.
+- `src/view/codegen_ssr.rs`:
+  - `emit_template_node_to_html` → `emit_template_node_
+    to_pieces` (writes `Vec<TemplatePiece>` instead of
+    `&mut String`). New `local_scope: &[&str]` parameter
+    for `{#for}` bindings.
+  - `emit_attr_to_html` → `emit_attr_to_pieces` (parallel
+    signature change; passes `local_scope` through).
+  - `emit_render_fn` accumulates pieces + calls
+    `serialize_pieces_as_html_arg` at the end.
+  - `emit_module_header` emits the `__fitz_view_str_join`
+    helper.
+  - New types + helpers: `TemplatePiece` enum, `push_text`,
+    `serialize_pieces_as_html_arg`,
+    `fitz_str_literal_for_chain_form`.
+  - `format_template_interpolation` removed (dead code
+    after the direct call to `format_fitz_expr_scoped` in
+    the Interpolation case).
+  - Module doc comment updated to reflect the new
+    supported grammar + emit shapes.
+- `src/view/codegen_ssr.rs` tests:
+  - Two pre-existing tests simplified to natural `.fitzv`
+    source now that the view lexer accepts `.` in event
+    body context:
+    - `phase_11_6_c_emit_accepts_method_call_rhs`
+    - `phase_11_6_c_emit_accepts_arrow_closure_rhs`
+  - Two pre-existing rejection tests inverted to positive
+    checks (`emit_rejects_if_directive_citing_11_6_c` +
+    `emit_rejects_for_directive_citing_11_6_c` were 11.6.b
+    tests):
+    - `phase_11_6_c_cont_emit_accepts_if_directive`
+    - `phase_11_6_c_cont_emit_accepts_for_directive`
+  - Two pre-existing "still rejects" tests from 11.6.c
+    partial folded into positive checks:
+    - `phase_11_6_c_cont_module_header_emits_str_join_helper`
+      (verifies the helper is present in every emit).
+  - 5 new tests:
+    - `phase_11_6_c_cont_emit_if_with_else_branch`
+    - `phase_11_6_c_cont_emit_if_without_else_uses_empty_string`
+    - `phase_11_6_c_cont_for_body_uses_bare_var_not_state`
+      — regression guard for the `{#for x in xs}` local-
+      scope tracking.
+    - `phase_11_6_c_cont_directive_bearing_module_round_
+      trips_through_classic_fitz` — end-to-end fixture with
+      `{#if}` + `{#for}` + BinOp arithmetic + template
+      interp + scoped style.
+    - `phase_11_6_c_cont_all_text_template_still_uses_
+      pretty_triple_string` — regression guard for the
+      pretty form.
+
+**Total test delta**: net +5 SSR tests (34 → 34; 2 old
+rejection tests removed, 4 inverted to positive, 5 new
+positive tests added). Full view test suite: **356 → 356**
+(no regressions; 22 net new positive assertions across the
+rename/invert/add).
+
+**Debt / gotchas visible from 11.6.c continuation**
+
+- **`__fitz_view_str_join` emitted unconditionally.**
+  Modules without `{#for}` carry the helper as dead code.
+  Fix: scan all templates for `{#for}` presence before
+  emitting the header, conditionally include. Skipped in
+  this commit because the negligible cost doesn't justify
+  the extra scan pass.
+- **StrInterp `FormatSpec` still dropped by walker.**
+  Same as 11.6.c partial. Format specs on state-field
+  interpolations remain rare in fitz-liveviews real usage;
+  refinement lands if pressure appears.
+- **`{#if cond}` with non-bare-Bool cond emits `if
+  (<expr>)` — classic Fitz may reject if `<expr>` doesn't
+  evaluate to Bool.** The SSR walker doesn't insert type
+  coercion; user is responsible for supplying a Bool-typed
+  condition. Same rule the classic Fitz checker enforces.
+- **`{#for}` body with statements (not just expression
+  content).** The `<body as Str>` branch handles template
+  nodes fine; anything more complex (a `<let>` inside a
+  directive?) isn't in the current template AST anyway.
+- **Multi-statement event bodies still reject.** Event
+  bodies with `if x { count = 1 } else { count = 0 }`
+  inside would need statement lowering to a struct
+  literal with an if-as-expression per mutated field.
+  Deferred to Phase 11.7+ alongside richer event
+  semantics.
+
+**Files NOT touched**
+
+- `src/view/expand.rs` / `src/view/check.rs` — the
+  pipeline shape is unchanged.
+- `src/main.rs` — no CLI wiring; SSR emitter is still
+  invoked only by tests. Module loader integration is
+  11.6.d.
+- `fitz-liveviews/*` — no migration yet.
+
+**Phase 11.6.c CLOSED ENTIRELY** with this §9.x section +
+the §6 row refresh (partial + continuation both marked
+CLOSED). The SSR emitter now handles the FULL template
+grammar (Text, Interpolation, Element, static + interpolated
++ event attrs, `{#if}` + `{#else}`, `{#for}`, `<style>`
+inline) + the full expression grammar (BinOp, UnaryOp, Call,
+Field, Index, StrInterp, List, Map, Range, Ok, Err, arrow
+FnExpr) with proper state-field rewriting + closure-param
+local-scope tracking. Next: 11.6.d — module loader
+integration + `<Child />` composition + `.fitzv` transparent
+handling in `from ./Comp import X`.
 
 ---
 
