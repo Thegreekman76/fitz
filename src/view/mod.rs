@@ -26,6 +26,7 @@
 
 pub mod ast;
 pub mod check;
+pub mod codegen_ssr;
 pub mod codegen_wasm;
 pub mod css_parser;
 pub mod expand;
@@ -34,6 +35,7 @@ pub mod parser;
 pub mod wasm_build;
 
 pub use check::{check, CheckError};
+pub use codegen_ssr::{emit_component_ssr, emit_module_ssr, SsrEmitError, SsrEmitResult};
 pub use codegen_wasm::{emit_component, emit_module, EmitError, EmitResult};
 pub use css_parser::{apply_scope, CssParseError};
 pub use expand::{

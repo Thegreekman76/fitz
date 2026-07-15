@@ -9669,10 +9669,27 @@ end para fixtures single-component (counter) y multi-component
 children estáticos). **Sub-paso 11.6.a CERRADO 2026-07-15** —
 research + decision doc (§9.u) restaura el intent original del
 §6 row 11.6 (SSR emitter + migración fitz-liveviews) y re-
-escopa client-side dynamic capabilities a **11.7**. Próximo
-norte: **11.6.b** — skeleton `view::emit_ssr` sobre un fixture
-`.fitzv` single-component targeted al framework runtime de
-fitz-liveviews.
+escopa client-side dynamic capabilities a **11.7**. **Sub-paso
+11.6.b CERRADO 2026-07-15** — nuevo módulo
+`src/view/codegen_ssr.rs` (~700 LoC + 20 unit tests) con
+`emit_module_ssr(&ExpandedViewFile) -> SsrEmitResult<String>`
++ `emit_component_ssr(&ExpandedComponent)`. Emite classic Fitz
+source text apuntando al fitz-liveviews framework contract
+(`@live_component` + `@render_for` + `@on`). Dos transforms
+pinneadas por §9.u: `@click` → `data-flv-click` en el HTML +
+`{field}` → `{state.field}` en la interpolación del render fn.
+Event body lowering: mutations accumulate en un struct-literal
+return que carga TODOS los state fields (mutated toman el RHS,
+untouched toman `state.<field>`). Bare-ident RHS = state field
+se reescribe como `state.<field>`. MVP scope guards (rejects
+con targeted 11.6.c/d/7+ pointers): non-literal RHS,
+`{#if}`/`{#for}`, `<style>`, `<Child />`, `<slot />`,
+non-state-field ident en interpolación. Acceptance criterion:
+round-trip test `emit_output_round_trips_through_classic_fitz_lexer_and_parser`
+prueba que el emitted source lexea + parsea limpio. See §9.v.
+Próximo norte: **11.6.c** — full event body lowering +
+`{#if}`/`{#for}` template lowering + `<style scoped>` inline
+emission.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
