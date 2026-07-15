@@ -9,13 +9,15 @@ entirely.** `fitz build --bin <web>` on a `.fitzv` with `target =
 "wasm-client"` produces a browser bundle end-to-end; single-
 component AND multi-component fixtures work, with the composition
 subset that 11.5.d anchored (static props, self-closing children,
-no event bubbling). See `docs/stack.md` for the architectural
-constitution this plan implements.
+no event bubbling). **Sub-phase 11.6.a CLOSED 2026-07-15** —
+research + decision doc pinning SSR emitter + fitz-liveviews
+migration as the 11.6 deliverable set, with client-side dynamic
+capabilities re-scoped to 11.7 (see §9.u). See `docs/stack.md`
+for the architectural constitution this plan implements.
 
-Sub-phases still open: 11.6 (fitz-liveviews migration + kanban
-port on top of 11.6's dynamic props / event bubbling / cross-
-file composition surface), 11.7 (LSP support), 11.8 (pedagogic
-docs).
+Sub-phases still open: 11.6.b/c/d/e (SSR emitter + fitz-
+liveviews migration), 11.7 (client-side dynamic capabilities +
+kanban SPA port), 11.8 (LSP support), 11.9 (pedagogic docs).
 
 This document captures the decisions and the sub-phases shipped
 so far, plus the shape of the ones still open. Its purpose is to
@@ -219,9 +221,10 @@ Phase 11 promise.
 | **11.3** | CSS scoping. Parse `<style scoped>` into a small AST, apply per-component class prefix, emit scoped CSS in the SSR output. Decide unscoped style story (`<style global>` or a separate directive). Split into three mini-commits, ALL **CLOSED 2026-07-14**: **11.3.a** — `<style global>` as a first-class sibling of `<style scoped>` in the lexer + parser + AST, plus new `StyleKind { Scoped, Global }` discriminant; bare `<style>` is rejected at lex time with a targeted error naming both accepted forms (see §9.i). **11.3.b** — standalone CSS mini-parser + `apply_scope(css_raw, scope) -> Result<String, CssParseError>` in `src/view/css_parser.rs` (~900 LoC + 45 unit tests + 1 doctest); walks the CSS char-by-char, suffixes every class selector `.<ident>` with `-<scope>`, recurses into `@media`/`@supports`/`@container`, keeps other at-rules opaque, handles strings + comments + attribute selectors + selector-arg pseudos (`:not(.foo)` correctly scopes the inner class) (see §9.j). **11.3.c** — wire scoping end-to-end in `expand`: new `enum ExpandedStyle { Scoped { css_scoped, scope_class, loc }, Global { css, loc } }` replaces the raw-passthrough `Option<RawStyle>`; scope class synthesised via FNV-1a of `<component>::<css_raw>` truncated to 8 hex, shape `<component-kebab>-c-<8hex>`; `apply_scope(...)` runs on the CSS body; every Element with a static `class` attribute gets suffixed variants added (`class="card"` → `class="card card-<scope>"`) via a recursive walker that descends into If then/else branches + For bodies; interpolated `class` attributes left alone as a documented limitation. Global styles are pure passthrough — no CSS transform, no template rewrite. Includes 21 new unit tests + `src/view/expand.rs` grew from ~830 LoC to ~1650 LoC (see §9.k). **Closes 11.3 entire** — Phase 11.3 shipped end-to-end. | A component with `<style scoped>` styling produces HTML + CSS where the styles apply only to that component's markup, verified against `.fitzv` fixtures. |
 | **11.4** | Client target decision (WASM vs JS-vanilla). Prototype whichever wins on a two-page counter demo. Confirm bundle size is acceptable. Split into four sub-commits: **11.4.a** — research + decision (docs-only, no code). **CLOSED 2026-07-14** — decision recorded is **WASM-first, hand-rolled `wasm-bindgen` + `web-sys` directly under opt-in feature `client-wasm`** (Approach A2 in §9.l). Rationale: aligns with `docs/stack.md` v1 "WASM primero, JS/vanilla secundario"; preserves the "Fitz por sí solo" promise (no external framework, no `npm`); preserves Invariant 4 (emitter isolated in `src/view/codegen_wasm.rs`, `cargo build` default unchanged); bundle 15-25 KB gzipped acceptable for 90% of cases. Gate for 11.4.b/c: if the counter POC exceeds 40 KB gzipped, PIVOT to JS-vanilla and refresh `docs/stack.md`. See §9.l. **11.4.b** — POC emitter of the chosen target on the counter subset (state Int + eventless params + template Text/Element/Interpolation/Event/Static-class). **CLOSED 2026-07-14** — `src/view/codegen_wasm.rs` (~1500 LoC + 23 unit tests) emits Rust source for one component (struct + `new()` + event fns + `mount()` + `render()` + scoped/global style helper) via `pub fn emit_component(&ExpandedComponent) -> EmitResult<String>` and a whole `.rs` module via `pub fn emit_module(&ExpandedViewFile) -> EmitResult<String>`. Naive re-render on state mutation (D1), two-fn public API (D2), strictly conservative subset (D3 — Int state + `@click`-only + literal-Int + BinOp arithmetic; If/For/Slot/non-click/Str/Bool/Nominal/handler-params reject with `EmitError` citing 11.4.c/11.5), string-grep unit tests only (D4). `Cargo.toml` gains opt-in feature `client-wasm` with `wasm-bindgen`/`web-sys`/`console_error_panic_hook`; `cargo build` default dep tree unchanged. Verification: 3510 lib tests green (3487 baseline + 23 new), fmt + clippy `-D warnings` clean in both default and `--features client-wasm` modes. See §9.m. Deuda derivada VISIBLE that gated 11.4.c (now CLOSED via §9.n follow-up 2026-07-14): view lexer arithmetic gap. **11.4.c** — counter demo runnable (`examples/view/counter/`) + browser smoke + bundle-size measurement recorded against the 40 KB gate. **CLOSED 2026-07-15** — `examples/view/counter/{Counter.fitzv, index.html, README.md, wasm-crate/}` shipped end-to-end. Harness lives in `tests/view_counter_wasm_smoke.rs`: `regenerate_counter_lib_rs` (always runs on `cargo test`, keeps `wasm-crate/src/lib.rs` in sync with the emitter output + validates structural invariants) + `build_counter_wasm_and_measure` (`#[ignore]`, opt-in via `-- --ignored`, runs `wasm-pack build --release --target web` and measures gzipped size against the 40 KB gate). `flate2 = "1"` added as `dev-dependency` for the size measurement. Composed entry point (`#[wasm_bindgen(start)] pub fn start()`) lives at the tail of the harness, NOT in `view::emit_module()` — same posture Phase 11.5 CLI will inherit. Verification: 3517 lib tests green (unchanged baseline, no regressions), fmt + clippy default + clippy `--features client-wasm` all clean. See §9.o. **MEASUREMENT CLOSED 2026-07-15** — measured on Windows 11 with `rustc + rust-std wasm32-unknown-unknown + wasm-pack 0.15.0`: raw `.wasm` 26.1 KB / **gzipped 11.4 KB** (28.6 KB headroom under the 40 KB gate). A2 (hand-rolled `wasm-bindgen`) validated as the primary WASM target; no pivot to JS-vanilla needed, `docs/stack.md` lines 99-101 remain accurate. `wasm-pack` requires `wasm-opt = ['-O', '--enable-bulk-memory']` metadata on the wasm-crate to accept modern rustc output — recorded in `wasm-crate/Cargo.toml` with the reason inline. Two cosmetic emitter warnings surfaced (`unused_parens` in BinOp assignment RHS + `non_snake_case` in style-injection helpers) and are documented as deuda derivada in §9.o Debt residual — not correctness bugs; deferred to the 11.5 emitter cleanup pass. **11.4.d** — cierre formal + roadmap refresh. **CLOSED 2026-07-15** — this doc's row + §9.o Result subsection + `docs/roadmap.md` Fase 11 section refreshed to reflect the gate outcome. Browser smoke validated manually on Windows 11 / Chrome (2026-07-15): counter renders in `#app` with initial `0`, `+`/`-`/`reset` mutate the value and re-render is scoped to the component's subtree (no full-body redraw, per §9.m D1 naive-render policy). Two cosmetic emitter warnings (`unused_parens` + `non_snake_case`) intentionally deferred to the 11.5 CLI cleanup pass (see §9.o Debt residual). **Closes 11.4 entirely** — A2 (hand-rolled `wasm-bindgen` + `web-sys` under opt-in feature `client-wasm`) confirmed as the primary WASM target for Fitz, no pivot to JS-vanilla needed. | `fitz build --target <chosen>` produces a working browser demo of the counter component with state persisting across events. |
 | **11.5** | CLI integration — `fitz build` routes `.fitzv` files based on `[[bin]] target` / `--target` flag. Multi-component composition (parent embeds child via `<Child prop="v" />`). Split into five sub-commits: **11.5.a** — research + decision (docs-only, no code). **CLOSED 2026-07-15** — decision recorded is **hybrid manifest + flag** (`[[bin]]` multi-bin closes debt 9.y.8+ as a side-effect; `target = "native"` \| `"wasm-client"` \| `"ssr"` with `ssr` reserved for 11.6+; `mount = "#app"` required for `wasm-client`; `--bin <name>` selector + `--target <t>` override; legacy `[bin]` singular auto-migrates). See §9.p. **11.5.b** — manifest extension: `[[bin]]` array-of-tables + `name`/`target`/`mount` fields + `--bin`/`--target` flags + auto-migration of legacy `[bin]` singular. Rejects `target = "ssr"` with targeted 11.6+ message. **CLOSED 2026-07-15** — `src/manifest.rs` now models `Manifest.bins: Vec<ManifestBin>` (was `Option<Bin>`) with new fields `name`/`target`/`mount`, new `Target` enum (kebab-case serde: `Native`/`WasmClient`/`Ssr`), new `ManifestWarning::SsrTargetReserved` surface for the CLI to display. Custom `Deserialize` via `RawManifest` + untagged `RawBinField { Single | Multiple }` auto-migrates legacy `[bin]` singular (fills `name` from `package.name` when omitted). Cross-field validation eagerly rejects `.fitzv` + `target = "native"` (both explicit and default) and `wasm-client` without `mount`. Custom `Serialize` preserves the visual `[bin]` singular shape for the common scaffolded case. CLI: `Commands::Build` gains `--bin <name>` + `--target <t>` (clap); new `resolve_entry_with_bin` propagates the selection + override into `ResolvedEntry.target_override` and `ManifestCtx.selected_bin`; helper `enforce_build_target_supported` rejects `wasm-client` citing 11.5.c and `ssr` citing 11.6+ before touching disk. 23 new unit tests in `manifest::tests` (legacy migration, multi-bin parse, target enum roundtrip, mount validation, `.fitzv` + native rejection, SSR warning, `select_bin`) + 7 new `cli_e2e` tests (`--bin` selector on multi-bin, wasm-client + 11.5.c rejection, ssr + 11.6+ rejection, unknown target value, legacy `[bin]` regression, `.fitzv` + native rejection). **Closes debt 9.y.8+ (multi-bin `[[bin]]`)** — noted in `docs/deudas-post-5b.md`. See §9.q. **11.5.c** — single-component `wasm-client` build. **CLOSED 2026-07-15** — new module `src/view/wasm_build.rs` (~430 LoC + 15 unit tests) owns the composition helpers: `compose_lib_rs(expanded, mount_selector, source_label)` runs `emit_module` and appends the `#[wasm_bindgen(start)]` wrapper (first-declared component = root, per §9.p); `compose_cargo_toml(pkg_name)` renders the wasm-crate Cargo.toml with the crucial `[package.metadata.wasm-pack.profile.release] wasm-opt = ['-O', '--enable-bulk-memory']` metadata knob (§9.o gotcha) + the exact `web-sys` feature subset the emitter uses; `sanitise_wasm_pkg_name` converts kebab-case bin names to snake_case Rust crate names; `write_wasm_crate_scaffold(dst, expanded, bin_name, mount, source_label)` materialises the scaffold on disk. `Manifest.warnings()` + the cross-field validation from 11.5.b keep the wasm-client path fail-fast. CLI: `Commands::Build` now dispatches `WasmClient` to `build_wasm_client_cmd(&resolved)` (in `src/main.rs`) which loads the `.fitzv`, runs the view pipeline (parse → expand → check), writes the scaffold under `<manifest_dir>/target/wasm-build/<bin_name>/`, shells `wasm-pack build --release --target web` inside it, and recursively copies `pkg/` to `<manifest_dir>/target/wasm/<bin_name>/`. Classic `.fitz` sources with `target = "wasm-client"` are rejected with a targeted 11.5.d pointer (composition case). Missing `wasm-pack` on the runner emits an actionable install pointer. The smoke harness `tests/view_counter_wasm_smoke.rs` now routes through `view::compose_lib_rs` — same helper the CLI uses — so the committed `examples/view/counter/wasm-crate/src/lib.rs` baseline is bit-for-bit what `fitz build --bin counter --target wasm-client` would produce. Added 3 new cli_e2e tests: (a) scaffold shape verification WITHOUT `wasm-pack` (checks `Cargo.toml` + `src/lib.rs` present with the composed wrapper and the wasm-opt knob); (b) `.fitz` + wasm-client rejected citing 11.5.d; (c) empty `.fitzv` (zero components) rejected with a targeted "no component to mount" error. The `[[bin]] name = "web"` + `mount = "#app"` path is now the canonical way to emit a browser WASM bundle from a `.fitzv`. See §9.r. **11.5.d** — multi-component composition. **CLOSED 2026-07-15** — capitalised template tags (`<Card />`) now expand to a dedicated `ExpandedTemplateNode::ChildComponent { name, props: Vec<ChildComponentProp>, loc }` variant. **Parser**: unchanged (`read_tag_name` already accepted `A-Z...`). **`expand.rs`**: `expand_template_node` dispatches on `starts_with_ascii_uppercase(tag)` to a new `expand_child_component` helper that enforces the composition shape — self-closing only (fallback children rejected citing 11.6+), static-value attrs only (dynamic `prop={expr}` rejected citing 11.6+), no event attrs (`@click="..."` on children rejected citing 11.6+, points at defining the handler inside the child's own `event ...` block). **`check.rs`**: new `check_child_components` pass builds a `HashMap<&str, &ExpandedComponent>` snapshot of the file and validates every `<Child />` site — child name exists (typo hint via Levenshtein ≤ 3, else full-list fallback), self-reference rejected with a "cannot mount itself" message, each prop's `field_name` matches a declared state field (typo hint), no duplicate props, and each `raw_value` coerces via the new `pub(crate) fn coerce_child_prop_raw_value(raw, type_expr) -> Result<String, String>` helper. Coercion supported for `Str`/`Int`/`Float`/`Bool` + `Nullable<T>` of those; compound types (`List`/`Map`/`Nominal`) rejected with 11.6+ pointers. **`codegen_wasm.rs`**: (a) `emit_mount_and_render` split — public `mount(selector)` now delegates to public `mount_into(root: HtmlElement)`, so composition sites hand pre-created elements directly; (b) new `emit_child_component` creates a wrapper `<div class="__fitz-child-<Name>">`, instantiates `Child::new()`, writes each coerced prop into the corresponding `RefCell<T>` state field, then calls `mount_into` on the wrapper; (c) `type_expr_to_rust` + `default_expr_to_rust` extended beyond `Int`-only to support the four primitive scalars plus `Nullable<T>` (matches the coercion helper — any type that flows through props is also usable as a state field). **Root convention**: first-declared component of the `.fitzv` is the WASM root; parent components mount children via inline `<Child />` sites. **RenderCtx** now carries `&'a ExpandedViewFile` so the emitter can look up the child's declared state field types when coercing. **Smoke harness** (`tests/view_counter_wasm_smoke.rs`) updated with 3 new structural invariants (both `mount(selector)` and `mount_into(root)` present, delegation call). **`emit_component`** wraps its single input in a synthetic `ExpandedViewFile` so the pre-existing single-component tests keep working. Counter baseline regenerated with the new `mount`/`mount_into` split — functionally identical output. **Tests**: 6 new expand tests + 16 new check tests + 4 new codegen tests + 1 new smoke test in `wasm_build.rs` + 2 updated pre-existing (Str state fields now emit successfully; nominal rejection message cites 11.6+ instead of 11.4.c). 321 view tests total, all green. See §9.s. Debt residual: **fallback children via `<slot>` + dynamic props + event bubbling on children**, all with targeted 11.6+ pointers in the rejection messages. Also: **child state resets on parent re-render** (documented consequence of naive-render §9.m D1 — persistent child state across parent renders needs a position-keyed component-instance cache, 11.6+). **11.5.e** — cierre formal. **CLOSED 2026-07-15** — three coordinated pieces landed together: (a) **cosmetic emitter warnings fixed** — crate-level `#![allow(non_snake_case, unused_parens)]` prepended by `emit_module_header` kills both warnings (§9.o Debt residual) uniformly across the emitted crate; chosen over per-fn attributes because the emitter's naming shape (`__inject_style_<PascalCase>_...`) is intentional and BinOp parens are correct for nested precedence, only redundant at the outermost RHS. (b) **Multi-component showcase fixture** `examples/view/showcase/` with `Dashboard.fitzv` (a `Board` root composing three `<MetricCard title="X" value="N" trend="Y" />` children with static Str + Int props), `wasm-crate/` scaffold (Cargo.toml + generated src/lib.rs), `index.html` mount shim, and README documenting build/serve recipe + honest limits (dynamic props / event bubbling / `<slot>` fill-in / cross-file composition / persistent child state all cited as 11.6+ debt). This is NOT the kanban port the original criterion asked for — that criterion was scope-drifted when §9.p moved SSR to 11.6+ and 11.5.d confirmed dynamic props stay deferred. The showcase is the LARGEST fixture the 11.5.d subset permits and exercises multi-component composition + prop coercion + per-child state end-to-end via `fitz::view::compose_lib_rs`. Counter baseline regenerated to include the new `#![allow]` header (functionally identical). (c) **New smoke test** `tests/view_showcase_wasm_smoke.rs` with `regenerate_showcase_lib_rs` (always runs; keeps the committed baseline in sync + validates 3 `<MetricCard />` composition sites + 5 total `mount_into` calls — 3 from composition + 2 from `mount(selector)` delegations) and `build_showcase_wasm` (`#[ignore]`, shells `wasm-pack` when the toolchain is present). No hard bundle-size assertion — the 40 KB gate was per-component-count-1; re-baselining is documented in §9.t. **Closes Phase 11.5 entirely.** See §9.t for the full closure narrative + the re-scoped kanban plan for 11.6+. | Multi-component showcase fixture (`examples/view/showcase/`) compiles + validates the end-to-end 11.5.d subset. Kanban port itself re-scoped to Phase 11.6+ (needs dynamic props + event bubbling + persistent child state — see §9.t rationale). Compile times of the fixture: view pipeline <100ms, `wasm-pack build --release` ~30s cold (`cargo build --release` + LTO + wasm-opt) — acceptable, no hard gate. |
-| **11.6** | Migration of `fitz-liveviews`. The library refactors its examples (`counter`, `chat`, `kanban`, `dashboard`) and its API to consume `.fitzv` SFCs. Public API (`component()`, `dispatch_component_events()`, decorators `@live_component` / `@render_for` / `@on`) stays identical from the user's POV, just their bodies are now generated by the `.fitzv` compiler. | The existing 4 fitz-liveviews examples run against a `fitz-liveviews vX.Y.Z` that requires `Fitz core vZ+` (whatever version ships Phase 11.5). |
-| **11.7** | LSP support inside `.fitzv` — hover over `{expr}` shows the type, autocomplete inside `state { }` and `event ...` bodies, template-attr completion knows about the declared event handlers of the enclosing component. | VSCode extension bumped with the new grammar + LSP config; typing `{sta` inside a template completes to `state field name` when the component has that field. |
-| **11.8** | Pedagogic docs — chapter in `docs/guide.md` covering `.fitzv` from scratch. Chapter in `docs/curso/` (new module M9?) mirroring the pedagogic style of M1-M8. Update `docs/architecture.md` with the two-parser split. | Chapter runs someone from zero to a working counter component. Course module has runnable examples. Neither confuses the reader about what's classic Fitz vs what's `.fitzv`. |
+| **11.6** | SSR emitter + migration of `fitz-liveviews` examples to `.fitzv`. New `view::emit_ssr` backend emits classic Fitz source (state `type` + `@render_for` fn returning `html("""<...>""")` + one `@on` fn per event block, all consumed by the existing fitz-liveviews framework runtime). Module loader detects `.fitzv` files transparently and runs the view pipeline before handing to classic lexer+parser. Kept isolated: the SSR emitter targets the fitz-liveviews API contract; client-side dynamic capabilities stay in 11.7. Split into five sub-commits: **11.6.a** — Research + decision (docs-only, no code). **CLOSED 2026-07-15** — SSR emitter approach pinned in §9.u (reconciles §9.t drift; original §6 row 11.6 intent restored: server-side `.fitzv` targeting fitz-liveviews now, client-side SPA capabilities re-scoped to 11.7). **11.6.b** — Skeleton `view::emit_ssr` on a single-component fixture (state Int + assignment-only event bodies + no styles/directives/composition). Unit tests on emitter output shape + E2E view pipeline → classic parse round-trip. **11.6.c** — Full event body lowering (multi-mutation → struct literal build), `{#if}`/`{#for}` template lowering to string concat, `<style scoped>` inlined as `<style>` tag inside HTML output. **11.6.d** — Module loader integration: `from ./Comp import X` triggers view pipeline when `Comp.fitzv` exists; `.fitzv` auto-detects + injects `fitz-liveviews` dep dependency. `<Child />` static-prop composition inline-renders the child. E2E: two-file project (main.fitz + Comp.fitzv) that compiles + runs bit-for-bit against a hand-authored fitz-liveviews baseline. **11.6.e** — Migrate the 4 fitz-liveviews examples (counter → dashboard → chat → kanban) from raw-string HTML to `.fitzv`. Each migration is bit-for-bit vs current baseline (or documented intentional divergence). Cierre formal. | fitz-liveviews's 4 examples (counter/chat/dashboard/kanban) rewritten as `.fitzv` SFCs; migration is transparent to the framework runtime; each example's server-side behaviour is bit-for-bit equivalent to the pre-migration handwritten version (or documented intentional divergence). |
+| **11.7** | Client-side dynamic capabilities on top of the 11.5 WASM emit surface — dynamic child props (`<Card title={expr} />`), event bubbling from children (`<Card @select="handler" />`), cross-file `.fitzv` composition, `<slot>` fallback children, persistent child state across parent re-renders (position-keyed component-instance cache), and the client-side kanban port as the concrete fixture that validates the whole surface. Scope re-set from §6 original (originally LSP support) — LSP moves to 11.8. Deferred here because SSR-first (11.6) delivers more real user value now; client-side SPA capabilities are a Phase 11.7+ story once demand appears. All rejection messages in `src/view/` currently pointing at `11.6+` will be updated to point at `11.7+` when 11.6 closes. | Kanban port from `fitz-liveviews/examples/kanban/` rewritten as a client-side SPA `.fitzv` (`target = "wasm-client"`) with drag-drop, dynamic card lists, per-column event bubbling. Compiles under a re-baselined bundle size gate (measured on the kanban itself). |
+| **11.8** | LSP support inside `.fitzv` — hover over `{expr}` shows the type, autocomplete inside `state { }` and `event ...` bodies, template-attr completion knows about the declared event handlers of the enclosing component. Was originally 11.7; moved to 11.8 by the 11.6.a re-scoping in §9.u. | VSCode extension bumped with the new grammar + LSP config; typing `{sta` inside a template completes to `state field name` when the component has that field. |
+| **11.9** | Pedagogic docs — chapter in `docs/guide.md` covering `.fitzv` from scratch. Chapter in `docs/curso/` (new module M9?) mirroring the pedagogic style of M1-M8. Update `docs/architecture.md` with the two-parser split. Was originally 11.8; renumbered by the 11.6.a re-scoping in §9.u. | Chapter runs someone from zero to a working counter component. Course module has runnable examples. Neither confuses the reader about what's classic Fitz vs what's `.fitzv`. |
 
 Sub-phases are deliberately spaced. 11.2 alone is a multi-session
 job because it wires the type-checker end-to-end. 11.4 (client
@@ -3757,6 +3760,313 @@ event bubbling). Every rejection message points at the right
 kanban port drives the concrete deliverable set (dynamic
 props, event bubbling, cross-file composition, SSR emitter,
 persistent child state).
+
+> **Correction (2026-07-15, 11.6.a)**: the "next block" text
+> above implied `11.6+` would prioritise client-side dynamic
+> capabilities. That reading is superseded by 11.6.a's
+> research (§9.u) — the original §6 row 11.6 promise (SSR
+> emitter + fitz-liveviews migration) is prioritised. Client-
+> side dynamic capabilities move to §6 row **11.7**. The
+> rationale (real user value now vs speculative SPA
+> capabilities) lives in §9.u.
+
+---
+
+## 9.u 11.6.a — Research + decision: SSR emitter + fitz-liveviews migration (client-side dynamic capabilities → 11.7)
+
+First sub-commit of 11.6. **Docs-only research + decision —
+zero code change** in this commit. Publishes the design that
+11.6.b/c/d/e will implement. Same posture as 11.5.a which
+pinned the hybrid manifest + `--target` decision.
+
+**What 11.6 has to solve — RECONCILED with §9.t drift**
+
+The plan doc's original §6 row 11.6 promised *"Migration of
+`fitz-liveviews`. The library refactors its examples
+(`counter`, `chat`, `kanban`, `dashboard`) and its API to
+consume `.fitzv` SFCs."* — that is, an SSR emitter that
+produces server-side render functions consumed by the existing
+fitz-liveviews runtime.
+
+§9.t (11.5.e closure) proto-scoped 11.6+ as client-side
+dynamic capabilities (dynamic props + event bubbling +
+cross-file composition + persistent child state). That was a
+proto-scoping mistake, not a formal decision — it papered
+over the ambiguity by saying "kanban port drives the
+deliverable set" without asking whether "kanban" meant
+server-side (fitz-liveviews) or client-side (SPA / WASM
+drag-drop).
+
+**11.6.a resolves the ambiguity in favour of the original §6
+plan.** Rationale:
+
+- **Real user value now vs speculative.** The
+  `fitz-liveviews` repo has 4 working examples today
+  (counter / chat / dashboard / kanban) with hand-written
+  raw-string HTML — that IS the current pain point. Any
+  `.fitzv` compilation that produces the render functions
+  fitz-liveviews already expects delivers immediate DX wins
+  to a real, running project. Client-side dynamic
+  capabilities don't unblock anything currently in
+  production; they are pure showcase.
+- **Technically simpler / lower risk of stalling.** SSR emit
+  = second backend paralleling `codegen_wasm.rs`, consuming
+  the same `ExpandedViewFile`. Output shape is well-
+  understood (functional render fn returning HTML string).
+  Client-side dynamic capabilities have an open design
+  question — which reactivity model? (React fibers /
+  Solid signals / Vue tracking / Elm patches) — each choice
+  is a permanent API commitment.
+- **Coherent web-framework pitch.** SSR-first means Fitz
+  ships as "backend + SSR frontend + WebSocket-driven
+  updates, one language, one binary" — a defensible pitch
+  competitive with Rails/Phoenix/Django. Comparable to
+  Elixir + Phoenix LiveView but with static typing. Client-
+  side SPA is a nice-to-have, not the killer differentiator.
+- **Author's own projects benefit first.** `fitz-liveviews`
+  is the author's own repo. `fitzwatch` (private SaaS)
+  could eventually mount `.fitzv` server-side without
+  architectural change. Neither project needs client-side
+  SPA today.
+
+Client-side dynamic capabilities (§9.s Debt residual: dynamic
+props, event bubbling from children, cross-file composition,
+persistent child state, kanban as client-side SPA drag-drop
+showcase) become the concrete scope of **11.7**. Documented in
+the §6 row 11.7 rewrite.
+
+**Existing fitz-liveviews API surface — what the SSR emitter targets**
+
+Concrete peek at
+`d:/fitz-liveviews/examples/dashboard/src/main.fitz`
+(read at 11.6.a docs time — this is real production shape,
+not aspirational):
+
+```fitz
+from fitz_liveviews import Html, html, live_layout, html_response, ...
+
+@live_component("metric_tile")
+type MetricTile {
+  count: Int = 0
+}
+
+@render_for("metric_tile")
+fn metric_tile_render(state: MetricTile) {
+  return html("""<div class="tile-body">
+    <div class="tile-count">{state.count}</div>
+    <button data-flv-click="bump">+1</button>
+    ...
+  </div>""")
+}
+
+@on("metric_tile", "bump")
+fn metric_tile_bump(state: MetricTile, payload: Map<Str, Str>) -> MetricTile {
+  return MetricTile { count: state.count + 1 }
+}
+```
+
+The framework runtime (Fitz core v0.20.1 `flv_register`
+implicit injection + `fitz-liveviews` lib runtime) already
+knows how to route WebSocket frames to `@on` handlers, call
+`@render_for` fn on state change, diff HTML, and send patches
+to the browser. **The pain point is the `html("""<div>...</div>""")`
+raw string** — no syntax highlighting, no HTML validation, no
+scoped styles, no template interpolation checking.
+
+**The .fitzv → fitz-liveviews mapping**
+
+A `.fitzv` SFC:
+
+```
+@live_component("metric_tile")
+component MetricTile {
+  state { count: Int = 0 }
+
+  event bump() { count = count + 1 }
+  event reset() { count = 0 }
+
+  <template>
+    <div class="tile-body">
+      <div class="tile-count">{count}</div>
+      <div class="tile-buttons">
+        <button data-flv-click="bump">+1</button>
+        <button data-flv-click="reset">reset</button>
+      </div>
+    </div>
+  </template>
+
+  <style scoped>
+    .tile-body { padding: 12px; }
+    .tile-count { font-size: 2em; }
+  </style>
+}
+```
+
+lowers via the new `view::emit_ssr` to the classic Fitz code
+above — modulo two transformations:
+
+1. **Event body: mutation → new-state return.** `.fitzv` event
+   `count = count + 1` becomes `@on` fn
+   `return MetricTile { count: state.count + 1 }`. Every
+   field the mutation touches gets set from `state.<field>`;
+   untouched fields carry over verbatim. Multi-mutation event
+   bodies build one final struct literal.
+2. **Template interpolation: `{field}` → `{state.field}`.**
+   Inside the emitted `html("""...""")`, bare `{count}` refers
+   to the state field — the emitter rewrites them to
+   `{state.count}` so classic Fitz's string interpolation
+   resolves them correctly.
+
+Everything else is 1:1: the `@live_component` decorator stays
+on the state type, the `@render_for` fn returns
+`html(<raw>)`, the `@on` fns take
+`(state: T, payload: Map<Str,Str>) -> T`.
+
+**Design decisions pinned in 11.6.a**
+
+1. **Output format: Fitz source text, not AST.** The emitter
+   writes classic `.fitz` source that classic Fitz's lexer +
+   parser consumes. Alternatives considered: emit `Program`
+   AST directly and inject into the module cache (faster, no
+   round-trip). Text-based wins because it's inspectable /
+   debuggable / diffable in tests (parallel to the counter
+   demo's committed `lib.rs` baseline pattern that 11.5.c/e
+   used).
+2. **Module resolution: transparent.** The Fitz module loader
+   detects `.fitzv` extensions during `from ./Comp import X`
+   resolution. When `.fitzv` is found instead of `.fitz`, it
+   runs the view pipeline (parse → expand → check →
+   `emit_ssr`), then feeds the emitted text through the
+   classic lexer+parser as if it were a hand-authored
+   `.fitz`. Zero manual `fitz view build` step. This is the
+   MOST magical option — the alternative (explicit CLI step
+   emitting a sibling `.fitz` file the user commits) is
+   documented as fallback if the transparent path proves
+   problematic in practice.
+3. **Emit target: classic Fitz + `fitz-liveviews` framework
+   contract.** The emitted code assumes `fitz-liveviews` is a
+   declared dep in `fitz.toml` (`from fitz_liveviews import
+   Html, html`). The user has to add the dep once; the
+   emitter always emits the `from` import at the top of the
+   emitted file. This is coupling from `.fitzv` to
+   fitz-liveviews the framework, made explicit.
+4. **Style handling: emit `<style>` inline in HTML.** The
+   `<style scoped>` block's compiled CSS (with scope suffixes
+   applied by 11.3.b's `apply_scope`) gets emitted INSIDE the
+   render fn's HTML output, wrapped in a `<style>` tag.
+   Simpler than trying to route styles to `<head>` (which
+   would need framework-runtime cooperation). fitz-liveviews
+   diffs HTML text — a stable `<style>` block at the start
+   of the render output collapses to a no-op patch after the
+   first render.
+5. **Composition (`<Child />`): server-side inline render.**
+   In SSR mode, a `<Child prop="v" />` composition site emits
+   an inline call to the child's `render_<Child>` fn with a
+   fresh `Child { prop: v, ... }` instance. NO
+   `component("child_id", ...)` lookup — that's for
+   per-instance state which the framework already provides
+   via `@live_component` + WebSocket handshake. For 11.6.b
+   MVP, static-prop composition is the same subset 11.5.d
+   opened.
+6. **The two 11.5.d rejection messages stay for SSR too.**
+   Dynamic child props / event bubbling from children stay
+   rejected with 11.7+ pointers. SSR doesn't change the
+   composition subset — the emitter just targets a different
+   output.
+
+**Sub-phase plan for 11.6**
+
+- **11.6.a** — Research + decision. **CLOSED 2026-07-15**
+  (this §9.u section). Zero code.
+- **11.6.b** — Skeleton `view::emit_ssr` module: consumes
+  `ExpandedViewFile`, emits classic Fitz source text with
+  the state type + `@render_for` fn + `@on` fns +
+  `@live_component` decorator. Handles a single `.fitzv`
+  file with the shape from `d:/fitz-liveviews/examples/
+  counter/src/main.fitz` (single component, state Int,
+  events with simple assignment bodies, no `<style>`, no
+  `{#if}`/`{#for}`, no composition). Unit tests on the
+  emitter output shape (grep-based invariants, matching the
+  11.5 emitter test pattern). E2E test: view pipeline on a
+  synthetic `.fitzv` produces classic Fitz text that
+  lexer+parser accept.
+- **11.6.c** — Full event body lowering: multi-mutation event
+  bodies build the final struct literal correctly, `{#if}` /
+  `{#for}` template directives lower to string concatenation
+  or embedded conditionals in the HTML string, `<style
+  scoped>` blocks get inlined as `<style>` tags. Unit tests
+  per feature.
+- **11.6.d** — Module loader integration: `from ./Comp
+  import X` triggers view pipeline when `Comp.fitzv` exists.
+  Auto-add `fitz-liveviews` dep resolution when a `.fitzv`
+  is present. `<Child />` composition (static props only,
+  the 11.5.d subset). E2E test using a two-file project
+  (main.fitz + Comp.fitzv) that compiles + runs.
+- **11.6.e** — Migrate the 4 fitz-liveviews examples
+  (counter → dashboard → chat → kanban) from raw-string HTML
+  to `.fitzv`. Each migration is bit-for-bit output diff
+  against the current handwritten baseline (or a documented
+  intentional divergence). Cierre formal: this §9.u section
+  + §6 rows + roadmap + memoria refreshed.
+
+**Debt / gotchas visible from 11.6.a**
+
+- **Event body lowering complexity.** Multi-mutation bodies
+  need shape analysis: `count = count + 1; msg = "bumped"`
+  becomes `return MetricTile { count: state.count + 1, msg:
+  "bumped".to_string() }`. The emitter needs to build a
+  fresh struct literal from ALL declared state fields,
+  substituting mutated ones. Simple case is trivial; the
+  interaction with `{#if}` bodies inside `event` is more
+  work.
+- **Template `{#for c in cards}` in SSR.** The template
+  directive lowers to a Fitz `for` loop that concatenates
+  strings. Works, but the generated code becomes verbose
+  and less pretty than the source. Acceptable — the
+  emitted `.fitz` is generated code, not for human reading.
+- **Cross-file `<Child />` composition with SSR.** 11.6.d
+  needs the `Comp.fitzv` to be loaded + expanded BEFORE the
+  main `.fitz` tries to compose `<Comp />`. The module
+  loader has to run in dependency order — same problem
+  Rust's build system solves via `mod` declarations.
+- **`fitz-liveviews` dep discovery.** The emitter emits
+  `from fitz_liveviews import ...` unconditionally when
+  emitting a `.fitzv`. If the user's `fitz.toml` doesn't
+  declare `fitz-liveviews` as a dep, the compile fails at
+  the classic Fitz stage with "unknown module `fitz_liveviews`".
+  Fix: 11.6.d has the loader inject the dep automatically
+  when `.fitzv` is detected, OR emit a clean error at the
+  view pipeline stage pointing at `fitz.toml`.
+- **Diffing baseline for migration.** Bit-for-bit output diff
+  is aspirational — the migrated versions may deliberately
+  clean up the raw HTML strings (whitespace normalisation,
+  etc.). 11.6.e will document any intentional divergences.
+- **Client-side dynamic capabilities are still 11.7.** The
+  §9.s rejection messages still cite 11.7+ (not 11.6+) for
+  dynamic props / event bubbling from children / cross-file
+  composition of client-side components. `<Child prop={expr}
+  />` on a `.fitzv` targeting `wasm-client` remains an error;
+  the same shape on a `.fitzv` targeting fitz-liveviews SSR
+  also remains an error (same subset, same rejections).
+
+**Files touched by 11.6.a**
+
+- `docs/fase-11-plan.md` — this §9.u section + refresh of §6
+  row 11.6 with the sub-phase breakdown a→e (11.6.a marked
+  CLOSED, b/c/d/e listed with concise scope) + §6 row 11.7
+  rewritten as "client-side dynamic capabilities" (docs-
+  only).
+- Memoria `project_phase_11_frontend_view.md` — cross-link
+  this §9.u and note the split so 11.6.b starts from the
+  right assumption.
+
+Not touched: `src/view/*`, `src/main.rs`, `src/manifest.rs`,
+`fitz-liveviews/*` — all deferred to 11.6.b+. Code lands one
+commit later.
+
+11.6.a fully CLOSED with this §9.u section. 11.6.b (skeleton
+`view::emit_ssr` on a single-component fixture) is the next
+commit — it's where code touches disk.
 
 ---
 

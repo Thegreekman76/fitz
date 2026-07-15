@@ -9642,7 +9642,7 @@ roadmap se reduce hoy a:
 
 | Item futuro | Estimación |
 |---|---|
-| Fase 11 sub-fases 11.6 → 11.8 | meses, cada una es sesión seria (11.4 + 11.5 completas al 2026-07-15) |
+| Fase 11 sub-fases 11.6 → 11.9 | meses, cada una es sesión seria (11.4 + 11.5 completas al 2026-07-15; 11.6.a research CLOSED — plan re-scoped: 11.6 = SSR + fitz-liveviews migration, 11.7 = client-side dynamic capabilities, 11.8 = LSP, 11.9 = pedagogic docs) |
 | V6 (DAP — debugging interactivo VSCode) | ~2 semanas, anotada en backlog |
 | Fase 12.6+ targets extra (`fitz deploy fly/railway/k8s`) | 1-2 semanas por target |
 | Deuda residual técnica menor | ver `docs/deudas-post-5b.md` |
@@ -9666,9 +9666,13 @@ composition + 11.5.e cierre formal — todas al 2026-07-15).
 `target = "wasm-client"` produce un bundle WASM browser end-to-
 end para fixtures single-component (counter) y multi-component
 (showcase Dashboard con `Board` root + 3 `<MetricCard />`
-children estáticos). Próximo norte: **Phase 11.6** — kanban
-port real como deliverable concreto que gate a dynamic props +
-event bubbling + cross-file composition + SSR emitter.
+children estáticos). **Sub-paso 11.6.a CERRADO 2026-07-15** —
+research + decision doc (§9.u) restaura el intent original del
+§6 row 11.6 (SSR emitter + migración fitz-liveviews) y re-
+escopa client-side dynamic capabilities a **11.7**. Próximo
+norte: **11.6.b** — skeleton `view::emit_ssr` sobre un fixture
+`.fitzv` single-component targeted al framework runtime de
+fitz-liveviews.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
