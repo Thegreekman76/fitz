@@ -9799,9 +9799,28 @@ como próximo norte):
     bit-for-bit what the CLI produces. 3 new cli_e2e tests
     (scaffold shape + `.fitz` + wasm-client rejection + empty
     `.fitzv` rejection). See §9.r.
-  - 🔵 **11.5.d** — Multi-component composition:
-    `<Child prop="v" />` in a template mounts a nested component
-    with static props.
+  - ✅ **11.5.d** — Multi-component composition
+    (`<Child prop="v" />`). CLOSED 2026-07-15. New AST variant
+    `ExpandedTemplateNode::ChildComponent` — capitalised template
+    tags route to it via a `starts_with_ascii_uppercase(tag)`
+    check in `expand_template_node`. Checker `check_child_components`
+    validates: name exists (typo hint), self-reference rejected,
+    prop names match declared state fields (typo hint), no
+    duplicates, prop values coerce to primitive scalar types
+    (`Int`/`Float`/`Bool`/`Str` + `Nullable<T>`). Emitter
+    refactors `mount(selector)` → `mount_into(root)` delegation
+    and adds `emit_child_component` that creates a
+    `__fitz-child-<Name>` wrapper, instantiates the child, sets
+    props via `borrow_mut()`, calls `mount_into`. Shared
+    `check::coerce_child_prop_raw_value` helper (pub(crate))
+    guarantees checker+emitter bit-for-bit agreement. Type +
+    default emitters extended beyond `Int`-only to the four
+    scalar primitives + `Nullable<T>`. 6 expand + 16 check + 4
+    codegen + 1 wasm_build smoke test (`phase_11_5_d_*`) + 2
+    updated pre-existing tests. 321 view tests total, all
+    green. Rejections cite 11.6+: fallback children,
+    dynamic props, event bubbling on children, compound-type
+    props. See §9.s.
   - 🔵 **11.5.e** — Cierre formal: kanban rewrite +
     docs/roadmap/memoria refresh + fix cosmetic emitter warnings
     (`unused_parens` + `non_snake_case` from §9.o).

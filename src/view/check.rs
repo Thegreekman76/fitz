@@ -52,8 +52,8 @@
 
 use super::ast::Loc;
 use super::expand::{
-    ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStateField, ExpandedTemplate,
-    ExpandedTemplateNode, ExpandedViewFile,
+    ChildComponentProp, ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStateField,
+    ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
 };
 use crate::ast::{AssignTarget, Expr, Pattern, Span, Stmt};
 use crate::types::{check_program, Type};
@@ -113,6 +113,14 @@ pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
         // `@click="undeclared"` sees both categories together.
         if let Some(template) = &component.template {
             check_template_event_attrs(component, template, &mut errors);
+        }
+        // Phase 11.5.d — child-component composition. Runs even
+        // when state has errors on THIS component, because the
+        // props being validated reference OTHER components'
+        // state; the cascade concern (compound "your state is
+        // broken AND props are broken") isn't relevant.
+        if let Some(template) = &component.template {
+            check_child_components(file, component, template, &mut errors);
         }
         // Cascade avoidance — only check handlers + interpolations
         // when the state is clean, so consequential errors don't
@@ -439,7 +447,8 @@ fn collect_if_conds<'a>(
         match node {
             ExpandedTemplateNode::Text(_)
             | ExpandedTemplateNode::Interpolation { .. }
-            | ExpandedTemplateNode::Slot { .. } => {}
+            | ExpandedTemplateNode::Slot { .. }
+            | ExpandedTemplateNode::ChildComponent { .. } => {}
             ExpandedTemplateNode::Element { children, .. } => {
                 collect_if_conds(children, out, for_scope);
             }
@@ -487,7 +496,8 @@ fn collect_for_iters<'a>(
         match node {
             ExpandedTemplateNode::Text(_)
             | ExpandedTemplateNode::Interpolation { .. }
-            | ExpandedTemplateNode::Slot { .. } => {}
+            | ExpandedTemplateNode::Slot { .. }
+            | ExpandedTemplateNode::ChildComponent { .. } => {}
             ExpandedTemplateNode::Element { children, .. } => {
                 collect_for_iters(children, out, for_scope);
             }
@@ -655,7 +665,9 @@ fn collect_interpolations<'a>(
 ) {
     for node in nodes {
         match node {
-            ExpandedTemplateNode::Text(_) | ExpandedTemplateNode::Slot { .. } => {}
+            ExpandedTemplateNode::Text(_)
+            | ExpandedTemplateNode::Slot { .. }
+            | ExpandedTemplateNode::ChildComponent { .. } => {}
             ExpandedTemplateNode::Interpolation { expr, loc } => {
                 out.push(InterpolationRef {
                     expr,
@@ -776,7 +788,8 @@ fn collect_event_attrs<'a>(nodes: &'a [ExpandedTemplateNode], out: &mut Vec<Even
         match node {
             ExpandedTemplateNode::Text(_)
             | ExpandedTemplateNode::Interpolation { .. }
-            | ExpandedTemplateNode::Slot { .. } => {}
+            | ExpandedTemplateNode::Slot { .. }
+            | ExpandedTemplateNode::ChildComponent { .. } => {}
             ExpandedTemplateNode::Element {
                 attrs, children, ..
             } => {
@@ -905,6 +918,355 @@ fn is_str_friendly(ty: &Type) -> bool {
         | Type::Secret(_)
         | Type::Function { .. } => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.5.d — child-component composition (`<Child prop="v" />`)
+// ---------------------------------------------------------------------------
+
+/// Validate every `<Child />` composition site in `template`:
+///
+/// - The referenced child must be declared in the same
+///   `ExpandedViewFile` (typo hint via Levenshtein ≤ 3, else a
+///   full list of available components).
+/// - The child is NOT `component` itself (self-reference would be
+///   infinite descent — rejected with a "cannot mount itself"
+///   message).
+/// - Every prop's `field_name` matches a declared state field of
+///   the child (typo hint via the state field names of the
+///   child).
+/// - No two props with the same `field_name` (accidental
+///   overwrite trap — reject with a targeted message).
+/// - Each prop's `raw_value` coerces into the field's declared
+///   `TypeExpr`. Only primitive scalars are supported in MVP:
+///   `Int`, `Float`, `Str`, `Bool`, and `Nullable<T>` of those.
+///   Compound types (`List`, `Map`, `Nominal`) are rejected with
+///   a 11.6+ pointer.
+///
+/// On success, we OVERWRITE `raw_value` in-place with a Rust
+/// literal that the emitter drops straight into
+/// `*child.field.borrow_mut() = <raw_value>;`. Encoding the
+/// coerced representation this way keeps the emitter dumb and
+/// avoids threading an "already-coerced" side-channel through
+/// the AST — the AST holds the coerced value directly.
+///
+/// Since it mutates the AST, this pass takes `&ExpandedViewFile`
+/// via UnsafeCell would be silly — we clone the file lookup
+/// state (a `HashMap<&str, &ExpandedComponent>` snapshot) and
+/// perform the mutation via `check_child_components_mut` on a
+/// separately-borrowed template that lives on the SAME
+/// component. Since the checker is called with `&file` and the
+/// template is `Option<ExpandedTemplate>` on the component,
+/// this would require `&mut` access — which the current
+/// public `check(&file)` signature does not permit. Rather
+/// than change the public signature, we accumulate the coerced
+/// values in a side table and let the emitter (a downstream
+/// consumer) apply them via `coerce_child_prop_raw_value`
+/// helper.
+///
+/// So the concrete plan: this pass VALIDATES only, producing
+/// errors. The emitter re-derives the coerced representation
+/// using the same helper. Kept in sync via unit tests.
+fn check_child_components(
+    file: &ExpandedViewFile,
+    component: &ExpandedComponent,
+    template: &ExpandedTemplate,
+    errors: &mut Vec<CheckError>,
+) {
+    let component_map = build_component_map(file);
+    for node in &template.roots {
+        walk_child_components(node, &component_map, &component.name, errors);
+    }
+}
+
+/// Build a `component_name → component` lookup for the file.
+fn build_component_map(
+    file: &ExpandedViewFile,
+) -> std::collections::HashMap<&str, &ExpandedComponent> {
+    file.components
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect()
+}
+
+fn walk_child_components(
+    node: &ExpandedTemplateNode,
+    component_map: &std::collections::HashMap<&str, &ExpandedComponent>,
+    parent_name: &str,
+    errors: &mut Vec<CheckError>,
+) {
+    match node {
+        ExpandedTemplateNode::ChildComponent { name, props, loc } => {
+            validate_child_site(name, props, *loc, component_map, parent_name, errors);
+        }
+        ExpandedTemplateNode::Element { children, .. } => {
+            for child in children {
+                walk_child_components(child, component_map, parent_name, errors);
+            }
+        }
+        ExpandedTemplateNode::If {
+            children,
+            else_children,
+            ..
+        } => {
+            for child in children {
+                walk_child_components(child, component_map, parent_name, errors);
+            }
+            if let Some(else_kids) = else_children {
+                for child in else_kids {
+                    walk_child_components(child, component_map, parent_name, errors);
+                }
+            }
+        }
+        ExpandedTemplateNode::For { children, .. } => {
+            for child in children {
+                walk_child_components(child, component_map, parent_name, errors);
+            }
+        }
+        ExpandedTemplateNode::Text(_)
+        | ExpandedTemplateNode::Interpolation { .. }
+        | ExpandedTemplateNode::Slot { .. } => {}
+    }
+}
+
+fn validate_child_site(
+    child_name: &str,
+    props: &[ChildComponentProp],
+    loc: Loc,
+    component_map: &std::collections::HashMap<&str, &ExpandedComponent>,
+    parent_name: &str,
+    errors: &mut Vec<CheckError>,
+) {
+    if child_name == parent_name {
+        errors.push(CheckError {
+            message: format!(
+                "component `{child_name}` cannot mount itself — that would \
+                 recurse forever at render time. Break the cycle by \
+                 extracting the shared UI into a separate component."
+            ),
+            loc,
+            context: format!("component '{parent_name}': template `<{child_name} />`"),
+        });
+        return;
+    }
+
+    let child = match component_map.get(child_name) {
+        Some(c) => c,
+        None => {
+            let names: Vec<&str> = component_map.keys().copied().collect();
+            let hint = suggestion_for(child_name, &names);
+            let msg = match hint {
+                Some(near) => format!(
+                    "unknown component `<{child_name} />` — did you mean `<{near} />`? \
+                     (declared in this file: {})",
+                    format_component_list(&names)
+                ),
+                None => format!(
+                    "unknown component `<{child_name} />`. Declare `component {child_name} \
+                     {{ ... }}` in this file, or check the spelling. Available: {}.",
+                    format_component_list(&names)
+                ),
+            };
+            errors.push(CheckError {
+                message: msg,
+                loc,
+                context: format!("component '{parent_name}': template `<{child_name} />`"),
+            });
+            return;
+        }
+    };
+
+    // Guard against duplicate props (accidental double-assign).
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for prop in props {
+        if !seen.insert(prop.field_name.as_str()) {
+            errors.push(CheckError {
+                message: format!(
+                    "duplicate prop `{}` on `<{child_name} />`. Each prop must appear \
+                     at most once.",
+                    prop.field_name
+                ),
+                loc: prop.loc,
+                context: format!("component '{parent_name}': template `<{child_name} />`"),
+            });
+        }
+    }
+
+    // Each prop must match a declared state field, and its value
+    // must coerce.
+    for prop in props {
+        let field = child.state.iter().find(|f| f.name == prop.field_name);
+        let field = match field {
+            Some(f) => f,
+            None => {
+                let field_names: Vec<&str> = child.state.iter().map(|f| f.name.as_str()).collect();
+                let hint = suggestion_for(&prop.field_name, &field_names);
+                let msg = match hint {
+                    Some(near) => format!(
+                        "unknown prop `{}` on `<{child_name} />` — did you mean `{near}`? \
+                         (`{child_name}` declares: {})",
+                        prop.field_name,
+                        format_field_list(&field_names)
+                    ),
+                    None => format!(
+                        "unknown prop `{}` on `<{child_name} />`. `{child_name}` \
+                         declares no such state field. Available: {}.",
+                        prop.field_name,
+                        format_field_list(&field_names)
+                    ),
+                };
+                errors.push(CheckError {
+                    message: msg,
+                    loc: prop.loc,
+                    context: format!("component '{parent_name}': template `<{child_name} />`"),
+                });
+                continue;
+            }
+        };
+
+        if let Err(msg) = coerce_child_prop_raw_value(&prop.raw_value, &field.type_expr) {
+            errors.push(CheckError {
+                message: format!(
+                    "prop `{}=\"{}\"` on `<{child_name} />`: {}",
+                    prop.field_name, prop.raw_value, msg
+                ),
+                loc: prop.loc,
+                context: format!("component '{parent_name}': template `<{child_name} />`"),
+            });
+        }
+    }
+}
+
+fn format_component_list(names: &[&str]) -> String {
+    if names.is_empty() {
+        return "(none — this file declares no components?)".to_string();
+    }
+    let mut sorted: Vec<&&str> = names.iter().collect();
+    sorted.sort();
+    sorted
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_field_list(names: &[&str]) -> String {
+    if names.is_empty() {
+        return "(no state fields declared)".to_string();
+    }
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Coerce a raw static-attribute value (a string as captured by
+/// the HTML sub-parser) into a Rust literal suitable for
+/// `*child.field.borrow_mut() = <literal>;`. Returns `Ok(literal)`
+/// on success, `Err(msg)` on failure.
+///
+/// Supported primitive targets:
+/// - `Str` → the value wrapped as `"..."` with proper escaping.
+/// - `Int` → parsed as `i64`, emitted as `123i64`.
+/// - `Float` → parsed as `f64`, emitted as `1.5f64`.
+/// - `Bool` → strictly `"true"` or `"false"`, emitted as `true`/`false`.
+/// - `Nullable<T>` → literal `"null"` emits `None`; otherwise
+///   recurse into `T` and wrap the result in `Some(...)`.
+///
+/// Compound types (`List`, `Map`, `Nominal`) and unrecognised
+/// heads reject with a 11.6+ pointer.
+///
+/// This helper is `pub(crate)` so `codegen_wasm.rs::emit_child_
+/// component` uses the SAME coercion when emitting, ensuring the
+/// checker and the emitter agree bit-for-bit.
+pub(crate) fn coerce_child_prop_raw_value(
+    raw: &str,
+    type_expr: &crate::ast::TypeExpr,
+) -> Result<String, String> {
+    use crate::ast::TypeExpr as T;
+    match type_expr {
+        T::Named(name) => match name.as_str() {
+            "Str" => Ok(rust_str_literal(raw)),
+            "Int" => raw.parse::<i64>().map(|n| format!("{n}i64")).map_err(|_| {
+                format!(
+                    "expected an integer literal for `Int` field, got `{raw}`. \
+                     Use a bare integer like `count=\"42\"`."
+                )
+            }),
+            "Float" => raw.parse::<f64>().map(|n| format!("{n}f64")).map_err(|_| {
+                format!(
+                    "expected a float literal for `Float` field, got `{raw}`. \
+                     Use a decimal like `rate=\"1.5\"`."
+                )
+            }),
+            "Bool" => match raw {
+                "true" => Ok("true".to_string()),
+                "false" => Ok("false".to_string()),
+                _ => Err(format!(
+                    "expected `\"true\"` or `\"false\"` for `Bool` field, got `{raw}`."
+                )),
+            },
+            other => Err(format!(
+                "prop coercion to `{other}` — static props for nominal / user-defined \
+                 types are not supported in Phase 11.5.d. Only `Str`, `Int`, `Float`, \
+                 `Bool` (and their `Nullable<T>` wrappers) coerce today; compound \
+                 types land alongside Phase 11.6+."
+            )),
+        },
+        T::Nullable(inner) => {
+            if raw == "null" {
+                Ok("None".to_string())
+            } else {
+                coerce_child_prop_raw_value(raw, inner).map(|lit| format!("Some({lit})"))
+            }
+        }
+        T::Generic { name, .. } => Err(format!(
+            "prop coercion to `{name}<...>` — static props for compound types \
+             (`List`, `Map`, etc.) are not supported in Phase 11.5.d. Only `Str`, \
+             `Int`, `Float`, `Bool` (and their `Nullable<T>` wrappers) coerce today; \
+             compound types land alongside Phase 11.6+."
+        )),
+        T::Function { .. } => Err(
+            "prop coercion to a function type — passing callbacks as props is \
+             not supported yet. Model the callback as an event bubbled up via \
+             `<Child @some_event=\"handler\" />` (11.6+ work). No coercion today."
+                .to_string(),
+        ),
+        T::Tuple(_) => Err(
+            "prop coercion to a tuple type — not supported. Extract the tuple \
+             into a nominal type (`type MyPair { ... }`) if you need to pass \
+             both halves, once nominal-type composition lands (11.6+)."
+                .to_string(),
+        ),
+    }
+}
+
+/// Escape `s` into a Rust `"..."` string literal. Handles the
+/// small set of characters that would corrupt the emitted source
+/// (`"`, `\`, newlines, tabs, and other control chars). Overlaps
+/// with `codegen_wasm::rust_string_literal` — kept as a local
+/// twin to avoid the module dependency in the checker (checker
+/// should not import the emitter).
+fn rust_str_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out.push_str(".to_string()");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2473,5 +2835,292 @@ component B {
             "expected no errors for a well-formed component with slots: {:#?}",
             check_str(src)
         );
+    }
+
+    // ---- Phase 11.5.d — child-component composition validation ----
+
+    #[test]
+    fn phase_11_5_d_check_valid_composition_ok() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card title="Hi" count="3" /></template>
+}
+component Card {
+  state {
+    title: Str = "x"
+    count: Int = 0
+  }
+  <template><div>{title}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert!(errs.is_empty(), "expected no errors, got: {errs:#?}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_unknown_component_errors_with_typo_hint() {
+        let src = r#"component Parent {
+  state {}
+  <template><Carr /></template>
+}
+component Card {
+  state { title: Str = "x" }
+  <template><div>{title}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1);
+        let msg = &errs[0].message;
+        assert!(msg.contains("unknown component"), "msg: {msg}");
+        assert!(msg.contains("Card"), "msg: {msg}");
+        assert!(
+            msg.contains("did you mean"),
+            "expected typo hint in msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_check_unknown_component_without_hint_lists_available() {
+        // `Zzzzzz` is far enough from `Card` that no typo suggestion
+        // fires (Levenshtein > 3). The message should list all
+        // available names.
+        let src = r#"component Parent {
+  state {}
+  <template><Zzzzzz /></template>
+}
+component Card {
+  state { title: Str = "x" }
+  <template><div>{title}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1);
+        let msg = &errs[0].message;
+        assert!(msg.contains("Zzzzzz"), "msg: {msg}");
+        assert!(
+            msg.contains("Available"),
+            "expected 'Available:' listing: {msg}"
+        );
+        assert!(msg.contains("Card"), "msg: {msg}");
+        assert!(msg.contains("Parent"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_self_reference_rejects_with_dedicated_message() {
+        let src = r#"component Loop {
+  state {}
+  <template><Loop /></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1);
+        let msg = &errs[0].message;
+        assert!(msg.contains("cannot mount itself"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_unknown_prop_errors_with_typo_hint() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card titel="Hi" /></template>
+}
+component Card {
+  state {
+    title: Str = "x"
+    count: Int = 0
+  }
+  <template><div>{title}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1);
+        let msg = &errs[0].message;
+        assert!(msg.contains("unknown prop"), "msg: {msg}");
+        assert!(msg.contains("titel"), "msg: {msg}");
+        assert!(msg.contains("did you mean"), "typo hint expected: {msg}");
+        assert!(
+            msg.contains("title"),
+            "typo hint should include title: {msg}"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_check_duplicate_prop_rejects() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card title="A" title="B" /></template>
+}
+component Card {
+  state { title: Str = "x" }
+  <template><div>{title}</div></template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty(), "expected an error");
+        assert!(
+            errs.iter().any(|e| e.message.contains("duplicate prop")),
+            "errors: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_check_int_prop_coerces_valid_integer() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card count="42" /></template>
+}
+component Card {
+  state { count: Int = 0 }
+  <template><span>{count}</span></template>
+}"#;
+        let errs = check_str(src);
+        assert!(errs.is_empty(), "expected no errors, got: {errs:#?}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_int_prop_rejects_non_numeric_value() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card count="abc" /></template>
+}
+component Card {
+  state { count: Int = 0 }
+  <template><span>{count}</span></template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty(), "expected an error");
+        let msg = &errs[0].message;
+        assert!(msg.contains("expected an integer literal"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_bool_prop_accepts_true_false_rejects_others() {
+        let ok_src = r#"component Parent {
+  state {}
+  <template><Card active="true" /></template>
+}
+component Card {
+  state { active: Bool = false }
+  <template><span>{active}</span></template>
+}"#;
+        assert!(check_str(ok_src).is_empty());
+        let bad_src = r#"component Parent {
+  state {}
+  <template><Card active="yes" /></template>
+}
+component Card {
+  state { active: Bool = false }
+  <template><span>{active}</span></template>
+}"#;
+        let errs = check_str(bad_src);
+        assert!(!errs.is_empty());
+        assert!(
+            errs[0].message.contains("`\"true\"` or `\"false\"`"),
+            "msg: {}",
+            errs[0].message
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_check_nullable_int_accepts_null_and_integer() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card n="null" /></template>
+}
+component Card {
+  state { n: Int? = null }
+  <template><span>hi</span></template>
+}"#;
+        assert!(check_str(src).is_empty(), "null case failed");
+
+        let src2 = r#"component Parent {
+  state {}
+  <template><Card n="7" /></template>
+}
+component Card {
+  state { n: Int? = null }
+  <template><span>hi</span></template>
+}"#;
+        assert!(check_str(src2).is_empty(), "int case failed");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_list_prop_rejects_citing_11_6() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card items="1,2,3" /></template>
+}
+component Card {
+  state { items: List<Int> = [] }
+  <template><span>hi</span></template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty(), "expected coercion rejection");
+        let msg = &errs[0].message;
+        assert!(msg.contains("compound types"), "msg: {msg}");
+        assert!(msg.contains("11.6"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_nominal_type_prop_rejects_with_hint() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card user="unused" /></template>
+}
+component Card {
+  state { user: User? = null }
+  <template><span>hi</span></template>
+}"#;
+        // The Nullable<User> unwraps to Named("User"), which is a
+        // nominal type — the coercer rejects with the "nominal /
+        // user-defined types" message. The `null` sub-branch would
+        // have coerced fine, but "unused" recurses into the inner
+        // and hits the nominal rejection.
+        let errs = check_str(src);
+        assert!(!errs.is_empty());
+        let msg = &errs[0].message;
+        assert!(msg.contains("nominal"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_coerce_helper_str_wraps_and_escapes() {
+        use crate::ast::TypeExpr;
+        // Str with quotes/backslashes gets escaped in the emitted
+        // Rust literal.
+        let s = coerce_child_prop_raw_value(r#"Hello "world"\n"#, &TypeExpr::Named("Str".into()))
+            .unwrap();
+        // Result should be a Rust `"..."` literal + `.to_string()`
+        // suffix, with quotes/backslashes escaped.
+        assert!(s.starts_with('"'), "got: {s}");
+        assert!(s.ends_with(".to_string()"), "got: {s}");
+        assert!(s.contains(r#"\""#), "quotes must be escaped: {s}");
+    }
+
+    #[test]
+    fn phase_11_5_d_check_coerce_helper_int_produces_i64_suffix() {
+        use crate::ast::TypeExpr;
+        assert_eq!(
+            coerce_child_prop_raw_value("42", &TypeExpr::Named("Int".into())).unwrap(),
+            "42i64"
+        );
+        assert_eq!(
+            coerce_child_prop_raw_value("-7", &TypeExpr::Named("Int".into())).unwrap(),
+            "-7i64"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_check_coerce_helper_bool_produces_bare_literal() {
+        use crate::ast::TypeExpr;
+        assert_eq!(
+            coerce_child_prop_raw_value("true", &TypeExpr::Named("Bool".into())).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            coerce_child_prop_raw_value("false", &TypeExpr::Named("Bool".into())).unwrap(),
+            "false"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_check_coerce_helper_nullable_null_produces_none() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())));
+        assert_eq!(coerce_child_prop_raw_value("null", &ty).unwrap(), "None");
+        assert_eq!(coerce_child_prop_raw_value("5", &ty).unwrap(), "Some(5i64)");
     }
 }

@@ -51,12 +51,16 @@ impl Counter {
     }
 
     pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(), JsValue> {
-        __inject_style_Counter_counter_c_8b71bce8();
         let document = web_sys::window().unwrap().document().unwrap();
         let root = document
             .query_selector(selector)?
             .ok_or_else(|| JsValue::from_str("mount: selector matched no element"))?
             .dyn_into::<HtmlElement>()?;
+        self.mount_into(root)
+    }
+
+    pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_Counter_counter_c_8b71bce8();
         *self.root.borrow_mut() = Some(root);
         self.render();
         Ok(())

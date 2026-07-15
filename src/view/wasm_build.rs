@@ -585,4 +585,83 @@ component Beta {
         assert!(result.cargo_toml.is_file());
         assert!(result.lib_rs.is_file());
     }
+
+    // ---- Phase 11.5.d — multi-component composition smoke ---------
+
+    #[test]
+    fn phase_11_5_d_compose_lib_rs_end_to_end_with_child_component() {
+        // Parent mounts a `<Card />` with two static props. The
+        // composer runs the FULL view pipeline (parse → expand →
+        // check → emit_module → compose entry) and the emitted
+        // Rust must contain: both component impls, the composed
+        // entry point mounting the FIRST-declared component
+        // (Parent), the wrapper div with `__fitz-child-Card`
+        // class, the coerced prop assignments (title as String,
+        // count as i64), and the child's `mount_into` call. This
+        // is the end-to-end smoke that proves the CLI produces
+        // usable WASM output for multi-component projects.
+        let src = r#"component Parent {
+  state {}
+  <template>
+    <section>
+      <Card title="Welcome" count="3" />
+    </section>
+  </template>
+}
+component Card {
+  state {
+    title: Str = "x"
+    count: Int = 0
+  }
+  <template><div class="card">{title}</div></template>
+}"#;
+        let expanded = expand_ok(src);
+        let out = compose_lib_rs(&expanded, "#app", Some("MultiCompose.fitzv")).unwrap();
+
+        // Both components emit.
+        assert!(out.contains("pub struct Parent {"), "Parent struct missing");
+        assert!(out.contains("pub struct Card {"), "Card struct missing");
+        // Composed entry mounts Parent (first declared) on `#app`.
+        assert!(
+            out.contains("let root = Parent::new();"),
+            "root must be Parent (first declared)"
+        );
+        assert!(
+            out.contains("root.mount(\"#app\")"),
+            "root mount selector wrong"
+        );
+        // Parent's render body creates the Card wrapper.
+        assert!(
+            out.contains(r#"set_attribute("class", "__fitz-child-Card")"#),
+            "wrapper class missing"
+        );
+        // Coerced props set on the child instance.
+        assert!(
+            out.contains(r#".title.borrow_mut() = "Welcome".to_string();"#),
+            "title prop coercion missing"
+        );
+        assert!(
+            out.contains(".count.borrow_mut() = 3i64;"),
+            "count prop coercion missing"
+        );
+        // Child mounted via mount_into on the wrapper.
+        assert!(
+            out.contains(".mount_into("),
+            "child must be mounted via mount_into"
+        );
+        // Both `mount(selector)` and `mount_into(root)` present on
+        // BOTH components (Parent + Card).
+        assert_eq!(
+            out.matches("pub fn mount(self: &Rc<Self>, selector: &str)")
+                .count(),
+            2,
+            "both components must have mount(selector)"
+        );
+        assert_eq!(
+            out.matches("pub fn mount_into(self: &Rc<Self>, root: HtmlElement)")
+                .count(),
+            2,
+            "both components must have mount_into(root)"
+        );
+    }
 }

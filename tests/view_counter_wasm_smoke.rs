@@ -129,6 +129,21 @@ fn regenerate_counter_lib_rs() {
             "root instantiation via compose_lib_rs",
         ),
         ("root.mount(\"#app\")", "entry point mounts on `#app`"),
+        // Phase 11.5.d — `mount()` now delegates to `mount_into()`
+        // so `<Child />` composition sites can hand a pre-created
+        // `HtmlElement` to the child. Verify both are present.
+        (
+            "pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(), JsValue> {",
+            "public mount(selector) present",
+        ),
+        (
+            "pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {",
+            "public mount_into(root) present for child composition",
+        ),
+        (
+            "self.mount_into(root)",
+            "mount(selector) delegates to mount_into(root)",
+        ),
         ("__inject_style_Counter", "scoped style helper referenced"),
     ];
     for (needle, why) in checks {

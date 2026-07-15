@@ -167,6 +167,45 @@ pub enum ExpandedTemplateNode {
         name: Option<String>,
         loc: Loc,
     },
+    /// `<Child prop="v" />` — mount a nested component with static
+    /// props. Phase 11.5.d.
+    ///
+    /// - `name` is the child component's declared name (e.g.
+    ///   `"Card"`). Cross-checked against the file's components in
+    ///   `check.rs::check_child_components`.
+    /// - `props` are the static attributes to pass through to the
+    ///   child's `state` fields. `raw_value` is the source text as
+    ///   captured by the HTML sub-parser (e.g. `"42"` for `count`,
+    ///   `"Hello"` for `title`) — the checker coerces it to the
+    ///   declared state-field type.
+    /// - `self_closing == true` is enforced at expand time. Fallback
+    ///   children (`<Card>...</Card>`) require `<slot>` fill-in
+    ///   wiring which is 11.6+ work.
+    ///
+    /// Dynamic props (`prop={expr}`), events on child components
+    /// (`@click="..."`), and fallthrough attrs are rejected at
+    /// expand time with targeted 11.6 pointers.
+    ChildComponent {
+        name: String,
+        props: Vec<ChildComponentProp>,
+        loc: Loc,
+    },
+}
+
+/// A static prop passed to a `<Child prop="v" />` composition site.
+/// The `raw_value` is the source text captured by the HTML
+/// sub-parser; the checker coerces it to the child's declared
+/// state-field type (see `check.rs::coerce_child_prop_value`).
+///
+/// Only primitive scalar targets are supported in Phase 11.5.d:
+/// `Str`, `Int`, `Float`, `Bool`, `Nullable<T>` of a primitive.
+/// Compound types (`List`, `Map`, `Nominal`) are rejected with
+/// 11.6+ pointers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChildComponentProp {
+    pub field_name: String,
+    pub raw_value: String,
+    pub loc: Loc,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -435,7 +474,8 @@ fn rewrite_class_attrs_in_template(nodes: &mut [ExpandedTemplateNode], scope_cla
             }
             ExpandedTemplateNode::Text(_)
             | ExpandedTemplateNode::Interpolation { .. }
-            | ExpandedTemplateNode::Slot { .. } => {}
+            | ExpandedTemplateNode::Slot { .. }
+            | ExpandedTemplateNode::ChildComponent { .. } => {}
         }
     }
 }
@@ -538,6 +578,15 @@ fn expand_template_node(
             self_closing,
             loc,
         } => {
+            // Phase 11.5.d — a tag starting with an ASCII
+            // uppercase letter is a child-component reference
+            // (Vue/React convention: HTML tags are lowercase,
+            // components are PascalCase). Route to a dedicated
+            // expander that enforces the composition rules
+            // (self-closing only, static props only, no events).
+            if starts_with_ascii_uppercase(tag) {
+                return expand_child_component(tag, attrs, children, *self_closing, *loc);
+            }
             let attrs = attrs
                 .iter()
                 .map(|a| expand_attr(a, component_name, tag))
@@ -607,6 +656,102 @@ fn expand_template_node(
             loc: *loc,
         }),
     }
+}
+
+/// True when `tag` starts with an ASCII uppercase letter. Used
+/// by [`expand_template_node`] to route capitalised tags to the
+/// child-component expander (Phase 11.5.d convention: HTML tags
+/// are lowercase, components are PascalCase — same as Vue/React).
+fn starts_with_ascii_uppercase(tag: &str) -> bool {
+    tag.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// Phase 11.5.d — expand a `<Child prop="v" />` node into a
+/// [`ExpandedTemplateNode::ChildComponent`]. Enforces the shape:
+///
+/// - **Self-closing only.** Fallback children (`<Child>...</Child>`)
+///   need `<slot>` fill-in wiring, which is 11.6+ work. Rejected
+///   with a targeted 11.6 pointer that names the tag.
+/// - **Static props only.** Each attribute must be
+///   [`RawAttr::Static`]. Dynamic props (`prop={expr}`) are
+///   rejected with a 11.6 pointer.
+/// - **No event attrs.** `@click="handler"` on a child component
+///   would require plumbing an event upwards (parent-defined
+///   handler) — rejected with a 11.6 pointer.
+///
+/// The child component's **existence** and each prop's
+/// **type-compatibility** are validated later, in
+/// `check.rs::check_child_components` — this expander doesn't
+/// have access to the sibling components' state fields yet
+/// (they live on the `ExpandedViewFile`, which the caller
+/// assembles after each component is expanded).
+fn expand_child_component(
+    tag: &str,
+    attrs: &[RawAttr],
+    children: &[RawTemplateNode],
+    self_closing: bool,
+    loc: Loc,
+) -> ExpandResult<ExpandedTemplateNode> {
+    if !self_closing || !children.is_empty() {
+        return Err(ExpandError {
+            message: format!(
+                "component composition `<{tag}>...</{tag}>` with fallback \
+                 children — not supported yet. Use `<{tag} />` (self-closing) \
+                 today; fallback children via `<slot>` land alongside Phase 11.6+."
+            ),
+            loc,
+            context: "template (child component composition)".to_string(),
+        });
+    }
+
+    let mut props = Vec::with_capacity(attrs.len());
+    for a in attrs {
+        match a {
+            RawAttr::Static { name, value, loc } => {
+                props.push(ChildComponentProp {
+                    field_name: name.clone(),
+                    raw_value: value.clone(),
+                    loc: *loc,
+                });
+            }
+            RawAttr::Interpolation {
+                name, loc: aloc, ..
+            } => {
+                return Err(ExpandError {
+                    message: format!(
+                        "dynamic prop `{name}={{...}}` on child component `<{tag} />` \
+                         — not supported yet. Only static values (`{name}=\"...\"`) \
+                         work in Phase 11.5.d; dynamic props land alongside Phase 11.6+."
+                    ),
+                    loc: *aloc,
+                    context: "template (child component composition)".to_string(),
+                });
+            }
+            RawAttr::Event {
+                event_name,
+                loc: aloc,
+                ..
+            } => {
+                return Err(ExpandError {
+                    message: format!(
+                        "event `@{event_name}=\"...\"` on child component `<{tag} />` \
+                         — not supported yet. Parent-defined handlers on children \
+                         require event bubbling wiring which lands with Phase 11.6+. \
+                         Move the handler into `<{tag}>`'s own `event ...` block \
+                         instead."
+                    ),
+                    loc: *aloc,
+                    context: "template (child component composition)".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(ExpandedTemplateNode::ChildComponent {
+        name: tag.to_string(),
+        props,
+        loc,
+    })
 }
 
 fn expand_attr(attr: &RawAttr, component_name: &str, tag: &str) -> ExpandResult<ExpandedAttr> {
@@ -1903,5 +2048,132 @@ component B {
     fn rewrite_class_value_helper_leaves_empty_and_whitespace_only_alone() {
         assert_eq!(rewrite_class_value("", "s"), "");
         assert_eq!(rewrite_class_value("   ", "s"), "   ");
+    }
+
+    // ---- Phase 11.5.d — ChildComponent expansion ----
+
+    fn expand_ok_test(src: &str) -> ExpandedViewFile {
+        let raw = super::super::parse(src).expect("view::parse");
+        super::expand(&raw).expect("view::expand")
+    }
+
+    fn expand_err_test(src: &str) -> ExpandError {
+        let raw = super::super::parse(src).expect("view::parse");
+        super::expand(&raw).unwrap_err()
+    }
+
+    fn find_child(node: &ExpandedTemplateNode) -> Option<(&str, &[ChildComponentProp])> {
+        match node {
+            ExpandedTemplateNode::ChildComponent { name, props, .. } => Some((name, props)),
+            ExpandedTemplateNode::Element { children, .. } => {
+                for c in children {
+                    if let Some(x) = find_child(c) {
+                        return Some(x);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn phase_11_5_d_expand_capitalised_tag_emits_child_component_variant() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card /></template>
+}
+component Card {
+  state { title: Str = "hi" }
+  <template><div>{title}</div></template>
+}
+"#;
+        let file = expand_ok_test(src);
+        let parent = &file.components[0];
+        let tpl = parent.template.as_ref().unwrap();
+        let (name, props) = find_child(&tpl.roots[0]).expect("ChildComponent not found");
+        assert_eq!(name, "Card");
+        assert!(props.is_empty(), "self-closing without attrs => no props");
+    }
+
+    #[test]
+    fn phase_11_5_d_expand_child_component_captures_static_props() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card title="Hello" count="3" /></template>
+}
+component Card {
+  state {
+    title: Str = "x"
+    count: Int = 0
+  }
+  <template><div>{title}</div></template>
+}
+"#;
+        let file = expand_ok_test(src);
+        let parent = &file.components[0];
+        let tpl = parent.template.as_ref().unwrap();
+        let (_, props) = find_child(&tpl.roots[0]).expect("ChildComponent not found");
+        assert_eq!(props.len(), 2);
+        assert_eq!(props[0].field_name, "title");
+        assert_eq!(props[0].raw_value, "Hello");
+        assert_eq!(props[1].field_name, "count");
+        assert_eq!(props[1].raw_value, "3");
+    }
+
+    #[test]
+    fn phase_11_5_d_expand_child_component_non_self_closing_rejects_citing_11_6() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card>fallback</Card></template>
+}
+"#;
+        let err = expand_err_test(src);
+        let msg = err.message;
+        assert!(msg.contains("fallback children"), "msg: {msg}");
+        assert!(msg.contains("11.6"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_expand_child_component_dynamic_prop_rejects_citing_11_6() {
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{title}" /></template>
+}
+"#;
+        let err = expand_err_test(src);
+        let msg = err.message;
+        assert!(msg.contains("dynamic prop"), "msg: {msg}");
+        assert!(msg.contains("11.6"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_expand_child_component_event_attr_rejects_citing_11_6() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card @click="foo" /></template>
+}
+"#;
+        let err = expand_err_test(src);
+        let msg = err.message;
+        assert!(msg.contains("@click"), "msg: {msg}");
+        assert!(msg.contains("11.6"), "msg: {msg}");
+    }
+
+    #[test]
+    fn phase_11_5_d_expand_lowercase_tag_stays_element_not_child_component() {
+        // Sanity: HTML tags (lowercase first char) must NOT be
+        // treated as child components.
+        let src = r#"component X {
+  state {}
+  <template><div class="card" /></template>
+}
+"#;
+        let file = expand_ok_test(src);
+        let tpl = file.components[0].template.as_ref().unwrap();
+        match &tpl.roots[0] {
+            ExpandedTemplateNode::Element { tag, .. } => assert_eq!(tag, "div"),
+            other => panic!("expected Element, got {other:?}"),
+        }
     }
 }

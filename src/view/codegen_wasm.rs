@@ -122,8 +122,18 @@ pub type EmitResult<T> = Result<T, EmitError>;
 /// NO emite `use` imports ni `#[wasm_bindgen(start)]`. El caller
 /// (típicamente [`emit_module`] o el CLI de 11.5) compone.
 pub fn emit_component(component: &ExpandedComponent) -> EmitResult<String> {
+    // Wrap the single component in a synthetic file so
+    // `emit_component_impl` has the same shape it gets from
+    // `emit_module`. Child-component composition (`<Child />`)
+    // in isolation is not sensible — a `<Child />` reference
+    // rejects at check-time when the sibling is missing —
+    // but tests that exercise the single-component emitter
+    // don't use composition anyway.
+    let synthetic_file = ExpandedViewFile {
+        components: vec![component.clone()],
+    };
     let mut out = String::new();
-    emit_component_impl(component, &mut out)?;
+    emit_component_impl(component, &synthetic_file, &mut out)?;
     Ok(out)
 }
 
@@ -143,7 +153,7 @@ pub fn emit_module(file: &ExpandedViewFile) -> EmitResult<String> {
     let mut out = String::new();
     emit_module_header(&mut out);
     for component in &file.components {
-        emit_component_impl(component, &mut out)?;
+        emit_component_impl(component, file, &mut out)?;
     }
     Ok(out)
 }
@@ -171,12 +181,16 @@ fn emit_module_header(out: &mut String) {
 // Per-component emit
 // ---------------------------------------------------------------------------
 
-fn emit_component_impl(component: &ExpandedComponent, out: &mut String) -> EmitResult<()> {
+fn emit_component_impl(
+    component: &ExpandedComponent,
+    file: &ExpandedViewFile,
+    out: &mut String,
+) -> EmitResult<()> {
     let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
 
     emit_struct_and_new(component, out)?;
     emit_event_handlers(component, &state_names, out)?;
-    emit_mount_and_render(component, &state_names, out)?;
+    emit_mount_and_render(component, &state_names, file, out)?;
     if let Some(style) = &component.style {
         emit_style_helper(&component.name, style, out);
     }
@@ -283,20 +297,23 @@ fn emit_event_handler(
 fn emit_mount_and_render(
     component: &ExpandedComponent,
     state_names: &[String],
+    file: &ExpandedViewFile,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
 
     // ---- mount() -------------------------------------------------
+    // Phase 11.5.d — factored into `mount(selector)` (public entry
+    // point for the composed WASM `start()` — resolves the
+    // selector in the DOM) and `mount_into(root)` (used by child
+    // components: `<Child />` composition sites hand the parent's
+    // element directly). Both share the "inject style once + store
+    // root + render" logic via `mount_into`.
     writeln!(
         out,
         "    pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(), JsValue> {{"
     )
     .unwrap();
-    if let Some(style) = &component.style {
-        let helper = style_helper_ident(name, style);
-        writeln!(out, "        {}();", helper).unwrap();
-    }
     writeln!(
         out,
         "        let document = web_sys::window().unwrap().document().unwrap();"
@@ -310,6 +327,24 @@ fn emit_mount_and_render(
     )
     .unwrap();
     writeln!(out, "            .dyn_into::<HtmlElement>()?;").unwrap();
+    writeln!(out, "        self.mount_into(root)").unwrap();
+    writeln!(out, "    }}\n").unwrap();
+
+    // ---- mount_into() --------------------------------------------
+    // Attaches the component into an existing `HtmlElement` root.
+    // Consumed by `<Child />` composition sites (Phase 11.5.d) —
+    // the parent creates a wrapper element and hands it to the
+    // child via this entry point. Also the underlying implementation
+    // of `mount(selector)`.
+    writeln!(
+        out,
+        "    pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {{"
+    )
+    .unwrap();
+    if let Some(style) = &component.style {
+        let helper = style_helper_ident(name, style);
+        writeln!(out, "        {}();", helper).unwrap();
+    }
     writeln!(out, "        *self.root.borrow_mut() = Some(root);").unwrap();
     writeln!(out, "        self.render();").unwrap();
     writeln!(out, "        Ok(())").unwrap();
@@ -332,7 +367,7 @@ fn emit_mount_and_render(
     .unwrap();
 
     if let Some(template) = &component.template {
-        let mut ctx = RenderCtx::new(name, state_names);
+        let mut ctx = RenderCtx::new(name, state_names, file);
         for root_node in &template.roots {
             emit_template_node(root_node, "root", &mut ctx, out)?;
         }
@@ -353,14 +388,20 @@ fn emit_mount_and_render(
 struct RenderCtx<'a> {
     component_name: &'a str,
     state_names: &'a [String],
+    /// Phase 11.5.d — every OTHER component in the same file,
+    /// keyed by name. Consumed by `emit_child_component` to
+    /// resolve the child's declared state-field types when
+    /// coercing static prop values into Rust literals.
+    file: &'a ExpandedViewFile,
     var_counter: usize,
 }
 
 impl<'a> RenderCtx<'a> {
-    fn new(component_name: &'a str, state_names: &'a [String]) -> Self {
+    fn new(component_name: &'a str, state_names: &'a [String], file: &'a ExpandedViewFile) -> Self {
         RenderCtx {
             component_name,
             state_names,
+            file,
             var_counter: 0,
         }
     }
@@ -404,6 +445,9 @@ fn emit_template_node(
             message: "`<slot />` composition — deferred to Phase 11.5".to_string(),
             context: format!("template of component `{}`", ctx.component_name),
         }),
+        ExpandedTemplateNode::ChildComponent { name, props, .. } => {
+            emit_child_component(name, props, parent_var, ctx, out)
+        }
     }
 }
 
@@ -525,6 +569,123 @@ fn emit_static_attr(name: &str, value: &str, el_var: &str, out: &mut String) {
         rust_string_literal(value)
     )
     .unwrap();
+}
+
+/// Phase 11.5.d — emit the Rust for a `<Child prop="v" />` node.
+/// Creates a wrapper `<div>` inside the parent (so the child owns
+/// a stable root), instantiates `Child::new()`, writes each
+/// coerced prop into the corresponding `RefCell<T>` state field,
+/// then calls `mount_into` handing the wrapper to the child.
+///
+/// The wrapper class is `__fitz-child-<ChildName>` so scoped CSS
+/// and dev-tools inspection stay predictable. The prop values are
+/// pre-coerced by `check.rs` via `check_child_components` — the
+/// emitter trusts the shape and just formats each prop as a Rust
+/// literal (`i64` / `f64` / `String` / `bool` / `Option<T>`).
+///
+/// Reflow semantics: when the parent re-renders (state change +
+/// `render()` clears the root), the child is re-instantiated
+/// from scratch. Child state resets on parent re-render — a
+/// consequence of naive-render (§9.m D1) that the composition
+/// wiring inherits. Persistent child state across parent renders
+/// is a Phase 11.6+ concern that would need a component-instance
+/// cache keyed by position in the render tree.
+fn emit_child_component(
+    child_name: &str,
+    props: &[super::expand::ChildComponentProp],
+    parent_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let wrapper_var = ctx.fresh("el");
+    writeln!(
+        out,
+        "        let {} = document.create_element(\"div\").unwrap();",
+        wrapper_var
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        {}.set_attribute(\"class\", \"__fitz-child-{}\").unwrap();",
+        wrapper_var, child_name
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        {}.append_child(&{}).unwrap();",
+        parent_var, wrapper_var
+    )
+    .unwrap();
+
+    let child_var = ctx.fresh("child");
+    writeln!(out, "        let {} = {}::new();", child_var, child_name).unwrap();
+
+    // Look up the child component to know each prop's declared
+    // type. The checker already validated the child exists +
+    // props coerce; we trust the shape and re-derive the Rust
+    // literal here (both routes share
+    // `check::coerce_child_prop_raw_value`, so the coerced
+    // representation is guaranteed identical bit-for-bit).
+    let child = ctx
+        .file
+        .components
+        .iter()
+        .find(|c| c.name == child_name)
+        .ok_or_else(|| EmitError {
+            message: format!(
+                "internal error: child component `{child_name}` not found in the \
+                 expanded view file — the checker should have caught this."
+            ),
+            context: format!("template of component `{}`", ctx.component_name),
+        })?;
+    for prop in props {
+        let field = child
+            .state
+            .iter()
+            .find(|f| f.name == prop.field_name)
+            .ok_or_else(|| EmitError {
+                message: format!(
+                    "internal error: prop `{}` on `<{child_name} />` matches no \
+                     state field — the checker should have caught this.",
+                    prop.field_name
+                ),
+                context: format!("template of component `{}`", ctx.component_name),
+            })?;
+        let literal = super::check::coerce_child_prop_raw_value(&prop.raw_value, &field.type_expr)
+            .map_err(|msg| EmitError {
+                message: format!(
+                    "internal error: prop `{}=\"{}\"` on `<{child_name} />` — \
+                 coerce_child_prop_raw_value: {msg}. The checker should have \
+                 caught this.",
+                    prop.field_name, prop.raw_value
+                ),
+                context: format!("template of component `{}`", ctx.component_name),
+            })?;
+        writeln!(
+            out,
+            "        *{}.{}.borrow_mut() = {};",
+            child_var, prop.field_name, literal
+        )
+        .unwrap();
+    }
+
+    writeln!(
+        out,
+        "        let {wrapper_var}_html = {wrapper_var}.clone().dyn_into::<HtmlElement>().unwrap();"
+    )
+    .unwrap();
+    // `render()` is `fn(...) -> ()` (no `Result`), so we cannot use
+    // `?` here. `mount_into` failure implies a JS runtime error
+    // (root already detached, etc.) — surface it via `unwrap()` so
+    // the browser console shows the panic trace via
+    // `console_error_panic_hook`.
+    writeln!(
+        out,
+        "        {}.mount_into({wrapper_var}_html).unwrap();",
+        child_var
+    )
+    .unwrap();
+    Ok(())
 }
 
 fn emit_event_attr(
@@ -816,23 +977,46 @@ fn lower_stmt(
 // ---------------------------------------------------------------------------
 
 /// Map a Fitz `TypeExpr` to the corresponding Rust type string used
-/// inside `RefCell<...>` for state fields. POC only accepts `Int` →
-/// `i64`. Str/Bool/Float/List/Map/Nominal deferred to 11.4.c.
+/// inside `RefCell<...>` for state fields.
+///
+/// Phase 11.5.d extended this from Int-only (11.4.b) to the four
+/// primitive scalars + `Nullable<T>` of a primitive. The set matches
+/// `check::coerce_child_prop_raw_value` so any type that flows
+/// through `<Child prop="v" />` composition can also be declared as
+/// a state field on the child.
+///
+/// Compound types (`List`, `Map`, nominal types) still deferred —
+/// they need cell layout decisions that overlap with the reflow
+/// story (Phase 11.6+).
 fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
     match ty {
-        TypeExpr::Named(name) if name == "Int" => Ok("i64".to_string()),
-        TypeExpr::Named(other) => Err(EmitError {
+        TypeExpr::Named(name) => match name.as_str() {
+            "Int" => Ok("i64".to_string()),
+            "Float" => Ok("f64".to_string()),
+            "Bool" => Ok("bool".to_string()),
+            "Str" => Ok("String".to_string()),
+            other => Err(EmitError {
+                message: format!(
+                    "state field type `{other}` — only `Int`/`Float`/`Bool`/`Str` \
+                     (and their `Nullable<T>` wrappers) supported today; nominal \
+                     types deferred to Phase 11.6+"
+                ),
+                context: "type".to_string(),
+            }),
+        },
+        TypeExpr::Nullable(inner) => {
+            let inner_rust = type_expr_to_rust(inner)?;
+            Ok(format!("Option<{inner_rust}>"))
+        }
+        TypeExpr::Generic { name, .. } => Err(EmitError {
             message: format!(
-                "state field type `{}` — only `Int` supported in Phase 11.4.b (deferred to 11.4.c)",
-                other
+                "state field type `{name}<...>` — compound types (`List`, `Map`, \
+                 etc.) deferred to Phase 11.6+"
             ),
             context: "type".to_string(),
         }),
-        TypeExpr::Nullable(_)
-        | TypeExpr::Generic { .. }
-        | TypeExpr::Tuple(_)
-        | TypeExpr::Function { .. } => Err(EmitError {
-            message: "compound state field type — deferred to Phase 11.4.c".to_string(),
+        TypeExpr::Tuple(_) | TypeExpr::Function { .. } => Err(EmitError {
+            message: "tuple / function state field type — deferred to Phase 11.6+".to_string(),
             context: "type".to_string(),
         }),
     }
@@ -841,16 +1025,50 @@ fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
 /// Lower a default expression to Rust source code, cross-checked
 /// against the declared type of the field so we can emit the right
 /// suffix (`0i64` for Int). POC only accepts Int defaults.
+/// Emit the Rust literal for a state field's `default` expression,
+/// checked against the field's declared type. Phase 11.5.d extended
+/// beyond `Int` to the four primitive scalars + `Nullable<T>`, so
+/// that any child-component composition target (`<Child /`>) can
+/// declare its state with the same primitives that flow through
+/// props.
+///
+/// - `Int` field ← `Expr::Int(n)`     → `<n>i64`
+/// - `Float` field ← `Expr::Float(f)` → `<f>f64`
+/// - `Bool` field ← `Expr::Bool(b)`   → `true`/`false`
+/// - `Str` field ← `Expr::Str(s)`     → `"...".to_string()`
+/// - `Nullable<T>` field ← `Expr::Null` → `None`
+/// - `Nullable<T>` field ← non-null   → `Some(<inner literal>)`
+/// - `Nullable<T>` field ← `Expr::Ident("null")` (legacy view sugar)
+///   → `None`. The view parser today emits `Expr::Null` for the
+///   `null` keyword, but we accept the ident form defensively so a
+///   pre-lang-refresh checkpoint doesn't regress.
+///
+/// Non-literal defaults (function calls, arithmetic, etc.) still
+/// error — they need the classic-Fitz expression lowering which
+/// belongs to a future emitter refactor.
 fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
     match (default, ty) {
-        (Expr::Int(n, _), TypeExpr::Named(name)) if name == "Int" => Ok(format!("{}i64", n)),
-        (_, TypeExpr::Named(name)) if name == "Int" => Err(EmitError {
-            message: "default expression is not an `Int` literal — deferred to Phase 11.4.c"
-                .to_string(),
-            context: "default".to_string(),
-        }),
+        (Expr::Int(n, _), TypeExpr::Named(name)) if name == "Int" => Ok(format!("{n}i64")),
+        (Expr::Float(f, _), TypeExpr::Named(name)) if name == "Float" => Ok(format!("{f}f64")),
+        (Expr::Bool(b, _), TypeExpr::Named(name)) if name == "Bool" => Ok(b.to_string()),
+        (Expr::Str(s, _), TypeExpr::Named(name)) if name == "Str" => {
+            Ok(format!("{s:?}.to_string()"))
+        }
+        // Nullable dispatch: `null` → None, else recurse into inner.
+        (Expr::Null(_), TypeExpr::Nullable(_)) => Ok("None".to_string()),
+        (_, TypeExpr::Nullable(inner)) => {
+            let inner_rust = default_expr_to_rust(default, inner)?;
+            Ok(format!("Some({inner_rust})"))
+        }
+        // Everything else: not a literal, or a mismatch. The classic
+        // checker catches literal-vs-type mismatch already; here we
+        // reject with a generic message pointing at the composition
+        // story.
         _ => Err(EmitError {
-            message: "default expression for non-Int state field — deferred to Phase 11.4.c"
+            message: "default expression for state field — must be a literal of the \
+                     declared primitive type (`Int`/`Float`/`Bool`/`Str`) or `null` \
+                     for a `Nullable<T>` field. Non-literal defaults deferred to \
+                     Phase 11.6+."
                 .to_string(),
             context: "default".to_string(),
         }),
@@ -1350,7 +1568,12 @@ mod tests {
     // ---- Errors for the deferred subset -------------------------
 
     #[test]
-    fn emit_rejects_str_state_field() {
+    fn emit_now_accepts_str_state_field_since_11_5_d() {
+        // Regression / behaviour-change guard: Phase 11.5.d extended
+        // the emitter's accepted state-field primitive set to
+        // include `Str` (plus `Float`/`Bool`/`Nullable<T>` — see the
+        // 11.5.d unit tests). A `Str` state field with a literal
+        // default now emits successfully instead of erroring.
         let src = r#"component Foo {
   state { name: Str = "hi" }
 
@@ -1359,16 +1582,36 @@ mod tests {
   </template>
 }"#;
         let expanded = parse_expand(src);
-        let err = emit_component(&expanded.components[0]).unwrap_err();
+        let out = emit_component(&expanded.components[0])
+            .expect("Str state fields must emit successfully since 11.5.d");
         assert!(
-            err.message.contains("Str") && err.message.contains("11.4.c"),
-            "str error:\n{}",
-            err
+            out.contains("name: RefCell<String>,"),
+            "Str field should map to RefCell<String>:\n{out}"
         );
         assert!(
-            err.context.contains("component `Foo`"),
-            "context names component:\n{}",
-            err
+            out.contains(r#"name: RefCell::new("hi".to_string())"#),
+            "default `\"hi\"` should coerce to a Rust String literal:\n{out}"
+        );
+    }
+
+    #[test]
+    fn emit_rejects_nominal_state_field_citing_11_6() {
+        // The rejection surface still catches nominal / user-defined
+        // types on state fields — those need type dispatch that
+        // overlaps with the "compose typed props through nominal
+        // types" story (11.6+).
+        let src = r#"component Foo {
+  state { user: User? = null }
+
+  <template>
+    <div>hi</div>
+  </template>
+}"#;
+        let expanded = parse_expand(src);
+        let err = emit_component(&expanded.components[0]).unwrap_err();
+        assert!(
+            err.message.contains("User") && err.message.contains("11.6"),
+            "nominal type rejection should cite 11.6+:\n{err}"
         );
     }
 
@@ -1531,5 +1774,104 @@ mod tests {
             "\"with \\\"quote\\\"\""
         );
         assert_eq!(rust_string_literal("line1\nline2"), "\"line1\\nline2\"");
+    }
+
+    // ---- Phase 11.5.d — mount_into split + emit_child_component ----
+
+    #[test]
+    fn phase_11_5_d_emit_mount_delegates_to_mount_into() {
+        let file = parse_expand(counter_shape_src());
+        let out = emit_module(&file).unwrap();
+        assert!(
+            out.contains("pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(), JsValue> {"),
+            "public mount(selector) missing:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {"
+            ),
+            "public mount_into(root) missing:\n{out}"
+        );
+        assert!(
+            out.contains("self.mount_into(root)"),
+            "mount(selector) must delegate to mount_into:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_emit_child_component_creates_wrapper_and_mounts_into() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card title="Hello" count="3" /></template>
+}
+component Card {
+  state {
+    title: Str = "x"
+    count: Int = 0
+  }
+  <template><div>{title}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).unwrap();
+        // Wrapper div created + classed with `__fitz-child-<Name>`.
+        assert!(
+            out.contains(r#"document.create_element("div").unwrap();"#),
+            "wrapper div creation missing"
+        );
+        assert!(
+            out.contains(r#"set_attribute("class", "__fitz-child-Card")"#),
+            "wrapper class must include `__fitz-child-Card`:\n{out}"
+        );
+        // Child instantiated + props coerced + mounted.
+        assert!(out.contains("Card::new();"), "child instantiation missing");
+        assert!(
+            out.contains(r#"*__child1.title.borrow_mut() = "Hello".to_string();"#)
+                || out.contains(r#"*__child1.title.borrow_mut() = "Hello""#),
+            "title prop must be coerced to a Rust String literal:\n{out}"
+        );
+        assert!(
+            out.contains("*__child1.count.borrow_mut() = 3i64;"),
+            "count prop must be coerced to i64:\n{out}"
+        );
+        assert!(
+            out.contains(".mount_into(__el0_html).unwrap();"),
+            "child must be mounted via mount_into on the wrapper:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_emit_child_component_nullable_null_produces_none() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card n="null" /></template>
+}
+component Card {
+  state { n: Int? = null }
+  <template><span>hi</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).unwrap();
+        assert!(
+            out.contains("*__child1.n.borrow_mut() = None;"),
+            "nullable null must emit None:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_5_d_emit_child_component_bool_produces_bare_literal() {
+        let src = r#"component Parent {
+  state {}
+  <template><Card active="true" /></template>
+}
+component Card {
+  state { active: Bool = false }
+  <template><span>hi</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).unwrap();
+        assert!(
+            out.contains("*__child1.active.borrow_mut() = true;"),
+            "bool prop must emit bare `true`/`false`:\n{out}"
+        );
     }
 }
