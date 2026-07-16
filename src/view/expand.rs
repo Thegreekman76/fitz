@@ -237,7 +237,13 @@ pub enum ExpandedTemplateNode {
 pub struct ChildComponentProp {
     pub field_name: String,
     pub raw_value: String,
-    pub expr_raw: Option<String>,
+    /// Set when the prop was written as `prop={expr}`. Holds the
+    /// PARSED classic-Fitz expression (via the same `parse_expr_at`
+    /// helper used by other template interpolations). The SSR
+    /// emitter runs it through `format_fitz_expr_scoped` to inline
+    /// the source with state-field rewriting. The WASM emitter
+    /// today rejects with a Phase 11.7+ pointer.
+    pub expr: Option<fast::Expr>,
     pub loc: Loc,
 }
 
@@ -246,7 +252,7 @@ impl ChildComponentProp {
     /// should NOT coerce; it should inline the expression source
     /// with any applicable state-field rewrites.
     pub fn is_interpolated(&self) -> bool {
-        self.expr_raw.is_some()
+        self.expr.is_some()
     }
 }
 
@@ -765,20 +771,34 @@ fn expand_child_component(
                 props.push(ChildComponentProp {
                     field_name: name.clone(),
                     raw_value: value.clone(),
+                    expr: None,
                     loc: *loc,
                 });
             }
             RawAttr::Interpolation {
-                name, loc: aloc, ..
+                name,
+                expr_raw,
+                loc: aloc,
             } => {
-                return Err(ExpandError {
-                    message: format!(
-                        "dynamic prop `{name}={{...}}` on child component `<{tag} />` \
-                         — not supported yet. Only static values (`{name}=\"...\"`) \
-                         work in Phase 11.5.d; dynamic props land alongside Phase 11.6+."
-                    ),
+                // K-3 remainder (post-v0.21.0): interpolated props
+                // pass through to the emitters. The SSR emitter
+                // runs the parsed expression through the standard
+                // scoping pass (state-field refs get rewritten to
+                // `state.<name>`) and inlines it in the struct
+                // literal. The WASM emitter errors out today with
+                // a Phase 11.7+ pointer — client-side dynamic
+                // composition needs richer reactivity plumbing.
+                //
+                // `raw_value` mirrors the expression source so
+                // error messages don't need to special-case the
+                // shape; the discriminant is `expr.is_some()`.
+                let ctx = format!("component template <{tag} /> prop '{name}' interpolation");
+                let expr = parse_expr_at(expr_raw, *aloc, ctx)?;
+                props.push(ChildComponentProp {
+                    field_name: name.clone(),
+                    raw_value: expr_raw.clone(),
+                    expr: Some(expr),
                     loc: *aloc,
-                    context: "template (child component composition)".to_string(),
                 });
             }
             RawAttr::Event {
@@ -2189,16 +2209,35 @@ component Card {
     }
 
     #[test]
-    fn phase_11_5_d_expand_child_component_dynamic_prop_rejects_citing_11_6() {
+    fn k3_interp_expand_child_component_accepts_dynamic_prop_and_parses_expr() {
+        // K-3 remainder (post-v0.21.0): `<Card label="{title}" />`
+        // used to reject at expand time with "dynamic prop —
+        // deferred to 11.6+". Now the expander parses the raw
+        // expression into a classic `Expr` and stores it on the
+        // `ChildComponentProp.expr` field for the emitters to
+        // consume.
         let src = r#"component Parent {
   state { title: Str = "hi" }
   <template><Card label="{title}" /></template>
 }
 "#;
-        let err = expand_err_test(src);
-        let msg = err.message;
-        assert!(msg.contains("dynamic prop"), "msg: {msg}");
-        assert!(msg.contains("11.6"), "msg: {msg}");
+        let file = expand_ok_test(src);
+        let (child_name, props) =
+            find_child(&file.components[0].template.as_ref().unwrap().roots[0])
+                .expect("first root is a child component");
+        assert_eq!(child_name, "Card");
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].field_name, "label");
+        assert!(props[0].is_interpolated(), "expected interpolated prop");
+        // raw_value mirrors the expression source so error
+        // messages don't need to special-case the shape.
+        assert_eq!(props[0].raw_value, "title");
+        // The parsed expression is a bare Ident("title") — the
+        // SSR emitter rewrites it to `state.title`.
+        match &props[0].expr {
+            Some(fast::Expr::Ident(name, _)) => assert_eq!(name, "title"),
+            other => panic!("expected Ident('title'), got: {other:?}"),
+        }
     }
 
     #[test]

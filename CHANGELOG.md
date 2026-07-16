@@ -268,6 +268,62 @@ rejection (`phase_11_5_d_check_list_prop_rejects_citing_11_6`
 values` + `k3_check_map_prop_still_rejects_citing_11_6_or_
 later`).
 
+### K-3 (remainder) — `<Child />` interpolated props `prop="{expr}"` para SSR — post-v0.21.0 (2026-07-16)
+
+**Cierre completo de K-3** — la segunda de las dos sub-releases
+que juntas cierran el gap "compound / interpolated child props"
+para el SSR path entero. Con esto **Board.fitzv migration queda
+desbloqueada** para el target fitz-liveviews.
+
+- **Parser + expand**: `<Card label="{title}" />` (donde
+  `label="{expr}"` es reconocido por `extract_full_interp` en el
+  POC parser) ya no aborta con "dynamic prop deferred to 11.6+".
+  El expander parsea el `expr_raw` a un `fast::Expr` clásico via
+  `parse_expr_at` (mismo helper usado para template interpolations)
+  y lo guarda en `ChildComponentProp.expr: Option<fast::Expr>`.
+  Helper nuevo `ChildComponentProp::is_interpolated()` discrimina
+  el shape.
+- **Checker**: cuando `is_interpolated()`, skippea `coerce_child_
+  prop_raw_value` (trust runtime). Type-check del expr vs field
+  type queda deferrable si false negatives aparecen.
+- **SSR emitter (`format_child_composition`)**: dispatch on
+  `is_interpolated()`. Static path usa el coerce helper como antes.
+  Interpolated path corre el expr por `format_fitz_expr_scoped`
+  con el `state_field_names` + `local_scope` del PARENT — bare
+  ident `title` en el expr rewritea a `state.title` (la parent's
+  state field), no la child's. Closure-parameter locals (`{#for x
+  in xs}` alrededor del `<Child />`) también shadow via el
+  `local_scope` del parent.
+- **WASM emitter**: rechaza interpolated props con mensaje claro
+  citando Phase 11.7+ y el workaround (static value o composición
+  top-level). Razón: reactive prop propagation from parent state
+  to mounted child needs child-lifecycle hooks + prop watchers.
+
+**Patterns unlocked** (SSR target, `fitz-liveviews`):
+- `<Card label="{title}" />` — bare state field reference.
+- `<Card count="{n + 1}" />` — inline arithmetic (any expression
+  the parser accepts as a classic Fitz expr).
+- `<Board initial-cards="{cards}" />` — nominal / compound types
+  pass through naturally via the interpolation (no static-value
+  serialization convention needed).
+- Mixed static + interpolated on same child: `<Card
+  label="{title}" kind="primary" />`.
+
+**Sin cambio breaking**: el shape `prop="value"` sigue funcionando
+idéntico. Solo cambia el shape `prop="{expr}"` — antes fallaba,
+ahora funciona en SSR. WASM sigue rechazando con mensaje que
+apunta al Phase 11.7+ scope real (reactivity, no un mero
+"defer everything").
+
+**Cambios técnicos**: ~120 LoC netos + 5 unit tests nuevos +
+1 test flipped from stale rejection (`phase_11_5_d_expand_child_
+component_dynamic_prop_rejects_citing_11_6` → `k3_interp_expand_
+child_component_accepts_dynamic_prop_and_parses_expr`). Refactor
+signature de `format_child_composition` para tomar
+`parent_state_field_names` + `parent_local_scope` (data ya
+disponible en el caller). 3711 → 3715 lib tests green, fmt +
+clippy limpios.
+
 ## [v0.20.1] — 2026-07-13 — Implicit `flv_register(...)` for LiveView components (fitz-liveviews Phase 5, A.1)
 
 Primer sub-paso de la Fase 5 diferida post-Phase-4 de `fitz-liveviews`.

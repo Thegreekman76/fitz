@@ -1233,7 +1233,8 @@ fn emit_template_node_to_pieces(
                     ),
                     context: format!("component `{}` template", component.name),
                 })?;
-            let expr_src = format_child_composition(child, props, component)?;
+            let expr_src =
+                format_child_composition(child, props, component, state_field_names, local_scope)?;
             pieces.push(TemplatePiece::Expr(expr_src));
             Ok(())
         }
@@ -1357,6 +1358,8 @@ fn format_child_composition(
     child: &ExpandedComponent,
     props: &[super::expand::ChildComponentProp],
     parent: &ExpandedComponent,
+    parent_state_field_names: &[&str],
+    parent_local_scope: &[&str],
 ) -> SsrEmitResult<String> {
     let child_name = &child.name;
     let mut out = format!("{child_name}_render({child_name} {{");
@@ -1375,19 +1378,39 @@ fn format_child_composition(
                 ),
                 context: format!("component `{}` template", parent.name),
             })?;
-        let literal = coerce_child_prop_raw_value_to_fitz_literal(
-            &prop.raw_value,
-            &field.type_expr,
-            child_name,
-            &prop.field_name,
-        )?;
+        // K-3 remainder: interpolated props (`prop={expr}`) inline
+        // the parsed expression source with the PARENT's state-
+        // field rewriting rules — a bare `count` in the expression
+        // refers to the parent's `count` state field (rewritten to
+        // `state.count`), NOT the child's. Closure-parameter locals
+        // (e.g. `{#for x in xs}` around the `<Child />`) shadow via
+        // the parent's `local_scope`.
+        let value_src = if let Some(expr) = &prop.expr {
+            format_fitz_expr_scoped(
+                expr,
+                parent_state_field_names,
+                parent_local_scope,
+                &parent.name,
+                &format!(
+                    "child composition <{child_name} /> prop '{}'",
+                    prop.field_name
+                ),
+            )?
+        } else {
+            coerce_child_prop_raw_value_to_fitz_literal(
+                &prop.raw_value,
+                &field.type_expr,
+                child_name,
+                &prop.field_name,
+            )?
+        };
         if i > 0 {
             out.push(',');
         }
         out.push(' ');
         out.push_str(&prop.field_name);
         out.push_str(": ");
-        out.push_str(&literal);
+        out.push_str(&value_src);
     }
     // Trailing space keeps the emitted source pretty in both
     // shapes: `Child { }` (no props → all state fields use their
@@ -3921,5 +3944,100 @@ component ChatRoom {
         let err = coerce_child_prop_raw_value_to_fitz_literal("k=v", &ty, "Child", "meta")
             .expect_err("Map not supported yet");
         assert!(err.message.contains("Map"), "got: {}", err.message);
+    }
+
+    // ---------------------------------------------------------------------
+    // K-3 remainder — SSR interpolated props (`<Child prop={expr} />`)
+    // ---------------------------------------------------------------------
+    //
+    // End-to-end tests: `.fitzv` source with `<Card label={title} />`
+    // (bare Ident referring to a parent state field) emits a child
+    // composition where `label: state.title` is inlined in the
+    // struct literal, matching the state-field rewriting rule the
+    // SSR emitter applies to template interpolations.
+
+    #[test]
+    fn k3_interp_ssr_bare_ident_prop_rewrites_to_state_dot_field() {
+        // Parent has a state field `title: Str`. `<Card label="{title}" />`
+        // must emit `label: state.title` at the composition site.
+        // The POC parser wraps interpolated values as `"{expr}"` —
+        // the shape recognized by `extract_full_interp` in the
+        // attribute reader.
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{title}" /></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><span>{label}</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // The composition site emits the child struct literal with
+        // the parent's state.title rewrite inline (not `title` bare,
+        // not `"title"` string literal).
+        assert!(
+            out.contains("Card { label: state.title }"),
+            "expected interpolated prop rewritten to state.title:\n{out}"
+        );
+    }
+
+    #[test]
+    fn k3_interp_ssr_int_expression_inline_math_ok() {
+        // Slightly richer interpolation: `<Card count="{n + 1}" />`
+        // with parent state `n: Int`. The SSR emitter runs the
+        // BinOp through `format_fitz_expr_scoped`, so `n` rewrites
+        // to `state.n` and the operator is preserved.
+        let src = r#"component Parent {
+  state { n: Int = 0 }
+  <template><Card count="{n + 1}" /></template>
+}
+component Card {
+  state { count: Int = 0 }
+  <template><span>{count}</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // `format_fitz_expr_scoped` wraps BinOp in parens for
+        // precedence safety, so the exact substring is `(state.n + 1)`
+        // (or however the scoping helper renders it — the important
+        // bit is that `n` was rewritten to `state.n`, not left bare).
+        assert!(
+            out.contains("state.n"),
+            "expected `n` rewritten to `state.n`:\n{out}"
+        );
+        assert!(
+            out.contains("Card { count:"),
+            "expected `Card {{ count: ...`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn k3_interp_ssr_static_and_interpolated_props_coexist() {
+        // Mix static + interpolated props on the same child.
+        // Both routes must emit the correct value form: static
+        // via the coerce helper (string literal), interpolated
+        // via the scoping helper (state rewrite).
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{title}" kind="primary" /></template>
+}
+component Card {
+  state {
+    label: Str = ""
+    kind: Str = ""
+  }
+  <template><span>{label} {kind}</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("label: state.title"),
+            "expected interpolated label rewrite:\n{out}"
+        );
+        assert!(
+            out.contains(r#"kind: "primary""#),
+            "expected static kind literal:\n{out}"
+        );
     }
 }

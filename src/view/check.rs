@@ -1205,6 +1205,17 @@ fn validate_child_site(
             }
         };
 
+        // K-3 remainder: interpolated props (`prop={expr}`) bypass
+        // the coercion helper — the value is a Fitz expression the
+        // emitter inlines verbatim (SSR path) or rejects (WASM path
+        // today). Type checking the expression against the field
+        // type is deferred to a follow-up if false negatives / typos
+        // surface in practice; today the classic-Fitz surface of the
+        // emitted module catches most mismatches at emit-time.
+        if prop.is_interpolated() {
+            continue;
+        }
+
         if let Err(msg) = coerce_child_prop_raw_value(&prop.raw_value, &field.type_expr) {
             errors.push(CheckError {
                 message: format!(

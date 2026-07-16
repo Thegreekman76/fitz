@@ -664,6 +664,29 @@ fn emit_child_component(
                 ),
                 context: format!("template of component `{}`", ctx.component_name),
             })?;
+        // K-3 remainder: interpolated props (`prop={expr}`) are
+        // accepted by the checker + SSR emitter but reject here in
+        // the WASM path. Reactive prop propagation from parent
+        // state to a mounted child needs the reactivity plumbing
+        // that arrives with Phase 11.7 (client-side dynamic
+        // capabilities + child-lifecycle hooks). Workaround today
+        // for the client-WASM target: pass the value as a static
+        // string / list literal.
+        if prop.is_interpolated() {
+            return Err(EmitError {
+                message: format!(
+                    "interpolated prop `{name}={{...}}` on `<{child_name} />` — \
+                     dynamic props from the client-WASM target need reactive \
+                     propagation from parent to mounted child, deferred to Phase \
+                     11.7+. For the SSR target (fitz-liveviews), interpolated \
+                     props work today. For client-WASM: use a static value \
+                     (`{name}=\"...\"`) or compose via top-level scaffolding \
+                     until 11.7 lands.",
+                    name = prop.field_name
+                ),
+                context: format!("template of component `{}`", ctx.component_name),
+            });
+        }
         let literal = super::check::coerce_child_prop_raw_value(&prop.raw_value, &field.type_expr)
             .map_err(|msg| EmitError {
                 message: format!(
@@ -2048,6 +2071,56 @@ component Card {
         assert_eq!(
             default_expr_to_rust(&default, &ty).unwrap(),
             "vec![Some(1i64), None, Some(3i64)]"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // K-3 remainder — WASM rejects interpolated props with 11.7+ pointer
+    // ---------------------------------------------------------------------
+    //
+    // The SSR path accepts `<Child prop={expr} />` (parent state
+    // rewrite via scoping helper). The client-WASM path today
+    // needs richer reactive-propagation plumbing (child state
+    // reads a live reference to the parent's state field), so
+    // interpolated props reject with a clear pointer to Phase
+    // 11.7+ and cite the static workaround.
+
+    #[test]
+    fn k3_interp_wasm_child_component_interpolated_prop_rejects_citing_11_7() {
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{title}" /></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><span>hi</span></template>
+}"#;
+        let file = parse_expand(src);
+        let err = emit_module(&file)
+            .expect_err("WASM path must reject interpolated props today (Phase 11.7+ work)");
+        assert!(
+            err.message.contains("interpolated"),
+            "message must call out `interpolated`: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("11.7"),
+            "message must point at Phase 11.7+: {}",
+            err.message
+        );
+        // Static prop path still works — regression check.
+        let src_static = r#"component Parent {
+  state {}
+  <template><Card label="hi" /></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><span>hi</span></template>
+}"#;
+        let file_static = parse_expand(src_static);
+        assert!(
+            emit_module(&file_static).is_ok(),
+            "static path must still work"
         );
     }
 }
