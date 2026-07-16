@@ -15,12 +15,15 @@ migration as the 11.6 deliverable set, with client-side dynamic
 capabilities re-scoped to 11.7 (see §9.u). See `docs/stack.md`
 for the architectural constitution this plan implements.
 
-Sub-phases still open: 11.6.e (fitz-liveviews migration —
-cross-file `<Child />` composition when the child lives in
-a sibling `.fitzv`, plus migration of the 4 existing
-fitz-liveviews examples), 11.7 (client-side dynamic
-capabilities + kanban SPA port), 11.8 (LSP support), 11.9
-(pedagogic docs).
+Sub-phases still open: **11.6.e (partial as of §9.z 2026-07-16
+— SSR emitter `payload` in event-body scope + `fitz_liveviews`
+missing-dep hint + counter migration draft applied to sibling
+repo uncommitted; remaining: cross-module `@live_component`
+auto-inject, event-body widening for `if`/`let` unlocking
+chat + kanban migrations, cross-file `<Child />` composition,
+migrations commits pending fitz v0.21.0 release)**, 11.7
+(client-side dynamic capabilities + kanban SPA port), 11.8
+(LSP support), 11.9 (pedagogic docs).
 
 **11.6.b + 11.6.c + 11.6.d CLOSED ENTIRELY 2026-07-15** —
 `view::emit_module_ssr` emits classic Fitz source with the
@@ -4915,6 +4918,200 @@ load, not just view sources); resolution is filesystem-touching
 kanban) from raw-string HTML to `.fitzv` SFCs, plus
 cross-file `<Child />` composition (which the migration
 will surface as a real need on the kanban port).
+
+---
+
+## 9.z 11.6.e — Migration prep (SSR emitter payload access + fitz_liveviews dep hint + counter draft) — PARTIAL
+
+Sub-step of 11.6. **Does NOT close 11.6.e entirely**. Ships
+the two Fitz-core enablers that surfaced when I actually
+tried to migrate the 4 fitz-liveviews examples to `.fitzv`,
+plus the counter migration draft applied to
+`d:/fitz-liveviews/examples/counter/` (uncommitted in the
+sibling repo, ready to land when Fitz v0.21.0 ships). The
+remaining migrations (dashboard, chat, kanban) plus
+cross-file `<Child />` composition remain scope for a
+follow-up mini-fase.
+
+### Empirical scoping
+
+Before touching code I walked every one of the 4 examples in
+`d:/fitz-liveviews/examples/{counter,dashboard,chat,kanban}/`.
+The two decisions the migration forced (aligned with the
+author 2026-07-16 at start of session):
+
+- **Cross-file `<Child />` composition is NOT required for
+  the migration.** All 4 examples that already have child
+  components (dashboard's `MetricTile`, kanban's
+  `CardEditor`) compose them with fitz-liveviews's runtime
+  `component(name, id)` API, not template syntax. That API
+  works cross-file naturally (registration + lookup at
+  runtime). Cross-file `<Child />` template syntax would
+  also need dynamic props (`title={expr}` — currently only
+  static in 11.5.d), which is 11.7+ material. Documented
+  as remaining scope for the 11.6.e continuation or 11.7.
+- **Counter + chat need conversion to `@live_component`
+  style.** The pre-11.6.e counter and chat kept mutation
+  logic inside the WebSocket handler loop (`state =
+  CounterState { count: state.count + 1 }`) instead of in
+  `@on` handlers. Converting them to the Phase-4 style
+  (matching dashboard + kanban) is documented as
+  intentional divergence vs the pre-migration baseline —
+  the whole point of the SFC is that state + events + template
+  live in the component.
+
+### The 2 SSR emitter blockers that surfaced
+
+Walking the empirical migration shape uncovered two
+event-body walker limits that block chat and kanban:
+
+- **`payload` rejected as a free identifier in event body
+  RHS.** The emitted `@on` fn signature is
+  `fn <Name>_<event>(state: <Name>, payload: Map<Str, Str>) -> <Name>`,
+  so `payload["author"]` and `payload.has("text")` are
+  natural in the event body — but the pre-11.6.e emitter
+  only passed `state_field_names` to
+  `format_fitz_expr_scoped` and empty `local_scope`. Any
+  bare `payload` reference tripped "identifier `payload` is
+  not a declared state field". Fix in this §9.z:
+  `format_event_rhs` now passes `&["payload"]` as
+  `local_scope`, so `payload[key]` / `payload.has(...)` /
+  `payload.get(...)` walk through the existing Index /
+  Field / Call arms unchanged.
+- **`if` statements + `let` bindings in event bodies
+  reject.** Chat's `send_message` and kanban's
+  `card_editor_save` both use nested `if
+  (payload.has(...)) { ... }` guards + `let seed = if
+  (...) { ... } else { ... }` expressions, but the emitter
+  only accepts linear `Stmt::Assign` sequences with a
+  hard reject on any other stmt kind (chat + kanban `.fitzv`
+  drafts would break at emit-time). **Widening the emitter
+  to full stmt bodies (`if` / `for` / `let` / expression
+  stmts) is not part of this §9.z scope** — it's real
+  11.6.e continuation work paralleling the `{#if}` /
+  `{#for}` widening from 11.6.c but on the event-body
+  side. Documented as debt below.
+
+### What ships in this §9.z
+
+1. **`src/view/codegen_ssr.rs`**: `format_event_rhs` now
+   passes `&["payload"]` to `format_fitz_expr_scoped` (was
+   `&[]`). Two new unit tests
+   (`phase_11_6_e_emit_accepts_payload_index_access_in_event_body_rhs`
+   +
+   `phase_11_6_e_emit_accepts_payload_method_call_in_event_body_rhs`)
+   validate the fixture shape chat/kanban would want.
+2. **`src/evaluator.rs` + `src/codegen.rs`**: the classic
+   loader's "module not found" error now enriches when the
+   missing module is exactly `fitz_liveviews` — a targeted
+   `hint:` block with the canonical
+   `[dependencies] fitz_liveviews = { git = "…", tag =
+   "v0.4.2" }` snippet users can paste into `fitz.toml`.
+   Fires in both `fitz run` (evaluator path) and `fitz
+   build` (codegen path). Two new unit tests in
+   `evaluator::tests::phase_11_6_e_missing_fitz_liveviews_dep_*`
+   assert the hint fires only for the targeted module name.
+3. **`d:/fitz-liveviews/examples/counter/` (sibling repo)**:
+   `Counter.fitzv` + rewritten `src/main.fitz` + updated
+   `README.md`. Uncommitted local changes in the fitz-
+   liveviews repo — they land as a real commit **only when
+   Fitz v0.21.0 (with 11.6.d loader integration) ships**,
+   since the system `fitz` binary users have installed is
+   still pre-11.6. Smoke validated end-to-end against my
+   local `d:/fitz/target/release/fitz.exe` (fitz 0.20.1 HEAD
+   post-11.6.d + this §9.z): `fitz check` passes; `fitz
+   run` boots the server on `:3000`; `curl /` returns the
+   `<div data-flv-component-name="Counter"
+   data-flv-value-instance_id="root">` wrapper with the
+   `Count: 0` initial state and 3 `data-flv-click` buttons.
+   The `flv_register(...)` call in `main.fitz` is manual
+   because v0.20.1's implicit auto-inject only scans the
+   TOP-LEVEL program for `@live_component` types — imported
+   ones (like `Counter` from `Counter.fitzv`) aren't seen
+   by `env.live_components`. Cross-module auto-inject is
+   documented as debt below.
+
+### Debt / gotchas visible after §9.z
+
+Ordered by priority for the 11.6.e continuation:
+
+- **Cross-module `@live_component` auto-inject.**
+  `inject_live_component_registrations` in `src/types.rs`
+  consults `env.live_components` populated by
+  `resolve_program` walking the top-level program AST only.
+  When `Counter` lives in `Counter.fitzv` imported via
+  `from Counter import Counter`, the main program's `env`
+  has no entry for `Counter`, so the auto-inject skips it
+  and users must write the `flv_register(...)` call by
+  hand. Parallel to imported-auth-provider (W12) /
+  imported-background-fns (B10) — both closed with a
+  dedicated pre-scan that threads metadata from imported
+  modules into the main env. Same pattern applies here.
+  ~200 LoC + tests.
+- **Event body widening: `if` + `let` + non-assign stmts.**
+  Blocks chat + kanban migrations. Chat's `send_message`
+  uses `if (payload.has("author")) { if (payload.has("text"))
+  { ... } }`; kanban's `card_editor_save` uses `let new_text
+  = if (...) { ... } else { ... }`. The emitter needs to
+  accept a linear-ish subset that lowers into a single
+  return of the fresh struct literal. Parallel to how
+  `{#if}` / `{#for}` in templates lower to Fitz `if
+  (...) { ... }` / `.map(...)` expressions — the event
+  body needs a matching lowering. Real 11.6.e continuation
+  work, ~200-300 LoC + tests.
+- **Cross-file `<Child />` composition.** The debt from
+  §9.y's list. Not actually needed for any of the 4
+  fitz-liveviews examples (they all use runtime
+  `component(name, id)`), so lower priority than the two
+  above. Still worth landing eventually because template-
+  syntax composition is nicer DX than runtime lookup.
+  Requires threading the loader's expanded-file cache
+  through the checker + emitter.
+- **Migration commits deferred until v0.21.0.**
+  `d:/fitz-liveviews/examples/counter/` has 3 uncommitted
+  changes (2 modified + 1 new). They land in fitz-liveviews
+  as a real commit only when v0.21.0 releases (which needs
+  a bump of `Cargo.toml` in fitz core plus the CHANGELOG
+  entry pointing at 11.6.d/e/etc.). Dashboard's migration
+  should be similar-shaped (extract `MetricTile.fitzv` +
+  update main.fitz + README); chat + kanban wait for the
+  event-body widening.
+- **`fitz-liveviews`'s minimum fitz version.** With 11.6.d
+  landed in fitz core, examples using `.fitzv` files
+  require fitz binary v0.21.0+. Once the migrations
+  actually commit, the fitz-liveviews README should
+  document the minimum version requirement (paralleling
+  how e.g. `fitz-liveviews` v0.4.x was pinned to specific
+  fitz features in memoria
+  `project_liveviews_phase4_plan`).
+
+### Files touched by 11.6.e §9.z
+
+- `src/view/codegen_ssr.rs` — `format_event_rhs` passes
+  `&["payload"]` to `format_fitz_expr_scoped`; 2 new
+  `phase_11_6_e_emit_accepts_payload_*` unit tests +
+  updated doc comment on `format_event_rhs`.
+- `src/evaluator.rs` — enriched "module not found" branch
+  for `fitz_liveviews`; 2 new
+  `phase_11_6_e_missing_fitz_liveviews_dep_*` unit tests.
+- `src/codegen.rs` — parallel enrichment in
+  `ModuleLoader::load_module`.
+- `docs/fase-11-plan.md` (this file) — this §9.z section +
+  top-of-file status refresh.
+- `d:/fitz-liveviews/examples/counter/src/Counter.fitzv`
+  (new, sibling repo, uncommitted).
+- `d:/fitz-liveviews/examples/counter/src/main.fitz`
+  (modified, sibling repo, uncommitted).
+- `d:/fitz-liveviews/examples/counter/README.md`
+  (modified, sibling repo, uncommitted).
+
+**Next norte after §9.z**: **11.6.e continuation** — either
+event-body widening (opens chat + kanban migrations) or
+cross-module `@live_component` auto-inject (removes the
+manual `flv_register(...)` boilerplate from the counter
+migration + every future `.fitzv` project). Both are pure
+Fitz-core work; migration commits in `fitz-liveviews` land
+when v0.21.0 ships.
 
 ---
 

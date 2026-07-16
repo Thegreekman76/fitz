@@ -2499,15 +2499,38 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     let canonical = match canonical_opt {
         Some(p) => p,
         None => {
+            let joined = segments.join(".");
+            // Phase 11.6.e — enriched hint when the missing module
+            // is `fitz_liveviews`. This is the classic symptom of
+            // importing (or transitively depending on) a `.fitzv`
+            // file without declaring the `fitz_liveviews` runtime
+            // dependency in `fitz.toml`. The generic "module not
+            // found" doesn't hint at the fix; this branch does.
+            let hint = if joined == "fitz_liveviews" {
+                Some(
+                    "\n  hint: `fitz_liveviews` is the runtime library backing \
+                     `.fitzv` single-file components. Declare it in `fitz.toml`:\n\n  \
+                     [dependencies]\n  \
+                     fitz_liveviews = { git = \"https://github.com/Thegreekman76/fitz-liveviews\", tag = \"v0.4.2\" }"
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            let base = format!(
+                "module `{}` not found (searched in `{}`)",
+                joined,
+                candidates[0].display(),
+            );
+            let message = match hint {
+                Some(h) => format!("{base}{h}"),
+                None => base,
+            };
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
                 0,
                 0,
-                format!(
-                    "module `{}` not found (searched in `{}`)",
-                    segments.join("."),
-                    candidates[0].display(),
-                ),
+                message,
             )));
         }
     };
@@ -24967,6 +24990,62 @@ let r = match n {
         let main = "import busted\n";
         let (_env, res) = eval_with_modules(&[("busted.fitz", busted)], main).await;
         assert!(res.is_err(), "expected module parse error");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase_11_6_e_missing_fitz_liveviews_dep_shows_targeted_hint() {
+        // Phase 11.6.e — importing `fitz_liveviews` without
+        // declaring the dep in `fitz.toml` is the classic symptom
+        // of using a `.fitzv` file (or the library directly)
+        // without wiring the runtime. The generic "module not
+        // found" is unhelpful; the enriched error surfaces the
+        // exact fix (a `[dependencies]` snippet).
+        let main = "from fitz_liveviews import Html\n";
+        let (_env, res) = eval_with_modules(&[], main).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("module `fitz_liveviews` not found"),
+            "expected base 'module not found' message, was: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("hint:") && err.message.contains("[dependencies]"),
+            "expected enriched hint with `[dependencies]` snippet, was: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains(
+                "fitz_liveviews = { git = \"https://github.com/Thegreekman76/fitz-liveviews\""
+            ),
+            "expected canonical dep snippet with the git URL, was: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase_11_6_e_missing_other_dep_does_not_show_liveviews_hint() {
+        // The enriched hint fires ONLY for `fitz_liveviews`. Any
+        // other missing module still gets the generic message
+        // without the liveviews-specific `[dependencies]` snippet.
+        let main = "from some_random_module import X\n";
+        let (_env, res) = eval_with_modules(&[], main).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message
+                .contains("module `some_random_module` not found"),
+            "expected the generic message, was: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("fitz_liveviews"),
+            "generic error should not mention fitz_liveviews, was: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("hint:"),
+            "generic error should not include a hint block, was: {}",
+            err.message
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -9,6 +9,88 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [Unreleased] — Phase 11.6.e §9.z partial (2026-07-16)
+
+Sub-step of Phase 11.6 (Frontend `.fitzv` → SSR). Ships the two
+Fitz-core enablers that surfaced when actually attempting the
+fitz-liveviews example migrations, plus the counter migration
+draft (uncommitted in the sibling `fitz-liveviews` repo, ready
+to land when v0.21.0 ships). **Does NOT close 11.6.e entirely** —
+event-body widening (blocks chat + kanban migrations),
+cross-module `@live_component` auto-inject, and cross-file
+`<Child />` composition remain scope for a follow-up mini-fase.
+
+**SSR emitter accepts `payload` in event body scope.** The
+emitted `@on` fn signature is `fn <Name>_<event>(state: <Name>,
+payload: Map<Str, Str>) -> <Name>`, so RHS expressions like
+`payload["author"]` or `payload.has("text")` are natural in
+event bodies. `format_event_rhs` in `src/view/codegen_ssr.rs`
+now passes `&["payload"]` as `local_scope` to
+`format_fitz_expr_scoped` (was `&[]`) — the walker's Index /
+Field / Call arms handle the actual grammar unchanged. Two new
+unit tests
+(`phase_11_6_e_emit_accepts_payload_index_access_in_event_body_rhs`
++ `phase_11_6_e_emit_accepts_payload_method_call_in_event_body_rhs`)
+lock the shape.
+
+**Enriched "module not found" hint for `fitz_liveviews`.** The
+classic module loader in both `evaluator::load_module` (`fitz
+run`) and `codegen::ModuleLoader::load_module` (`fitz build`)
+now detects when the missing module name is exactly
+`fitz_liveviews` and appends a targeted `hint:` block with the
+canonical `[dependencies]` snippet users can paste into
+`fitz.toml`. Generic "module not found" was unhelpful; users
+importing (or transitively depending on) a `.fitzv` file
+without declaring the runtime library got a confusing error.
+Two new unit tests
+(`phase_11_6_e_missing_fitz_liveviews_dep_shows_targeted_hint`
++ `phase_11_6_e_missing_other_dep_does_not_show_liveviews_hint`)
+validate that the hint fires only for the targeted module name.
+
+**Counter migration draft applied to sibling repo (uncommitted).**
+`d:/fitz-liveviews/examples/counter/src/Counter.fitzv` (new) +
+rewritten `src/main.fitz` + updated `README.md`. Smoke validated
+end-to-end against `d:/fitz/target/release/fitz.exe` (fitz
+0.20.1 HEAD post-11.6.d + this §9.z): `fitz check` passes;
+`fitz run` boots the server on `:3000`; `curl /` returns the
+`<div data-flv-component-name="Counter"
+data-flv-value-instance_id="root">` wrapper with `Count: 0` +
+3 `data-flv-click` buttons. The `flv_register(...)` call in
+`main.fitz` is manual — v0.20.1's implicit auto-inject only
+scans the top-level program for `@live_component` types;
+imported ones aren't seen by `env.live_components`. Cross-
+module auto-inject is documented as debt.
+
+**Files touched**:
+
+- `src/view/codegen_ssr.rs` — `format_event_rhs` scope +
+  updated doc comment + 2 new phase_11_6_e tests.
+- `src/evaluator.rs` — enriched module-not-found branch + 2
+  new phase_11_6_e tests.
+- `src/codegen.rs` — parallel enrichment in `ModuleLoader`.
+- `docs/fase-11-plan.md` — §9.z new section + top-of-file
+  status refresh.
+- `d:/fitz-liveviews/examples/counter/` — draft migration
+  files (uncommitted in the sibling repo).
+
+**Debt / next norte after §9.z**:
+
+- **Event body widening**: `if` / `let` / non-assign stmts
+  in event bodies rejected by the SSR emitter — blocks chat
+  + kanban migrations. Parallel to the `{#if}` / `{#for}`
+  widening from 11.6.c but on the event-body side.
+- **Cross-module `@live_component` auto-inject**: extends
+  v0.20.1's implicit registration to see types declared in
+  imported `.fitzv` modules. Parallel to W12 / B10 imported-
+  auth-provider / imported-background-fns fixes.
+- **Cross-file `<Child />` composition**: still open from
+  §9.y. Not needed by any of the 4 fitz-liveviews examples
+  (they all use runtime `component(name, id)`), lower
+  priority.
+- **Migration commits deferred to Fitz v0.21.0**: dashboard
+  should follow the counter shape once v0.21.0 ships; chat
+  + kanban wait for event-body widening.
+
 ## [v0.20.1] — 2026-07-13 — Implicit `flv_register(...)` for LiveView components (fitz-liveviews Phase 5, A.1)
 
 Primer sub-paso de la Fase 5 diferida post-Phase-4 de `fitz-liveviews`.

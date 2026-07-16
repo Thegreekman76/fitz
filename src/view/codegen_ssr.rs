@@ -611,22 +611,31 @@ fn emit_event_fn(
 // ---------------------------------------------------------------------------
 
 /// Format the RHS of an event body assignment. Thin wrapper
-/// over [`format_fitz_expr`] with the event's context label
+/// over [`format_fitz_expr_scoped`] with the event's context label
 /// baked in — the walker handles the actual grammar.
 ///
 /// Phase 11.6.c widened this from literal-only to the full
 /// walker grammar (BinOp arithmetic, function calls,
 /// StrInterp, Field access, Index, List, Map, Range,
 /// Ok/Err, arrow closures for `.map(...)` etc.).
+///
+/// Phase 11.6.e — the emitted `@on` fn signature is
+/// `fn <Name>_<event>(state: <Name>, payload: Map<Str, Str>) -> <Name>`,
+/// so `payload` is a valid free identifier inside the body. It is
+/// added to the walker's `local_scope` here (paralleling closure
+/// params) so RHS expressions like `payload["author"]` or
+/// `payload.has("text")` emit verbatim without tripping the "not a
+/// declared state field" rejection.
 fn format_event_rhs(
     expr: &Expr,
     state_field_names: &[&str],
     component: &ExpandedComponent,
     event: &ExpandedEventHandler,
 ) -> SsrEmitResult<String> {
-    format_fitz_expr(
+    format_fitz_expr_scoped(
         expr,
         state_field_names,
+        &["payload"],
         &component.name,
         &format!("event `{}` body RHS", event.name),
     )
@@ -1847,6 +1856,50 @@ mod tests {
         assert!(
             out.contains("a: state.b,"),
             "bare RHS `b` must rewrite as `state.b`:\n{out}"
+        );
+    }
+
+    // Phase 11.6.e — the emitted @on signature has `payload:
+    // Map<Str, Str>`, so event body RHS is allowed to read from
+    // it directly. The walker's local_scope now contains
+    // "payload" so bare `payload["key"]` / `payload.has(...)`
+    // pass without the "not a declared state field" rejection.
+    #[test]
+    fn phase_11_6_e_emit_accepts_payload_index_access_in_event_body_rhs() {
+        // Payload indexing survives the walker unchanged (Index
+        // over Ident where Ident is in local_scope emits as the
+        // bare Fitz source).
+        let src = r#"component Widget {
+  state { title: Str = "" }
+  event set_title() { title = payload["text"] }
+  <template><span>{title}</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("title: payload[\"text\"],"),
+            "expected `title: payload[\"text\"],` in emitted event fn:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_emit_accepts_payload_method_call_in_event_body_rhs() {
+        // Method call on payload (`payload.get("author")` style)
+        // walks as Call(Field(payload, "get"), ["author"]). The
+        // Field object walk resolves `payload` via local_scope.
+        // Assigning the result to a `Str` state field via a full
+        // string interp (matches how the chat example composes
+        // an author-tagged message).
+        let src = r#"component Notes {
+  state { last_author: Str = "" }
+  event tag() { last_author = payload["author"] }
+  <template><span>{last_author}</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("last_author: payload[\"author\"],"),
+            "expected `last_author: payload[\"author\"],` in emitted source:\n{out}"
         );
     }
 

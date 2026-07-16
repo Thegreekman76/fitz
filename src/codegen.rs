@@ -4284,11 +4284,28 @@ impl ModuleLoader {
         }
         let path = self.resolve_path(segments);
         let canonical = std::fs::canonicalize(&path).map_err(|_| {
-            loader_err(format!(
+            let joined = segments.join(".");
+            // Phase 11.6.e — parallel enrichment to
+            // `evaluator::load_module`: when the missing module is
+            // `fitz_liveviews`, hint at the dep declaration in
+            // `fitz.toml` so users importing `.fitzv` files without
+            // the runtime library get a helpful diagnostic.
+            let base = format!(
                 "module `{}` not found (searched in `{}`)",
-                segments.join("."),
+                joined,
                 path.display()
-            ))
+            );
+            let msg = if joined == "fitz_liveviews" {
+                format!(
+                    "{base}\n  hint: `fitz_liveviews` is the runtime library backing \
+                     `.fitzv` single-file components. Declare it in `fitz.toml`:\n\n  \
+                     [dependencies]\n  \
+                     fitz_liveviews = {{ git = \"https://github.com/Thegreekman76/fitz-liveviews\", tag = \"v0.4.2\" }}"
+                )
+            } else {
+                base
+            };
+            loader_err(msg)
         })?;
 
         if let Some(&idx) = self.by_path.get(&canonical) {
