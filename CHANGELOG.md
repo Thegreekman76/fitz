@@ -227,7 +227,46 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 ## [Unreleased]
 
-*(vacía — próximas entradas van acá antes del siguiente bump)*
+### K-3 (partial) — `<Child prop />` static props para `List<primitive>` — post-v0.21.0 (2026-07-16)
+
+**Refinement** del feature `<Child prop="v" />` composition
+introducido en Phase 11.5.d, sin bump del lenguaje. El path de
+prop coercion (checker + WASM + SSR emitters) ahora acepta
+`List<T>` donde `T` es un primitivo soportado (o
+`Nullable<primitive>`) via **comma-separated raw values**.
+
+- `<Child tags="a,b,c" />` con `tags: List<Str>` en el child
+  coerciona a `vec!["a".to_string(), "b".to_string(),
+  "c".to_string()]` en el path Rust literal (checker + WASM
+  emitter) y a `["a", "b", "c"]` en el path Fitz literal (SSR
+  emitter).
+- Empty string yields `vec![]` / `[]`. Whitespace around commas
+  is trimmed.
+- Nested primitives (`List<Int>`, `List<Bool>`,
+  `List<Nullable<Int>>`) recurse via el mismo helper.
+- WASM state fields con `List<T>` gain Rust type `Vec<T>` +
+  default `vec![...]` / `Vec::new()` (wrapped en `RefCell` por
+  el existing struct emitter).
+
+**Deudas residuales** de K-3 que siguen abiertas (documentadas
+en `docs/deudas-post-5b.md` → K-3): `Map<K, V>` static props,
+nominal-type static props (`<Card user="{seedUser}" />`), e
+interpolated `<Child prop={expr} />` composition. Ninguna
+bloquea el 90% del caso (primitive list props tipo tag arrays,
+dropdown options, chart series).
+
+**Sin cambio breaking**: los programas existentes se comportan
+bit-a-bit idénticos (el path viejo solo rechazaba estos casos —
+ahora los acepta). Cierra la sección "K-3" de las Framework
+gaps parcialmente (List<primitive> shipped; nominal +
+interpolación siguen abiertas).
+
+**Cambios técnicos**: ~130 LoC netos, 21 unit tests nuevos + 2
+E2E via `check_str` reemplazando el test stale que asertaba
+rejection (`phase_11_5_d_check_list_prop_rejects_citing_11_6`
+→ `k3_check_list_int_prop_end_to_end_accepts_comma_separated_
+values` + `k3_check_map_prop_still_rejects_citing_11_6_or_
+later`).
 
 ## [v0.20.1] — 2026-07-13 — Implicit `flv_register(...)` for LiveView components (fitz-liveviews Phase 5, A.1)
 

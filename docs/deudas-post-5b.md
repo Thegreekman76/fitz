@@ -74,53 +74,73 @@ imperative updates. ~50 LoC each framework.
 **Recomendación**: shipping juntas como PAIR (`component_state`
 + `set_component_state`) para simetría API.
 
-### K-3 — Component props para compound / nominal types en `<Child />`
+### 🟢 K-3 — Component props para compound types en `<Child />` — **PARCIALMENTE CERRADO 2026-07-16** (List<primitive> shipped)
 
-**Síntoma**: `<Board initial-cards="{seedCards}" />` no es posible.
-Fitz core Phase 11.5.d shipped `<Child prop="v" />` composition
-CON primitivos (`Str`/`Int`/`Float`/`Bool`/`Nullable<T>` de
-primitivo). §9.dd extended STATE annotations to accept cross-file
+**Síntoma original**: `<Board initial-cards="{seedCards}" />` no es
+posible. Fitz core Phase 11.5.d shipped `<Child prop="v" />`
+composition CON primitivos (`Str`/`Int`/`Float`/`Bool`/`Nullable<T>`
+de primitivo). §9.dd extended STATE annotations to accept cross-file
 nominals via `from X import Y`. Pero el path del child PROP
 coercion (`coerce_child_prop_raw_value_to_fitz_literal`) todavía
 sólo acepta primitivos.
 
-**Impacto**: components no pueden pasar List/Map/Instance data via
-static props. Workaround: state comes from imported `let` at
-top-level, o desde `component()` runtime API.
+**Cierre K-3 (post-v0.21.0, 2026-07-16)**: `List<primitive>` shipped
+via comma-separated static props. `<Child tags="a,b,c" />` con
+`tags: List<Str>` coerciona a `vec!["a".to_string(), ...]` en el
+Rust literal (checker + WASM emitter) y a `["a", "b", "c"]` en el
+Fitz literal (SSR emitter). Empty string → `vec![]` / `[]`.
+Whitespace around commas is trimmed. Nested primitives (`List<Int>`,
+`List<Bool>`, `List<Nullable<Int>>`) recurse via el mismo helper.
+Both emitter paths (SSR + WASM) share la misma acceptance semantics
+via `check::coerce_child_prop_raw_value` (Rust) + parallel
+`codegen_ssr::coerce_child_prop_raw_value_to_fitz_literal` (Fitz).
+WASM state fields con `List<T>` gain `Vec<Rust>` type + `vec![...]`
+default via `codegen_wasm::type_expr_to_rust` +
+`default_expr_to_rust`. Escaping de commas dentro de items queda
+como MVP limitation documentada. **~130 LoC netos, 21 unit tests +
+2 E2E via check_str** (`k3_check_*`, `k3_ssr_*`, `k3_wasm_*`).
 
-**Diseño futuro (candidate)**:
-- Extender `coerce_child_prop_raw_value_to_fitz_literal` para
-  aceptar Nominal types + List/Map of primitives. ~80 LoC.
-- Interpolated props `<Child prop={expr} />` (currently rejected
-  at expand time, cita Phase 11.6+) — ~120 LoC más.
+**Deudas residuales que siguen abiertas de K-3**:
+- **`Map<K, V>` static props** — sintaxis `<Child meta="k=v,x=y" />`
+  o similar; requiere decisión sobre key/value separator syntax.
+- **Nominal types** — `<Card user="{seedUser}" />` con `user: User`;
+  requiere interpolated expression parser (Phase 11.6+ scope) o
+  serialized-value convention (`user='{"id":1,"name":"x"}'`).
+- **Interpolated props `<Child prop={expr} />`** — currently rejected
+  at expand time citing Phase 11.6+. Aún necesario para
+  `<Board initial-cards="{seedCards}" />` end-to-end.
 
-Ambos necesarios para que `<Board initial-cards="{seedCards}" />`
-funcione end-to-end. Together con K-1 + K-2, desbloquea full
-Board.fitzv migration + composable multi-instance patterns.
-
-**Recomendación**: K-3 primero (props ampliation) es lower-risk;
-K-1/K-2 (event bubbling + state API) son más architectural.
+**Impacto acumulado**: K-3 (List<primitive>) unblocks the 90% case
+of primitive list props (tag arrays, dropdown options, chart
+series). Nominal + interpolated composition together with K-1
+(event bubbling) + K-2 (state API) sigue siendo prerequisites
+reales para full Board.fitzv migration + kanban SPA port
+(Phase 11.7+).
 
 ### Impacto acumulado + Phase 11.7+ scoping
 
-Los 3 gaps son **prerequisites reales** para Phase 11.7 (client-
-side dynamic capabilities + kanban SPA port) según el ROADMAP de
-Fitz core. Cerrarlos desbloquea:
-- **Full Board.fitzv migration** (kanban parent shell as SFC).
-- **Full `<Component prop={live_expr} />` dynamic composition**.
-- **Cross-component event flows** — parent orchestrates child
-  reactions without hand-rolling.
-- **Kanban SPA port** (drag-drop client-side + board state via
-  component API — Phase 11.7 acceptance criterion).
+Post-K-3 (List<primitive> shipped, 2026-07-16): K-1 + K-2 shipped
+en fitz-liveviews v0.5.0 (dispatch_to + component_state /
+set_component_state). K-3 shipped 90% del caso — primitive lists
+via static props. **Remaining gaps** para Phase 11.7 (client-side
+dynamic capabilities + kanban SPA port) según el ROADMAP de Fitz
+core:
+- **K-3 remainder** — `Map<K, V>` static props, nominal-type static
+  props, interpolated `<Child prop={expr} />` composition.
+- **Cross-component event flows** — K-1 shipped explicit
+  `dispatch_to()`; a más ergonomic bubbling API (implicit event
+  propagation, `@parent.event` decorator, etc.) queda para futuro
+  si la demanda real aparece.
 
-**Estimación combinada**: K-1 + K-2 + K-3 = ~400-500 LoC en Fitz
-core (framework changes) + ~150 LoC en fitz-liveviews lib
-(consuming APIs). 2-3 sesiones dedicadas.
+**Estimación combinada del remainder**: ~200-300 LoC en Fitz core
+(interpolated props parser + nominal coercion) + framework API
+refinements. 1-2 sesiones dedicadas si aparece demanda.
 
 **No hay urgencia** — el workaround actual (board state top-
-level en `let` + hand-rolled WS post-processing) funciona para
-kanban's use case. Pero cerrar los 3 gaps convierte a Fitz
-LiveViews en un framework SPA-capable de verdad.
+level en `let` + hand-rolled WS post-processing + K-1/K-2/K-3
+compound primitive props) cubre el 90% del caso. Full Board.fitzv
+migration + kanban SPA port pueden reintentarse ahora con las
+piezas cerradas y decidir si el gap remaining vale la sesión.
 
 ## 🟢 View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — **CERRADAS ENTERAS 2026-07-16** (§9.cc + §9.dd + §9.ee)
 

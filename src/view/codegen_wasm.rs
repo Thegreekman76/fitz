@@ -993,14 +993,15 @@ fn lower_stmt(
 /// inside `RefCell<...>` for state fields.
 ///
 /// Phase 11.5.d extended this from Int-only (11.4.b) to the four
-/// primitive scalars + `Nullable<T>` of a primitive. The set matches
-/// `check::coerce_child_prop_raw_value` so any type that flows
-/// through `<Child prop="v" />` composition can also be declared as
-/// a state field on the child.
+/// primitive scalars + `Nullable<T>` of a primitive. K-3 sums
+/// `List<T>` (mapped to `Vec<Rust-T>`) for compound props. The set
+/// matches `check::coerce_child_prop_raw_value` so any type that
+/// flows through `<Child prop="v" />` composition can also be
+/// declared as a state field on the child.
 ///
-/// Compound types (`List`, `Map`, nominal types) still deferred —
-/// they need cell layout decisions that overlap with the reflow
-/// story (Phase 11.6+).
+/// `Map<K, V>` and nominal types still deferred — they need cell
+/// layout decisions that overlap with the reflow story (Phase
+/// 11.6+).
 fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
     match ty {
         TypeExpr::Named(name) => match name.as_str() {
@@ -1021,13 +1022,23 @@ fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
             let inner_rust = type_expr_to_rust(inner)?;
             Ok(format!("Option<{inner_rust}>"))
         }
-        TypeExpr::Generic { name, .. } => Err(EmitError {
-            message: format!(
-                "state field type `{name}<...>` — compound types (`List`, `Map`, \
-                 etc.) deferred to Phase 11.6+"
-            ),
-            context: "type".to_string(),
-        }),
+        TypeExpr::Generic { name, args } => {
+            if name == "List" && args.len() == 1 {
+                // K-3: List<primitive> for WASM state fields, emitted as
+                // `Vec<Rust>`. Recurses so `List<Nullable<Int>>` works
+                // symmetrically with the SSR + check helpers.
+                let inner_rust = type_expr_to_rust(&args[0])?;
+                Ok(format!("Vec<{inner_rust}>"))
+            } else {
+                Err(EmitError {
+                    message: format!(
+                        "state field type `{name}<...>` — `Map` and other compound \
+                         types deferred to Phase 11.6+"
+                    ),
+                    context: "type".to_string(),
+                })
+            }
+        }
         TypeExpr::Tuple(_) | TypeExpr::Function { .. } => Err(EmitError {
             message: "tuple / function state field type — deferred to Phase 11.6+".to_string(),
             context: "type".to_string(),
@@ -1055,6 +1066,11 @@ fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
 ///   → `None`. The view parser today emits `Expr::Null` for the
 ///   `null` keyword, but we accept the ident form defensively so a
 ///   pre-lang-refresh checkpoint doesn't regress.
+/// - `List<T>` field ← `Expr::List(items)` → empty list yields
+///   `Vec::new()`; otherwise each item recurses via the same
+///   helper so `default = [1, 2]` on a `List<Int>` field emits
+///   `vec![1i64, 2i64]` (K-3, MVP: item must itself be a literal
+///   of the inner primitive type).
 ///
 /// Non-literal defaults (function calls, arithmetic, etc.) still
 /// error — they need the classic-Fitz expression lowering which
@@ -1072,6 +1088,24 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
         (_, TypeExpr::Nullable(inner)) => {
             let inner_rust = default_expr_to_rust(default, inner)?;
             Ok(format!("Some({inner_rust})"))
+        }
+        // K-3: List<primitive> defaults. Accepts `Expr::List(items, _)`
+        // against `List<T>` where T is a supported primitive (or
+        // `Nullable<primitive>`). Empty list emits `Vec::new()`; non-empty
+        // recurses per-item so `default = [1, 2, 3]` on a `List<Int>`
+        // field emits `vec![1i64, 2i64, 3i64]`.
+        (Expr::List(items, _), TypeExpr::Generic { name, args })
+            if name == "List" && args.len() == 1 =>
+        {
+            if items.is_empty() {
+                return Ok("Vec::new()".to_string());
+            }
+            let inner_ty = &args[0];
+            let mut lits: Vec<String> = Vec::with_capacity(items.len());
+            for item in items {
+                lits.push(default_expr_to_rust(item, inner_ty)?);
+            }
+            Ok(format!("vec![{}]", lits.join(", ")))
         }
         // Everything else: not a literal, or a mismatch. The classic
         // checker catches literal-vs-type mismatch already; here we
@@ -1885,6 +1919,135 @@ component Card {
         assert!(
             out.contains("*__child1.active.borrow_mut() = true;"),
             "bool prop must emit bare `true`/`false`:\n{out}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // K-3 — WASM type_expr_to_rust + default_expr_to_rust for List<T>
+    // ---------------------------------------------------------------------
+    //
+    // The view lexer/parser cannot express `List<Str>` in state
+    // fields today (the raw `<`/`>` chars land inside `<template>`
+    // territory), so these unit tests exercise the type + default
+    // lowering helpers directly. The child-prop path in
+    // `emit_child_component` already delegates to
+    // `check::coerce_child_prop_raw_value`, which the K-3 check
+    // tests cover end-to-end (Rust `vec![...]` literal). The WASM
+    // helpers below own the STATE-side story: what Rust type the
+    // struct field gets and what `RefCell::new(...)` initializer
+    // wraps a `List` default expression.
+
+    #[test]
+    fn k3_wasm_type_expr_to_rust_list_str_maps_to_vec_string() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<String>");
+    }
+
+    #[test]
+    fn k3_wasm_type_expr_to_rust_list_int_maps_to_vec_i64() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Int".into())],
+        };
+        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<i64>");
+    }
+
+    #[test]
+    fn k3_wasm_type_expr_to_rust_list_nullable_int_recurses() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())))],
+        };
+        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<Option<i64>>");
+    }
+
+    #[test]
+    fn k3_wasm_type_expr_to_rust_map_still_rejected() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
+        };
+        let err = type_expr_to_rust(&ty).expect_err("Map still deferred");
+        assert!(err.message.contains("Map"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn k3_wasm_default_expr_to_rust_empty_list_produces_vec_new() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        let default = Expr::List(Vec::new(), Span::new(1, 1));
+        assert_eq!(default_expr_to_rust(&default, &ty).unwrap(), "Vec::new()");
+    }
+
+    #[test]
+    fn k3_wasm_default_expr_to_rust_list_int_literal_produces_vec_macro() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Int".into())],
+        };
+        let default = Expr::List(
+            vec![
+                Expr::Int(1, Span::new(1, 1)),
+                Expr::Int(2, Span::new(1, 1)),
+                Expr::Int(3, Span::new(1, 1)),
+            ],
+            Span::new(1, 1),
+        );
+        assert_eq!(
+            default_expr_to_rust(&default, &ty).unwrap(),
+            "vec![1i64, 2i64, 3i64]"
+        );
+    }
+
+    #[test]
+    fn k3_wasm_default_expr_to_rust_list_str_literal_produces_vec_of_strings() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        let default = Expr::List(
+            vec![
+                Expr::Str("a".to_string(), Span::new(1, 1)),
+                Expr::Str("b".to_string(), Span::new(1, 1)),
+            ],
+            Span::new(1, 1),
+        );
+        let lit = default_expr_to_rust(&default, &ty).unwrap();
+        assert!(lit.starts_with("vec!["), "got: {lit}");
+        assert!(lit.contains("\"a\".to_string()"), "got: {lit}");
+        assert!(lit.contains("\"b\".to_string()"), "got: {lit}");
+    }
+
+    #[test]
+    fn k3_wasm_default_expr_to_rust_list_nullable_int_recurses_via_some_none() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())))],
+        };
+        let default = Expr::List(
+            vec![
+                Expr::Int(1, Span::new(1, 1)),
+                Expr::Null(Span::new(1, 1)),
+                Expr::Int(3, Span::new(1, 1)),
+            ],
+            Span::new(1, 1),
+        );
+        assert_eq!(
+            default_expr_to_rust(&default, &ty).unwrap(),
+            "vec![Some(1i64), None, Some(3i64)]"
         );
     }
 }

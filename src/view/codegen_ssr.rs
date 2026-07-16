@@ -1410,10 +1410,13 @@ fn format_child_composition(
 /// - `Bool` → `true` / `false`.
 /// - `Nullable<T>` → `null` when raw is literally `null`,
 ///   otherwise recurse on the inner type.
+/// - `List<T>` → comma-separated raw values; empty string yields
+///   `[]`, otherwise each item recursively coerces to the classic
+///   Fitz literal form (K-3, MVP: no comma escaping).
 ///
-/// Rejects nominals, generics (`List<T>` / `Map<K, V>`), and
-/// function types with a targeted 11.7+ pointer — those need
-/// richer static-prop coercion which the MVP defers.
+/// Rejects nominals, `Map<K, V>`, and function types with a
+/// targeted 11.7+ pointer — those need richer static-prop
+/// coercion which the MVP defers.
 pub(crate) fn coerce_child_prop_raw_value_to_fitz_literal(
     raw: &str,
     type_expr: &crate::ast::TypeExpr,
@@ -1497,14 +1500,39 @@ pub(crate) fn coerce_child_prop_raw_value_to_fitz_literal(
                 coerce_child_prop_raw_value_to_fitz_literal(raw, inner, child_name, field_name)
             }
         }
-        T::Generic { name, .. } => Err(SsrEmitError {
-            message: format!(
-                "prop coercion to `{name}<...>` on `<{child_name} />` — static props \
-                 for compound types (`List`, `Map`, etc.) are deferred to Phase 11.7+. \
-                 Today's MVP accepts only primitives + `Nullable<T>` primitives."
-            ),
-            context: format!("child composition `<{child_name} />`"),
-        }),
+        T::Generic { name, args } => {
+            if name == "List" && args.len() == 1 {
+                // K-3: List<primitive> via comma-separated raw values.
+                // Empty string → empty list literal `[]`. Whitespace around
+                // commas is trimmed. Each item is recursively coerced to the
+                // inner type using the classic Fitz literal syntax. No
+                // escaping of commas today (MVP scope).
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Ok("[]".to_string());
+                }
+                let inner = &args[0];
+                let mut lits: Vec<String> = Vec::new();
+                for item in trimmed.split(',') {
+                    let piece = item.trim();
+                    let lit = coerce_child_prop_raw_value_to_fitz_literal(
+                        piece, inner, child_name, field_name,
+                    )?;
+                    lits.push(lit);
+                }
+                Ok(format!("[{}]", lits.join(", ")))
+            } else {
+                Err(SsrEmitError {
+                    message: format!(
+                        "prop coercion to `{name}<...>` on `<{child_name} />` — static props \
+                         for `Map` and other compound types are deferred to Phase 11.7+. \
+                         Today's MVP accepts primitives, their `Nullable<T>` wrappers, and \
+                         `List<primitive>` (comma-separated)."
+                    ),
+                    context: format!("child composition `<{child_name} />`"),
+                })
+            }
+        }
         T::Function { .. } => Err(SsrEmitError {
             message: format!(
                 "prop coercion to a function type on `<{child_name} />` — passing \
@@ -3821,5 +3849,77 @@ component ChatRoom {
             out.contains("return html(\"\"\"<div><span>{state.count}</span></div>\"\"\")"),
             "expected pretty triple-string form:\n{out}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // K-3 — SSR coerce_child_prop_raw_value_to_fitz_literal for List<T>
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn k3_ssr_coerce_helper_list_str_produces_bracket_list_of_string_literals() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        let lit = coerce_child_prop_raw_value_to_fitz_literal("a,b,c", &ty, "Child", "tags")
+            .expect("List<Str> coerces");
+        assert!(lit.starts_with('['), "got: {lit}");
+        assert!(lit.ends_with(']'), "got: {lit}");
+        assert!(lit.contains("\"a\""), "got: {lit}");
+        assert!(lit.contains("\"c\""), "got: {lit}");
+        // Fitz literal — NO `.to_string()` suffix here (that's the
+        // Rust-literal form). SSR emits classic Fitz source.
+        assert!(!lit.contains(".to_string()"), "got: {lit}");
+    }
+
+    #[test]
+    fn k3_ssr_coerce_helper_list_int_trims_whitespace_around_commas() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Int".into())],
+        };
+        let lit = coerce_child_prop_raw_value_to_fitz_literal(" 1 , 2 , 3 ", &ty, "Child", "nums")
+            .expect("List<Int> coerces");
+        assert_eq!(lit, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn k3_ssr_coerce_helper_list_empty_string_produces_empty_list() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        assert_eq!(
+            coerce_child_prop_raw_value_to_fitz_literal("", &ty, "Child", "tags").unwrap(),
+            "[]"
+        );
+    }
+
+    #[test]
+    fn k3_ssr_coerce_helper_list_nullable_int_recurses() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())))],
+        };
+        let lit = coerce_child_prop_raw_value_to_fitz_literal("1,null,3", &ty, "Child", "nums")
+            .expect("List<Int?> coerces");
+        // Fitz literal form: `null` for None, bare Int for Some(n).
+        assert_eq!(lit, "[1, null, 3]");
+    }
+
+    #[test]
+    fn k3_ssr_coerce_helper_map_still_rejected() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
+        };
+        let err = coerce_child_prop_raw_value_to_fitz_literal("k=v", &ty, "Child", "meta")
+            .expect_err("Map not supported yet");
+        assert!(err.message.contains("Map"), "got: {}", err.message);
     }
 }

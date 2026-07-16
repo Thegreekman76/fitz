@@ -1254,9 +1254,13 @@ fn format_field_list(names: &[&str]) -> String {
 /// - `Bool` → strictly `"true"` or `"false"`, emitted as `true`/`false`.
 /// - `Nullable<T>` → literal `"null"` emits `None`; otherwise
 ///   recurse into `T` and wrap the result in `Some(...)`.
+/// - `List<T>` → comma-separated raw values; empty string yields
+///   `vec![]`, otherwise each item is recursively coerced and the
+///   result is `vec![item1, item2, ...]`. Whitespace around commas
+///   is trimmed. **No escaping of commas today** (K-3 MVP).
 ///
-/// Compound types (`List`, `Map`, `Nominal`) and unrecognised
-/// heads reject with a 11.6+ pointer.
+/// `Map<K, V>`, nominal, function, and tuple types still reject
+/// with a targeted pointer to the deferred sub-phase.
 ///
 /// This helper is `pub(crate)` so `codegen_wasm.rs::emit_child_
 /// component` uses the SAME coercion when emitting, ensuring the
@@ -1302,12 +1306,37 @@ pub(crate) fn coerce_child_prop_raw_value(
                 coerce_child_prop_raw_value(raw, inner).map(|lit| format!("Some({lit})"))
             }
         }
-        T::Generic { name, .. } => Err(format!(
-            "prop coercion to `{name}<...>` — static props for compound types \
-             (`List`, `Map`, etc.) are not supported in Phase 11.5.d. Only `Str`, \
-             `Int`, `Float`, `Bool` (and their `Nullable<T>` wrappers) coerce today; \
-             compound types land alongside Phase 11.6+."
-        )),
+        T::Generic { name, args } => {
+            if name == "List" && args.len() == 1 {
+                // K-3: List<primitive> via comma-separated raw values.
+                // Empty string → empty vec. Whitespace around commas is trimmed.
+                // Each item is recursively coerced to the inner type. No escaping
+                // of commas today (MVP scope — matches Vue's `:tags="'a,b,c'"`
+                // pattern when tags contain no commas).
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Ok("vec![]".to_string());
+                }
+                let inner = &args[0];
+                let mut lits: Vec<String> = Vec::new();
+                for item in trimmed.split(',') {
+                    let piece = item.trim();
+                    let lit = coerce_child_prop_raw_value(piece, inner).map_err(|e| {
+                        format!("List<{}> item `{}`: {}", inner.head_name(), piece, e)
+                    })?;
+                    lits.push(lit);
+                }
+                Ok(format!("vec![{}]", lits.join(", ")))
+            } else {
+                Err(format!(
+                    "prop coercion to `{name}<...>` — static props for `Map` and other \
+                     compound types are not supported today. Only `Str`, `Int`, `Float`, \
+                     `Bool`, their `Nullable<T>` wrappers, and `List<primitive>` \
+                     (comma-separated) coerce; richer compound types land alongside \
+                     Phase 11.6+."
+                ))
+            }
+        }
         T::Function { .. } => Err(
             "prop coercion to a function type — passing callbacks as props is \
              not supported yet. Model the callback as an event bubbled up via \
@@ -3123,7 +3152,14 @@ component Card {
     }
 
     #[test]
-    fn phase_11_5_d_check_list_prop_rejects_citing_11_6() {
+    fn k3_check_list_int_prop_end_to_end_accepts_comma_separated_values() {
+        // Was `phase_11_5_d_check_list_prop_rejects_citing_11_6`
+        // pre-K-3. K-3 lifted the block — `<Card items="1,2,3" />`
+        // now coerces against `List<Int>` cleanly through the full
+        // view parser + expander + checker pipeline. This is the
+        // end-to-end complement to the direct-helper unit tests
+        // above (which build TypeExpr by hand and never touch the
+        // view parser).
         let src = r#"component Parent {
   state {}
   <template><Card items="1,2,3" /></template>
@@ -3133,10 +3169,27 @@ component Card {
   <template><span>hi</span></template>
 }"#;
         let errs = check_str(src);
+        assert!(errs.is_empty(), "expected zero errors; got: {:?}", errs);
+    }
+
+    #[test]
+    fn k3_check_map_prop_still_rejects_citing_11_6_or_later() {
+        // Map<K, V> still deferred — the K-3 error message widens
+        // the block from "compound types" to "`Map` and other
+        // compound types" so the lint keeps pointing at the
+        // roadmap while List<primitive> works.
+        let src = r#"component Parent {
+  state {}
+  <template><Card meta="k=v" /></template>
+}
+component Card {
+  state { meta: Map<Str, Str> = {} }
+  <template><span>hi</span></template>
+}"#;
+        let errs = check_str(src);
         assert!(!errs.is_empty(), "expected coercion rejection");
         let msg = &errs[0].message;
-        assert!(msg.contains("compound types"), "msg: {msg}");
-        assert!(msg.contains("11.6"), "msg: {msg}");
+        assert!(msg.contains("Map"), "msg: {msg}");
     }
 
     #[test]
@@ -3206,6 +3259,91 @@ component Card {
         let ty = TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())));
         assert_eq!(coerce_child_prop_raw_value("null", &ty).unwrap(), "None");
         assert_eq!(coerce_child_prop_raw_value("5", &ty).unwrap(), "Some(5i64)");
+    }
+
+    // -----------------------------------------------------------------------
+    // K-3 — List<primitive> compound props via comma-separated values
+    // -----------------------------------------------------------------------
+    //
+    // Extends the child-prop coercion so a `<Child tags="a,b,c" />`
+    // where `tags: List<Str>` produces a Rust `vec![...]` literal
+    // instead of the pre-K-3 error. Empty string yields `vec![]`.
+    // Whitespace around commas is trimmed. Nested primitives (Int,
+    // Float, Bool, Nullable<primitive>) recurse via the same helper
+    // so the SSR + WASM emitters share the exact acceptance shape.
+
+    #[test]
+    fn k3_check_coerce_helper_list_str_produces_vec_of_string_literals() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        let lit = coerce_child_prop_raw_value("a,b,c", &ty).unwrap();
+        // vec![ "a".to_string(), "b".to_string(), "c".to_string() ]
+        assert!(lit.starts_with("vec!["), "got: {lit}");
+        assert!(lit.contains(r#""a""#), "got: {lit}");
+        assert!(lit.contains(r#""c""#), "got: {lit}");
+        assert!(lit.contains(".to_string()"), "got: {lit}");
+    }
+
+    #[test]
+    fn k3_check_coerce_helper_list_int_trims_whitespace_around_commas() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Int".into())],
+        };
+        let lit = coerce_child_prop_raw_value(" 1 , 2 , 3 ", &ty).unwrap();
+        assert_eq!(lit, "vec![1i64, 2i64, 3i64]");
+    }
+
+    #[test]
+    fn k3_check_coerce_helper_list_empty_string_produces_empty_vec() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        assert_eq!(coerce_child_prop_raw_value("", &ty).unwrap(), "vec![]");
+        assert_eq!(coerce_child_prop_raw_value("   ", &ty).unwrap(), "vec![]");
+    }
+
+    #[test]
+    fn k3_check_coerce_helper_list_nullable_int_recurses() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())))],
+        };
+        let lit = coerce_child_prop_raw_value("1,null,3", &ty).unwrap();
+        assert_eq!(lit, "vec![Some(1i64), None, Some(3i64)]");
+    }
+
+    #[test]
+    fn k3_check_coerce_helper_list_bool_bad_item_reports_position() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Bool".into())],
+        };
+        let err =
+            coerce_child_prop_raw_value("true,yes,false", &ty).expect_err("`yes` is not a Bool");
+        // Item shows up in the error breadcrumb; head is the inner
+        // type name (`Bool`).
+        assert!(err.contains("List<Bool>"), "got: {err}");
+        assert!(err.contains("`yes`"), "got: {err}");
+    }
+
+    #[test]
+    fn k3_check_coerce_helper_map_still_rejected() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
+        };
+        let err = coerce_child_prop_raw_value("k=v", &ty).expect_err("Map not supported yet");
+        assert!(err.contains("Map"), "got: {err}");
     }
 
     // -----------------------------------------------------------------------
