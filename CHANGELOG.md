@@ -9,87 +9,225 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
-## [Unreleased] — Phase 11.6.e §9.z partial (2026-07-16)
+## [v0.21.0] — 2026-07-16 — Phase 11: Native frontend `.fitzv` compiled to WASM + SSR emitter for fitz-liveviews
 
-Sub-step of Phase 11.6 (Frontend `.fitzv` → SSR). Ships the two
-Fitz-core enablers that surfaced when actually attempting the
-fitz-liveviews example migrations, plus the counter migration
-draft (uncommitted in the sibling `fitz-liveviews` repo, ready
-to land when v0.21.0 ships). **Does NOT close 11.6.e entirely** —
-event-body widening (blocks chat + kanban migrations),
-cross-module `@live_component` auto-inject, and cross-file
-`<Child />` composition remain scope for a follow-up mini-fase.
+**Major release** — ships **Phase 11 (Native frontend in Fitz
+core)** in one coordinated bump. Fitz gains a new file extension
+`.fitzv` (single-file components à la Vue/Svelte, hand-rolled
+parser + expand + checker + two backend targets: WASM for
+client-side interactivity, SSR for server-rendered HTML). The
+compiler + module loader route `.fitzv` transparently — a
+sibling `.fitz` still wins when both exist, so the migration
+from classic to view is opt-in and additive. `fitz build --bin
+web --target wasm-client` produces a browser bundle end-to-end
+(hand-rolled `wasm-bindgen` under feature `client-wasm`, 11.4 KB
+gzipped for a canonical counter demo). The SSR emitter targets
+the `fitz-liveviews` framework contract (`@live_component` +
+`@render_for` + `@on`), and cross-module auto-inject removes
+the manual `flv_register(...)` boot boilerplate for components
+declared in imported `.fitzv` sibling modules.
 
-**SSR emitter accepts `payload` in event body scope.** The
-emitted `@on` fn signature is `fn <Name>_<event>(state: <Name>,
-payload: Map<Str, Str>) -> <Name>`, so RHS expressions like
-`payload["author"]` or `payload.has("text")` are natural in
-event bodies. `format_event_rhs` in `src/view/codegen_ssr.rs`
-now passes `&["payload"]` as `local_scope` to
-`format_fitz_expr_scoped` (was `&[]`) — the walker's Index /
-Field / Call arms handle the actual grammar unchanged. Two new
-unit tests
-(`phase_11_6_e_emit_accepts_payload_index_access_in_event_body_rhs`
-+ `phase_11_6_e_emit_accepts_payload_method_call_in_event_body_rhs`)
-lock the shape.
+**What's shipped**:
 
-**Enriched "module not found" hint for `fitz_liveviews`.** The
-classic module loader in both `evaluator::load_module` (`fitz
-run`) and `codegen::ModuleLoader::load_module` (`fitz build`)
-now detects when the missing module name is exactly
-`fitz_liveviews` and appends a targeted `hint:` block with the
-canonical `[dependencies]` snippet users can paste into
-`fitz.toml`. Generic "module not found" was unhelpful; users
-importing (or transitively depending on) a `.fitzv` file
-without declaring the runtime library got a confusing error.
-Two new unit tests
-(`phase_11_6_e_missing_fitz_liveviews_dep_shows_targeted_hint`
-+ `phase_11_6_e_missing_other_dep_does_not_show_liveviews_hint`)
-validate that the hint fires only for the targeted module name.
+- **Phase 11.1 — POC parser** (`.fitzv` extension, shell
+  scaffold, HTML sub-parser). New `crate::view` module with
+  `pub fn parse(source) -> ViewParseResult<ViewFile>`.
+- **Phase 11.2.a/b/c — Bridge to classic AST + checker**.
+  `expand.rs` lowers `.fitzv` raw blobs to classic Fitz AST
+  segments; checker validates state field defaults + event
+  handler signatures + template interpolations + cross-refs
+  (`@click="handler"` must name an event in the same
+  component). Template directives `{#if cond}…{/if}`,
+  `{#for x in xs}…{/for}`, `{#else}`, and `<slot />` end-to-
+  end.
+- **Phase 11.3.a/b/c — Scoped styles**. `<style scoped>`
+  (default) rewrites class attrs + selectors with a per-
+  component scope suffix; `<style global>` opts out. CSS
+  mini-parser + `apply_scope(...)` helper. Fully wired into
+  `expand`.
+- **Phase 11.4.a/b/c/d — WASM emitter (approach A2)**.
+  Hand-rolled `wasm-bindgen` + `web-sys` under feature opt-in
+  `client-wasm`; gate closed at 11.4 KB gzipped over 40 KB
+  budget (28.6 KB headroom). Counter demo runs in Chrome end-
+  to-end: `0 → +1 → +2 → -1 → 0` cycle with subtree-scoped
+  re-renders (§9.m D1 naive-render policy). Bundle-size gate
+  reproducible via `tests/view_counter_wasm_smoke.rs`.
+- **Phase 11.5.a/b/c/d/e — CLI wiring + multi-component
+  composition**. Manifest gains `[[bin]] name = "…" main =
+  "…" target = "wasm-client|native|ssr" mount = "#app"` (with
+  legacy `[bin]` auto-migration at parse time — cero breaking
+  para 40+ boilerplates + curso; **cierra debt 9.y.8+**). CLI
+  `fitz build --bin <name> [--target <t>]` dispatches wasm-
+  client to a wasm-pack pipeline that materializes a scaffold
+  in `target/wasm-build/<bin>/` and copies `pkg/` to
+  `target/wasm/<bin>/`. `<Child prop="v" />` in a template
+  mounts a sibling component with static props (`Str`, `Int`,
+  `Float`, `Bool`, `Nullable<T>` primitives; nominals/generics/
+  functions/tuples deferred to 11.7+).
+- **Phase 11.6.a — Research + decision**. Restored the
+  original §6 row 11.6 intent (SSR emitter for the 4
+  `fitz-liveviews` examples) after §9.t drift; client-side
+  dynamic capabilities re-scoped formally to 11.7+.
+- **Phase 11.6.b — Skeleton SSR emitter**. New module
+  `src/view/codegen_ssr.rs` (~700 LoC + 20 unit tests). Emits
+  classic Fitz source (not AST — more debuggable) targeting
+  the `fitz-liveviews` contract: `from fitz_liveviews import
+  Html, html` + `@live_component("Name") type Name {…}` +
+  `@render_for("Name") fn Name_render(state) -> Html` + one
+  `@on("Name", "event") fn Name_event(state, payload) ->
+  Name` per event block. Event body lowering: mutations
+  accumulate → struct-lit return carries every state field
+  (mutated fields take assigned RHS, untouched take
+  `state.<field>`). `@click="handler"` in the template
+  rewrites to `data-flv-click="handler"` in the emitted HTML.
+- **Phase 11.6.c partial + continuation — Full expression
+  grammar + template directives inline**. RHS walker
+  (`format_fitz_expr_scoped`) covers BinOp, UnaryOp, Call,
+  Field, Index, StrInterp, List, Map, Range, Ok, Err, arrow
+  FnExpr with state-field rewriting + closure-param local-
+  scope tracking. `<style scoped>` / `<style global>` blocks
+  inline at the top of the emitted render body. `{#if}` /
+  `{#for}` lower to Fitz expressions in the template
+  (`__fitz_view_str_join` helper). View lexer gains
+  `Token::Dot` so `state.count.upper()` reconstructs
+  losslessly in event body raw-capture context.
+- **Phase 11.6.d — Loader integration + same-file `<Child />`
+  composition**. All 5 module loader entry points (evaluator,
+  codegen, main CLI pre-scan, LSP definition, LSP from-import)
+  try `.fitz` first and fall back to `.fitzv` transparently.
+  When a `.fitzv` resolves, `crate::view::transform_fitzv_source
+  (source, path)` runs the view pipeline (parse → expand →
+  check → emit_module_ssr) and hands classic Fitz source to
+  the classic loader. Any view-pipeline failure gets wrapped
+  in a `FitzError` naming the offending path + stage. Same-
+  file `<Child prop="v" />` composition inline-renders the
+  sibling with primitive Fitz-literal props.
+- **Phase 11.6.e (partial via §9.z + §9.aa + §9.bb)**.
+  - **§9.z**: SSR emitter accepts `payload` in event-body
+    scope (`payload["key"]` / `payload.has(…)` / `payload.get(…)`
+    natural in RHS). Enriched module-not-found hint for
+    `fitz_liveviews` (both `fitz run` + `fitz build` loaders
+    detect missing framework dep and suggest the canonical
+    git dep snippet in `fitz.toml`).
+  - **§9.aa**: Event-body widening. `emit_event_fn` dispatches
+    trivial vs widened bodies via `is_trivial_event_body`; wide
+    path primes shadow locals + walks recursively accepting
+    `Stmt::Assign` to `Ident` (new local or shadow mutation)
+    and `Stmt::Expr(Expr::If, _)` guards con arm-scope
+    truncation. Walker widened para `Expr::If` (single-expr
+    arms) + `Expr::StructLit` (walk fields verbatim). Unblocks
+    kanban's `card_editor_save` (`let new_text = if(payload.
+    has("text")){payload["text"]} else {text}`) + chat's
+    `send_message` (nested `if(payload.has("author")){if(payload.
+    has("text")){last_msg = payload["text"]}}`).
+  - **§9.bb**: **Cross-module `@live_component` auto-inject**.
+    Extends v0.20.1's implicit `flv_register(...)` injection
+    (which only scanned top-level program AST) to components
+    declared in imported `.fitzv` / `.fitz` sibling modules.
+    Paralelo bit-a-bit a W12 (`pre_scan_imported_auth_provider`)
+    y B10 (`pre_scan_imported_background_fns`): new
+    `TypeEnv.imported_live_components: Vec<ImportedLiveComponent>`
+    populated by `pre_scan_imported_live_components` in
+    `main.rs`; `inject_live_component_registrations` extended
+    con imported loop that emits `flv_register("Counter",
+    Counter { }, Counter_render, {…events})` bare-Ident calls
+    per imported component. Local-wins-over-imported silent
+    skip; missing-names errors list every expected name plus
+    the actionable `Add \`from <module> import <TypeName>,
+    <TypeName>_render, <TypeName>_<event>...\`` fix. Removes
+    the manual boot boilerplate del counter migration draft +
+    destraba dashboard/chat/kanban migrations una vez que
+    aterricen.
 
-**Counter migration draft applied to sibling repo (uncommitted).**
-`d:/fitz-liveviews/examples/counter/src/Counter.fitzv` (new) +
-rewritten `src/main.fitz` + updated `README.md`. Smoke validated
-end-to-end against `d:/fitz/target/release/fitz.exe` (fitz
-0.20.1 HEAD post-11.6.d + this §9.z): `fitz check` passes;
-`fitz run` boots the server on `:3000`; `curl /` returns the
-`<div data-flv-component-name="Counter"
-data-flv-value-instance_id="root">` wrapper with `Count: 0` +
-3 `data-flv-click` buttons. The `flv_register(...)` call in
-`main.fitz` is manual — v0.20.1's implicit auto-inject only
-scans the top-level program for `@live_component` types;
-imported ones aren't seen by `env.live_components`. Cross-
-module auto-inject is documented as debt.
+**Tests al cierre v0.21.0**: 3651 unit (default) + 3787 unit
+(`--features lsp`) + 115 cli_e2e + 3 openapi_e2e + 381 compile_e2e
+(4 pre-existing failures — file-lock Windows races +
+`orm_w17` #7 codegen drift + `http_coverage` routing 404 —
+todos documentados pre-v0.21.0, cero regresiones imputables al
+diff Phase 11 entero). `--features python` env-blocked por
+`PYO3_PYTHON` shim del host — no regresión. `cargo fmt --all
+--check` limpio. `cargo clippy --lib --tests --bins -- -D
+warnings` limpio.
 
-**Files touched**:
+**Extensión VSCode bumpeada a 0.21.0** con `.vsix` regenerado
+(`editors/vscode/fitz-language-win32-x64-0.21.0.vsix`)
+bundleando el `fitz-lsp.exe` fresh de v0.21.0.
 
-- `src/view/codegen_ssr.rs` — `format_event_rhs` scope +
-  updated doc comment + 2 new phase_11_6_e tests.
-- `src/evaluator.rs` — enriched module-not-found branch + 2
-  new phase_11_6_e tests.
-- `src/codegen.rs` — parallel enrichment in `ModuleLoader`.
-- `docs/fase-11-plan.md` — §9.z new section + top-of-file
-  status refresh.
-- `d:/fitz-liveviews/examples/counter/` — draft migration
-  files (uncommitted in the sibling repo).
+**Files touched (summary)**:
 
-**Debt / next norte after §9.z**:
+- `src/view/` — nuevo módulo entero (`parse.rs`, `ast.rs`,
+  `expand.rs`, `check.rs`, `codegen_wasm.rs`,
+  `codegen_ssr.rs`, `wasm_build.rs`, plus lexer). ~4500 LoC
+  + ~360 unit tests.
+- `src/lexer.rs` — view-dialect keywords + `.` follow-up +
+  §7 state annotations con generics.
+- `src/manifest.rs` — `[[bin]]` array-of-tables + `target`
+  + `mount` fields con legacy `[bin]` auto-migration.
+- `src/main.rs` — `--bin <name>` / `--target <t>` CLI flags
+  + `pre_scan_imported_live_components` helper +
+  `build_wasm_client_cmd` dispatch.
+- `src/types.rs` — `ImportedLiveComponent` struct +
+  `TypeEnv.imported_live_components` field + accessors +
+  `extract_live_components_from_program` public helper +
+  `inject_live_component_registrations` extension +
+  `collect_names_in_scope` helper.
+- `src/evaluator.rs`, `src/codegen.rs`, `src/lsp.rs` —
+  `.fitzv` loader integration + enriched module-not-found
+  hint for `fitz_liveviews`.
+- `examples/view/` — counter demo (WASM-runnable) + showcase
+  (multi-component composition fixture).
+- `docs/fase-11-plan.md` — plan doc con §1–§10 + §9.a–§9.bb
+  sub-sections (~5400 lines).
+- `docs/stack.md` — architectural constitution (Invariants
+  1–4, WASM-first).
+- `docs/roadmap.md`, `README.md`, `CLAUDE.md`, `docs/index.md`
+  — Phase 11 status refreshed.
+- `editors/vscode/package.json` bumpeada a 0.21.0 + `.vsix`
+  regenerado.
 
-- **Event body widening**: `if` / `let` / non-assign stmts
-  in event bodies rejected by the SSR emitter — blocks chat
-  + kanban migrations. Parallel to the `{#if}` / `{#for}`
-  widening from 11.6.c but on the event-body side.
-- **Cross-module `@live_component` auto-inject**: extends
-  v0.20.1's implicit registration to see types declared in
-  imported `.fitzv` modules. Parallel to W12 / B10 imported-
-  auth-provider / imported-background-fns fixes.
-- **Cross-file `<Child />` composition**: still open from
-  §9.y. Not needed by any of the 4 fitz-liveviews examples
-  (they all use runtime `component(name, id)`), lower
-  priority.
-- **Migration commits deferred to Fitz v0.21.0**: dashboard
-  should follow the counter shape once v0.21.0 ships; chat
-  + kanban wait for event-body widening.
+**Cierre formal de Phase 11 (parcial)**: 11.1 → 11.5 CLOSED
+ENTIRELY. 11.6.a → 11.6.d CLOSED ENTIRELY. 11.6.e PARTIAL
+(§9.z + §9.aa + §9.bb) — remaining scope: cross-file
+`<Child />` composition (§9.y debt, low priority), migration
+commits en `fitz-liveviews` (pending post-release rebase).
+
+**Debt residual (NO bloquea uso real)**:
+
+- **Cross-file `<Child />` composition** (§9.y): threading
+  loader's expanded-file cache through checker + emitter.
+  None of the 4 `fitz-liveviews` examples need it (all use
+  runtime `component(name, id)` API), so low priority.
+- **`fitz check` inject-time errors**: cross-module auto-
+  inject validation errors surface via `fitz run` / `fitz
+  build` only (checker doesn't run inject). Refinable si
+  demand real aparece del LSP or CI-only flows.
+- **Client-side dynamic capabilities** (Phase 11.7):
+  dynamic props (`prop={expr}`), event bubbling, cross-file
+  `<Child />` static + dynamic, `<slot />` fallback,
+  persistent child state, drag-drop. Deferred hasta demanda
+  real (kanban SPA port pinned as the acceptance criterion).
+- **LSP support inside `.fitzv`** (Phase 11.8): hover,
+  autocomplete, template-attr completion. Deferred.
+- **Pedagogic docs** (Phase 11.9): cap dedicado en
+  `docs/guide.md` + módulo del curso + `architecture.md`
+  refresh. Deferred.
+- **`fitz-liveviews` migration commits**: counter draft
+  uncommitted en el sibling repo desde §9.z; dashboard
+  debería seguir el mismo shape (extract `MetricTile.fitzv`);
+  chat + kanban ahora desbloqueados por §9.aa (event-body
+  widening) + §9.bb (cross-module auto-inject). Commits
+  land post-v0.21.0 release.
+
+**Próximo norte tras v0.21.0**: **atacar deudas** — inventario
+completo en `docs/deudas-post-5b.md`. Ver también:
+- `docs/roadmap.md` — sub-fases 11.7 / 11.8 / 11.9 y Fase 12+
+  status.
+- `docs/fase-11-plan.md` §11 — remaining sub-pass scope for
+  11.6.e continuations.
+
+## [Unreleased]
+
+*(vacía — próximas entradas van acá antes del siguiente bump)*
 
 ## [v0.20.1] — 2026-07-13 — Implicit `flv_register(...)` for LiveView components (fitz-liveviews Phase 5, A.1)
 

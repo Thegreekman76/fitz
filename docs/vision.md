@@ -242,18 +242,26 @@ fitz build
 
 Un binario. Sin runtime. Sin dependencias en producción.
 
-La promesa se extiende más allá del primer endpoint. El roadmap a
-mediano plazo (Fase 9) suma **stack web first-class** —
+La promesa se extiende más allá del primer endpoint. El roadmap
+llegó lejos: Fase 9 shipped **stack web first-class** —
 `@authenticated`, `@ws`, `@cron`, `@background` como decoradores
 del lenguaje, no como combinación de 5 librerías a integrar — y
 **DX completo** (formatter sin config, test runner built-in, hot
 reload, REPL, linter, package manager + registry escrito en Fitz
-mismo). El norte largo: Fase 10 stack DB nativo + ORM declarativo,
-Fase 11 frontend en `.fitz` (componentes con SSR built-in, el
-mismo `type` para back y front), Fase 12 deployment de un solo
-comando (`fitz deploy` con Dockerfile autogenerado y observability
-nativa). Ver [`docs/roadmap.md`](roadmap.md) para el plan
-completo.
+mismo). Fase 10 shipped **stack DB nativo + ORM declarativo**
+(driver Postgres puro en Fitz + `@table`/`@primary` con
+migraciones + transactions + composite PK). **Fase 11 shipped en
+v0.21.0 (2026-07-16)** — nueva extensión `.fitzv` (single-file
+components) con parser + expand + checker + dos backends
+compilados: **WASM** para interactividad client-side y **SSR**
+para server-rendered HTML targeting `fitz-liveviews`. El mismo
+`type` funciona back y front; los componentes se testan como
+código Fitz normal. Fase 12 shipped deployment de un solo comando
+(`fitz deploy` con Dockerfile autogenerado y observability
+nativa). Fase 13 shipped CLI builder nativo (`@command`/`@arg`/
+`@flag`). Ver [`docs/roadmap.md`](roadmap.md) para el plan
+completo y [`docs/fase-11-plan.md`](fase-11-plan.md) para el
+detalle del frontend nativo.
 
 ## Para quién es Fitz
 

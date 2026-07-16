@@ -4,6 +4,119 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 Fase 11 — Native frontend `.fitzv` compilada a WASM + SSR emitter for fitz-liveviews — **CERRADO por v0.21.0 (2026-07-16)**
+
+Release **mayor** aggregating Phase 11.1 → 11.5 + 11.6.a/b/c/d +
+11.6.e §9.z/§9.aa/§9.bb en un solo bump. Cierra la fase más
+ambiciosa del roadmap original ("frontend en `.fitz`") con dos
+backends compilados: WASM para client-side interactivity + SSR
+para server-rendered HTML targeting `fitz-liveviews`. Detalle
+exhaustivo en [`docs/fase-11-plan.md`](fase-11-plan.md) §9.a–§9.bb
+(~5400 líneas).
+
+**Sub-fases shipped**:
+
+- **11.1** — POC parser (`.fitzv` extension, HTML sub-parser,
+  `src/view/` module scaffold).
+- **11.2.a/b/c** — Bridge classic AST + checker + template
+  directives `{#if}` / `{#for}` / `{#else}` / `<slot>` + view-
+  lexer §7 (state annotations con generics).
+- **11.3.a/b/c** — Scoped styles + CSS mini-parser + `apply_scope`
+  helper wired en `expand`.
+- **11.4.a/b/c/d** — WASM emitter approach A2 (hand-rolled
+  `wasm-bindgen` + `web-sys` bajo feature opt-in `client-wasm`).
+  Bundle-size gate cerrado 2026-07-15 con 11.4 KB gzipped sobre
+  40 KB (28.6 KB headroom sobre el counter demo). Browser smoke
+  manual Windows 11 / Chrome validado.
+- **11.5.a/b/c/d/e** — CLI wiring `fitz build --bin <name>
+  [--target <t>]` + manifest `[[bin]]` array-of-tables con
+  legacy `[bin]` auto-migration (**cierra debt 9.y.8+ multi-
+  bin**) + wasm-client emit + multi-component composition
+  `<Child prop="v" />` con primitivos Fitz-literal + cierre
+  formal.
+- **11.6.a/b/c/d** — SSR emitter research + skeleton
+  `src/view/codegen_ssr.rs` con `emit_module_ssr` + full
+  expression grammar `format_fitz_expr_scoped` con state-field
+  rewriting + closure-param local-scope tracking +
+  `<style scoped>`/`<style global>` inline con CSS-brace escape
+  + template directives `{#if}` / `{#for}` con `__fitz_view_str_
+  join` helper + view lexer `.` fix + module loader integration
+  para `.fitzv` transparente (`.fitz` first, `.fitzv` fallback
+  paralelo en 5 loader entry points) + same-file `<Child />`
+  composición con primitive Fitz-literal coerce.
+- **11.6.e PARTIAL** (§9.z + §9.aa + §9.bb).
+  - **§9.z**: SSR emitter `payload` scope en event bodies +
+    enriched module-not-found hint for `fitz_liveviews` (targeted
+    `hint:` block en both `evaluator::load_module` y
+    `codegen::ModuleLoader::load_module` con canonical git dep
+    snippet).
+  - **§9.aa**: Event-body widening. `emit_event_fn` dispatcher
+    `is_trivial_event_body` → trivial / widened path; wide path
+    prime shadow locals `let <field> = state.<field>` + walker
+    recursivo `lower_event_body_stmts` acepta `Stmt::Assign` a
+    `Ident` (new local o shadow mutation) + `Stmt::Expr(Expr::If,
+    _)` guards con arm scope truncation. Walker `format_fitz_
+    expr_scoped` widened para `Expr::If` (single-expr arms via
+    `format_if_arm_value`) + `Expr::StructLit` (walk fields
+    verbatim). Unblocks kanban's `card_editor_save` + chat's
+    `send_message` `.fitzv` migrations.
+  - **§9.bb**: **Cross-module `@live_component` auto-inject**
+    paralelo bit-a-bit a W12 (`pre_scan_imported_auth_provider`)
+    y B10 (`pre_scan_imported_background_fns`). Nuevo `pub struct
+    ImportedLiveComponent { component_name, type_name, module_
+    name, render_fn, events }` + field `TypeEnv.imported_live_
+    components` con `add_imported_live_components`/
+    `imported_live_components()` accessors + `pub fn extract_live_
+    components_from_program(program, module_name)` walker (silent-
+    drop-on-missing-render_for + deterministic alphabetical sort).
+    `inject_live_component_registrations` extended con imported
+    loop: local-wins-over-imported silent skip, bare-Ident
+    emission (matches local case shape), name-in-scope
+    validation via nuevo private helper `collect_names_in_
+    scope(program)` con actionable hint `Add \`from <module>
+    import <TypeName>, <TypeName>_render, ...\``. Nuevo
+    `pre_scan_imported_live_components` en `main.rs` wired en
+    `check_program_with_pyi_stubs_and_deps`. Removes manual
+    `flv_register(...)` boilerplate para components declarados
+    en imported `.fitzv`/`.fitz` sibling modules.
+
+**Tests al cierre**: 3651 unit (default) + 3787 unit (`--features
+lsp`) + 115 cli_e2e + 3 openapi_e2e + 381 compile_e2e (4
+pre-existentes: file-lock Windows races + `orm_w17` #7 codegen
+drift + `http_coverage_metodos_headers` routing 404 — todos
+documentados pre-v0.21.0, cero regresiones imputables al diff
+Phase 11 entero). `cargo fmt --all --check` + `cargo clippy
+--lib --tests --bins -- -D warnings` limpios.
+
+### Deudas residuales derivadas (NO bloquean)
+
+- **Cross-file `<Child />` composition** (§9.y debt) — low
+  priority: ninguno de los 4 ejemplos `fitz-liveviews`
+  (counter/dashboard/chat/kanban) lo necesita, todos usan
+  runtime `component(name, id)` API cross-file. Threading el
+  loader's expanded-file cache through checker + emitter es
+  refinable si demanda real aparece.
+- **`fitz check` inject-time errors** — cross-module auto-
+  inject validation errors surface via `fitz run` / `fitz build`
+  solo. El checker no corre inject (misma policy que v0.20.1
+  local case). UX gap refinable si LSP or CI-only workflows
+  demand it.
+- **Client-side dynamic capabilities** (Phase 11.7) — dynamic
+  props (`prop={expr}`), event bubbling, cross-file `<Child />`
+  dynamic, `<slot />` fallback, persistent child state,
+  drag-drop. Kanban SPA port pinned como acceptance criterion.
+  Deferred hasta demanda real.
+- **LSP support inside `.fitzv`** (Phase 11.8) — hover,
+  autocomplete, template-attr completion. Deferred.
+- **Pedagogic docs** (Phase 11.9) — cap dedicado en
+  `docs/guide.md` + módulo del curso M9 + `docs/architecture.md`
+  refresh cubriendo el pipeline `src/view/`. Deferred.
+- **Migration commits en `fitz-liveviews` sibling repo** —
+  counter draft uncommitted desde §9.z; dashboard debería
+  seguir el mismo shape (extract `MetricTile.fitzv`); chat +
+  kanban ahora unblocked por §9.aa (event-body widening) +
+  §9.bb (cross-module auto-inject). Land post-v0.21.0.
+
 ## 🟢 Multi-bin (`[[bin]]` array-of-tables) — **CERRADO por Fase 11.5.b (2026-07-15)**
 
 Deuda 9.y.8+ arrastrada desde Fase 9.y.1 (2026-05-16). El

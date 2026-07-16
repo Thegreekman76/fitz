@@ -211,8 +211,11 @@ Extensions. Detalle en
 - **Fase 10** — Stack DB nativo (driver Postgres puro Fitz + ORM
   declarativo + migraciones automáticas + transactions + composite
   PK + indexes + tipos avanzados Date/DateTime/Uuid).
-- **Fase 11** (v0.11.0) — CLI builder nativo (`@command` con
-  `--help` autogenerado, sin `clap`/`argparse`/`click`).
+- **Fase 13** (v0.11.0) — CLI builder nativo (`@command` con
+  `--help` autogenerado, sin `clap`/`argparse`/`click`). *Nota
+  histórica: originalmente numerada como "Fase 11" antes del
+  reordenamiento del roadmap que promovió el frontend nativo
+  a Fase 11.*
 - **Fase 12 ENTERA** — **Deployment ciudadano primera clase**.
   Healthz/readyz auto-mount + SIGTERM drain (12.1), `Secret<T>`
   opaco con redacción automática + builtins
@@ -236,10 +239,42 @@ Extensions. Detalle en
   feature flags built-in `@flag("name")` + `flag(name) -> Bool`
   + módulo `flags` con manifest `[flags]` y override por env
   var `FITZ_FLAG_<UPPERCASE>` (12.8).
+- **Fase 11 hasta 11.6.e §9.bb** (v0.21.0, 2026-07-16) — **Native
+  frontend `.fitzv` compilado a WASM + SSR emitter for
+  `fitz-liveviews`**. Nueva extensión `.fitzv` (single-file
+  components à la Vue/Svelte) con parser + expand + checker + dos
+  backends: **WASM** para interactividad client-side
+  (`fitz build --bin <web> --target wasm-client` bajo feature
+  opt-in `client-wasm`, 11.4 KB gzipped sobre 40 KB gate en el
+  counter demo) y **SSR** targeting `fitz-liveviews`
+  (`@live_component` + `@render_for` + `@on`). Module loader
+  routes `.fitzv` transparente — sibling `.fitz` gana cuando
+  both existen, migration opt-in y additiva. Cross-module
+  `@live_component` auto-inject (§9.bb) paralelo bit-a-bit a
+  W12+B10 elimina el manual `flv_register(...)` boilerplate
+  para components declarados en imported `.fitzv`/`.fitz`
+  sibling modules. Cierra 11.1 (POC parser), 11.2.a/b/c (bridge
+  classic AST + checker + directives `{#if}`/`{#for}`/`{#else}`/
+  `<slot>`), 11.3.a/b/c (scoped styles + `apply_scope`),
+  11.4.a/b/c/d (WASM emitter approach A2 hand-rolled
+  `wasm-bindgen`; bundle-size gate cerrado; browser smoke
+  manual validado), 11.5.a/b/c/d/e (CLI wiring + manifest
+  `[[bin]]` array — cierra debt 9.y.8+ multi-bin — + wasm-client
+  emit + multi-component composition `<Child prop="v" />` +
+  cierre formal), 11.6.a/b/c/d (SSR emitter + full expression
+  grammar + module loader integration + same-file `<Child />`
+  composición), 11.6.e PARTIAL (§9.z payload scope +
+  `fitz_liveviews` missing-dep hint; §9.aa event-body widening;
+  §9.bb cross-module auto-inject). Detalle exhaustivo en
+  [`docs/fase-11-plan.md`](fase-11-plan.md) §9.a–§9.bb.
 
-**Próximo norte**: Fase 13+ (orquestación distribuida, multi-tenant,
-o plugin architecture para deploy targets `fly`/`railway`/`k8s`)
-según demanda real. Sin presión inmediata.
+**Próximo norte**: **atacar deudas** — inventario en
+[`docs/deudas-post-5b.md`](deudas-post-5b.md). Fase 11
+remaining scope (11.7 client-side dynamic capabilities +
+kanban SPA port, 11.8 LSP inside `.fitzv`, 11.9 pedagogic
+docs), Fase 13+ (orquestación distribuida, multi-tenant, deploy
+targets extra `fly`/`railway`/`k8s`) según demanda real. Sin
+presión inmediata.
 
 ---
 

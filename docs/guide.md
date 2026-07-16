@@ -12646,13 +12646,17 @@ Todo en el binario `fitz`, todo con paridad bit-a-bit
 intérprete↔binario, todo validado en CI multi-plataforma con
 Postgres real en cada push.
 
-Lo que queda es Fase 11+ — frontend, deployment ciudadano de
-primera, CLI builder — la apuesta a largo plazo. Pero el
-**stack server completo** ya está vivo. Si tu objetivo es
-"escribir una API tipada con auth + DB + jobs + WebSockets que
-deploye como un binario standalone": Fitz lo hace hoy, en un
-solo lenguaje, con cero `requirements.txt`/`Cargo.toml`/
-`package.json` que mantener.
+Fase 12 (deployment ciudadano) shipped en v0.13.0. Fase 13 (CLI
+builder nativo con `@command`) shipped en v0.11.0. **Fase 11
+(frontend nativo `.fitzv` compilado a WASM + SSR) shipped en
+v0.21.0** (2026-07-16). Lo que queda es 11.7 (client-side dynamic
+capabilities + kanban SPA port), 11.8 (LSP support inside
+`.fitzv`), y 11.9 (pedagogic docs — cap dedicado en esta guía +
+módulo del curso M9). Pero el **stack server completo** ya está
+vivo. Si tu objetivo es "escribir una API tipada con auth + DB +
+jobs + WebSockets que deploye como un binario standalone": Fitz lo
+hace hoy, en un solo lenguaje, con cero `requirements.txt`/
+`Cargo.toml`/`package.json` que mantener.
 
 ### Transactions (v0.10.14)
 

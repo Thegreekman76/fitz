@@ -82,7 +82,13 @@
 >   lexer/parser/AST refactor; pending.
 > - Native CLI builder (`@command`/`@arg`/`@flag`) — Phase 13 of
 >   the roadmap.
-> - Frontend in `.fitz` (SFC + SSR) — Phase 11+ of the roadmap.
+> - Frontend in `.fitzv` (SFC + SSR + WASM) — Phase 11 shipped in
+>   v0.21.0 (2026-07-16) through sub-phase 11.6.e §9.bb. Grammar
+>   for the view dialect lives in `docs/fase-11-plan.md` and is
+>   NOT part of the classic `.fitz` surface — the classic parser
+>   never sees view tokens. Phase 11.7 (client-side dynamic
+>   capabilities), 11.8 (LSP inside `.fitzv`), and 11.9 (pedagogic
+>   docs) remain scope for future releases.
 >
 > When this specification and the guide disagree, **the guide
 > wins** (it only documents what is implemented).

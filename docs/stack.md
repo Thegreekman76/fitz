@@ -70,11 +70,11 @@ Un release de Fitz core puede ocurrir sin release de fitz-liveviews, y viceversa
 
 Fase 11 es el ítem más ambicioso que queda del roadmap fitz core y toca superficie sensible (lexer, parser, checker, codegen). El siguiente contrato es **inviolable** durante su desarrollo:
 
-**Invariant 1** — Los ~370 ejemplos guide+curso+TaskHub del smoke `GUIDE_EXAMPLES_COMPILE` siguen compilando y corriendo idénticos al último release estable (v0.20.1 al momento de escribir este doc).
+**Invariant 1** — Los ~370 ejemplos guide+curso+TaskHub del smoke `GUIDE_EXAMPLES_COMPILE` siguen compilando y corriendo idénticos al último release estable (v0.21.0 al momento de escribir este doc — Fase 11.1 → 11.5 + 11.6.a/b/c/d + 11.6.e §9.z/aa/bb shipped; 381 passed / 4 pre-existing failures documentados sin regresiones imputables).
 
 **Invariant 2** — Los boilerplates (11 al momento de escribir esto) siguen pasando `fitz check` + `fitz build`.
 
-**Invariant 3** — La superficie del parser `.fitz` clásico es 100% compatible-hacia-atrás. Código de v0.20.1 compila en la versión con Fase 11 sin cambio ninguno.
+**Invariant 3** — La superficie del parser `.fitz` clásico es 100% compatible-hacia-atrás. Código de v0.20.1 compila en la versión con Fase 11 (v0.21.0+) sin cambio ninguno.
 
 **Invariant 4** — El parser nuevo de Fase 11 vive en un módulo dedicado (`src/view/` o similar) aislado del parser clásico. Un bug en el módulo nuevo NO puede romper `.fitz` clásico.
 
