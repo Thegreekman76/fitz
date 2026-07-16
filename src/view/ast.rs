@@ -19,7 +19,35 @@
 /// spec but the plan defers wiring to 11.2+.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewFile {
+    /// §9.dd (2026-07-16) — Top-level `from X import Y1, Y2, ...`
+    /// declarations. Emitted verbatim as classic Fitz `from ...
+    /// import ...` at the top of the transformed source so the
+    /// classic loader resolves the nominals across files. Enables
+    /// cross-file nominal type refs in state annotations (`state {
+    /// messages: List<Message> = [] }` where `Message` is in a
+    /// sibling `message.fitz`) and struct literals inside event
+    /// bodies (`messages.push(Message { ... })`).
+    pub imports: Vec<ViewImport>,
     pub components: Vec<Component>,
+}
+
+/// §9.dd — A `from X import Y1, Y2, ...` declaration at the top
+/// of a `.fitzv` file. Module path is a dotted sequence of segments
+/// (`from foo.bar import Baz` → `path: ["foo", "bar"]`). Names are
+/// the identifiers imported; multi-name shortcuts like `from foo
+/// import Baz, Quux` produce a single `ViewImport` with two names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewImport {
+    /// Module path (dotted, no trailing empty). `["Counter"]` for
+    /// `from Counter import ...`; `["utils", "shared"]` for
+    /// `from utils.shared import ...`.
+    pub path: Vec<String>,
+    /// Names imported from the module. Aliases (`import X as Y`)
+    /// deferred — the parser rejects `as` for now with a targeted
+    /// pointer to Phase 11.7+.
+    pub names: Vec<String>,
+    /// Position of the `from` keyword. 1-based (line, column).
+    pub loc: Loc,
 }
 
 /// A single component block: `component Name { ... }`.

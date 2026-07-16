@@ -53,7 +53,7 @@
 use super::ast::Loc;
 use super::expand::{
     ChildComponentProp, ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStateField,
-    ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
+    ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile, ExpandedViewImport,
 };
 use crate::ast::{AssignTarget, Expr, Pattern, Span, Stmt, TypeExpr};
 use crate::types::{check_program, Type};
@@ -99,10 +99,19 @@ impl std::error::Error for CheckError {}
 /// (source order — depth-first walk of the template AST).
 pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
     let mut errors = Vec::new();
+    // §9.dd (2026-07-16) — Convert top-level `from X import Y` view
+    // imports to classic `Stmt::FromImport` ONCE at the top of the
+    // check pass. Passed to every synth-program builder so the
+    // classic checker sees the imported nominals in scope (registered
+    // via `resolve_program`'s `Pass 1` walk which turns FromImport
+    // names into TypeEnv nominals with `fields: None` — enough for
+    // `List<Message>` and `Message { ... }` struct literals to pass
+    // the classic checker's shape validation).
+    let import_stmts = imports_to_from_import_stmts(&file.imports);
     for component in &file.components {
         let state_before = errors.len();
         for field in &component.state {
-            check_state_field(component.name.as_str(), field, &mut errors);
+            check_state_field(component.name.as_str(), field, &import_stmts, &mut errors);
         }
         let state_errored = errors.len() > state_before;
         // Event attr cross-refs are pure structural comparisons
@@ -127,12 +136,12 @@ pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
         // pile up on top of the actual bug.
         if !state_errored {
             for handler in &component.events {
-                check_event_handler(component, handler, &mut errors);
+                check_event_handler(component, handler, &import_stmts, &mut errors);
             }
             if let Some(template) = &component.template {
-                check_template_for_iters(component, template, &mut errors);
-                check_template_interpolations(component, template, &mut errors);
-                check_template_if_conds(component, template, &mut errors);
+                check_template_for_iters(component, template, &import_stmts, &mut errors);
+                check_template_interpolations(component, template, &import_stmts, &mut errors);
+                check_template_if_conds(component, template, &import_stmts, &mut errors);
             }
         }
     }
@@ -142,6 +151,7 @@ pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
 fn check_state_field(
     component_name: &str,
     field: &ExpandedStateField,
+    imports: &[Stmt],
     errors: &mut Vec<CheckError>,
 ) {
     // Synthesise `<field.name>: <field.type_expr> = <field.default>`
@@ -149,12 +159,20 @@ fn check_state_field(
     // because the classic checker would use it to point at the source
     // — we intercept the emitted error and replace its position with
     // the state field's blob `Loc`.
-    let program: Vec<Stmt> = vec![Stmt::Assign {
+    //
+    // §9.dd — Prepend imported nominal stubs so `List<Message>`
+    // (with Message declared in a sibling `.fitz`/`.fitzv` and
+    // imported via `from message import Message`) resolves cleanly.
+    let mut program: Vec<Stmt> = Vec::with_capacity(imports.len() + 1);
+    for imp in imports {
+        program.push(imp.clone());
+    }
+    program.push(Stmt::Assign {
         target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
         type_: Some(field.type_expr.clone()),
         value: field.default.clone(),
         span: Span::ZERO,
-    }];
+    });
     let (_env, _info, _defs, classic_errors) = check_program(&program);
     for e in classic_errors {
         errors.push(CheckError {
@@ -192,6 +210,7 @@ fn check_state_field(
 fn check_event_handler(
     component: &ExpandedComponent,
     handler: &ExpandedEventHandler,
+    imports: &[Stmt],
     errors: &mut Vec<CheckError>,
 ) {
     // Include ONLY the current handler's body; the other handlers
@@ -199,7 +218,7 @@ fn check_event_handler(
     // handler calls resolve without accidentally surfacing their
     // body errors here (each handler's body is checked in its own
     // pass via `check_event_handler`).
-    let program = build_env_program(component, Some(&handler.name), None, &[]);
+    let program = build_env_program(component, imports, Some(&handler.name), None, &[]);
     let (_env, _info, _defs, classic_errors) = check_program(&program);
     for e in classic_errors {
         errors.push(CheckError {
@@ -230,6 +249,7 @@ fn check_event_handler(
 fn check_template_interpolations(
     component: &ExpandedComponent,
     template: &ExpandedTemplate,
+    imports: &[Stmt],
     errors: &mut Vec<CheckError>,
 ) {
     let mut interpolations: Vec<InterpolationRef<'_>> = Vec::new();
@@ -248,6 +268,7 @@ fn check_template_interpolations(
         // matches how Vue/React expose methods to templates.
         let program = build_env_program(
             component,
+            imports,
             None,
             Some(Stmt::Assign {
                 target: AssignTarget::Ident(check_var, Span::ZERO),
@@ -300,6 +321,7 @@ fn check_template_interpolations(
 fn check_template_if_conds(
     component: &ExpandedComponent,
     template: &ExpandedTemplate,
+    imports: &[Stmt],
     errors: &mut Vec<CheckError>,
 ) {
     let mut conds: Vec<IfCondRef<'_>> = Vec::new();
@@ -311,6 +333,7 @@ fn check_template_if_conds(
         let cond_span = cond_ref.cond.span();
         let program = build_env_program(
             component,
+            imports,
             None,
             Some(Stmt::Assign {
                 target: AssignTarget::Ident(check_var, Span::ZERO),
@@ -360,6 +383,7 @@ fn check_template_if_conds(
 fn check_template_for_iters(
     component: &ExpandedComponent,
     template: &ExpandedTemplate,
+    imports: &[Stmt],
     errors: &mut Vec<CheckError>,
 ) {
     let mut iters: Vec<ForIterRef<'_>> = Vec::new();
@@ -378,7 +402,7 @@ fn check_template_for_iters(
             label: None,
             span: Span::ZERO,
         };
-        let program = build_env_program(component, None, Some(stmt), &iter_ref.for_scope);
+        let program = build_env_program(component, imports, None, Some(stmt), &iter_ref.for_scope);
         let (_env, _info, _defs, classic_errors) = check_program(&program);
         for e in classic_errors {
             errors.push(CheckError {
@@ -563,14 +587,39 @@ fn is_bool_compatible(ty: &Type) -> bool {
 /// handler declarations visible to every other stmt regardless of
 /// declaration order, so handler-to-handler calls (mutual recursion,
 /// one handler invoking another) resolve without further care.
+/// §9.dd — Convert each `ExpandedViewImport` into a classic
+/// `Stmt::FromImport` for injection into the view checker's synth
+/// programs. Names are wrapped as `(name, None)` (no alias support
+/// in the `.fitzv` view syntax MVP — aliases would require alias-
+/// aware TypeEnv patching + emit-side rewriting; deferred).
+fn imports_to_from_import_stmts(imports: &[ExpandedViewImport]) -> Vec<Stmt> {
+    imports
+        .iter()
+        .map(|imp| Stmt::FromImport {
+            path: imp.path.clone(),
+            names: imp.names.iter().map(|n| (n.clone(), None)).collect(),
+            span: Span::ZERO,
+        })
+        .collect()
+}
+
 fn build_env_program(
     component: &ExpandedComponent,
+    imports: &[Stmt],
     include_body_for: Option<&str>,
     extra: Option<Stmt>,
     for_scope: &[ForBinding<'_>],
 ) -> Vec<Stmt> {
     let mut program: Vec<Stmt> =
-        Vec::with_capacity(component.state.len() + component.events.len() + 2);
+        Vec::with_capacity(imports.len() + component.state.len() + component.events.len() + 2);
+    // §9.dd — Prepend imported nominal decls so `resolve_program`'s
+    // Pass 1 walk registers them as TypeEnv nominals (with
+    // `fields: None`). The classic checker will then accept
+    // `List<Message>` in state and `Message { ... }` struct
+    // literals in event bodies without "unknown type" errors.
+    for imp in imports {
+        program.push(imp.clone());
+    }
     for field in &component.state {
         program.push(Stmt::Assign {
             target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
@@ -1331,6 +1380,7 @@ mod tests {
     /// `docs/fase-11-plan.md` §7.
     fn synth_file(component_name: &str, fields: Vec<ExpandedStateField>) -> ExpandedViewFile {
         ExpandedViewFile {
+            imports: Vec::new(),
             components: vec![ExpandedComponent {
                 name: component_name.into(),
                 loc: Loc::new(1, 1),
@@ -1877,6 +1927,7 @@ component B {
         // `interpolation_of_str_friendly_types_are_ok` about the
         // view POC lexer not accepting `.` in state defaults.
         let file = ExpandedViewFile {
+            imports: Vec::new(),
             components: vec![ExpandedComponent {
                 name: "X".into(),
                 loc: Loc::new(1, 1),
@@ -2410,6 +2461,7 @@ component B {
         // source level since view-lexer §7 but for defaults `false`
         // is easier to write than a full Bool? source-level path.
         let file = ExpandedViewFile {
+            imports: Vec::new(),
             components: vec![ExpandedComponent {
                 name: "X".into(),
                 loc: Loc::new(1, 1),
@@ -3262,6 +3314,125 @@ component Card {
         assert!(
             errors.iter().any(|e| e.message.contains("payload")),
             "expected error message referencing `payload`; got: {:?}",
+            errors
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // §9.dd V-3 + V-5 — cross-file nominals via `from X import Y` in `.fitzv`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v3_state_field_with_imported_nominal_type_no_longer_unknown() {
+        // Canonical chat-migration case: `state { messages:
+        // List<Message> = [] }` with `Message` declared in a sibling
+        // `.fitz` module (`message.fitz`) and imported via
+        // `from message import Message` at the top of the `.fitzv`.
+        // Pre-fix: "unknown type Message" from the view checker.
+        // Post-fix: parses + checks clean.
+        let src = r#"from message import Message
+
+component ChatRoom {
+  state { messages: List<Message> = [] }
+}"#;
+        let errors = check_str(src);
+        assert!(
+            errors.is_empty(),
+            "expected zero errors with imported nominal in state; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn v5_struct_literal_of_imported_nominal_in_event_body_no_longer_unknown() {
+        // Canonical chat-migration case: `messages.push(Message {
+        // author: author, text: text })` inside event body. Post
+        // §9.cc V-6 the bare `.push()` is accepted; post §9.dd V-3+V-5
+        // the `Message { ... }` struct literal now resolves via the
+        // imported nominal stub (fields: None in TypeEnv → struct lit
+        // shape validation is skipped silently, matching classic Fitz
+        // behaviour for cross-file imported types with no declared
+        // fields in the current module).
+        let src = r#"from message import Message
+
+component ChatRoom {
+  state { messages: List<Message> = [] }
+  event send() {
+    if (payload.has("author")) {
+      if (payload.has("text")) {
+        let author = payload["author"]
+        let text = payload["text"]
+        messages.push(Message { author: author, text: text })
+      }
+    }
+  }
+}"#;
+        let errors = check_str(src);
+        assert!(
+            errors.is_empty(),
+            "expected zero errors with imported nominal used as struct \
+             literal in event body; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn v3_multi_name_from_import_all_names_visible() {
+        // Verify that multi-name `from X import Y1, Y2, Y3` shape
+        // registers ALL names as nominals in scope, not just the first.
+        let src = r#"from users import User, Post, Comment
+
+component X {
+  state {
+    u: User = null
+    p: Post = null
+    c: Comment = null
+  }
+}"#;
+        let errors = check_str(src);
+        // No errors expected — but the state defaults are `null`
+        // against non-Nullable types, which classic checker rejects.
+        // Filter those out (not our concern) and check no "unknown type"
+        // errors surface for the imported names.
+        let unknown_type_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| e.message.contains("unknown type"))
+            .collect();
+        assert!(
+            unknown_type_errors.is_empty(),
+            "expected zero 'unknown type' errors on multi-name import; got: {:?}",
+            unknown_type_errors
+        );
+    }
+
+    #[test]
+    fn v3_dotted_path_from_import_treated_same_as_single_segment() {
+        let src = r#"from utils.shared import Widget
+
+component X {
+  state { w: List<Widget> = [] }
+}"#;
+        let errors = check_str(src);
+        assert!(
+            errors.is_empty(),
+            "expected zero errors with dotted-path import; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn v3_no_imports_backward_compat_regression() {
+        // Regression: `.fitzv` files without any imports must still
+        // check clean (counter/dashboard/MetricTile shape). The
+        // §9.dd fix only ADDS a code path; doesn't remove anything.
+        let src = r#"component Counter {
+  state { count: Int = 0 }
+  event increment() { count = count + 1 }
+}"#;
+        let errors = check_str(src);
+        assert!(
+            errors.is_empty(),
+            "regression: no-imports shape must still check clean; got: {:?}",
             errors
         );
     }

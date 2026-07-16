@@ -130,6 +130,7 @@ pub fn emit_component(component: &ExpandedComponent) -> EmitResult<String> {
     // but tests that exercise the single-component emitter
     // don't use composition anyway.
     let synthetic_file = ExpandedViewFile {
+        imports: Vec::new(),
         components: vec![component.clone()],
     };
     let mut out = String::new();

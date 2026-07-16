@@ -104,11 +104,33 @@ impl ViewParser {
     }
 
     fn parse_view_file(&mut self) -> ViewParseResult<ViewFile> {
+        let mut imports = Vec::new();
         let mut components = Vec::new();
         loop {
             self.skip_newlines();
             match self.peek().token {
                 Token::Eof => break,
+                // §9.dd (2026-07-16) — `from X import Y1, Y2, ...` at
+                // top of `.fitzv`. Emitted verbatim as classic Fitz
+                // import at the top of the transformed source so the
+                // classic loader resolves cross-file nominals normally.
+                // Imports MUST precede all `component` blocks; a `from`
+                // after a `component` errors (classic Fitz convention
+                // is imports at file head).
+                Token::From => {
+                    if !components.is_empty() {
+                        let cur = self.peek().clone();
+                        return Err(ViewParseError {
+                            message: "`from ... import ...` must appear \
+                                      before any `component` block (classic Fitz \
+                                      convention: imports at file head)"
+                                .to_string(),
+                            line: cur.line,
+                            column: cur.column,
+                        });
+                    }
+                    imports.push(self.parse_view_import()?);
+                }
                 Token::Component => {
                     components.push(self.parse_component()?);
                 }
@@ -116,7 +138,8 @@ impl ViewParser {
                     let cur = self.peek().clone();
                     return Err(ViewParseError {
                         message: format!(
-                            "expected `component` at the top level, got {}",
+                            "expected `from ... import ...` or `component ...` \
+                             at the top level, got {}",
                             cur.token
                         ),
                         line: cur.line,
@@ -125,7 +148,129 @@ impl ViewParser {
                 }
             }
         }
-        Ok(ViewFile { components })
+        Ok(ViewFile {
+            imports,
+            components,
+        })
+    }
+
+    /// §9.dd (2026-07-16) — Parse `from <path> import <name1>, <name2>,
+    /// ...` at the top of a `.fitzv` file. Grammar:
+    ///
+    /// ```text
+    /// FromImport := "from" IdentPath "import" IdentList
+    /// IdentPath  := Ident ("." Ident)*
+    /// IdentList  := Ident ("," Ident)*
+    /// ```
+    ///
+    /// The `as` alias syntax (`import X as Y`) is REJECTED with a
+    /// targeted Phase 11.7+ pointer — aliases would require alias-
+    /// aware TypeEnv patching + emit-side rewriting; deferred.
+    fn parse_view_import(&mut self) -> ViewParseResult<ViewImport> {
+        // Consume `from`
+        let from_tok = self.advance();
+        let loc = Loc::new(from_tok.line, from_tok.column);
+        // Read dotted path.
+        let mut path = Vec::new();
+        loop {
+            self.skip_newlines_soft();
+            let cur = self.peek().clone();
+            match &cur.token {
+                Token::Ident(s) => {
+                    path.push(s.clone());
+                    self.advance();
+                }
+                _ => {
+                    return Err(ViewParseError {
+                        message: format!(
+                            "expected identifier in `from` module path, got {}",
+                            cur.token
+                        ),
+                        line: cur.line,
+                        column: cur.column,
+                    });
+                }
+            }
+            self.skip_newlines_soft();
+            match self.peek().token {
+                Token::Dot => {
+                    self.advance(); // consume `.`
+                    continue;
+                }
+                _ => break,
+            }
+        }
+        if path.is_empty() {
+            return Err(ViewParseError {
+                message: "empty module path in `from ... import ...`".into(),
+                line: loc.line,
+                column: loc.column,
+            });
+        }
+        // Expect `import`
+        self.skip_newlines_soft();
+        let cur = self.peek().clone();
+        if !matches!(cur.token, Token::Import) {
+            return Err(ViewParseError {
+                message: format!(
+                    "expected `import` after module path in `from ... import ...`, \
+                     got {}",
+                    cur.token
+                ),
+                line: cur.line,
+                column: cur.column,
+            });
+        }
+        self.advance(); // consume `import`
+                        // Read comma-separated identifiers.
+        let mut names = Vec::new();
+        loop {
+            self.skip_newlines_soft();
+            let cur = self.peek().clone();
+            match &cur.token {
+                Token::Ident(s) => {
+                    names.push(s.clone());
+                    self.advance();
+                }
+                _ => {
+                    return Err(ViewParseError {
+                        message: format!(
+                            "expected identifier in `import` name list, got {}",
+                            cur.token
+                        ),
+                        line: cur.line,
+                        column: cur.column,
+                    });
+                }
+            }
+            self.skip_newlines_soft();
+            match self.peek().token {
+                Token::Comma => {
+                    self.advance(); // consume `,`
+                    continue;
+                }
+                _ => break,
+            }
+        }
+        if names.is_empty() {
+            return Err(ViewParseError {
+                message: "`from ... import` requires at least one name".into(),
+                line: loc.line,
+                column: loc.column,
+            });
+        }
+        Ok(ViewImport { path, names, loc })
+    }
+
+    /// Skip a bounded number of newline tokens WITHOUT hitting the
+    /// end of the token stream. Used inside `parse_view_import` where
+    /// the import can span multiple lines (`from foo\n  import Bar,\n
+    /// Baz`) but shouldn't consume newlines that terminate the whole
+    /// stmt.
+    fn skip_newlines_soft(&mut self) {
+        while matches!(self.peek().token, Token::Newline) {
+            self.advance();
+        }
     }
 
     fn parse_component(&mut self) -> ViewParseResult<Component> {
@@ -394,6 +539,8 @@ fn append_token_source(out: &mut String, tok: &Token) {
         Token::Component => out.push_str("component"),
         Token::State => out.push_str("state"),
         Token::Event => out.push_str("event"),
+        Token::From => out.push_str("from"),
+        Token::Import => out.push_str("import"),
         Token::Ident(s) => out.push_str(s),
         Token::Str(s) => {
             out.push('"');
@@ -2756,6 +2903,129 @@ mod tests {
             "expected `data-flv-clear` bare; got {:?}",
             input
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // §9.dd V-3 + V-5 — `from X import Y1, Y2, ...` at top of `.fitzv`
+    // -----------------------------------------------------------------------
+    //
+    // Enables cross-file nominal type refs in state annotations and
+    // struct literals inside event bodies. Emitted verbatim as classic
+    // Fitz `from ... import ...` at the top of the transformed source.
+
+    #[test]
+    fn v3_single_from_import_parses() {
+        let src = r#"from message import Message
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let file = parse(src).expect("V-3: from-import should parse clean");
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].path, vec!["message"]);
+        assert_eq!(file.imports[0].names, vec!["Message"]);
+        assert_eq!(file.components.len(), 1);
+    }
+
+    #[test]
+    fn v3_multi_name_from_import_parses() {
+        let src = r#"from utils import User, Post, Comment
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let file = parse(src).expect("multi-name from-import should parse");
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].names, vec!["User", "Post", "Comment"]);
+    }
+
+    #[test]
+    fn v3_dotted_path_from_import_parses() {
+        let src = r#"from foo.bar.baz import Widget
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let file = parse(src).expect("dotted-path from-import should parse");
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].path, vec!["foo", "bar", "baz"]);
+        assert_eq!(file.imports[0].names, vec!["Widget"]);
+    }
+
+    #[test]
+    fn v3_multiple_from_imports_parse() {
+        let src = r#"from message import Message
+from user import User
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let file = parse(src).expect("multiple from-imports should parse");
+        assert_eq!(file.imports.len(), 2);
+        assert_eq!(file.imports[0].names, vec!["Message"]);
+        assert_eq!(file.imports[1].names, vec!["User"]);
+    }
+
+    #[test]
+    fn v3_from_import_after_component_errors_clearly() {
+        // Classic Fitz convention: imports at the top of the file,
+        // before any type/fn declarations. Same for `.fitzv`.
+        let src = r#"component X {
+  state { count: Int = 0 }
+}
+
+from message import Message"#;
+        let err = parse(src).expect_err("from-after-component should error");
+        assert!(
+            err.message.contains("must appear before any `component`"),
+            "error must cite ordering rule: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v3_from_import_missing_import_keyword_errors() {
+        let src = r#"from message Message
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let err = parse(src).expect_err("missing `import` should error");
+        assert!(
+            err.message.contains("expected `import`"),
+            "error must cite missing import keyword: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v3_from_import_empty_name_list_errors() {
+        // `from message import` with nothing after — malformed.
+        // In practice this will trip the "expected identifier" error
+        // when trying to read the first name.
+        let src = r#"from message import
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let err = parse(src).expect_err("empty name list should error");
+        assert!(
+            err.message.contains("identifier") || err.message.contains("import"),
+            "error must cite malformed import: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v3_no_imports_still_produces_empty_vec() {
+        // Regression: files without any imports must still parse
+        // (backward compat with counter/dashboard/MetricTile).
+        let src = r#"component X {
+  state { count: Int = 0 }
+}"#;
+        let file = parse(src).expect("no-imports file should parse");
+        assert!(file.imports.is_empty());
+        assert_eq!(file.components.len(), 1);
     }
 
     #[test]

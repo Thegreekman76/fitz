@@ -44,6 +44,15 @@ pub enum Token {
     Component,
     State,
     Event,
+    /// §9.dd (2026-07-16) — `from` keyword for `from X import Y1, Y2`
+    /// at top of `.fitzv` (Vue/Svelte convention). Enables cross-file
+    /// nominal type refs (V-3 + V-5 debts from chat migration probe).
+    /// View emitter emits these verbatim as classic Fitz `from X
+    /// import Y1, Y2` at the top of the transformed source, so the
+    /// classic loader resolves the nominals normally.
+    From,
+    /// §9.dd — `import` keyword paired with `From`.
+    Import,
 
     // Identifiers + literals
     Ident(String),
@@ -118,6 +127,8 @@ impl fmt::Display for Token {
             Token::Component => write!(f, "`component`"),
             Token::State => write!(f, "`state`"),
             Token::Event => write!(f, "`event`"),
+            Token::From => write!(f, "`from`"),
+            Token::Import => write!(f, "`import`"),
             Token::Ident(s) => write!(f, "identifier `{s}`"),
             Token::Str(_) => write!(f, "string literal"),
             Token::LBrace => write!(f, "`{{`"),
@@ -509,6 +520,8 @@ impl ViewLexer {
                         "component" => Token::Component,
                         "state" => Token::State,
                         "event" => Token::Event,
+                        "from" => Token::From,
+                        "import" => Token::Import,
                         _ => Token::Ident(s),
                     };
                     self.tokens.push(TokenWithLoc {

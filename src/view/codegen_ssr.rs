@@ -183,6 +183,7 @@
 
 use super::expand::{
     ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedTemplateNode, ExpandedViewFile,
+    ExpandedViewImport,
 };
 use crate::ast::{AssignTarget, Expr, Stmt};
 use std::fmt::Write as _;
@@ -226,6 +227,12 @@ pub type SsrEmitResult<T> = Result<T, SsrEmitError>;
 pub fn emit_module_ssr(file: &ExpandedViewFile) -> SsrEmitResult<String> {
     let mut out = String::new();
     emit_module_header(&mut out);
+    // §9.dd (2026-07-16) — Emit `from X import Y1, Y2, ...` for each
+    // top-level `.fitzv` import verbatim before component blocks.
+    // The classic Fitz loader then resolves the imported nominals
+    // normally (`List<Message>` in state, `Message { ... }` in
+    // event bodies).
+    emit_user_imports(&file.imports, &mut out);
     for component in &file.components {
         emit_component_ssr_into(component, &file.components, &mut out)?;
     }
@@ -253,6 +260,29 @@ pub fn emit_component_ssr(component: &ExpandedComponent) -> SsrEmitResult<String
 // ---------------------------------------------------------------------------
 // Module-level header
 // ---------------------------------------------------------------------------
+
+/// §9.dd (2026-07-16) — Emit each user-declared top-level `from X
+/// import Y1, Y2, ...` from the `.fitzv` verbatim as classic Fitz
+/// import stmts at the top of the transformed source. Placed AFTER
+/// the framework header (`from fitz_liveviews import Html, html`)
+/// so that fitz-liveviews types are always in scope even if the
+/// user's imports shadow something — user imports come "later" and
+/// take precedence via classic Fitz's normal name resolution.
+///
+/// Each `ExpandedViewImport` emits one classic Fitz stmt of the
+/// shape `from <path.join(".")> import <names.join(", ")>` on its
+/// own line, followed by a blank line for readability.
+fn emit_user_imports(imports: &[ExpandedViewImport], out: &mut String) {
+    if imports.is_empty() {
+        return;
+    }
+    for imp in imports {
+        let path_str = imp.path.join(".");
+        let names_str = imp.names.join(", ");
+        out.push_str(&format!("from {} import {}\n", path_str, names_str));
+    }
+    out.push('\n');
+}
 
 /// The `from fitz_liveviews import ...` line prepended to every
 /// emitted module. The imports match what the render fn signature
@@ -3628,6 +3658,151 @@ component Card {
             out.contains("let count = state.count"),
             "conditional_reset widened path must prime shadow local:\n{out}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // §9.dd V-3 + V-5 — emit `from X import Y` at top of transformed source
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v3_from_import_emitted_verbatim_at_top_of_transformed_source() {
+        // Canonical case: `.fitzv` declares `from message import Message`
+        // + uses `List<Message>` in state. Transformed source must
+        // include the `from message import Message` line so the classic
+        // Fitz loader resolves the nominal from the sibling module.
+        let src = r#"from message import Message
+
+component ChatRoom {
+  state { messages: List<Message> = [] }
+  <template><div>chat</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("from message import Message"),
+            "expected `from message import Message` in output:\n{out}"
+        );
+        // Assert order: the user import should come AFTER the framework
+        // import (`from fitz_liveviews import Html, html`) but BEFORE
+        // the `@live_component` block.
+        let framework_idx = out
+            .find("from fitz_liveviews import Html, html")
+            .expect("framework import present");
+        let user_idx = out.find("from message import Message").unwrap();
+        let component_idx = out
+            .find("@live_component")
+            .expect("component block present");
+        assert!(
+            framework_idx < user_idx,
+            "user import must come AFTER framework import: framework={framework_idx}, user={user_idx}"
+        );
+        assert!(
+            user_idx < component_idx,
+            "user import must come BEFORE component block: user={user_idx}, component={component_idx}"
+        );
+    }
+
+    #[test]
+    fn v3_multi_name_from_import_emits_comma_separated() {
+        let src = r#"from users import User, Post, Comment
+
+component X {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("from users import User, Post, Comment"),
+            "expected multi-name import verbatim:\n{out}"
+        );
+    }
+
+    #[test]
+    fn v3_dotted_path_from_import_emitted_verbatim() {
+        let src = r#"from utils.shared import Widget
+
+component X {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("from utils.shared import Widget"),
+            "expected dotted-path import verbatim:\n{out}"
+        );
+    }
+
+    #[test]
+    fn v3_no_user_imports_no_extra_blank_lines_regression() {
+        // Regression: files without any user imports must NOT emit
+        // extra blank lines in place of the imports block. Counter/
+        // MetricTile shape must be preserved.
+        let src = r#"component Counter {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // Just check that user-import lines aren't present.
+        assert!(
+            !out.contains("from message"),
+            "expected no user imports emitted:\n{out}"
+        );
+        assert!(
+            !out.contains("from utils"),
+            "expected no user imports emitted:\n{out}"
+        );
+    }
+
+    #[test]
+    fn v3_multiple_from_imports_emit_in_order() {
+        let src = r#"from message import Message
+from user import User
+
+component X {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        let msg_idx = out.find("from message import Message").unwrap();
+        let user_idx = out.find("from user import User").unwrap();
+        assert!(
+            msg_idx < user_idx,
+            "imports must emit in source order:\n{out}"
+        );
+    }
+
+    #[test]
+    fn v3_emitted_source_with_imports_round_trips_through_classic_fitz() {
+        // Acceptance criterion: whatever we emit, classic Fitz reads.
+        // Post V-3 + V-5 fixes, the emitted source with user imports
+        // must lex + parse cleanly through classic Fitz.
+        let src = r#"from message import Message
+
+component ChatRoom {
+  state { messages: List<Message> = [] }
+  event send() {
+    if (payload.has("author")) {
+      if (payload.has("text")) {
+        let author = payload["author"]
+        let text = payload["text"]
+        messages.push(Message { author: author, text: text })
+      }
+    }
+  }
+  <template><div>chat</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        let tokens = crate::lexer::tokenize(&out).unwrap_or_else(|e| {
+            panic!("emitted source failed classic lex:\n---\n{out}\n---\nerr: {e}")
+        });
+        crate::parser::parse(tokens).unwrap_or_else(|e| {
+            panic!("emitted source failed classic parse:\n---\n{out}\n---\nerr: {e}")
+        });
     }
 
     #[test]

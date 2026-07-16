@@ -48,7 +48,25 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpandedViewFile {
+    /// §9.dd (2026-07-16) — Top-level `from X import Y1, Y2, ...`
+    /// declarations propagated from the raw `ViewFile`. Enables cross-
+    /// file nominal type refs; view checker registers each name as
+    /// an opaque nominal stub, and view SSR emitter emits `from X
+    /// import Y1, Y2` at the top of the transformed classic source.
+    pub imports: Vec<ExpandedViewImport>,
     pub components: Vec<ExpandedComponent>,
+}
+
+/// §9.dd — Expanded form of `ViewImport` (name-preserving; the
+/// expand pass does not transform imports, just carries them
+/// through). Kept as a distinct type so future expand-time
+/// validation (e.g. duplicate name detection) can hang off it
+/// without changing the AST node's fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpandedViewImport {
+    pub path: Vec<String>,
+    pub names: Vec<String>,
+    pub loc: Loc,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,12 +292,24 @@ pub type ExpandResult<T> = Result<T, ExpandError>;
 /// mirroring how the classic `parse()` behaves. Recovery (for the
 /// LSP) will land alongside 11.7 when the view LSP surface lands.
 pub fn expand(file: &ViewFile) -> ExpandResult<ExpandedViewFile> {
+    let imports = file
+        .imports
+        .iter()
+        .map(|imp| ExpandedViewImport {
+            path: imp.path.clone(),
+            names: imp.names.clone(),
+            loc: imp.loc,
+        })
+        .collect();
     let components = file
         .components
         .iter()
         .map(expand_component)
         .collect::<ExpandResult<Vec<_>>>()?;
-    Ok(ExpandedViewFile { components })
+    Ok(ExpandedViewFile {
+        imports,
+        components,
+    })
 }
 
 fn expand_component(c: &RawComponent) -> ExpandResult<ExpandedComponent> {

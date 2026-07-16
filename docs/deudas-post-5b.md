@@ -4,7 +4,64 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🔴 View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — **ABIERTO 2026-07-16**
+## 🟢 View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — **CERRADAS ENTERAS 2026-07-16** (§9.cc + §9.dd + §9.ee)
+
+**Cierre resumen** (post-v0.21.0, mismo día que la debt entry — el
+autor priorizó atacar las 6 gaps inmediatamente): las 6 blockers
+que la chat migration probe surface fueron cerradas en 3 sub-fases
+coordinated durante la misma sesión.
+
+- **§9.cc (2026-07-16)** — V-4 (`payload` in view checker event-body
+  scope, ~30 LoC in `src/view/check.rs::build_env_program`, +5
+  tests) + V-6 (bare method calls on shadow-local state fields
+  accepted by SSR emitter's §9.aa walker, ~40 LoC in
+  `src/view/codegen_ssr.rs::lower_event_body_stmts`, +6 tests).
+- **§9.ee (2026-07-16)** — V-1 (HTML5 comments `<!-- ... -->` in
+  templates, ~30 LoC in `src/view/parser.rs::parse_element` +
+  `parse_html_comment` helper, +5 tests) + V-2 (bare boolean HTML
+  attrs like `required`, `disabled`, `checked`, `data-flv-clear`
+  accepted, ~10 LoC in `src/view/parser.rs::parse_attribute`, +4
+  tests).
+- **§9.dd (2026-07-16)** — V-3 (cross-file nominal type refs in
+  state annotations) + V-5 (cross-file nominal refs in struct
+  literals inside event bodies). Chosen approach: **`from X import
+  Y` syntax in `.fitzv`** (Vue/Svelte convention), NOT loader-side
+  env patching. ~500 LoC across 5 files (view lexer + parser + AST
+  + expand + checker + SSR emitter). +19 tests. User-side: refactor
+  shared types to sibling `.fitz` module (both parent and `.fitzv`
+  import from there — no cycle).
+
+**Empirical end-to-end validation**: chat migration probe with
+`message.fitz` sibling (declares `type Message`) + `ChatRoom.fitzv`
+(`from message import Message`, `state { messages: List<Message> =
+[] }`, event body with `messages.push(Message { author, text })`)
++ `main.fitz` (`from ChatRoom import ...`) — `fitz run` boots
+clean, `curl / → 200` with `data-flv-component-name="ChatRoom"` in
+HTML. ALL 6 gaps closed, chat migration end-to-end unblocked.
+
+**Tests al cierre de todo el bloque**: 3691/3691 lib tests verde
+(+19 vs V-2 baseline 3672, +30 vs pre-§9.cc baseline 3661).
+`cargo fmt --all --check` + `cargo clippy --lib --tests -- -D
+warnings` limpios en cada sub-fase.
+
+**Deuda residual derivada NUEVA** (menor, NO bloquea):
+- `.fitzv` `from X import Y as Z` alias syntax NOT supported.
+  Rejected at parse time citando Phase 11.7+. Rare need.
+- `.fitzv` `import X` (bare, no `from`) NOT supported. User must
+  use `from X import Y` explicit shape. Cleaner than `import X`
+  in a components-only context.
+- Chat migration in fitz-liveviews still pending in ROADMAP —
+  §9.dd fixed the Fitz-core-side blockers; chat migration itself
+  needs a follow-up commit in fitz-liveviews that refactors
+  `type Message` to `message.fitz` sibling and migrates
+  `main.fitz` to consume the SFC. Now UNBLOCKED — no more Fitz
+  core work required.
+
+---
+
+### (HISTÓRICO) Texto original de la deuda (preservado para referencia)
+
+## View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — ~~ABIERTO 2026-07-16~~ (**CERRADAS** ver sección arriba)
 
 **Trigger**: intento de migración del chat example de fitz-liveviews
 a `.fitzv` SFC syntax (Phase 8.4 del ROADMAP de fitz-liveviews).
