@@ -1010,10 +1010,77 @@ impl<'a> HtmlParser<'a> {
         }
     }
 
+    /// §9.ee V-1 (2026-07-16) — Consume an HTML5 comment
+    /// `<!-- ... -->` starting from the `!` char (the leading `<`
+    /// was already advanced by `parse_element`). Returns `Ok(())`
+    /// on clean consumption; error if the shape doesn't match
+    /// (`<!DOCTYPE ...>` etc — deferred) or if the comment is
+    /// unterminated. Nested comments are NOT supported (matching
+    /// the HTML5 spec — `<!-- outer <!-- inner --> outer -->`
+    /// closes on the first `-->`).
+    fn parse_html_comment(&mut self, start_line: usize, start_col: usize) -> ViewParseResult<()> {
+        // Consume `!`
+        self.advance();
+        // Expect `--` to open the comment. Anything else (e.g.
+        // `<!DOCTYPE html>`, `<![CDATA[ ... ]]>`) is rejected with
+        // a targeted hint that these forms are deferred.
+        if self.peek() != Some('-') || self.peek_at(1) != Some('-') {
+            return Err(ViewParseError {
+                message: "expected `<!-- ...` for HTML comment; only \
+                          `<!-- ... -->` is supported today. `<!DOCTYPE ...>` \
+                          and `<![CDATA[ ... ]]>` are deferred (rare in \
+                          component templates — top-level `<!DOCTYPE html>` \
+                          belongs to the framework layout, not templates)."
+                    .into(),
+                line: start_line,
+                column: start_col,
+            });
+        }
+        self.advance(); // first `-`
+        self.advance(); // second `-`
+                        // Read until `-->`.
+        loop {
+            match self.peek() {
+                Some('-') if self.peek_at(1) == Some('-') && self.peek_at(2) == Some('>') => {
+                    self.advance(); // `-`
+                    self.advance(); // `-`
+                    self.advance(); // `>`
+                    return Ok(());
+                }
+                Some(_) => {
+                    self.advance();
+                }
+                None => {
+                    return Err(ViewParseError {
+                        message: "unterminated HTML comment — expected `-->` \
+                                  to close"
+                            .into(),
+                        line: start_line,
+                        column: start_col,
+                    });
+                }
+            }
+        }
+    }
+
     fn parse_element(&mut self) -> ViewParseResult<TemplateNode> {
         let start_line = self.line;
         let start_col = self.column;
         self.advance(); // `<`
+                        // §9.ee V-1 (2026-07-16) — HTML5 comment `<!-- ... -->`
+                        // support. When the char after `<` is `!`, dispatch to the
+                        // comment consumer (discards the content and returns an empty
+                        // Text node — comments produce no user-visible output; the
+                        // downstream SSR/WASM emit for Text("") is a no-op). Only
+                        // `<!-- ... -->` is accepted today; `<!DOCTYPE ...>` and
+                        // `<![CDATA[ ... ]]>` remain deferred (rare in `.fitzv`
+                        // component templates — the top-level `<!DOCTYPE html>`
+                        // belongs to the framework's `live_layout`, not to a
+                        // component template).
+        if self.peek() == Some('!') {
+            self.parse_html_comment(start_line, start_col)?;
+            return Ok(TemplateNode::Text(String::new()));
+        }
         let tag = self.read_tag_name();
         if tag.is_empty() {
             return Err(ViewParseError {
@@ -1101,13 +1168,22 @@ impl<'a> HtmlParser<'a> {
             });
         }
         self.skip_ws_inside_tag();
+        // §9.ee V-2 (2026-07-16) — Bare boolean HTML attribute
+        // support. HTML5 spec permits `<input required>` as a shorthand
+        // for `<input required="">` (empty-string value) or `<input
+        // required="required">` (self-referential). We normalise to
+        // empty-string value in the AST — SSR emitters can render as
+        // bare or with `=""` at their preference. Covers the common
+        // real-world cases: `required`, `disabled`, `readonly`,
+        // `checked`, `selected`, `autofocus`, `autoplay`, `controls`,
+        // `loop`, `muted`, `open`, `hidden`, plus the fitz-liveviews
+        // conventions `data-flv-clear`, `data-flv-root`. If the caller
+        // wants a specific value they can still use `attr="val"`.
         if self.peek() != Some('=') {
-            return Err(ViewParseError {
-                message: format!(
-                    "attribute `{name}` requires a value in the POC — bare boolean attrs land in Phase 11.2+"
-                ),
-                line: self.line,
-                column: self.column,
+            return Ok(Attr::Static {
+                name,
+                value: String::new(),
+                loc: Loc::new(start_line, start_col),
             });
         }
         self.advance(); // `=`
@@ -2452,5 +2528,263 @@ mod tests {
             },
             other => panic!("expected Assign, got {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // §9.ee V-1 — HTML comment `<!-- ... -->` support in template block
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v1_html_comment_in_template_accepted_and_discarded() {
+        // Canonical case from the chat migration probe: an HTML
+        // comment between two elements. Pre-fix: "expected tag name
+        // after `<`". Post-fix: parses clean; comment consumed as
+        // an empty Text node (no user-visible output).
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <div>
+      <!-- This is a comment -->
+      <p>{count}</p>
+    </div>
+  </template>
+}"#;
+        let file = parse(src).expect("V-1: HTML comment should parse clean");
+        // Should have one component with a template.
+        assert_eq!(file.components.len(), 1);
+        let tmpl = file.components[0]
+            .template
+            .as_ref()
+            .expect("template present");
+        // Roots may include whitespace text — assert at least ONE
+        // Element root (the `<div>`).
+        let has_div_element = tmpl
+            .roots
+            .iter()
+            .any(|n| matches!(n, TemplateNode::Element { tag, .. } if tag == "div"));
+        assert!(
+            has_div_element,
+            "expected `<div>` root: got {:?}",
+            tmpl.roots
+        );
+    }
+
+    #[test]
+    fn v1_html_comment_at_start_of_template_accepted() {
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <!-- top-of-template comment -->
+    <div>{count}</div>
+  </template>
+}"#;
+        let file = parse(src).expect("comment at start of template should parse clean");
+        assert_eq!(file.components.len(), 1);
+    }
+
+    #[test]
+    fn v1_html_comment_multi_line_body_accepted() {
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <!--
+      Multi-line
+      HTML comment
+      with several lines
+    -->
+    <div>{count}</div>
+  </template>
+}"#;
+        let file = parse(src).expect("multi-line comment should parse clean");
+        assert_eq!(file.components.len(), 1);
+    }
+
+    #[test]
+    fn v1_html_comment_with_dashes_inside_accepted() {
+        // Single `-` chars inside a comment body should not
+        // prematurely close the comment. Only `-->` closes.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <!-- foo - bar - baz -->
+    <div>{count}</div>
+  </template>
+}"#;
+        let file = parse(src).expect("single dashes inside comment should not close");
+        assert_eq!(file.components.len(), 1);
+    }
+
+    #[test]
+    fn v1_html_comment_unterminated_errors_clearly() {
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <!-- never closes
+    <div>{count}</div>
+  </template>
+}"#;
+        let err = parse(src).expect_err("unterminated comment should error");
+        assert!(
+            err.message.contains("unterminated HTML comment"),
+            "error must cite unterminated: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v1_doctype_still_errors_with_targeted_hint() {
+        // `<!DOCTYPE ...>` NOT accepted — belongs to framework layout,
+        // not templates. Error must be actionable.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <!DOCTYPE html>
+    <div>{count}</div>
+  </template>
+}"#;
+        let err = parse(src).expect_err("DOCTYPE should error");
+        assert!(
+            err.message.contains("<!--"),
+            "error should reference the accepted form: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("DOCTYPE"),
+            "error should mention DOCTYPE as unsupported: {}",
+            err.message
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // §9.ee V-2 — Bare boolean HTML attribute support
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v2_bare_required_attribute_accepted_as_empty_static() {
+        // Canonical case from chat migration: `<input required>`
+        // which HTML5 spec permits as sugar for
+        // `<input required="">`. Pre-fix: error "requires a value".
+        // Post-fix: parses as Attr::Static with empty value.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <input name="user" required autocomplete="off" />
+  </template>
+}"#;
+        let file = parse(src).expect("V-2: bare `required` should parse clean");
+        let tmpl = file.components[0]
+            .template
+            .as_ref()
+            .expect("template present");
+        // Find the input element and check its attrs.
+        let input = tmpl
+            .roots
+            .iter()
+            .find_map(|n| match n {
+                TemplateNode::Element { tag, attrs, .. } if tag == "input" => Some(attrs),
+                _ => None,
+            })
+            .expect("input element present");
+        let has_bare_required = input.iter().any(|a| matches!(a, Attr::Static { name, value, .. } if name == "required" && value.is_empty()));
+        assert!(
+            has_bare_required,
+            "expected `required` as Attr::Static with empty value; got {:?}",
+            input
+        );
+    }
+
+    #[test]
+    fn v2_multiple_bare_boolean_attrs_all_accepted() {
+        // Real-world case: `<input required disabled readonly>` —
+        // three bare booleans in a row, all should parse clean.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <input required disabled readonly />
+  </template>
+}"#;
+        let file = parse(src).expect("multiple bare booleans should parse clean");
+        let tmpl = file.components[0]
+            .template
+            .as_ref()
+            .expect("template present");
+        let input = tmpl
+            .roots
+            .iter()
+            .find_map(|n| match n {
+                TemplateNode::Element { tag, attrs, .. } if tag == "input" => Some(attrs),
+                _ => None,
+            })
+            .expect("input element present");
+        let bare_count = input
+            .iter()
+            .filter(|a| matches!(a, Attr::Static { value, .. } if value.is_empty()))
+            .count();
+        assert_eq!(
+            bare_count, 3,
+            "expected 3 bare boolean attrs; got {:?}",
+            input
+        );
+    }
+
+    #[test]
+    fn v2_bare_data_flv_clear_accepted() {
+        // fitz-liveviews convention: `data-flv-clear` bare means
+        // "clear this input on next re-render". Pre-fix: rejected.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <input name="msg" data-flv-clear />
+  </template>
+}"#;
+        let file = parse(src).expect("data-flv-clear bare should parse clean");
+        let tmpl = file.components[0]
+            .template
+            .as_ref()
+            .expect("template present");
+        let input = tmpl
+            .roots
+            .iter()
+            .find_map(|n| match n {
+                TemplateNode::Element { tag, attrs, .. } if tag == "input" => Some(attrs),
+                _ => None,
+            })
+            .expect("input element present");
+        let has_flv_clear = input.iter().any(|a| matches!(a, Attr::Static { name, value, .. } if name == "data-flv-clear" && value.is_empty()));
+        assert!(
+            has_flv_clear,
+            "expected `data-flv-clear` bare; got {:?}",
+            input
+        );
+    }
+
+    #[test]
+    fn v2_explicit_value_still_supported_regression() {
+        // Regression: attrs with explicit values MUST still work
+        // (`name="user"`, `required="required"`, etc.).
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <input name="user" required="required" data-flv-clear="true" />
+  </template>
+}"#;
+        let file = parse(src).expect("explicit values regression should parse clean");
+        let tmpl = file.components[0]
+            .template
+            .as_ref()
+            .expect("template present");
+        let input = tmpl
+            .roots
+            .iter()
+            .find_map(|n| match n {
+                TemplateNode::Element { tag, attrs, .. } if tag == "input" => Some(attrs),
+                _ => None,
+            })
+            .expect("input element present");
+        assert!(input.iter().any(
+            |a| matches!(a, Attr::Static { name, value, .. } if name == "name" && value == "user")
+        ));
+        assert!(input.iter().any(|a| matches!(a, Attr::Static { name, value, .. } if name == "required" && value == "required")));
+        assert!(input.iter().any(|a| matches!(a, Attr::Static { name, value, .. } if name == "data-flv-clear" && value == "true")));
     }
 }
