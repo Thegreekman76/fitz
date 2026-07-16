@@ -4,6 +4,124 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 Framework support gaps — surface durante fitz-liveviews kanban migration (Phase 8.5) — **ABIERTAS 2026-07-16** (Phase 11.7+ scope)
+
+**Trigger**: migración de kanban a `.fitzv` SFC (Phase 8.5 en
+`fitz-liveviews`). Post-cierre de las 6 view pipeline gaps (§9.cc +
+§9.dd + §9.ee), la migración pudo extraer el `card_editor`
+`@live_component` a `CardEditor.fitzv` y los shared types a
+`card.fitz`. Full `Board.fitzv` migration DIFERIDA porque necesita
+framework features que hoy no existen. Documentado aquí para
+priorización futura — cada uno DESBLOQUEA nuevos idioms + patterns
+en fitz-liveviews.
+
+### K-1 — Event bubbling entre componentes
+
+**Síntoma**: cuando `CardEditor.save` fires con `payload["text"]`,
+el `Board` component debería recibir el evento también (para
+actualizar `board.cards[i].title`). Hoy `dispatch_component_events
+(frame)` routes al UNIQUE component matching el `component_name`
+del frame — no hay propagación upward al parent component.
+
+**Workaround actual** (kanban `main.fitz`): post-dispatch manual
+en la parent WS handler:
+```fitz
+let handled = dispatch_component_events(frame)
+if (handled && frame.event == "save") {
+  if (frame.payload.has("instance_id")) { ... update board.cards ... }
+}
+```
+Funciona pero forza a que board-level state VIVE en `let board`
+top-level, NO como state de `Board.fitzv` SFC. Rompe la
+composability.
+
+**Diseño futuro (candidate)**:
+- (a) **Explicit `dispatch_to(parent_component_name, event,
+  payload)` API** — user code calls it inside sub-component's
+  event handler. Explicit, no magic. ~50 LoC framework.
+- (b) **Convention: `@bubbles("event_name")` attr on sub-component's
+  event decorator** — framework auto-dispatches to parent when
+  event fires. React-style. ~100 LoC framework + `@bubbles`
+  decorator support in Fitz core.
+- (c) **Full DOM-style event bubbling model** — every event
+  propagates through the component tree unless `stopPropagation()`
+  called. Vue-style. ~200 LoC + potentially conflicts with the
+  current dispatch model. Overkill for MVP.
+
+**Recomendación**: (a) primero (explicit `dispatch_to`), (b) si
+demand aparece.
+
+### K-2 — Cross-component state read/write API
+
+**Síntoma**: parent handler quiere leer `Board.cards[i]` (Board
+componenet's state) para propagar CardEditor's save. Hoy component
+state es opaque — el framework maneja el store internamente, no
+hay API para read/write from outside.
+
+**Workaround actual**: board-level state vive en `let board` top-
+level (Arc<Mutex>), no en un component. Rompe la premisa de
+"components own their state".
+
+**Diseño futuro (candidate)**:
+- **`component_state("name", "id") -> T`** — read component's
+  current state (returns snapshot).
+- **`set_component_state("name", "id", new_state: T)`** — write
+  new state (framework triggers re-render).
+
+Ambas APIs son necesarias para hydration / test fixtures /
+imperative updates. ~50 LoC each framework.
+
+**Recomendación**: shipping juntas como PAIR (`component_state`
++ `set_component_state`) para simetría API.
+
+### K-3 — Component props para compound / nominal types en `<Child />`
+
+**Síntoma**: `<Board initial-cards="{seedCards}" />` no es posible.
+Fitz core Phase 11.5.d shipped `<Child prop="v" />` composition
+CON primitivos (`Str`/`Int`/`Float`/`Bool`/`Nullable<T>` de
+primitivo). §9.dd extended STATE annotations to accept cross-file
+nominals via `from X import Y`. Pero el path del child PROP
+coercion (`coerce_child_prop_raw_value_to_fitz_literal`) todavía
+sólo acepta primitivos.
+
+**Impacto**: components no pueden pasar List/Map/Instance data via
+static props. Workaround: state comes from imported `let` at
+top-level, o desde `component()` runtime API.
+
+**Diseño futuro (candidate)**:
+- Extender `coerce_child_prop_raw_value_to_fitz_literal` para
+  aceptar Nominal types + List/Map of primitives. ~80 LoC.
+- Interpolated props `<Child prop={expr} />` (currently rejected
+  at expand time, cita Phase 11.6+) — ~120 LoC más.
+
+Ambos necesarios para que `<Board initial-cards="{seedCards}" />`
+funcione end-to-end. Together con K-1 + K-2, desbloquea full
+Board.fitzv migration + composable multi-instance patterns.
+
+**Recomendación**: K-3 primero (props ampliation) es lower-risk;
+K-1/K-2 (event bubbling + state API) son más architectural.
+
+### Impacto acumulado + Phase 11.7+ scoping
+
+Los 3 gaps son **prerequisites reales** para Phase 11.7 (client-
+side dynamic capabilities + kanban SPA port) según el ROADMAP de
+Fitz core. Cerrarlos desbloquea:
+- **Full Board.fitzv migration** (kanban parent shell as SFC).
+- **Full `<Component prop={live_expr} />` dynamic composition**.
+- **Cross-component event flows** — parent orchestrates child
+  reactions without hand-rolling.
+- **Kanban SPA port** (drag-drop client-side + board state via
+  component API — Phase 11.7 acceptance criterion).
+
+**Estimación combinada**: K-1 + K-2 + K-3 = ~400-500 LoC en Fitz
+core (framework changes) + ~150 LoC en fitz-liveviews lib
+(consuming APIs). 2-3 sesiones dedicadas.
+
+**No hay urgencia** — el workaround actual (board state top-
+level en `let` + hand-rolled WS post-processing) funciona para
+kanban's use case. Pero cerrar los 3 gaps convierte a Fitz
+LiveViews en un framework SPA-capable de verdad.
+
 ## 🟢 View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — **CERRADAS ENTERAS 2026-07-16** (§9.cc + §9.dd + §9.ee)
 
 **Cierre resumen** (post-v0.21.0, mismo día que la debt entry — el
