@@ -210,20 +210,44 @@ pub enum ExpandedTemplateNode {
     },
 }
 
-/// A static prop passed to a `<Child prop="v" />` composition site.
-/// The `raw_value` is the source text captured by the HTML
-/// sub-parser; the checker coerces it to the child's declared
-/// state-field type (see `check.rs::coerce_child_prop_value`).
+/// A prop passed to a `<Child prop="v" />` or `<Child prop={expr} />`
+/// composition site.
 ///
-/// Only primitive scalar targets are supported in Phase 11.5.d:
-/// `Str`, `Int`, `Float`, `Bool`, `Nullable<T>` of a primitive.
-/// Compound types (`List`, `Map`, `Nominal`) are rejected with
-/// 11.6+ pointers.
+/// Two shapes:
+/// - **Static** (`prop="raw"`): `raw_value` holds the source text
+///   captured by the HTML sub-parser; `expr_raw` is `None`. The
+///   checker coerces `raw_value` to the child's declared state-
+///   field type via `check.rs::coerce_child_prop_raw_value`, and
+///   the emitters produce a literal at the composition site.
+/// - **Interpolated** (`prop={expr}`, K-3 remainder — post-v0.21.0):
+///   `expr_raw` holds the trimmed expression source (e.g. `"seedCards"`,
+///   `"state.cards"`, `"count + 1"`); `raw_value` mirrors the same
+///   text for error messages but is not coerced. The SSR emitter
+///   inlines the expression verbatim in the struct literal (with
+///   the checker's state-field rewriting rules). The WASM emitter
+///   errors out today with a clear "client-side dynamic composition
+///   deferred to Phase 11.7+" pointer.
+///
+/// Static coercion supports `Str` / `Int` / `Float` / `Bool` /
+/// `Nullable<primitive>` (Phase 11.5.d) + `List<primitive>` (K-3,
+/// post-v0.21.0). Interpolated props bypass coercion — any type
+/// expressible in classic Fitz that matches the child's field type
+/// works.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChildComponentProp {
     pub field_name: String,
     pub raw_value: String,
+    pub expr_raw: Option<String>,
     pub loc: Loc,
+}
+
+impl ChildComponentProp {
+    /// True when the prop was written as `prop={expr}` — the emitter
+    /// should NOT coerce; it should inline the expression source
+    /// with any applicable state-field rewrites.
+    pub fn is_interpolated(&self) -> bool {
+        self.expr_raw.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
