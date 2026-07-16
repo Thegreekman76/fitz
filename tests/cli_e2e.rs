@@ -2631,3 +2631,148 @@ fn phase_11_5_b_manifest_fitzv_native_rejected_at_parse() {
     assert!(stderr.contains(".fitzv"), "stderr: {stderr}");
     assert!(stderr.contains("wasm-client"), "stderr: {stderr}");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11.6.d — Module loader integration for `.fitzv`
+// ---------------------------------------------------------------------------
+//
+// The classic module loader (used by `fitz run` / `fitz build` /
+// `fitz check`) transparently routes a `.fitzv` sibling through
+// the view pipeline (parse → expand → check → emit_module_ssr)
+// when it is resolved as an import target. The tests below
+// exercise the shape from the CLI:
+//
+// 1. `main.fitz` imports `Card` from `Card.fitzv`. `.fitzv`
+//    routing is transparent — the classic loader never sees the
+//    view AST, but rather the emitted classic Fitz source.
+// 2. When both `Card.fitz` and `Card.fitzv` exist, `.fitz` wins
+//    (backward-compat with pre-11.6.d resolution).
+// 3. A broken `.fitzv` file surfaces its view-pipeline error
+//    (with the file path in the message) rather than a
+//    generic "module not found".
+//
+// Since the emitted classic Fitz depends on
+// `from fitz_liveviews import Html, html`, and the test tempdir
+// does not have `fitz-liveviews` on the dep registry, these
+// tests use `fitz check` and expect the check to progress FAR
+// enough to reach the "fitz_liveviews module not found" error.
+// That's the exact signal the classic loader received the
+// transformed source (as opposed to falling back to
+// `Card not found`, which would prove routing was broken).
+
+#[test]
+fn phase_11_6_d_import_of_fitzv_sibling_is_transformed_through_view_pipeline() {
+    // 2-file project: main.fitz + Card.fitzv sibling.
+    // Expectation: `fitz run` resolves `from Card import Card`
+    // to `Card.fitzv`, runs the view pipeline, and hands the
+    // emitted source to the classic pipeline. The classic
+    // pipeline then tries to resolve `fitz_liveviews` (from
+    // the emitted `from fitz_liveviews import Html, html`) and
+    // fails — but the FAILURE cites `fitz_liveviews`, proving
+    // the `.fitzv` transformation happened. Uses `fitz run`
+    // (not `fitz check`) because `run` actually loads the
+    // module via the evaluator loader, which is the code path
+    // updated by 11.6.d.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(root, "main.fitz", "from Card import Card\nprint(\"hi\")\n");
+    write_file(
+        root,
+        "Card.fitzv",
+        "component Card {\n  state { title: Str = \"hello\" }\n  <template><span>{title}</span></template>\n}\n",
+    );
+
+    let (_stdout, stderr, code) = run_fitz(&["run", "main.fitz"], root);
+    assert_ne!(code, 0, "run must fail: stderr = {stderr}");
+    assert!(
+        stderr.contains("fitz_liveviews"),
+        "loader must have transformed Card.fitzv and hit the missing \
+         `fitz_liveviews` dep; stderr:\n{stderr}"
+    );
+    // Negative assertion: the resolver should NOT have failed on
+    // finding `Card` — that would prove `.fitzv` fallback did not
+    // fire.
+    assert!(
+        !stderr.contains("module `Card` not found") && !stderr.contains("`Card` no encontrado"),
+        "the `.fitzv` extension fallback did not fire; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn phase_11_6_d_import_prefers_dot_fitz_over_dot_fitzv_when_both_exist() {
+    // Backward-compat: if a sibling has BOTH `Card.fitz` and
+    // `Card.fitzv`, the classic `.fitz` wins. The user
+    // migrating from classic to view can drop the `.fitzv`
+    // sibling and keep the classic file authoritative until
+    // the migration completes.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(root, "main.fitz", "from Card import Card\nprint(Card)\n");
+    // The classic Card.fitz declares `Card` as a plain type.
+    write_file(
+        root,
+        "Card.fitz",
+        "type Card {\n  title: Str = \"classic\"\n}\n",
+    );
+    // The view Card.fitzv would emit `@live_component`, but
+    // must NOT be picked when the classic file exists.
+    write_file(
+        root,
+        "Card.fitzv",
+        "component Card {\n  state { title: Str = \"view\" }\n  <template><span>{title}</span></template>\n}\n",
+    );
+
+    // `fitz run` succeeds — the classic Card.fitz is a plain
+    // type, the print emits the type Display, no `fitz_liveviews`
+    // dep needed.
+    let (stdout, stderr, code) = run_fitz(&["run", "main.fitz"], root);
+    assert_eq!(code, 0, "should run cleanly: stderr = {stderr}");
+    assert!(
+        stdout.contains("Card") || stdout.contains("classic"),
+        "output should reflect the classic Card definition: stdout = {stdout}"
+    );
+    // And the `fitz_liveviews` dep must NOT appear anywhere in
+    // the output — a sure sign the `.fitzv` was ignored.
+    assert!(
+        !stderr.contains("fitz_liveviews"),
+        "the `.fitzv` shadowed unexpectedly: stderr = {stderr}"
+    );
+}
+
+#[test]
+fn phase_11_6_d_broken_fitzv_import_surfaces_view_pipeline_error_with_path() {
+    // A malformed `.fitzv` sibling must not surface as a
+    // generic "module not found" — the loader routed the
+    // file through the view pipeline, and the error cites
+    // both the file path and a view-stage name.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "main.fitz",
+        "from Broken import Something\nprint(\"hi\")\n",
+    );
+    write_file(
+        root,
+        "Broken.fitzv",
+        "component Broken { <template>", // opening never closes
+    );
+
+    // `fitz run` fails first at the module loader (evaluator)
+    // when it tries to load Broken.fitzv. The pre-scan paths
+    // have silent fallback, so `fitz check` may not surface
+    // it — the runtime loader does.
+    let (_stdout, stderr, code) = run_fitz(&["run", "main.fitz"], root);
+    assert_ne!(code, 0, "run must fail: stderr = {stderr}");
+    assert!(
+        stderr.contains("Broken.fitzv"),
+        "error must cite the offending .fitzv path: stderr = {stderr}"
+    );
+    assert!(
+        stderr.contains("view parse error")
+            || stderr.contains("view expand error")
+            || stderr.contains("view check errors")
+            || stderr.contains("view emit_ssr error"),
+        "error must name at least one view stage: stderr = {stderr}"
+    );
+}

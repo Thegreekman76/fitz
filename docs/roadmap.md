@@ -9727,6 +9727,47 @@ migran a natural `.fitzv` source. See §9.x. Próximo norte:
 cuando `Comp.fitzv` existe + `<Child />` composition inline-
 render para SSR.
 
+**Sub-paso 11.6.d CERRADO 2026-07-15** — cierra 11.6.d
+entera. Dos piezas coordinadas: (1) **Loader integration**:
+los 5 entry points del module loader clásico (evaluator's
+`resolve_module_path`, codegen's `ModuleLoader::resolve_path`
++ `resolve_loader_import_file_path`, main's
+`resolve_import_file_path`, LSP's
+`resolve_import_file_path_lsp`) ahora prueban `.fitz`
+PRIMERO y `.fitzv` como fallback (backward-compat: `.fitz`
+gana si ambos siblings existen), driven por dos helpers pub
+nuevos en `src/view/mod.rs`: `is_fitzv_extension(&Path) ->
+bool` y `resolve_module_file_candidates(&Path, &str) ->
+Option<PathBuf>`. Cuando un `.fitzv` resuelve, el loader
+llama al nuevo pub `transform_fitzv_source(source, path) ->
+Result<String, FitzError>` bridge que ejecuta la view
+pipeline entera (parse → expand → check → emit_module_ssr)
+y devuelve source classic Fitz — el classic lexer + parser +
+checker + evaluator nunca ven un token del view side. Cualquier
+error de la pipeline se envuelve en un `FitzError` que nombra
+el path del `.fitzv` ofensivo más el stage que falló. (2)
+**Same-file `<Child />` composition** en el SSR emitter: el
+composition site lowered a `Expr("<Child>_render(<Child> {
+<props> }).raw")` y se empalma en la parent's chain-form html
+body. Prop coercion sigue el subset 11.5.d (Str / Int / Float
+/ Bool / `Nullable<T>` de primitivo) via el nuevo helper
+`coerce_child_prop_raw_value_to_fitz_literal` — paralelo Fitz-
+literal de la versión 11.5.d Rust-literal. Same-file
+constraint enforced resolviendo el nombre del child contra el
+slice `siblings: &[ExpandedComponent]` del parent; cross-file
+`<Child />` (child en un `.fitzv` sibling importado desde
+main.fitz) errora con pointer 11.6.e. Auto-inject de la dep
+`fitz_liveviews` DIFERIDO a 11.6.e — user declara la dep en
+`fitz.toml`, missing dep aparece como "unknown module
+`fitz_liveviews`" en la etapa del classic loader. 7 SSR unit
+tests + 8 loader-bridge unit tests + 3 cli_e2e tests (main.fitz
++ Card.fitzv sibling con variantes: transformación positiva,
+shadow con .fitz precedence, .fitzv malformado). See §9.y.
+Próximo norte: **11.6.e** — migración de los 4 ejemplos de
+fitz-liveviews (counter → dashboard → chat → kanban) a
+`.fitzv` SFCs + cross-file `<Child />` composition +
+opcional auto-inject de la dep `fitz_liveviews`.
+
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
   4 nuevos `pub fn parse_*_from_source` en `src/parser.rs` +

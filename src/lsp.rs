@@ -182,8 +182,17 @@ fn pre_scan_imported_auth_provider_lsp(
         let Some(file_path) = resolve_import_file_path_lsp(&path_segments, base_dir) else {
             continue;
         };
-        let Ok(source) = std::fs::read_to_string(&file_path) else {
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
             continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling.
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
         };
         let Ok(tokens) = tokenize(&source) else {
             continue;
@@ -228,8 +237,17 @@ fn pre_scan_imported_background_fns_lsp(
         let Some(file_path) = resolve_import_file_path_lsp(&path_segments, base_dir) else {
             continue;
         };
-        let Ok(source) = std::fs::read_to_string(&file_path) else {
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
             continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling.
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
         };
         let Ok(tokens) = tokenize(&source) else {
             continue;
@@ -256,18 +274,13 @@ fn resolve_import_file_path_lsp(
     if segments.is_empty() {
         return None;
     }
-    let mut candidate = base_dir.to_path_buf();
+    let mut dir = base_dir.to_path_buf();
     for seg in &segments[..segments.len().saturating_sub(1)] {
-        candidate.push(seg);
+        dir.push(seg);
     }
-    if let Some(last) = segments.last() {
-        candidate.push(format!("{}.fitz", last));
-    }
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
-    }
+    // Phase 11.6.d — try `.fitz` first, `.fitzv` as fallback.
+    let last = segments.last()?;
+    crate::view::resolve_module_file_candidates(&dir, last)
 }
 
 /// Converts a list of `FitzError` into LSP `Diagnostic`s. Pure
@@ -687,23 +700,29 @@ pub fn resolve_cross_module_definition(
         found?
     };
 
-    // Resolve the path to a real `.fitz` file. Loader convention:
-    // `path = ["foo", "bar"]` → `<base>/foo/bar.fitz`.
-    let mut target_path = base_dir.to_path_buf();
+    // Resolve the path to a real `.fitz` (or `.fitzv`) file.
+    // Loader convention: `path = ["foo", "bar"]` →
+    // `<base>/foo/bar.fitz`. Phase 11.6.d: also try `.fitzv`
+    // as fallback for cross-module go-to-def on view SFCs.
     if module_path.is_empty() {
         return None;
     }
-    for (i, comp) in module_path.iter().enumerate() {
-        if i + 1 == module_path.len() {
-            target_path.push(format!("{}.fitz", comp));
-        } else {
-            target_path.push(comp);
-        }
+    let mut target_dir = base_dir.to_path_buf();
+    for comp in &module_path[..module_path.len().saturating_sub(1)] {
+        target_dir.push(comp);
     }
+    let last = module_path.last()?;
+    let target_path = crate::view::resolve_module_file_candidates(&target_dir, last)?;
     let target_path = target_path.canonicalize().ok()?;
 
     // Parse the target file and look up the declaration.
-    let source = std::fs::read_to_string(&target_path).ok()?;
+    let source_raw = std::fs::read_to_string(&target_path).ok()?;
+    // Phase 11.6.d — `.fitzv` transparent handling.
+    let source = if crate::view::is_fitzv_extension(&target_path) {
+        crate::view::transform_fitzv_source(&source_raw, &target_path).ok()?
+    } else {
+        source_raw
+    };
     let tokens = tokenize(&source).ok()?;
     let (target_program, _errs) = parse_with_recovery(tokens);
 
@@ -761,17 +780,30 @@ pub fn from_import_completions(doc_uri: &Url, mod_path: &[String]) -> Vec<Comple
     let Some(base_dir) = doc_path.parent() else {
         return Vec::new();
     };
-    let mut target_path = base_dir.to_path_buf();
-    for (i, comp) in mod_path.iter().enumerate() {
-        if i + 1 == mod_path.len() {
-            target_path.push(format!("{}.fitz", comp));
-        } else {
-            target_path.push(comp);
-        }
+    // Phase 11.6.d — try `.fitz` first, `.fitzv` as fallback.
+    let mut target_dir = base_dir.to_path_buf();
+    for comp in &mod_path[..mod_path.len().saturating_sub(1)] {
+        target_dir.push(comp);
     }
-    let source = match std::fs::read_to_string(&target_path) {
+    let Some(last) = mod_path.last() else {
+        return Vec::new();
+    };
+    let target_path = match crate::view::resolve_module_file_candidates(&target_dir, last) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let source_raw = match std::fs::read_to_string(&target_path) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
+    };
+    // Phase 11.6.d — `.fitzv` transparent handling.
+    let source = if crate::view::is_fitzv_extension(&target_path) {
+        match crate::view::transform_fitzv_source(&source_raw, &target_path) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        source_raw
     };
     let tokens = match tokenize(&source) {
         Ok(t) => t,

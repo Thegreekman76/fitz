@@ -2440,26 +2440,33 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
             ))
         })?;
     let n = segments.len();
-    let build_path = |base: &PathBuf| -> PathBuf {
-        let mut path = base.clone();
+    // Phase 11.6.d — every path candidate is tried with `.fitz`
+    // FIRST and `.fitzv` as fallback. If both exist in the same
+    // directory, `.fitz` wins (backward-compat with pre-11.6.d
+    // resolution). The loader downstream then routes `.fitzv`
+    // sources through `view::transform_fitzv_source` before
+    // handing them to the classic lexer.
+    let build_paths = |base: &PathBuf| -> Vec<PathBuf> {
+        let mut classic = base.clone();
+        let mut view = base.clone();
         for (i, seg) in segments.iter().enumerate() {
             if i + 1 == n {
-                path.push(format!("{}.fitz", seg));
+                classic.push(format!("{}.fitz", seg));
+                view.push(format!("{}.fitzv", seg));
             } else {
-                path.push(seg);
+                classic.push(seg);
+                view.push(seg);
             }
         }
-        path
+        vec![classic, view]
     };
-    let mut candidates = Vec::with_capacity(2);
-    let relative = build_path(&base_dir);
-    candidates.push(relative);
+    let mut candidates = Vec::with_capacity(4);
+    candidates.extend(build_paths(&base_dir));
     // Only add the `import_root` fallback if it differs from the
     // current base_dir (top-level imports from the entry file already
     // have base_dir == import_root, no need to duplicate).
     if base_dir != import_root {
-        let absolute = build_path(&import_root);
-        candidates.push(absolute);
+        candidates.extend(build_paths(&import_root));
     }
     Ok(candidates)
 }
@@ -2549,7 +2556,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     }
 
     // Read + lex + parse the file. Errors from any stage propagate.
-    let source = match fs::read_to_string(&canonical) {
+    let source_raw = match fs::read_to_string(&canonical) {
         Ok(s) => s,
         Err(e) => {
             return Err(EvalSignal::Error(FitzError::new(
@@ -2559,6 +2566,17 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
                 format!("error reading module `{}`: {}", canonical.display(), e,),
             )));
         }
+    };
+    // Phase 11.6.d — `.fitzv` transparent handling. When the
+    // resolved file is a view SFC, run the view pipeline
+    // (parse view → expand → check → emit_module_ssr) to
+    // produce classic Fitz source, then feed THAT to the
+    // classic lexer + parser. The classic side never sees a
+    // `.fitzv` token.
+    let source: String = if crate::view::is_fitzv_extension(&canonical) {
+        crate::view::transform_fitzv_source(&source_raw, &canonical).map_err(EvalSignal::Error)?
+    } else {
+        source_raw
     };
     let tokens = tokenize(&source).map_err(EvalSignal::Error)?;
     let module_program = parse(tokens).map_err(EvalSignal::Error)?;

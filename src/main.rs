@@ -1673,8 +1673,22 @@ fn pre_scan_imported_auth_provider(
         else {
             continue;
         };
-        let Ok(source) = fs::read_to_string(&file_path) else {
+        let Ok(source_raw) = fs::read_to_string(&file_path) else {
             continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling in the
+        // pre-scan path. `fitz::view::is_fitzv_extension` matches
+        // the same rule as the runtime + codegen loaders; a view
+        // transform failure silences the pre-scan (same policy
+        // as read/lex failures — the main loader will report
+        // the error).
+        let source = if fitz::view::is_fitzv_extension(&file_path) {
+            match fitz::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
         };
         let Ok(tokens) = lexer::tokenize(&source) else {
             continue;
@@ -1733,8 +1747,22 @@ fn pre_scan_imported_background_fns(
         else {
             continue;
         };
-        let Ok(source) = fs::read_to_string(&file_path) else {
+        let Ok(source_raw) = fs::read_to_string(&file_path) else {
             continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling in the
+        // pre-scan path. `fitz::view::is_fitzv_extension` matches
+        // the same rule as the runtime + codegen loaders; a view
+        // transform failure silences the pre-scan (same policy
+        // as read/lex failures — the main loader will report
+        // the error).
+        let source = if fitz::view::is_fitzv_extension(&file_path) {
+            match fitz::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
         };
         let Ok(tokens) = lexer::tokenize(&source) else {
             continue;
@@ -1770,18 +1798,13 @@ fn resolve_import_file_path(
             }
         }
     }
-    let mut candidate = base_dir.to_path_buf();
+    let mut dir = base_dir.to_path_buf();
     for seg in &segments[..segments.len().saturating_sub(1)] {
-        candidate.push(seg);
+        dir.push(seg);
     }
-    if let Some(last) = segments.last() {
-        candidate.push(format!("{}.fitz", last));
-    }
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
-    }
+    // Phase 11.6.d — try `.fitz` first, `.fitzv` as fallback.
+    let last = segments.last()?;
+    fitz::view::resolve_module_file_candidates(&dir, last)
 }
 
 /// `fitz openapi <file>` — Phase 7.1. Lex + parse + check + eval

@@ -4249,17 +4249,29 @@ impl ModuleLoader {
             }
         }
 
-        // Step 2 — relative path (pre-9.y.3.b behavior).
-        let mut path = self.base_dir.clone();
+        // Step 2 — relative path. Phase 11.6.d: try `.fitz`
+        // FIRST and `.fitzv` as fallback (backward-compat wins
+        // if both exist). The classic path is the fallback
+        // return value so error messages keep citing the
+        // classic `.fitz` filename (the more-common case) —
+        // when neither exists, `canonicalize` in `load_module`
+        // will raise the `not found` error with the classic
+        // path.
+        let mut dir = self.base_dir.clone();
         let n = segments.len();
-        for (i, seg) in segments.iter().enumerate() {
-            if i + 1 == n {
-                path.push(format!("{}.fitz", seg));
-            } else {
-                path.push(seg);
-            }
+        for seg in &segments[..n.saturating_sub(1)] {
+            dir.push(seg);
         }
-        path
+        if let Some(stem) = segments.last() {
+            if let Some(hit) = crate::view::resolve_module_file_candidates(&dir, stem) {
+                return hit;
+            }
+            let mut classic = dir;
+            classic.push(format!("{}.fitz", stem));
+            classic
+        } else {
+            dir
+        }
     }
 
     /// Loads a module: if already cached by path, returns the
@@ -4313,13 +4325,23 @@ impl ModuleLoader {
         segments: &[String],
         canonical: &Path,
     ) -> Result<usize, FitzError> {
-        let source = std::fs::read_to_string(canonical).map_err(|e| {
+        let source_raw = std::fs::read_to_string(canonical).map_err(|e| {
             loader_err(format!(
                 "error reading module `{}`: {}",
                 canonical.display(),
                 e
             ))
         })?;
+        // Phase 11.6.d — `.fitzv` transparent handling. The
+        // resolve_path step tried the view extension as
+        // fallback; if the canonical file ends in `.fitzv`,
+        // run the view pipeline to produce classic Fitz
+        // source and feed THAT to the classic lexer.
+        let source = if crate::view::is_fitzv_extension(canonical) {
+            crate::view::transform_fitzv_source(&source_raw, canonical)?
+        } else {
+            source_raw
+        };
         let tokens = crate::lexer::tokenize(&source).map_err(|e| loader_err(e.message.clone()))?;
         let module_program =
             crate::parser::parse(tokens).map_err(|e| loader_err(e.message.clone()))?;
@@ -4906,8 +4928,20 @@ fn pre_scan_imported_auth_provider_for_loader(
             _ => continue,
         };
         let file_path = resolve_loader_import_file_path(&path_segments, base_dir, dep_registry)?;
-        let Ok(source) = std::fs::read_to_string(&file_path) else {
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
             continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling. Same
+        // silent-fallback policy as read/lex errors: if the
+        // view transform fails, the pre-scan skips this module
+        // and the main loader will surface the error.
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
         };
         let Ok(tokens) = crate::lexer::tokenize(&source) else {
             continue;
@@ -4959,8 +4993,17 @@ fn pre_scan_imported_background_fns_for_loader(
         else {
             continue;
         };
-        let Ok(source) = std::fs::read_to_string(&file_path) else {
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
             continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling.
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
         };
         let Ok(tokens) = crate::lexer::tokenize(&source) else {
             continue;
@@ -5022,8 +5065,17 @@ fn pre_scan_imported_middleware_fns_for_loader(
         else {
             continue;
         };
-        let Ok(source) = std::fs::read_to_string(&file_path) else {
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
             continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling.
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
         };
         let Ok(tokens) = crate::lexer::tokenize(&source) else {
             continue;
@@ -5051,18 +5103,13 @@ fn resolve_loader_import_file_path(
             }
         }
     }
-    let mut candidate = base_dir.to_path_buf();
+    let mut dir = base_dir.to_path_buf();
     for seg in &segments[..segments.len().saturating_sub(1)] {
-        candidate.push(seg);
+        dir.push(seg);
     }
-    if let Some(last) = segments.last() {
-        candidate.push(format!("{}.fitz", last));
-    }
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
-    }
+    // Phase 11.6.d — try `.fitz` first, `.fitzv` as fallback.
+    let last = segments.last()?;
+    crate::view::resolve_module_file_candidates(&dir, last)
 }
 
 /// Generates `src/<mod>.rs` for an imported module. Mode: `Module`
