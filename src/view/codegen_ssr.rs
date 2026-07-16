@@ -860,14 +860,71 @@ fn lower_event_body_stmts(
                     }
                 }
             }
+            // §9.cc V-6 (2026-07-16) — Accept bare method-call stmts
+            // whose base is a shadow-local Ident (a state field name
+            // primed at the top of the widened event body per §9.aa).
+            // Semantics: Fitz `List<T>` is `Arc<Mutex<Vec<T>>>` (per
+            // F17), so mutation via `.push(x)` / `.remove(i)` / etc on
+            // the shadow local propagates to `state.<field>` via the
+            // shared Arc. The struct-lit return (`return X { <field>:
+            // <field>, ... }`) then re-packages the (now-mutated) same
+            // Arc, preserving §9.aa's shadow-local return contract
+            // WITHOUT needing an immutable-return builtin like
+            // `List<T>.appended(x)`. Also applies to `Map<K, V>` (also
+            // `Arc<Mutex<...>>`) and to any nominal type wrapped in
+            // Arc<Mutex>. Zero-copy state mutation.
+            //
+            // Restricted shape: callee must be
+            // `Expr::Field { base: Expr::Ident(<shadow>), name }`.
+            // Method chains (`xs.map(...).filter(...)`), calls on
+            // nested field access (`obj.list.push(...)`), and other
+            // deeper shapes are rejected with a targeted Phase 11.7+
+            // pointer — extending them is a follow-up mini-fase if
+            // real demand appears.
+            Stmt::Expr(expr @ Expr::Call { callee, .. }, _) => {
+                let is_shadow_method_call = if let Expr::Field { object, .. } = callee.as_ref() {
+                    if let Expr::Ident(name, _) = object.as_ref() {
+                        local_scope.iter().any(|s| s == name)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !is_shadow_method_call {
+                    return Err(SsrEmitError {
+                        message: format!(
+                            "event `{}` body contains a bare call statement whose \
+                             callee is not a method call on a shadow-local state \
+                             field. Only single-level method calls on shadow locals \
+                             (`<field>.push(...)`, `<field>.remove(i)`, etc.) are \
+                             accepted. Method chains (`xs.map(...).filter(...)`), \
+                             calls on nested field access (`obj.list.push(...)`), \
+                             and free-standing calls are deferred to Phase 11.7+.",
+                            event.name
+                        ),
+                        context: format!("component `{}` event `{}`", component.name, event.name),
+                    });
+                }
+                let local_refs: Vec<&str> = local_scope.iter().map(String::as_str).collect();
+                let call_src = format_fitz_expr_scoped(
+                    expr,
+                    state_field_names,
+                    &local_refs,
+                    &component.name,
+                    &format!("event `{}` body method call", event.name),
+                )?;
+                writeln!(out, "{indent}{call_src}").unwrap();
+            }
             Stmt::Expr(_, _) => {
                 return Err(SsrEmitError {
                     message: format!(
                         "event `{}` body contains a bare expression statement (not an \
-                         `if` guard) — only assignments (`<field> = ...`), `let` \
-                         bindings, and `if` guards are supported today. Side-effect \
-                         calls like `xs.push(item)` escape the shadow-local model and \
-                         are deferred to Phase 11.7+.",
+                         `if` guard nor a method call on a shadow-local state field) \
+                         — only assignments (`<field> = ...`), `let` bindings, `if` \
+                         guards, and single-level method calls on shadow locals \
+                         (`<field>.push(...)`) are supported today. Other bare \
+                         expression statements are deferred to Phase 11.7+.",
                         event.name
                     ),
                     context: format!("component `{}` event `{}`", component.name, event.name),
@@ -3285,16 +3342,19 @@ component Card {
 
     #[test]
     fn phase_11_6_e_widened_body_rejects_bare_expression_stmt() {
-        // A bare expression stmt (e.g. a hypothetical
-        // `xs.push(item)` side effect) can't be modelled by
-        // the shadow-local shape. Force the wide path via a
-        // `let` binding first, then use a bare
-        // `payload.has("k")` stmt to trip the reject.
+        // A bare expression stmt that is NOT an if guard NOR a
+        // method call on a shadow-local state field must be
+        // rejected. Post §9.cc V-6, method calls on shadow locals
+        // like `payload.has("k")` or `<field>.push(x)` ARE
+        // accepted — so this test uses a truly-bare-arithmetic
+        // expression stmt (`n + 1` with the result discarded) to
+        // exercise the fallthrough rejection path. Force wide-body
+        // via a `let` binding first.
         let src = r#"component X {
   state { n: Int = 0 }
   event bump() {
     let dummy = 1
-    payload.has("k")
+    n + 1
   }
   <template><div>{n}</div></template>
 }"#;
@@ -3380,6 +3440,194 @@ component Card {
         crate::parser::parse(tokens).unwrap_or_else(|e| {
             panic!("widened emit failed classic parse:\n---\n{emitted}\n---\nerr: {e}")
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // §9.cc V-6 — Accept bare method calls on shadow-local state fields
+    // -----------------------------------------------------------------------
+    //
+    // Fitz `List<T>` is `Arc<Mutex<Vec<T>>>` per F17. Mutation via
+    // `.push(x)` on the shadow local `<field>` mutates the same
+    // underlying Arc as `state.<field>`. The struct-lit return then
+    // re-packages the (now-mutated) same Arc, preserving §9.aa's
+    // shadow-local return contract WITHOUT needing an immutable-
+    // return builtin like `List<T>.appended(x)`.
+
+    #[test]
+    fn v6_widened_body_accepts_bare_push_on_shadow_local_list() {
+        // The canonical chat-migration pattern: `messages.push(new)` on
+        // a shadow-local List<T>. Pre-fix this errored with "bare
+        // expression statement". Post-fix accepts + emits verbatim.
+        let src = r#"component ChatRoom {
+  state { messages: List<Str> = [] }
+  event append() {
+    let dummy = 1
+    messages.push("hi")
+  }
+  <template><div>x</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // The emitted event fn primes `let messages = state.messages`
+        // + walks the body verbatim. `messages.push("hi")` should
+        // appear as-is on its own line.
+        assert!(
+            out.contains("messages.push(\"hi\")"),
+            "expected `messages.push(\"hi\")` emitted verbatim:\n{out}"
+        );
+        // Struct-lit return re-packages messages (mutated shadow local).
+        assert!(
+            out.contains("messages: messages,") || out.contains("messages: messages\n"),
+            "expected return struct lit to re-package messages:\n{out}"
+        );
+    }
+
+    #[test]
+    fn v6_widened_body_accepts_bare_push_within_nested_if_guards() {
+        // Chat migration's exact 2-level nested guard shape post
+        // §9.aa event-body widening. The `.push()` sits in the
+        // innermost arm.
+        let src = r#"component ChatRoom {
+  state { messages: List<Str> = [] }
+  event send_message() {
+    if (payload.has("author")) {
+      if (payload.has("text")) {
+        let text = payload["text"]
+        messages.push(text)
+      }
+    }
+  }
+  <template><div>x</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // Emitted body should contain both if guards + the push.
+        assert!(out.contains("if ("), "expected if guard in emit:\n{out}");
+        assert!(
+            out.contains("messages.push(text)"),
+            "expected `messages.push(text)` verbatim inside nested if:\n{out}"
+        );
+        // Round-trip: emitted classic Fitz must lex + parse clean.
+        let tokens = crate::lexer::tokenize(&out)
+            .unwrap_or_else(|e| panic!("V-6 emit failed classic lex:\n---\n{out}\n---\nerr: {e}"));
+        crate::parser::parse(tokens).unwrap_or_else(|e| {
+            panic!("V-6 emit failed classic parse:\n---\n{out}\n---\nerr: {e}")
+        });
+    }
+
+    #[test]
+    fn v6_widened_body_accepts_bare_method_call_on_payload_shadow() {
+        // `payload` is a shadow local per §9.z (populated in the
+        // walker's local_scope for event bodies). A bare
+        // `payload.has("k")` — which pre-V-6 was rejected as "bare
+        // expression stmt" — now accepted (though semantically a
+        // no-op since return value is discarded).
+        let src = r#"component X {
+  state { n: Int = 0 }
+  event bump() {
+    let dummy = 1
+    payload.has("k")
+  }
+  <template><div>{n}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file)
+            .expect("V-6 accepts bare method call on `payload` (a shadow local per §9.z)");
+        assert!(
+            out.contains("payload.has(\"k\")"),
+            "expected `payload.has(\"k\")` emitted verbatim:\n{out}"
+        );
+    }
+
+    #[test]
+    fn v6_widened_body_rejects_bare_method_call_on_non_shadow_ident() {
+        // A bare method call on a Non-shadow-local ident MUST still
+        // be rejected. `some_fn` is not a state field and not a
+        // shadow local — the callee's base `some_fn` fails the
+        // `local_scope` check. Rejection is the safe behavior.
+        let src = r#"component X {
+  state { n: Int = 0 }
+  event bump() {
+    let dummy = 1
+    unknown_var.frobnicate("x")
+  }
+  <template><div>{n}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let err = emit_module_ssr(&file).unwrap_err();
+        assert!(
+            err.message.contains("not a method call on a shadow-local"),
+            "expected V-6 rejection message on non-shadow base:\n{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("11.7+"),
+            "error must point at Phase 11.7+:\n{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v6_widened_body_rejects_method_chain_on_shadow_local() {
+        // Method CHAINS on shadow locals (`messages.map(f).filter(g)`)
+        // are rejected because the callee's base is a Call, not an
+        // Ident. Rejection preserves the "single-level method call"
+        // constraint of V-6 MVP.
+        let src = r#"component X {
+  state { messages: List<Str> = [] }
+  event process() {
+    let dummy = 1
+    messages.map(fn(m) => m).filter(fn(m) => true)
+  }
+  <template><div>x</div></template>
+}"#;
+        let file = parse_expand(src);
+        let err = emit_module_ssr(&file).unwrap_err();
+        // Base of the outer .filter(...) is Call, not Ident → V-6 rejects.
+        assert!(
+            err.message.contains("not a method call on a shadow-local"),
+            "expected V-6 rejection on method chain (base is Call, not Ident):\n{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v6_regression_events_without_bare_calls_still_type_check() {
+        // Regression: the V-6 fix only ADDS a new acceptance path;
+        // events that don't use bare method calls (only re-assigns +
+        // if guards + let) must still work bit-for-bit as before.
+        let src = r#"component Counter {
+  state { count: Int = 0 }
+  event increment() {
+    count = count + 1
+  }
+  event conditional_reset() {
+    if (payload.has("hard")) {
+      count = 0
+    }
+  }
+  <template><div>{count}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out =
+            emit_module_ssr(&file).expect("V-6 must not regress plain re-assign + if guard events");
+        // `increment` is single-assign → trivial body path emits
+        // direct struct-lit return (`return Counter { count: state.count + 1 }`),
+        // NOT the widened shadow-local shape.
+        assert!(
+            out.contains("count: (state.count + 1)") || out.contains("count: state.count + 1"),
+            "increment must use trivial body emit (`count: state.count + 1` or with parens):\n{out}"
+        );
+        // `conditional_reset` has an `if` guard → widened body path
+        // with shadow-local prime + assign inside arm.
+        assert!(
+            out.contains("if ("),
+            "conditional_reset body must emit if guard (widened path):\n{out}"
+        );
+        assert!(
+            out.contains("let count = state.count"),
+            "conditional_reset widened path must prime shadow local:\n{out}"
+        );
     }
 
     #[test]
