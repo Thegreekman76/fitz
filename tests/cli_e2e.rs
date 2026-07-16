@@ -2776,3 +2776,101 @@ fn phase_11_6_d_broken_fitzv_import_surfaces_view_pipeline_error_with_path() {
         "error must name at least one view stage: stderr = {stderr}"
     );
 }
+
+// ===================================================================
+// Phase 11.6.e continuation (§9.bb, 2026-07-16) — cross-module
+// `@live_component` auto-inject.
+//
+// A `.fitzv` sibling declaring `@live_component` + `@render_for` +
+// `@on` is imported by main.fitz WITHOUT the manual
+// `flv_register(...)` boot call. The compiler's cross-module
+// pre-scan populates `TypeEnv.imported_live_components` and
+// `inject_live_component_registrations` synthesises the call so
+// the framework can dispatch — same UX as v0.20.1's local implicit
+// register, extended across module boundaries.
+//
+// Uses a stub `fitz_liveviews.fitz` sibling so `fitz run` can
+// satisfy the classic loader's `from fitz_liveviews import
+// Html, html, flv_register` without requiring the real library
+// (which lives in a separate git dep in the sibling repo).
+// ===================================================================
+
+/// Stub content for a `fitz_liveviews.fitz` sibling. Provides just
+/// enough surface for the E2E tests below to boot: `Html` type,
+/// `html(s) -> Html` factory, and `flv_register(...)` no-op. The
+/// counter's emitted classic Fitz source uses `Html`/`html`; the
+/// auto-injector emits `flv_register(...)` calls.
+const FITZ_LIVEVIEWS_STUB_9BB: &str = "type Html { raw: Str = \"\" }\n\
+fn html(s: Str) -> Html => Html { raw: s }\n\
+fn flv_register(name: Str, initial_state: Any, render_fn: Any, events: Map<Str, Any>) -> Null => null\n";
+
+/// Canonical Counter.fitzv used by the tests below. Emits (after
+/// the view pipeline transform) a `@live_component("Counter")` type,
+/// a `@render_for("Counter") fn Counter_render`, and one
+/// `@on("Counter", "increment") fn Counter_increment`.
+const COUNTER_FITZV_9BB: &str = "component Counter {\n  \
+    state { count: Int = 0 }\n  \
+    event increment() { count = count + 1 }\n  \
+    <template><span>{count}</span></template>\n\
+}\n";
+
+#[test]
+fn phase_11_6_e_bb_cross_module_live_component_auto_injects_flv_register() {
+    // Canonical case: main.fitz imports Counter (state type) plus
+    // its render + event fn names from a `.fitzv` sibling but
+    // does NOT write a manual `flv_register(...)` call. The
+    // cross-module pre-scan extracts the component metadata and
+    // the injector synthesises the call. `fitz run` completes
+    // successfully — proving the auto-inject path is wired end-
+    // to-end for imported `.fitzv` modules.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(root, "fitz_liveviews.fitz", FITZ_LIVEVIEWS_STUB_9BB);
+    write_file(root, "Counter.fitzv", COUNTER_FITZV_9BB);
+    write_file(
+        root,
+        "main.fitz",
+        "from fitz_liveviews import Html, html, flv_register\n\
+         from Counter import Counter, Counter_render, Counter_increment\n\
+         print(\"boot OK\")\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["run", "main.fitz"], root);
+    assert_eq!(
+        code, 0,
+        "cross-module auto-inject must succeed: stderr = {stderr}"
+    );
+    assert!(
+        stdout.contains("boot OK"),
+        "main.fitz must reach the print stmt (auto-inject appended after it, no side effect from the stub): stdout = {stdout}"
+    );
+}
+
+#[test]
+fn phase_11_6_e_bb_cross_module_missing_imports_errors_with_hint() {
+    // When main.fitz forgets a name required by the imported
+    // component (here `Counter_render` and `Counter_increment`),
+    // the injector must error citing every missing name plus an
+    // actionable `from <module> import ...` hint. Complements the
+    // happy-path test above.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(root, "fitz_liveviews.fitz", FITZ_LIVEVIEWS_STUB_9BB);
+    write_file(root, "Counter.fitzv", COUNTER_FITZV_9BB);
+    write_file(
+        root,
+        "main.fitz",
+        "from fitz_liveviews import Html, html, flv_register\n\
+         from Counter import Counter\n\
+         print(\"boot\")\n",
+    );
+    let (_stdout, stderr, code) = run_fitz(&["run", "main.fitz"], root);
+    assert_ne!(code, 0, "must fail with missing-imports error");
+    assert!(
+        stderr.contains("Counter_render") && stderr.contains("Counter_increment"),
+        "error must list every missing name: stderr = {stderr}"
+    );
+    assert!(
+        stderr.contains("Add `from Counter import"),
+        "error must include the actionable fix: stderr = {stderr}"
+    );
+}

@@ -1611,6 +1611,19 @@ fn check_program_with_pyi_stubs_and_deps(
     if !bg_names.is_empty() {
         env.add_imported_background_fns(bg_names);
     }
+    // Phase 11.6.e continuation (§9.bb, 2026-07-16) — cross-module
+    // `@live_component` pre-scan. Extracts component metadata
+    // (state type + render_fn + events) from each imported module
+    // so `types::inject_live_component_registrations` can synthesise
+    // `flv_register(...)` calls for components declared in sibling
+    // `.fitzv`/`.fitz` modules — removes the manual boot boilerplate
+    // that Phase 4 (v0.20.1) required. Paralelo bit-a-bit a
+    // `pre_scan_imported_background_fns` (B10) y
+    // `pre_scan_imported_auth_provider` (W12).
+    let live_comps = pre_scan_imported_live_components(program, &base_dir, dep_registry);
+    if !live_comps.is_empty() {
+        env.add_imported_live_components(live_comps);
+    }
     types::check_with_env(program, env, errors)
 }
 
@@ -1771,6 +1784,93 @@ fn pre_scan_imported_background_fns(
             continue;
         };
         out.extend(types::extract_background_fn_names(&module_program));
+    }
+    out
+}
+
+/// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Scans each
+/// `Stmt::Import`/`Stmt::FromImport`, resolves the imported module
+/// (`.fitz` first, `.fitzv` fallback — parallel to
+/// `pre_scan_imported_background_fns`), parses it, transforms
+/// `.fitzv` via `crate::view::transform_fitzv_source`, and invokes
+/// `types::extract_live_components_from_program` to collect
+/// `ImportedLiveComponent` entries. Populates the importer's
+/// `TypeEnv.imported_live_components` so
+/// `inject_live_component_registrations` can synthesise
+/// `flv_register(...)` calls for cross-module `@live_component`
+/// types.
+///
+/// **Error policy**: module read/parse/view-transform errors are
+/// silenced (silent fallback — parallel to
+/// `pre_scan_imported_background_fns`). The real runtime/codegen
+/// loader reports its own errors when it actually loads the module.
+///
+/// **Module name**: derived from the last segment of the import
+/// path (`from Counter import ...` → `"Counter"`;
+/// `import sub.foo` → `"foo"`). Used by the injector in the
+/// missing-imports error message so the fix is actionable.
+///
+/// **MVP scope**: single level of depth (does not recurse into
+/// transitive imports), paralelo a
+/// `pre_scan_imported_background_fns` (B10) y
+/// `pre_scan_imported_auth_provider` (W12).
+fn pre_scan_imported_live_components(
+    program: &ast::Program,
+    base_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> Vec<types::ImportedLiveComponent> {
+    let mut out: Vec<types::ImportedLiveComponent> = Vec::new();
+    for stmt in program {
+        let path_segments = match stmt {
+            ast::Stmt::Import { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            ast::Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) = resolve_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source_raw) = fs::read_to_string(&file_path) else {
+            continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling; a view
+        // transform failure silences the pre-scan (paralelo a
+        // `pre_scan_imported_background_fns`).
+        let source = if fitz::view::is_fitzv_extension(&file_path) {
+            match fitz::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
+        };
+        let Ok(tokens) = lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = parser::parse(tokens) else {
+            continue;
+        };
+        // Module binding name: last segment of the import path.
+        // Used in the missing-imports error message so the fix is
+        // actionable (`from <module> import ...`).
+        let module_name = path_segments
+            .last()
+            .cloned()
+            .unwrap_or_else(|| String::from("<module>"));
+        out.extend(types::extract_live_components_from_program(
+            &module_program,
+            &module_name,
+        ));
     }
     out
 }

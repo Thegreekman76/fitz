@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Decorator, Expr, Field, Param, Program, Span, Stmt, TypeExpr};
+use crate::ast::{AssignTarget, Decorator, Expr, Field, Param, Program, Span, Stmt, TypeExpr};
 use crate::error::{ErrorKind, FitzError};
 
 /// Unique identity for nominal types (those declared with
@@ -769,6 +769,52 @@ pub struct LiveComponentMetadata {
     pub type_id: TypeId,
 }
 
+/// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Cross-module
+/// `@live_component` metadata. Populated by
+/// `extract_live_components_from_program` walking an already-parsed
+/// imported module's AST, then registered in the importer's
+/// `TypeEnv` via `add_imported_live_components` (paralelo bit-a-bit
+/// a `add_imported_background_fns` B10 y `set_imported_auth_provider`
+/// W12). Consumed by `inject_live_component_registrations` to emit
+/// a synthetic `flv_register(...)` call for each imported component
+/// — removing the manual boot boilerplate from every `.fitzv`
+/// project that lives in a sibling module.
+///
+/// Unlike `LiveComponentMetadata` (used for local components,
+/// keyed by `TypeId`), imported components carry the fully-resolved
+/// render + event fn names captured at extraction time. The
+/// importer's `TypeEnv` never registers a `TypeId` for the
+/// imported type — the synthetic `flv_register(...)` uses bare
+/// `Ident` references and requires the user to bring the names
+/// into scope via `from <module> import <TypeName>,
+/// <TypeName>_render, <TypeName>_<event>...`.
+#[derive(Debug, Clone)]
+pub struct ImportedLiveComponent {
+    /// Component name (from `@live_component("name")` in the
+    /// imported module). Unique string identifier used by the
+    /// framework layer to look up render + event handlers.
+    pub component_name: String,
+    /// State type name (the `type <Name> { ... }` that carries
+    /// `@live_component`). Used as the `type_name` of the
+    /// injected `Expr::StructLit` (empty struct = initial state
+    /// synthesised from defaults).
+    pub type_name: String,
+    /// Name of the module the component was extracted from
+    /// (typically the stem of the imported file, e.g.
+    /// `Counter.fitzv` → `"Counter"`). Used in the
+    /// missing-imports error message so the fix is actionable.
+    pub module_name: String,
+    /// Name of the fn declared with `@render_for("<component>")`
+    /// in the same imported module. The injected call passes it
+    /// as the render fn argument.
+    pub render_fn: String,
+    /// Event handlers declared with `@on("<component>",
+    /// "<event>")` in the same imported module. Sorted by event
+    /// name at extraction time so the emitted map is
+    /// deterministic across compiler runs.
+    pub events: Vec<(String, String)>,
+}
+
 /// Type environment of the program. Carries:
 ///  - Built-ins (primitives and generics), implicit via
 ///    `resolve_named`.
@@ -848,6 +894,21 @@ pub struct TypeEnv {
     /// Parallel to `imported_background_fns` (B10) and
     /// `imported_auth_provider` (W12).
     imported_middleware_fns: HashSet<String>,
+    /// Phase 11.6.e continuation (§9.bb, 2026-07-16) — cross-module
+    /// `@live_component` metadata extracted from imported modules.
+    /// Pre-scanned by the caller via
+    /// `extract_live_components_from_program` and merged in via
+    /// `add_imported_live_components`. Consumed by
+    /// `inject_live_component_registrations` to emit a synthetic
+    /// `flv_register("<component>", <Type> {}, <render_fn>,
+    /// {<events>})` call per imported component, removing the manual
+    /// boot boilerplate for every `.fitzv` component declared in a
+    /// sibling module. Local `@live_component` (in `live_components`,
+    /// keyed by `TypeId`) takes precedence: if the same component
+    /// name appears both locally and imported, the imported one is
+    /// skipped. Parallel to `imported_background_fns` (B10) and
+    /// `imported_auth_provider` (W12).
+    imported_live_components: Vec<ImportedLiveComponent>,
 }
 
 impl TypeEnv {
@@ -1065,6 +1126,33 @@ impl TypeEnv {
     /// in `check_program`.
     pub fn imported_middleware_fns(&self) -> &HashSet<String> {
         &self.imported_middleware_fns
+    }
+
+    /// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Registers
+    /// cross-module `@live_component` metadata extracted from
+    /// imported modules. Pre-scanned via
+    /// `extract_live_components_from_program` for each imported
+    /// `.fitz`/`.fitzv` module. The caller invokes this AFTER
+    /// `resolve_program` and BEFORE `check_with_env` so
+    /// `inject_live_component_registrations` sees the merged set
+    /// when it runs after the checker.
+    ///
+    /// Parallel to `add_imported_background_fns` (B10) and
+    /// `set_imported_auth_provider` (W12).
+    pub fn add_imported_live_components<I: IntoIterator<Item = ImportedLiveComponent>>(
+        &mut self,
+        components: I,
+    ) {
+        self.imported_live_components.extend(components);
+    }
+
+    /// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Returns
+    /// cross-module `@live_component` metadata registered via
+    /// `add_imported_live_components`. Consumed by
+    /// `inject_live_component_registrations` to synthesise
+    /// `flv_register(...)` calls per imported component.
+    pub fn imported_live_components(&self) -> &[ImportedLiveComponent] {
+        &self.imported_live_components
     }
 }
 
@@ -2231,10 +2319,14 @@ pub fn process_live_component_decorators(
 //
 // Consumes the metadata that `resolve_program` already persisted in
 // `TypeEnv` (`live_components`, `render_handlers`, `event_handlers`)
-// and materializes one synthetic `flv_register("name", InitialState
-// {}, render_fn, {"event": handler})` call per component, appended
-// at the end of `program`. Eliminates the boilerplate manual boot
-// call that was required in Phase 4 (Y-B).
+// PLUS the cross-module metadata that the caller pre-scanned into
+// `imported_live_components` (Phase 11.6.e continuation, §9.bb).
+// Materializes one synthetic `flv_register("name", InitialState {},
+// render_fn, {"event": handler})` call per component (local and
+// imported), appended at the end of `program`. Eliminates the
+// boilerplate manual boot call that was required in Phase 4 (Y-B)
+// and, since §9.bb, also for components declared in imported
+// `.fitzv`/`.fitz` siblings.
 //
 // Semantics:
 //   - Called AFTER the checker (`check_program`) so `TypeEnv` is
@@ -2245,22 +2337,39 @@ pub fn process_live_component_decorators(
 //     honouring the user's explicit intent is friendlier).
 //   - Order-deterministic: components are visited sorted by name so
 //     the generated stmts have a stable order across compiler runs.
-//   - Fields validation: every `@live_component` type must declare
-//     defaults on every field. Otherwise the empty `TypeName {}`
-//     struct literal we inject would fail at eval-time with a
-//     confusing "missing field" error. We validate upfront at inject
-//     time and produce a clean error citing the offending field.
-//   - Missing `@render_for("name")`: hard error. A component without
-//     a renderer would blow up at first render; we surface it here.
-//   - Cross-module `@live_component` is NOT supported in this MVP.
-//     Only decorators declared in the top-level `program` count.
-//     Support arrives if demand appears (parallel to
-//     `imported_auth_provider` / `imported_background_fns`).
+//     Local components are emitted first (sorted alphabetically),
+//     then imported (also sorted alphabetically), so tests and
+//     downstream tooling see a stable emission order.
+//   - Local wins over imported: if the same component name appears
+//     in both `env.live_components` and `env.imported_live_components`,
+//     the imported entry is skipped silently. The local emission
+//     uses the local render+event handler names.
+//   - Fields validation (LOCAL ONLY): every local `@live_component`
+//     type must declare defaults on every field. Imported types
+//     are trusted (their own module's checker validates the shape
+//     when the module is loaded through the classic pipeline). If
+//     an imported type has fields without defaults, the resulting
+//     `<TypeName> {}` struct literal errors at eval-time in the
+//     evaluator's `Expr::StructLit` handler — same behavior as if
+//     the user had written it manually.
+//   - Missing `@render_for("name")`: hard error for local
+//     components; silently omitted for imported (the extractor
+//     drops entries without a `render_fn` — the imported module's
+//     own checker will surface the error when it's loaded).
+//   - Cross-module name resolution: the injected call uses bare
+//     `Ident` refs for the type, render fn, and each event handler
+//     fn. For imported components, this means the user must bring
+//     the names into scope via
+//     `from <module> import <TypeName>, <TypeName>_render,
+//     <TypeName>_<event>...`. If any name is missing, we emit a
+//     clean error listing exactly what to add.
 pub fn inject_live_component_registrations(
     program: &mut Program,
     env: &TypeEnv,
 ) -> Result<(), Vec<FitzError>> {
-    if env.live_components.is_empty() {
+    let has_local = !env.live_components.is_empty();
+    let has_imported = !env.imported_live_components.is_empty();
+    if !has_local && !has_imported {
         return Ok(());
     }
 
@@ -2289,11 +2398,17 @@ pub fn inject_live_component_registrations(
         }
     }
     if !flv_register_in_scope {
-        // Component name to cite in the error — first one alphabetically.
+        // Component name to cite in the error — first one alphabetically,
+        // considering both local and imported components.
         let mut comp_names: Vec<&str> = env
             .live_components
             .values()
             .map(|m| m.name.as_str())
+            .chain(
+                env.imported_live_components
+                    .iter()
+                    .map(|c| c.component_name.as_str()),
+            )
             .collect();
         comp_names.sort();
         let sample = comp_names.first().copied().unwrap_or("<component>");
@@ -2445,12 +2560,154 @@ pub fn inject_live_component_registrations(
         new_stmts.push(Stmt::Expr(call, Span::ZERO));
     }
 
+    // Phase 11.6.e continuation (§9.bb, 2026-07-16) — imported
+    // components. Same emitted shape as the local loop above; the
+    // difference is validation. The imported module's own checker
+    // already validated `@render_for` + `@on` shape when the module
+    // was loaded — we only need to confirm the names are brought
+    // into the importer's scope (via `from <module> import ...` OR
+    // a local FnDef/TypeDef with the same name).
+    //
+    // Local wins over imported: if the same component name is
+    // registered locally, we skip the imported entry.
+    //
+    // Deterministic order: `imported_live_components()` is emitted
+    // by `extract_live_components_from_program` sorted by component
+    // name, and `pre_scan_imported_live_components` iterates
+    // imports in source order — the combined set is stable per
+    // program without extra sorting here.
+    if has_imported {
+        let names_in_scope = collect_names_in_scope(program);
+        for imp in env.imported_live_components() {
+            let component_name = &imp.component_name;
+            if manually_registered.contains(component_name) {
+                continue;
+            }
+            // Local wins: skip imported if a local with the same
+            // component name already emitted (or errored).
+            if env.live_component_by_name(component_name).is_some() {
+                continue;
+            }
+
+            // Validate names in scope: the injected call uses bare
+            // `Ident` refs for the type, render fn, and each event
+            // handler. Collect the missing names, error once with
+            // the full fix so the user can add all of them in a
+            // single `from <module> import ...` stmt.
+            let mut missing: Vec<String> = Vec::new();
+            if !names_in_scope.contains(imp.type_name.as_str()) {
+                missing.push(imp.type_name.clone());
+            }
+            if !names_in_scope.contains(imp.render_fn.as_str()) {
+                missing.push(imp.render_fn.clone());
+            }
+            for (_ev, fn_name) in imp.events.iter() {
+                if !names_in_scope.contains(fn_name.as_str()) {
+                    missing.push(fn_name.clone());
+                }
+            }
+            if !missing.is_empty() {
+                let list = missing.join(", ");
+                errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    format!(
+                        "@live_component(\"{component_name}\") in imported module `{module}` requires the following names in scope: {list}. Add `from {module} import {list}` at the top of the file so the implicit `flv_register(...)` for imported components can resolve.",
+                        module = imp.module_name,
+                    ),
+                ));
+                continue;
+            }
+
+            // Build the synthetic call using the imported names:
+            //   flv_register(
+            //     "component_name",
+            //     TypeName {},
+            //     render_fn,
+            //     {"event": handler_fn, ...},
+            //   )
+            let call = Expr::Call {
+                callee: Box::new(Expr::Ident("flv_register".into(), Span::ZERO)),
+                args: vec![
+                    Expr::Str(component_name.clone(), Span::ZERO),
+                    Expr::StructLit {
+                        type_name: imp.type_name.clone(),
+                        fields: vec![],
+                        span: Span::ZERO,
+                    },
+                    Expr::Ident(imp.render_fn.clone(), Span::ZERO),
+                    Expr::Map(
+                        imp.events
+                            .iter()
+                            .map(|(ev, fn_name)| {
+                                (
+                                    Expr::Str(ev.clone(), Span::ZERO),
+                                    Expr::Ident(fn_name.clone(), Span::ZERO),
+                                )
+                            })
+                            .collect(),
+                        Span::ZERO,
+                    ),
+                ],
+                span: Span::ZERO,
+            };
+            new_stmts.push(Stmt::Expr(call, Span::ZERO));
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
 
     program.extend(new_stmts);
     Ok(())
+}
+
+/// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Helper for
+/// `inject_live_component_registrations`. Collects the set of
+/// identifiers that are brought into scope at the top level of the
+/// program, considering:
+///   - `Stmt::FromImport { names, .. }` — each `(orig, alias)`
+///     entry contributes its bound name (`alias.unwrap_or(orig)`).
+///   - `Stmt::FnDef { name, .. }` — local top-level fns.
+///   - `Stmt::TypeDef { name, .. }` — local types.
+///   - `Stmt::Assign { target: Ident(name), .. }` — local bindings.
+///
+/// Does NOT descend into fn bodies; the injector only cares about
+/// what's visible at the top level (where the synthetic
+/// `flv_register(...)` calls are appended).
+///
+/// Consumed only by the imported branch of
+/// `inject_live_component_registrations` to validate that the user
+/// has the required `from <module> import <TypeName>,
+/// <TypeName>_render, <TypeName>_<event>...` in scope.
+fn collect_names_in_scope(program: &Program) -> HashSet<String> {
+    let mut set: HashSet<String> = HashSet::new();
+    for stmt in program.iter() {
+        match stmt {
+            Stmt::FromImport { names, .. } => {
+                for (orig, alias) in names {
+                    let bound = alias.as_deref().unwrap_or(orig.as_str());
+                    set.insert(bound.to_string());
+                }
+            }
+            Stmt::FnDef { name, .. } => {
+                set.insert(name.clone());
+            }
+            Stmt::TypeDef { name, .. } => {
+                set.insert(name.clone());
+            }
+            Stmt::Assign {
+                target: AssignTarget::Ident(name, _),
+                ..
+            } => {
+                set.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+    set
 }
 
 // Phase 10.3.a — processes ORM decorators over a `type`.
@@ -3719,7 +3976,7 @@ fn annotate(mut e: FitzError, context: &str) -> FitzError {
 // in 5.3.2+.
 // ---------------------------------------------------------------------------
 
-use crate::ast::{AssignTarget, BinOpKind, StrPart, UnaryOpKind};
+use crate::ast::{BinOpKind, StrPart, UnaryOpKind};
 
 /// Binding of a variable in a scope. Carries the type and an
 /// `annotated` flag indicating whether the FIRST assignment of that name
@@ -11040,6 +11297,126 @@ pub fn extract_background_fn_names(program: &Program) -> Vec<String> {
         }
     }
     names
+}
+
+/// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Cross-module
+/// `@live_component` scanner. Walks the AST of an already-parsed
+/// imported module and returns one `ImportedLiveComponent` per
+/// component fully wired with its `@render_for` fn and any `@on`
+/// event handlers declared in the SAME module (single-module
+/// scope, paralelo bit-a-bit a `extract_background_fn_names`).
+///
+/// The caller (typically `main.rs::pre_scan_imported_live_components`,
+/// paralelo a `pre_scan_imported_background_fns`) walks each
+/// `Stmt::Import`/`Stmt::FromImport`, parses the imported module,
+/// and feeds the result of this function back to the importer's
+/// `TypeEnv` via `add_imported_live_components`. The injector
+/// (`inject_live_component_registrations`) then emits
+/// `flv_register(...)` calls for each entry.
+///
+/// **Shape validation is intentionally loose here** — the imported
+/// module's own checker (`process_live_component_decorators` +
+/// `process_render_for_decorators` + `process_on_decorators`) does
+/// the full validation when the module is loaded on its own. Here
+/// we only extract what the injector needs. Components without a
+/// matching `@render_for` in the same module are silently omitted
+/// (the imported module's own checker will report the error when
+/// it's loaded through the classic pipeline).
+///
+/// `module_name` is the caller-supplied binding for the module
+/// (typically the stem of the imported file: `Counter.fitzv` →
+/// `"Counter"`). Preserved on each entry for the missing-imports
+/// error message so the fix is actionable.
+///
+/// Determinism: entries sorted alphabetically by component name;
+/// event pairs sorted by event name.
+pub fn extract_live_components_from_program(
+    program: &Program,
+    module_name: &str,
+) -> Vec<ImportedLiveComponent> {
+    // Pass 1: collect (component_name, type_name) pairs from
+    // `@live_component("<name>")` on `Stmt::TypeDef`s.
+    let mut components: Vec<(String, String)> = Vec::new();
+    for stmt in program {
+        let Stmt::TypeDef {
+            name, decorators, ..
+        } = stmt
+        else {
+            continue;
+        };
+        for dec in decorators {
+            if dec.name != "live_component" {
+                continue;
+            }
+            if dec.args.len() != 1 || !dec.kwargs.is_empty() {
+                continue;
+            }
+            if let Expr::Str(comp, _) = &dec.args[0] {
+                components.push((comp.clone(), name.clone()));
+            }
+        }
+    }
+    if components.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<ImportedLiveComponent> = components
+        .iter()
+        .map(|(comp, ty)| ImportedLiveComponent {
+            component_name: comp.clone(),
+            type_name: ty.clone(),
+            module_name: module_name.to_string(),
+            render_fn: String::new(),
+            events: Vec::new(),
+        })
+        .collect();
+    // Pass 2: walk `Stmt::FnDef`s picking `@render_for("<comp>")`
+    // and `@on("<comp>", "<event>")`.
+    for stmt in program {
+        let Stmt::FnDef {
+            name, decorators, ..
+        } = stmt
+        else {
+            continue;
+        };
+        for dec in decorators {
+            match dec.name.as_str() {
+                "render_for" => {
+                    if dec.args.len() != 1 || !dec.kwargs.is_empty() {
+                        continue;
+                    }
+                    if let Expr::Str(comp, _) = &dec.args[0] {
+                        if let Some(entry) = out.iter_mut().find(|c| &c.component_name == comp) {
+                            entry.render_fn = name.clone();
+                        }
+                    }
+                }
+                "on" => {
+                    if dec.args.len() != 2 || !dec.kwargs.is_empty() {
+                        continue;
+                    }
+                    if let (Expr::Str(comp, _), Expr::Str(event, _)) = (&dec.args[0], &dec.args[1])
+                    {
+                        if let Some(entry) = out.iter_mut().find(|c| &c.component_name == comp) {
+                            entry.events.push((event.clone(), name.clone()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Silently drop components that never got a render_fn — the
+    // imported module's own checker will surface the error when
+    // it's loaded through the classic pipeline. Keep the extractor
+    // permissive so a partially-broken imported module does not
+    // spam the importer's error stream.
+    out.retain(|c| !c.render_fn.is_empty());
+    // Deterministic order.
+    out.sort_by(|a, b| a.component_name.cmp(&b.component_name));
+    for entry in out.iter_mut() {
+        entry.events.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    out
 }
 
 /// Phase 9.w.3 — validates `@cron("cron-expr")` on top-level `fn`s.
@@ -19571,6 +19948,278 @@ print(total)
         assert!(errs.is_empty(), "no errors: {:?}", errs);
         let (_comp, _type, _render, events) = extract_last_flv_register(&program);
         assert!(events.is_empty(), "empty event map expected");
+    }
+
+    // =====================================================================
+    // Phase 11.6.e continuation (§9.bb, 2026-07-16) — cross-module
+    // @live_component auto-inject. Complements the local implicit_register
+    // block above.
+    //
+    // The extractor is public API so the pre-scan in main.rs can call it;
+    // the injector consumes both local + imported entries from TypeEnv.
+    // =====================================================================
+
+    fn parse_module_program(src: &str) -> Program {
+        let tokens = tokenize(src).expect("lex OK");
+        parse(tokens).expect("parse OK")
+    }
+
+    #[test]
+    fn extract_live_components_basic_returns_component_metadata_9bb() {
+        // Shape of a `Counter.fitzv` transformed to classic Fitz by
+        // the SSR emitter: @live_component type + @render_for fn +
+        // @on fns per event.
+        let src = "@live_component(\"Counter\") type Counter { count: Int = 0 }\n\
+                   @render_for(\"Counter\")\n\
+                   fn Counter_render(state: Counter) -> Str => \"<div/>\"\n\
+                   @on(\"Counter\", \"increment\")\n\
+                   fn Counter_increment(state: Counter, payload: Map<Str, Str>) -> Counter => state\n\
+                   @on(\"Counter\", \"decrement\")\n\
+                   fn Counter_decrement(state: Counter, payload: Map<Str, Str>) -> Counter => state";
+        let program = parse_module_program(src);
+        let out = super::extract_live_components_from_program(&program, "Counter");
+        assert_eq!(out.len(), 1);
+        let c = &out[0];
+        assert_eq!(c.component_name, "Counter");
+        assert_eq!(c.type_name, "Counter");
+        assert_eq!(c.module_name, "Counter");
+        assert_eq!(c.render_fn, "Counter_render");
+        // Events sorted alphabetically at extraction time.
+        assert_eq!(
+            c.events,
+            vec![
+                ("decrement".to_string(), "Counter_decrement".to_string()),
+                ("increment".to_string(), "Counter_increment".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_live_components_no_component_returns_empty_9bb() {
+        // A module without any @live_component decorators should
+        // produce an empty extraction — the injector wouldn't have
+        // anything to emit anyway.
+        let src = "fn helper(x: Int) -> Int => x * 2";
+        let program = parse_module_program(src);
+        let out = super::extract_live_components_from_program(&program, "helpers");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn extract_live_components_skips_component_without_render_for_9bb() {
+        // If a @live_component type has no matching @render_for in
+        // the same module, the extractor silently drops it. The
+        // imported module's own checker will surface the error when
+        // it's loaded through the classic pipeline. Silent drop
+        // avoids spamming the importer's error stream.
+        let src = "@live_component(\"Orphan\") type Orphan { x: Int = 0 }";
+        let program = parse_module_program(src);
+        let out = super::extract_live_components_from_program(&program, "Orphan");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn extract_live_components_multiple_sorted_alphabetically_9bb() {
+        // Two @live_component in the same module: the extractor
+        // returns them sorted by component name for deterministic
+        // injection order.
+        let src = "@live_component(\"Zeta\") type Zeta { x: Int = 0 }\n\
+                   @render_for(\"Zeta\")\n\
+                   fn Zeta_render(state: Zeta) -> Str => \"z\"\n\
+                   @live_component(\"Alpha\") type Alpha { y: Int = 0 }\n\
+                   @render_for(\"Alpha\")\n\
+                   fn Alpha_render(state: Alpha) -> Str => \"a\"";
+        let program = parse_module_program(src);
+        let out = super::extract_live_components_from_program(&program, "mixed");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].component_name, "Alpha");
+        assert_eq!(out[1].component_name, "Zeta");
+    }
+
+    #[test]
+    fn inject_imported_component_appends_flv_register_call_9bb() {
+        // Canonical case: main.fitz has `from Counter import Counter,
+        // Counter_render, Counter_increment` and the TypeEnv carries
+        // one ImportedLiveComponent for "Counter". The injector
+        // emits the same shape as the local case (bare Ident refs).
+        let src = format!(
+            "{FLV_REGISTER_STUB}\
+             fn Counter() -> Null => null\n\
+             fn Counter_render(state: Any) -> Str => \"<div/>\"\n\
+             fn Counter_increment(state: Any, payload: Any) -> Any => state\n"
+        );
+        // We build a synthetic Program + TypeEnv by hand — the
+        // canonical pipeline (main.rs pre-scan) is exercised by the
+        // E2E test. Here we focus on the injector's behavior.
+        let tokens = tokenize(&src).expect("lex OK");
+        let mut program = parse(tokens).expect("parse OK");
+        let mut env = TypeEnv::new();
+        env.add_imported_live_components(std::iter::once(super::ImportedLiveComponent {
+            component_name: "Counter".to_string(),
+            type_name: "Counter".to_string(),
+            module_name: "Counter".to_string(),
+            render_fn: "Counter_render".to_string(),
+            events: vec![("increment".to_string(), "Counter_increment".to_string())],
+        }));
+        let res = super::inject_live_component_registrations(&mut program, &env);
+        assert!(res.is_ok(), "inject failed: {:?}", res);
+        let (comp, ty, render, events) = extract_last_flv_register(&program);
+        assert_eq!(comp, "Counter");
+        assert_eq!(ty, "Counter");
+        assert_eq!(render, "Counter_render");
+        assert_eq!(
+            events,
+            vec![("increment".to_string(), "Counter_increment".to_string())]
+        );
+    }
+
+    #[test]
+    fn inject_imported_component_missing_names_errors_with_hint_9bb() {
+        // main.fitz forgot `from Counter import Counter_render, ...`
+        // — only imported `flv_register` and `Counter`. The injector
+        // should error listing the missing names + the fix.
+        let src = format!(
+            "{FLV_REGISTER_STUB}\
+             fn Counter() -> Null => null\n"
+        );
+        let tokens = tokenize(&src).expect("lex OK");
+        let mut program = parse(tokens).expect("parse OK");
+        let mut env = TypeEnv::new();
+        env.add_imported_live_components(std::iter::once(super::ImportedLiveComponent {
+            component_name: "Counter".to_string(),
+            type_name: "Counter".to_string(),
+            module_name: "Counter".to_string(),
+            render_fn: "Counter_render".to_string(),
+            events: vec![("increment".to_string(), "Counter_increment".to_string())],
+        }));
+        let errs = super::inject_live_component_registrations(&mut program, &env)
+            .expect_err("expected missing-names error");
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("Counter_render, Counter_increment")
+                    && e.message.contains("Add `from Counter import")),
+            "expected missing-names error with actionable hint: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn inject_imported_component_manual_call_takes_precedence_9bb() {
+        // If the user wrote a manual `flv_register("Counter", ...)`
+        // for the same component, the injector skips it — same
+        // policy as the local case.
+        let src = format!(
+            "{FLV_REGISTER_STUB}\
+             fn Counter() -> Null => null\n\
+             fn Counter_render(state: Any) -> Str => \"<div/>\"\n\
+             flv_register(\"Counter\", Counter {{ }}, Counter_render, {{ }})\n"
+        );
+        // NOTE: parser rejects `Counter { }` as a struct lit for a fn
+        // (only types can be struct-lit'd). We work around by using
+        // a TypeDef stub for Counter here.
+        let src = src.replace(
+            "fn Counter() -> Null => null",
+            "type Counter { count: Int = 0 }",
+        );
+        let tokens = tokenize(&src).expect("lex OK");
+        let mut program = parse(tokens).expect("parse OK");
+        let mut env = TypeEnv::new();
+        env.add_imported_live_components(std::iter::once(super::ImportedLiveComponent {
+            component_name: "Counter".to_string(),
+            type_name: "Counter".to_string(),
+            module_name: "Counter".to_string(),
+            render_fn: "Counter_render".to_string(),
+            events: vec![],
+        }));
+        let res = super::inject_live_component_registrations(&mut program, &env);
+        assert!(res.is_ok(), "inject failed: {:?}", res);
+        let count = program
+            .iter()
+            .filter(|s| matches!(s, Stmt::Expr(Expr::Call { callee, .. }, _) if matches!(callee.as_ref(), Expr::Ident(n, _) if n == "flv_register")))
+            .count();
+        assert_eq!(count, 1, "one manual call, no implicit append");
+    }
+
+    #[test]
+    fn inject_local_wins_over_imported_same_name_9bb() {
+        // If the same component name appears both locally AND
+        // imported, the local one wins (imported is silently
+        // skipped). Uses the local render + events.
+        let src = format!(
+            "{FLV_REGISTER_STUB}\
+             @live_component(\"Counter\") type Counter {{ count: Int = 0 }}\n\
+             @render_for(\"Counter\")\n\
+             fn local_counter_render(state: Counter) -> Str => \"<local/>\"\n\
+             fn Counter_render(state: Counter) -> Str => \"<imported/>\"\n\
+             fn Counter_increment(state: Counter, payload: Map<Str, Str>) -> Counter => state\n"
+        );
+        let tokens = tokenize(&src).expect("lex OK");
+        let mut program = parse(tokens).expect("parse OK");
+        let (mut env, _types, _defs, check_errs) = super::check_program(&program);
+        assert!(check_errs.is_empty(), "check errors: {:?}", check_errs);
+        env.add_imported_live_components(std::iter::once(super::ImportedLiveComponent {
+            component_name: "Counter".to_string(),
+            type_name: "Counter".to_string(),
+            module_name: "Counter".to_string(),
+            render_fn: "Counter_render".to_string(),
+            events: vec![("increment".to_string(), "Counter_increment".to_string())],
+        }));
+        let res = super::inject_live_component_registrations(&mut program, &env);
+        assert!(res.is_ok(), "inject failed: {:?}", res);
+        // Exactly one injected call for "Counter" — the local one.
+        let injected: Vec<_> = program
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Expr(Expr::Call { callee, args, .. }, _) => {
+                    if let Expr::Ident(n, _) = callee.as_ref() {
+                        if n == "flv_register" {
+                            if let Some(Expr::Str(cn, _)) = args.first() {
+                                return Some((cn.clone(), args.clone()));
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(injected.len(), 1);
+        assert_eq!(injected[0].0, "Counter");
+        // Render fn must be the LOCAL one (`local_counter_render`),
+        // not `Counter_render` from the imported entry.
+        let render = match &injected[0].1[2] {
+            Expr::Ident(n, _) => n.clone(),
+            other => panic!("expected Ident, got {:?}", other),
+        };
+        assert_eq!(render, "local_counter_render");
+    }
+
+    #[test]
+    fn inject_imported_component_missing_flv_register_import_errors_9bb() {
+        // No `from fitz_liveviews import flv_register` and no local
+        // stub — the pass surfaces a clear error citing the imported
+        // component name.
+        let src = "fn Counter() -> Null => null\n\
+                   fn Counter_render(state: Any) -> Str => \"<div/>\"";
+        let tokens = tokenize(src).expect("lex OK");
+        let mut program = parse(tokens).expect("parse OK");
+        let mut env = TypeEnv::new();
+        env.add_imported_live_components(std::iter::once(super::ImportedLiveComponent {
+            component_name: "Counter".to_string(),
+            type_name: "Counter".to_string(),
+            module_name: "Counter".to_string(),
+            render_fn: "Counter_render".to_string(),
+            events: vec![],
+        }));
+        let errs = super::inject_live_component_registrations(&mut program, &env)
+            .expect_err("expected missing-flv_register-import error");
+        assert!(
+            errs.iter().any(|e| e.message.contains(
+                "`flv_register` is not in scope. Add `from fitz_liveviews import flv_register`"
+            )),
+            "expected missing-import error: {:?}",
+            errs
+        );
     }
 
     // ===== Phase 10.4.a — relations =====

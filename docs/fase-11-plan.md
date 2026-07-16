@@ -15,17 +15,23 @@ migration as the 11.6 deliverable set, with client-side dynamic
 capabilities re-scoped to 11.7 (see §9.u). See `docs/stack.md`
 for the architectural constitution this plan implements.
 
-Sub-phases still open: **11.6.e (partial as of §9.aa 2026-07-16
-— §9.z shipped SSR emitter `payload` in event-body scope +
-`fitz_liveviews` missing-dep hint + counter migration draft
-uncommitted; §9.aa ships event-body widening for `let` +
-nested `if` guards + `Expr::If`/`Expr::StructLit` on RHS,
-unblocking kanban's `card_editor_save` + chat's
-`send_message` `.fitzv` migrations; remaining: cross-module
-`@live_component` auto-inject, cross-file `<Child />`
-composition, migrations commits pending fitz v0.21.0
-release)**, 11.7 (client-side dynamic capabilities + kanban
-SPA port), 11.8 (LSP support), 11.9 (pedagogic docs).
+Sub-phases still open: **11.6.e (partial as of §9.bb
+2026-07-16 — §9.z shipped SSR emitter `payload` in event-
+body scope + `fitz_liveviews` missing-dep hint + counter
+migration draft uncommitted; §9.aa shipped event-body
+widening for `let` + nested `if` guards + `Expr::If`/
+`Expr::StructLit` on RHS, unblocking kanban's
+`card_editor_save` + chat's `send_message` `.fitzv`
+migrations; §9.bb ships cross-module `@live_component`
+auto-inject — extends v0.20.1's implicit `flv_register(...)`
+to types declared in imported `.fitzv`/`.fitz` sibling
+modules via `TypeEnv.imported_live_components` +
+`pre_scan_imported_live_components` paralelo W12/B10;
+remaining: cross-file `<Child />` composition (low
+priority, §9.y debt), migration commits in
+fitz-liveviews deferred until Fitz v0.21.0 release)**,
+11.7 (client-side dynamic capabilities + kanban SPA
+port), 11.8 (LSP support), 11.9 (pedagogic docs).
 
 **11.6.b + 11.6.c + 11.6.d CLOSED ENTIRELY 2026-07-15** —
 `view::emit_module_ssr` emits classic Fitz source with the
@@ -5361,6 +5367,219 @@ already does (it manually writes the register call).
 Paralleling W12 (`pre_scan_imported_auth_provider`) +
 B10 (`pre_scan_imported_background_fns`) is a clean
 shape.
+
+---
+
+## §9.bb 11.6.e continuation — Cross-module `@live_component`
+## auto-inject
+
+**Sub-step of Phase 11.6.e (2026-07-16)**. Extends v0.20.1's
+implicit `flv_register(...)` injection (which only scanned the
+top-level program AST) to components declared in **imported**
+`.fitzv`/`.fitz` sibling modules. Parallels W12
+(`pre_scan_imported_auth_provider`) and B10
+(`pre_scan_imported_background_fns`).
+
+### What changes
+
+Before §9.bb, a project like the counter migration in
+`d:/fitz-liveviews/examples/counter/` required a manual boot
+registration in `main.fitz`:
+
+```fitz
+from fitz_liveviews import Html, html, flv_register
+from Counter import Counter, Counter_render, Counter_increment,
+                    Counter_decrement, Counter_reset
+
+// Manual — v0.20.1's implicit inject only scanned top-level
+// program, so imported components had to be registered by hand.
+flv_register("Counter", Counter { }, Counter_render, {
+  "increment": Counter_increment,
+  "decrement": Counter_decrement,
+  "reset": Counter_reset,
+})
+
+@get("/") fn counter_page() -> Response { ... }
+```
+
+Post-§9.bb, the manual call goes away — the compiler synthesises
+it during check-time by extracting `@live_component` +
+`@render_for` + `@on` metadata from every imported module:
+
+```fitz
+from fitz_liveviews import Html, html, flv_register
+from Counter import Counter, Counter_render, Counter_increment,
+                    Counter_decrement, Counter_reset
+
+// Auto-injected. No manual flv_register(...) needed.
+
+@get("/") fn counter_page() -> Response { ... }
+```
+
+The user still writes the `from Counter import ...` line — the
+injected call uses bare `Ident` refs for the type + render fn +
+event handlers, matching the local case shape.
+
+### Files touched by §9.bb
+
+- `src/types.rs`:
+  - New `pub struct ImportedLiveComponent { component_name,
+    type_name, module_name, render_fn, events }` — populated per
+    imported component with the fully-resolved render + event fn
+    names.
+  - New field `TypeEnv.imported_live_components:
+    Vec<ImportedLiveComponent>` + `add_imported_live_components`
+    setter + `imported_live_components()` getter.
+  - New public `pub fn extract_live_components_from_program(
+    program: &Program, module_name: &str) ->
+    Vec<ImportedLiveComponent>` — walks a parsed module's AST
+    collecting `@live_component` types plus their sibling
+    `@render_for` + `@on` fns. Silently drops components without a
+    matching `@render_for` (the imported module's own checker will
+    surface the error when it's loaded through the classic
+    pipeline). Deterministic order: sorted by component name,
+    events sorted by event name.
+  - Extended `inject_live_component_registrations`: after
+    processing local components (as before), iterates over
+    `env.imported_live_components()` sorted by component name.
+    For each imported entry:
+    - Skips if the user wrote a manual `flv_register("<name>",
+      ...)` call (same as local).
+    - Skips if a local `@live_component` with the same name
+      exists (**local wins over imported** — silent skip).
+    - Validates that `type_name`, `render_fn`, and every event
+      handler fn name are in scope via `from` imports OR local
+      FnDef/TypeDef/Assign stmts. Missing names produce a clean
+      error listing every missing name plus an actionable `Add
+      \`from <module> import <TypeName>, <TypeName>_render,
+      <TypeName>_<event>...\`` hint.
+    - Emits the same `Expr::Call { flv_register, [Str(comp),
+      StructLit { type_name, fields: [] }, Ident(render_fn),
+      Map({event: fn_name})] }` shape as the local case.
+  - New private helper `collect_names_in_scope(program) ->
+    HashSet<String>` used by the imported branch — collects
+    identifiers brought into top-level scope by
+    `Stmt::FromImport { names, .. }` (respecting aliases),
+    `Stmt::FnDef`, `Stmt::TypeDef`, and `Stmt::Assign` with
+    `AssignTarget::Ident`.
+  - +9 unit tests `types::tests::extract_live_components_*_9bb`
+    (4 extractor tests) and `types::tests::inject_*_9bb` (5
+    injector tests) covering: extractor basic + no-components
+    no-op + skip-without-render-for + multi-component alphabetical
+    order + inject basic + missing-imports-hint + manual-call
+    precedence + local-wins-over-imported + missing-flv_register-
+    import.
+- `src/main.rs`:
+  - New helper `pre_scan_imported_live_components(program,
+    base_dir, dep_registry) -> Vec<types::ImportedLiveComponent>`
+    paralleling `pre_scan_imported_background_fns`. Walks each
+    `Stmt::Import` / `Stmt::FromImport`, resolves the file
+    (`.fitz` first, `.fitzv` fallback via
+    `fitz::view::resolve_module_file_candidates`, transformed
+    through `fitz::view::transform_fitzv_source`), tokenizes +
+    parses, and feeds the result to
+    `types::extract_live_components_from_program`. Silent-fallback
+    on read/lex/parse/view-transform errors (paralelo bit-a-bit al
+    W12/B10 pattern). Module binding name derived from the last
+    segment of the import path (`from Counter import ...` →
+    `"Counter"`).
+  - Wired into `check_program_with_pyi_stubs_and_deps` right
+    after the B10 pre-scan and before `check_with_env`. All 3
+    sites that call `inject_live_component_registrations`
+    (`run_file`, `build_file`, `build_file_with_bundle`) benefit
+    automatically because they all read from the enriched
+    `TypeEnv` produced by the checker.
+- `tests/cli_e2e.rs`:
+  - Two new E2E tests (`phase_11_6_e_bb_cross_module_*`) using a
+    stub `fitz_liveviews.fitz` sibling providing `Html`,
+    `html(s) -> Html`, and `flv_register(name, initial_state,
+    render_fn, events) -> Null` no-ops so the classic loader can
+    resolve `from fitz_liveviews import ...` without the real
+    library. Canonical `Counter.fitzv` sibling declares one
+    `@live_component` + `@render_for` + `@on`.
+    - `phase_11_6_e_bb_cross_module_live_component_auto_injects_flv_register`
+      — happy path. main.fitz omits the manual `flv_register(...)`
+      call and reaches `print("boot OK")` via `fitz run`.
+    - `phase_11_6_e_bb_cross_module_missing_imports_errors_with_hint`
+      — negative case. main.fitz forgets `Counter_render` +
+      `Counter_increment` in its `from` import; `fitz run`
+      fails citing every missing name plus the actionable fix.
+
+### Design decisions
+
+- **Local wins over imported** (silent skip): if the same
+  component name is registered both locally and via import, the
+  imported entry is skipped. Matches how W12 handles cross-module
+  `@auth_provider` overlap.
+- **Bare `Ident` refs in the injected call**: the injected shape
+  is identical to the local case (`flv_register("Counter",
+  Counter { }, Counter_render, {...})`) — the user brings the
+  names into scope via `from <module> import <TypeName>,
+  <TypeName>_render, <TypeName>_<event>...`. Reasons:
+  - Struct literals require a bare `TypeName` in scope (parser
+    doesn't accept `mod.TypeName { }`); forcing `from` for the
+    type carries the render + event fn names in the same import
+    line naturally.
+  - Emitting `<module>.<name>` field access for the fn refs would
+    require dual paths + branching per imported entry.
+  - Missing-names errors are actionable: we surface the exact
+    `from <module> import ...` line the user needs.
+- **Silent drop of components without `@render_for`** at
+  extraction time — the imported module's own checker reports
+  the missing renderer when loaded through the classic pipeline;
+  we don't want to double-report from the importer.
+- **Field-default validation skipped for imported types** — the
+  extractor never inspects the imported type's fields. If a
+  field lacks a default, the resulting `<TypeName> { }` fails at
+  eval-time with the standard "missing field" error, same UX as
+  writing it manually.
+- **`fitz check` does NOT run the injector** — same as v0.20.1's
+  local case (`fitz check` is a diagnostic-only pass). Missing-
+  imports errors from cross-module auto-inject surface via `fitz
+  run` and `fitz build` only. Refinable if presión real appears
+  from LSP or CI-only workflows.
+
+### Debt / gotchas visible after §9.bb
+
+Ordered by priority for the 11.6.e continuation:
+
+- **Cross-file `<Child />` composition** — still open from §9.y.
+  Low priority because none of the 4 fitz-liveviews examples need
+  it (they all use runtime `component(name, id)`). Requires
+  threading the loader's expanded-file cache through the checker
+  + emitter.
+- **`fitz check` inject-time errors** — checker doesn't run
+  inject, so missing-imports errors from cross-module auto-inject
+  don't fire during `fitz check`. UX-visible only via `fitz run`
+  or `fitz build`. Refinable if LSP or CI-only flows demand it.
+- **Migration commits in fitz-liveviews** — counter draft
+  uncommitted from §9.z; dashboard should follow the same shape
+  (extract `MetricTile.fitzv`); chat + kanban now unblocked by
+  §9.aa (event-body widening) + §9.bb (cross-module auto-inject).
+  Commits land when Fitz v0.21.0 ships.
+- **Transitive imports** — like W12/B10, only direct imports are
+  scanned. A component in a module imported by another imported
+  module is invisible to the auto-inject.
+
+### Files touched by 11.6.e §9.bb
+
+- `src/types.rs` — `ImportedLiveComponent` struct + `TypeEnv`
+  field + accessors + `extract_live_components_from_program`
+  extractor + `inject_live_component_registrations` extension +
+  `collect_names_in_scope` helper. +9 unit tests.
+- `src/main.rs` — `pre_scan_imported_live_components` helper +
+  wired into `check_program_with_pyi_stubs_and_deps`.
+- `tests/cli_e2e.rs` — 2 new E2E tests with stub
+  `fitz_liveviews.fitz` + canonical `Counter.fitzv`.
+- `docs/fase-11-plan.md` (this file) — this §9.bb section +
+  status refresh at top.
+
+**Next norte after §9.bb**: **§9.y debt (cross-file `<Child />`
+composition)** if a demand appears (none of the 4 fitz-liveviews
+examples need it), OR **land the counter/dashboard/chat/kanban
+migrations** in the sibling repo when Fitz v0.21.0 ships. With
+§9.bb closed, chat + kanban `.fitzv` versions can drop their
+manual `flv_register(...)` boot boilerplate.
 
 ---
 
