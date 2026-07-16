@@ -1,4 +1,4 @@
-//! Phase 11.6.b + 11.6.c + 11.6.d — SSR emitter (`view::emit_ssr`).
+//! Phase 11.6.b + 11.6.c + 11.6.d + 11.6.e — SSR emitter (`view::emit_ssr`).
 //!
 //! Second backend paralleling `codegen_wasm.rs`. Consumes an
 //! [`ExpandedViewFile`] and emits classic Fitz source text
@@ -124,6 +124,32 @@
 //!     [`crate::view::transform_fitzv_source`] for the
 //!     helper the classic loader consumes when it sees a
 //!     `.fitzv` file at import resolution time.
+//! - Since Phase 11.6.e:
+//!   - Event body widening — bodies can now contain `let`
+//!     bindings (assignments to non-state-field idents),
+//!     `if` guards (`Stmt::Expr(Expr::If, _)` including
+//!     arbitrarily nested), and `if`-as-expression on the
+//!     RHS of a `let` / mutation. Kanban's
+//!     `card_editor_save` (`let new_text = if
+//!     (payload.has("text")) { payload["text"] } else {
+//!     state.text }`) and chat's `send_message` (nested
+//!     `if (payload.has("author")) { if
+//!     (payload.has("text")) { messages = messages + [
+//!     Message { author: payload["author"], text:
+//!     payload["text"] } ] } }`) both fall out. Trivial
+//!     bodies (linear state-field mutations only) keep the
+//!     compact `return X { <field>: <rhs>, ... }` shape;
+//!     wider bodies switch to a shadow-local shape (prime
+//!     `let <field> = state.<field>` at the top, walk body
+//!     verbatim, `return X { <field>: <field>, ... }` at
+//!     the bottom). See [`emit_event_fn`] for the split.
+//!   - Walker widened for `Expr::If` and `Expr::StructLit`
+//!     — `if(cond) { <expr> } else { <expr> }` on any RHS
+//!     and `TypeName { field: <expr>, ... }` inline struct
+//!     construction both work everywhere the walker runs
+//!     (event body RHS, template interpolation, state
+//!     field defaults). See [`format_fitz_expr_scoped`] +
+//!     [`format_if_arm_value`].
 //! - `<slot />` still deferred to Phase 11.7+.
 //!
 //! ## Emit shape: pretty vs chain form
@@ -475,22 +501,43 @@ fn fitz_str_literal_for_chain_form(s: &str) -> String {
 }
 
 /// Emit one `@on(<component>, <event>)` fn. Body semantics:
-/// (state, payload) -> state, always returning a fresh struct
-/// literal that carries EVERY state field. Mutated fields
-/// take the assigned value (RHS lowered via
-/// [`format_fitz_expr`] so bare state-field idents get the
-/// `state.` prefix); untouched fields carry over from
-/// `state.<field>`.
+/// `(state, payload) -> state`, always returning a fresh struct
+/// literal that carries EVERY state field.
 ///
-/// Phase 11.6.b MVP restricted the RHS to literals + bare
-/// state-field idents; Phase 11.6.c widened this to the full
-/// walker grammar (BinOp / UnaryOp / Call / Field / Index /
-/// StrInterp / List / Map / Range / Ok / Err / arrow
-/// closure). Statement / control-flow shapes in the body
-/// (multi-stmt with an `if` inside, `for` loops, etc.) still
-/// reject — the emitter accumulates linear `Stmt::Assign`
-/// mutations only. Richer bodies land alongside the template
-/// directive support in the 11.6.c continuation.
+/// Two emit shapes:
+///
+/// - **Trivial body** — every stmt is `Stmt::Assign` targeting a
+///   state-field ident. The emitter produces the compact form
+///   preserved since Phase 11.6.b: a single `return <Name> {
+///   <field>: <rhs>, ... }` where mutated fields take the
+///   assigned value (RHS lowered via [`format_event_rhs`] so
+///   bare state-field idents get the `state.` prefix) and
+///   untouched fields carry over from `state.<field>`.
+/// - **Widened body** — as of Phase 11.6.e, when the body
+///   contains `let` bindings (assignments to non-state-field
+///   idents), `if` guards (`Stmt::Expr(Expr::If, _)`), or
+///   nested statements, the emitter switches to the
+///   shadow-local shape: prime each state field as a mutable
+///   local at the top (`let <field> = state.<field>`), lower
+///   the body statement-by-statement (idents resolve verbatim
+///   against the shadow, `let x = ...` introduces new locals,
+///   `if (...) { ... }` recurses into arms with a child scope
+///   that pops on close), and return `<Name> { <field>:
+///   <field>, ... }` at the bottom. Same semantics, just a
+///   richer surface. Widens the set of `.fitzv` files the SSR
+///   emitter can lower — kanban's `card_editor_save`
+///   (`let new_text = if(...){...} else{...}`) and chat's
+///   `send_message` (nested `if (payload.has(...)) { ... }`)
+///   both fall out.
+///
+/// Phase 11.6.c widened the RHS walker to the full expression
+/// grammar (BinOp / Call / Field / Index / StrInterp / List /
+/// Map / Range / Ok / Err / arrow closure). Phase 11.6.e adds
+/// `Expr::If` and `Expr::StructLit` to that walker, so
+/// if-as-expression RHS (`let x = if(...) {...} else {...}`)
+/// and inline struct construction (`Message { author:
+/// payload["a"], text: payload["t"] }`) work in every
+/// context that calls [`format_fitz_expr_scoped`].
 fn emit_event_fn(
     component: &ExpandedComponent,
     event: &ExpandedEventHandler,
@@ -508,76 +555,65 @@ fn emit_event_fn(
         });
     }
 
+    let state_field_names: Vec<&str> = component.state.iter().map(|f| f.name.as_str()).collect();
+
+    if is_trivial_event_body(&event.body, &state_field_names) {
+        emit_event_fn_trivial(component, event, &state_field_names, out)
+    } else {
+        emit_event_fn_widened(component, event, &state_field_names, out)
+    }
+}
+
+/// Return `true` iff every stmt in the body is a direct
+/// state-field mutation (`Stmt::Assign` with an `Ident` target
+/// whose name is a declared state field, no type annotation).
+/// The trivial path preserves the compact `return X { a:
+/// <rhs>, b: state.b, ... }` shape from Phase 11.6.b/c for
+/// human-readable output on the common case. Any other stmt
+/// kind (including `let` bindings that introduce non-state
+/// locals, `if` guards, or Field/Index assignments) routes
+/// through the widened path where the shape is uniform
+/// regardless of what the body does.
+fn is_trivial_event_body(body: &[Stmt], state_field_names: &[&str]) -> bool {
+    body.iter().all(|stmt| match stmt {
+        Stmt::Assign {
+            target: AssignTarget::Ident(name, _),
+            type_: None,
+            ..
+        } => state_field_names.contains(&name.as_str()),
+        _ => false,
+    })
+}
+
+/// Trivial-body emitter — one `return <Name> { ... }` struct
+/// literal where every state field's RHS is either the last
+/// assignment's value (last-write-wins if a field is assigned
+/// multiple times) or `state.<field>` if untouched.
+fn emit_event_fn_trivial(
+    component: &ExpandedComponent,
+    event: &ExpandedEventHandler,
+    state_field_names: &[&str],
+    out: &mut String,
+) -> SsrEmitResult<()> {
     // Accumulate the mutations. If the same field is assigned
     // multiple times inside the body, the LAST assignment wins
     // — same semantics classic Fitz has when you re-assign the
     // same var in a linear body.
-    let state_field_names: Vec<&str> = component.state.iter().map(|f| f.name.as_str()).collect();
     let mut mutations: Vec<(String, String)> = Vec::new();
     for stmt in &event.body {
         match stmt {
             Stmt::Assign {
-                target,
+                target: AssignTarget::Ident(name, _),
                 value,
-                type_: _,
+                type_: None,
                 ..
             } => {
-                let field_name = match target {
-                    AssignTarget::Ident(name, _) => name.clone(),
-                    AssignTarget::Field { .. } => {
-                        return Err(SsrEmitError {
-                            message: format!(
-                                "event `{}` body assigns to a field access (`obj.field = ...`) \
-                                 — only direct state-field assignments (`<field> = ...`) are \
-                                 supported. Deferred to Phase 11.7+.",
-                                event.name
-                            ),
-                            context: format!(
-                                "component `{}` event `{}`",
-                                component.name, event.name
-                            ),
-                        });
-                    }
-                    AssignTarget::Index { .. } => {
-                        return Err(SsrEmitError {
-                            message: format!(
-                                "event `{}` body assigns to an index (`xs[i] = ...`) — only \
-                                 direct state-field assignments (`<field> = ...`) are supported. \
-                                 Deferred to Phase 11.7+.",
-                                event.name
-                            ),
-                            context: format!(
-                                "component `{}` event `{}`",
-                                component.name, event.name
-                            ),
-                        });
-                    }
-                };
-                if !state_field_names.iter().any(|s| *s == field_name) {
-                    return Err(SsrEmitError {
-                        message: format!(
-                            "event `{}` body assigns to `{}` which is not a declared state field. \
-                             Declare it in `state {{ ... }}` first.",
-                            event.name, field_name
-                        ),
-                        context: format!("component `{}` event `{}`", component.name, event.name),
-                    });
-                }
-                let rhs = format_event_rhs(value, &state_field_names, component, event)?;
-                mutations.push((field_name, rhs));
+                let rhs = format_event_rhs(value, state_field_names, component, event)?;
+                mutations.push((name.clone(), rhs));
             }
-            _ => {
-                return Err(SsrEmitError {
-                    message: format!(
-                        "event `{}` body contains a non-assignment statement — the SSR emitter \
-                         supports single- or multi-`Stmt::Assign` bodies (as of 11.6.c). Other \
-                         statement kinds (`if` / `for` / `return` / expression statements) \
-                         deferred to the 11.6.c template-directive continuation.",
-                        event.name
-                    ),
-                    context: format!("component `{}` event `{}`", component.name, event.name),
-                });
-            }
+            _ => unreachable!(
+                "is_trivial_event_body guarantees every stmt is Stmt::Assign to a state-field Ident"
+            ),
         }
     }
 
@@ -590,7 +626,6 @@ fn emit_event_fn(
     .unwrap();
     writeln!(out, "  return {} {{", component.name).unwrap();
     for field in &component.state {
-        // If mutated, use the mutation's RHS; else carry over.
         let assigned = mutations
             .iter()
             .rev()
@@ -603,6 +638,255 @@ fn emit_event_fn(
     }
     writeln!(out, "  }}").unwrap();
     writeln!(out, "}}\n").unwrap();
+    Ok(())
+}
+
+/// Widened-body emitter — prime shadow locals, lower body
+/// stmt-by-stmt via [`lower_event_body_stmts`], return the
+/// final struct literal.
+///
+/// Every state field becomes a mutable local `let <field> =
+/// state.<field>` at the top of the fn body. The walker's
+/// `local_scope` (paralleling the closure-param shadow logic
+/// from Phase 11.6.c) treats those names as bare idents, so
+/// `count = count + 1` in the source lowers to
+/// `count = (count + 1)` and reads/writes the shadow. `let
+/// new_text = ...` introduces additional locals that follow
+/// the same rule. The final return builds
+/// `<Name> { <field>: <field>, ... }` from the shadows — the
+/// unmutated fields still hold their initial `state.<field>`
+/// value, mutated ones the last write.
+///
+/// The wider shape is uniform: every `.fitzv` event body
+/// lowers the same way regardless of what mutations happen,
+/// so debugging the emitted output is easier than reasoning
+/// about the trivial path's per-field rewrites. The trivial
+/// path is kept only because its output is more compact for
+/// the common case (single state-field mutation).
+fn emit_event_fn_widened(
+    component: &ExpandedComponent,
+    event: &ExpandedEventHandler,
+    state_field_names: &[&str],
+    out: &mut String,
+) -> SsrEmitResult<()> {
+    writeln!(out, "@on(\"{}\", \"{}\")", component.name, event.name).unwrap();
+    writeln!(
+        out,
+        "fn {}_{}(state: {}, payload: Map<Str, Str>) -> {} {{",
+        component.name, event.name, component.name, component.name
+    )
+    .unwrap();
+
+    // Prime shadow locals from state. Every state field is a
+    // reassignable Fitz local now — assignments to `<field> =
+    // ...` in the body mutate the shadow, and the terminal
+    // return reads back from it.
+    for field in &component.state {
+        writeln!(out, "  let {} = state.{}", field.name, field.name).unwrap();
+    }
+
+    // Local scope seed: state fields (so the walker skips the
+    // `state.` rewrite; they now reference the mutable
+    // shadow) + `payload` (the fn param). New `let x = ...`
+    // stmts extend the scope; `if` arms get their own
+    // truncate-on-exit sub-scope so an arm-local binding
+    // doesn't leak.
+    let mut local_scope: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
+    local_scope.push("payload".to_string());
+
+    lower_event_body_stmts(
+        &event.body,
+        state_field_names,
+        &mut local_scope,
+        component,
+        event,
+        "  ",
+        out,
+    )?;
+
+    writeln!(out, "  return {} {{", component.name).unwrap();
+    for field in &component.state {
+        writeln!(out, "    {}: {},", field.name, field.name).unwrap();
+    }
+    writeln!(out, "  }}").unwrap();
+    writeln!(out, "}}\n").unwrap();
+    Ok(())
+}
+
+/// Recursive body-lowering helper — emits classic Fitz source
+/// text for the widened event-body grammar. Each stmt maps as
+/// follows:
+///
+/// - `Stmt::Assign { target: Ident(name), value, .. }` — if
+///   `name` is already in `local_scope` (either a state-field
+///   shadow or a previously introduced local), emit `<name> =
+///   <lowered rhs>` (a reassignment). Otherwise emit `let
+///   <name> = <lowered rhs>` and push `name` to `local_scope`
+///   (a new local). Fitz's AST does not preserve the `let`
+///   keyword — the scope-tracking model here is the honest
+///   interpretation.
+/// - `Stmt::Assign { target: Field { .. } | Index { .. } }` —
+///   reject with a Phase 11.7+ pointer (nested mutation via
+///   `obj.field = ...` / `xs[i] = ...` requires the mutation
+///   to reach outside the shadow-local model).
+/// - `Stmt::Expr(Expr::If { condition, then, else_ }, _)` —
+///   emit `if (<cond>) { <recurse then> } else { <recurse
+///   else> }` (or without the else clause). Each arm gets a
+///   child scope: extend `local_scope` for the arm, then
+///   truncate back to the pre-arm length on close so an
+///   arm-local `let` doesn't leak.
+/// - `Stmt::Expr(other, _)` — reject. Bare expression stmts
+///   are typically side-effect calls (`xs.push(item)`) that
+///   escape the shadow-local model. Deferred to Phase 11.7+.
+/// - Any other stmt kind (`Return`, `Break`, `Continue`,
+///   `For`, `While`, `Loop`, `TypeDef`, `FnDef`, `Import`,
+///   `FromImport`, `Destructure`, `ReturnStatus`, `Error`) —
+///   reject with a Phase 11.7+ pointer. The event-body
+///   subset is deliberately narrow: assignments + `let`
+///   bindings + `if` guards.
+fn lower_event_body_stmts(
+    stmts: &[Stmt],
+    state_field_names: &[&str],
+    local_scope: &mut Vec<String>,
+    component: &ExpandedComponent,
+    event: &ExpandedEventHandler,
+    indent: &str,
+    out: &mut String,
+) -> SsrEmitResult<()> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign {
+                target: AssignTarget::Ident(name, _),
+                value,
+                type_: _,
+                ..
+            } => {
+                let local_refs: Vec<&str> = local_scope.iter().map(String::as_str).collect();
+                let rhs = format_fitz_expr_scoped(
+                    value,
+                    state_field_names,
+                    &local_refs,
+                    &component.name,
+                    &format!("event `{}` body RHS", event.name),
+                )?;
+                let already_bound = local_scope.iter().any(|s| s == name);
+                if already_bound {
+                    writeln!(out, "{indent}{name} = {rhs}").unwrap();
+                } else {
+                    // New local — annotation on the source `let x: T
+                    // = ...` is dropped from the emit; classic Fitz
+                    // will infer the same type from the RHS shape.
+                    writeln!(out, "{indent}let {name} = {rhs}").unwrap();
+                    local_scope.push(name.clone());
+                }
+            }
+            Stmt::Assign {
+                target: AssignTarget::Field { .. },
+                ..
+            } => {
+                return Err(SsrEmitError {
+                    message: format!(
+                        "event `{}` body assigns to a field access (`obj.field = ...`) \
+                         — only direct state-field assignments (`<field> = ...`) and \
+                         local `let` bindings are supported. Deferred to Phase 11.7+.",
+                        event.name
+                    ),
+                    context: format!("component `{}` event `{}`", component.name, event.name),
+                });
+            }
+            Stmt::Assign {
+                target: AssignTarget::Index { .. },
+                ..
+            } => {
+                return Err(SsrEmitError {
+                    message: format!(
+                        "event `{}` body assigns to an index (`xs[i] = ...`) — only \
+                         direct state-field assignments (`<field> = ...`) and local \
+                         `let` bindings are supported. Deferred to Phase 11.7+.",
+                        event.name
+                    ),
+                    context: format!("component `{}` event `{}`", component.name, event.name),
+                });
+            }
+            Stmt::Expr(
+                Expr::If {
+                    condition,
+                    then,
+                    else_,
+                    ..
+                },
+                _,
+            ) => {
+                let local_refs: Vec<&str> = local_scope.iter().map(String::as_str).collect();
+                let cond_src = format_fitz_expr_scoped(
+                    condition,
+                    state_field_names,
+                    &local_refs,
+                    &component.name,
+                    &format!("event `{}` if condition", event.name),
+                )?;
+
+                let child_indent = format!("{indent}  ");
+                writeln!(out, "{indent}if ({cond_src}) {{").unwrap();
+                let saved = local_scope.len();
+                lower_event_body_stmts(
+                    then,
+                    state_field_names,
+                    local_scope,
+                    component,
+                    event,
+                    &child_indent,
+                    out,
+                )?;
+                local_scope.truncate(saved);
+                match else_ {
+                    Some(else_body) => {
+                        writeln!(out, "{indent}}} else {{").unwrap();
+                        let saved = local_scope.len();
+                        lower_event_body_stmts(
+                            else_body,
+                            state_field_names,
+                            local_scope,
+                            component,
+                            event,
+                            &child_indent,
+                            out,
+                        )?;
+                        local_scope.truncate(saved);
+                        writeln!(out, "{indent}}}").unwrap();
+                    }
+                    None => {
+                        writeln!(out, "{indent}}}").unwrap();
+                    }
+                }
+            }
+            Stmt::Expr(_, _) => {
+                return Err(SsrEmitError {
+                    message: format!(
+                        "event `{}` body contains a bare expression statement (not an \
+                         `if` guard) — only assignments (`<field> = ...`), `let` \
+                         bindings, and `if` guards are supported today. Side-effect \
+                         calls like `xs.push(item)` escape the shadow-local model and \
+                         are deferred to Phase 11.7+.",
+                        event.name
+                    ),
+                    context: format!("component `{}` event `{}`", component.name, event.name),
+                });
+            }
+            _ => {
+                return Err(SsrEmitError {
+                    message: format!(
+                        "event `{}` body contains an unsupported statement kind. The SSR \
+                         emitter accepts assignments (state-field mutations and local \
+                         `let` bindings) plus `if` guards. Loop / return / function / \
+                         type / import statements are deferred to Phase 11.7+.",
+                        event.name
+                    ),
+                    context: format!("component `{}` event `{}`", component.name, event.name),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1212,23 +1496,34 @@ fn format_expr_source(
 /// - `FnExpr` — arrow form only (single `Return` statement in
 ///   body). Multi-statement closures deferred to Phase 11.7+.
 ///
-/// **11.6.c rejects** with a 11.7+ pointer:
+/// **Phase 11.6.e widens the walker further**:
+/// - `If` as expression — `if(<cond>) { <arm> } else { <arm> }`.
+///   Each arm body is a single `Stmt::Expr(<value>, _)` (see
+///   [`format_if_arm_value`]); without-else falls back to
+///   `null` so the arm has a value. Kanban's `let seed =
+///   if(payload.has(...)) { payload["..."] } else {
+///   state.text }` uses this. Multi-stmt arms deferred to
+///   Phase 11.7+.
+/// - `StructLit` — `TypeName { field: <expr>, ... }` for
+///   building fresh instances of state-list elements or
+///   auxiliary types. Chat's `Message { author: ...,
+///   text: ... }` in a `send_message` event body uses this.
+///
+/// **11.6.c/e rejects** with a 11.7+ pointer:
 /// - `Slice` (`xs[a..b]`) — rarely useful in the SSR path.
 /// - `ListComp`/`MapComp` — the whole comprehension surface.
 /// - `Tuple` — tuple types don't cross the fitz-liveviews API
 ///   boundary cleanly today.
-/// - `If`/`Match` as an expression — control flow inside
-///   RHS/interpolations lands with template directive support.
-/// - `StructLit` — constructing new instances of state or
-///   other types. 11.6.d for the state-mutation case.
+/// - `Match` as an expression — the SSR walker does not lower
+///   match-arms yet.
 /// - `Await`/`Try`/`NamedArg` — async and error propagation
 ///   both make no sense inside a synchronous render body.
 /// - `Bytes` — not a template-friendly type.
-/// - `Ident` for a NON-state field — could be a free variable
-///   the render's enclosing scope resolves (e.g. a `let` in
-///   the caller), but the SSR emitter cannot know without
-///   scope analysis. Deferred to 11.7+ when the loader
-///   integration lands.
+/// - `Ident` for a NON-state field, NOT in `local_scope` —
+///   could be a free variable the render's enclosing scope
+///   resolves (e.g. a `let` in the caller), but the SSR
+///   emitter cannot know without scope analysis. Deferred
+///   to 11.7+ when the loader integration lands.
 /// - `Error` — the parser's error-recovery sentinel; should
 ///   never appear in a checked AST but reject defensively.
 fn format_fitz_expr(
@@ -1558,21 +1853,91 @@ fn format_fitz_expr_scoped(
             Ok(format!("fn({}) => {inner}", params_src.join(", ")))
         }
 
+        // ---- If-as-expression (Phase 11.6.e) ----
+        //
+        // `if (cond) { <arm> } else { <arm> }` where each arm
+        // body is a single expression statement — matches the
+        // kanban pattern `let seed = if (payload.has(...))
+        // { payload["..."] } else { state.text }`. Multi-stmt
+        // arms defer to Phase 11.7+ via
+        // [`format_if_arm_value`]; without-else falls back to
+        // `null` so the arm always has a value.
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            let cond_src = format_fitz_expr_scoped(
+                condition,
+                state_field_names,
+                local_scope,
+                component_name,
+                context_label,
+            )?;
+            let then_src = format_if_arm_value(
+                then,
+                state_field_names,
+                local_scope,
+                component_name,
+                context_label,
+            )?;
+            let else_src = match else_ {
+                Some(body) => format_if_arm_value(
+                    body,
+                    state_field_names,
+                    local_scope,
+                    component_name,
+                    context_label,
+                )?,
+                None => "null".to_string(),
+            };
+            Ok(format!(
+                "if ({cond_src}) {{ {then_src} }} else {{ {else_src} }}"
+            ))
+        }
+
+        // ---- StructLit (Phase 11.6.e) ----
+        //
+        // `TypeName { field: <expr>, ... }` for building fresh
+        // instances of state-list elements or auxiliary types.
+        // Chat's `send_message` uses this to construct
+        // `Message { author: payload["author"], text:
+        // payload["text"] }` before appending to a state list.
+        // Each field's RHS walks recursively through the same
+        // scope machinery. The emitter does not validate that
+        // `type_name` is declared — classic Fitz's type
+        // checker handles that on the round-trip.
+        Expr::StructLit {
+            type_name, fields, ..
+        } => {
+            let mut field_srcs = Vec::with_capacity(fields.len());
+            for (fname, fexpr) in fields {
+                let val_src = format_fitz_expr_scoped(
+                    fexpr,
+                    state_field_names,
+                    local_scope,
+                    component_name,
+                    context_label,
+                )?;
+                field_srcs.push(format!("{fname}: {val_src}"));
+            }
+            Ok(format!("{type_name} {{ {} }}", field_srcs.join(", ")))
+        }
+
         // ---- Explicit rejections with targeted pointers ----
         Expr::Try(_, _)
         | Expr::Await(_, _)
         | Expr::NamedArg { .. }
         | Expr::Match { .. }
-        | Expr::If { .. }
-        | Expr::StructLit { .. }
         | Expr::Slice { .. }
         | Expr::ListComp { .. }
         | Expr::MapComp { .. }
         | Expr::Bytes(_, _) => Err(SsrEmitError {
             message: format!(
                 "{context_label} for component `{component_name}` uses an expression \
-                 shape (`{}`) that the 11.6.c SSR walker does not yet handle. Deferred \
-                 to Phase 11.7+ (or 11.6.d for struct-literal state constructors).",
+                 shape (`{}`) that the SSR walker does not yet handle. Deferred to \
+                 Phase 11.7+.",
                 expr_kind_label(expr)
             ),
             context: format!("component `{component_name}` {context_label}"),
@@ -1589,6 +1954,55 @@ fn format_fitz_expr_scoped(
             message: format!(
                 "{context_label} for component `{component_name}` uses an expression \
                  shape not covered by the 11.6.c SSR walker. Deferred to Phase 11.7+."
+            ),
+            context: format!("component `{component_name}` {context_label}"),
+        }),
+    }
+}
+
+/// Emit the value expression of an if-as-expression arm body.
+///
+/// Phase 11.6.e MVP: an arm body must be a single
+/// `Stmt::Expr(_)` — the sole statement's expression IS the
+/// arm's value. Multi-stmt arms would need the emitter to
+/// choose between "sequence all stmts and pick the last" and
+/// "wrap in a block that classic Fitz reads as an
+/// if-expression". Both work in classic Fitz semantics but
+/// the sequential-emit model would require lowering the
+/// full event-body grammar recursively, and the block-wrap
+/// interacts oddly with `let` bindings inside arms. Deferred.
+fn format_if_arm_value(
+    body: &[Stmt],
+    state_field_names: &[&str],
+    local_scope: &[&str],
+    component_name: &str,
+    context_label: &str,
+) -> SsrEmitResult<String> {
+    if body.len() != 1 {
+        return Err(SsrEmitError {
+            message: format!(
+                "{context_label} for component `{component_name}` uses an `if`-as-expression \
+                 with a multi-statement arm body — the SSR walker only supports single \
+                 expression-stmt arms today (`if (...) {{ <expr> }} else {{ <expr> }}`). \
+                 Deferred to Phase 11.7+."
+            ),
+            context: format!("component `{component_name}` {context_label}"),
+        });
+    }
+    match &body[0] {
+        Stmt::Expr(e, _) => format_fitz_expr_scoped(
+            e,
+            state_field_names,
+            local_scope,
+            component_name,
+            context_label,
+        ),
+        _ => Err(SsrEmitError {
+            message: format!(
+                "{context_label} for component `{component_name}` uses an `if`-as-expression \
+                 whose arm body is not a single expression statement — the SSR walker only \
+                 supports single expression-stmt arms today (the arm's final value is the \
+                 last statement's expression). Deferred to Phase 11.7+."
             ),
             context: format!("component `{component_name}` {context_label}"),
         }),
@@ -2549,6 +2963,423 @@ component Card {
         assert!(emitted.contains("if (state.show_empty)"));
         assert!(emitted.contains("__fitz_view_str_join(state.items.map(fn(name) =>"));
         assert!(emitted.contains("<style>"));
+    }
+
+    // ---- Phase 11.6.e — Event body widening -----------------
+    //
+    // Event bodies now accept:
+    // - `let x = ...` bindings (assign to non-state-field
+    //   idents). Wide path.
+    // - `if (cond) { <body> }` guards at stmt level, arbitrarily
+    //   nested. Wide path.
+    // - `Expr::If` on the RHS of a `let` / mutation. Walker.
+    // - `Expr::StructLit` on any RHS. Walker.
+    //
+    // Trivial bodies (linear state-field mutations only) keep
+    // the compact `return X { <field>: <rhs>, ... }` shape.
+
+    #[test]
+    fn phase_11_6_e_widened_body_primes_shadow_locals_from_state() {
+        // The presence of a non-state-field `let` binding
+        // forces the wide path. The emitter primes a shadow
+        // local for every state field, so subsequent
+        // mutations to state fields flow through the
+        // reassignable local (not `state.<field>`, which is
+        // read-only).
+        let src = r#"component X {
+  state {
+    count: Int = 0
+    msg: Str = "hi"
+  }
+  event bump() {
+    let bumped = count + 1
+    count = bumped
+  }
+  <template><div>{count}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // Prime lines exist.
+        assert!(
+            out.contains("let count = state.count"),
+            "widened emit must prime `count` shadow from state:\n{out}"
+        );
+        assert!(
+            out.contains("let msg = state.msg"),
+            "widened emit must prime `msg` shadow from state:\n{out}"
+        );
+        // Let binding + state-field mutation via shadow.
+        assert!(
+            out.contains("let bumped = (count + 1)"),
+            "expected `let bumped = (count + 1)` in widened body:\n{out}"
+        );
+        assert!(
+            out.contains("count = bumped"),
+            "expected `count = bumped` mutation via shadow:\n{out}"
+        );
+        // Return reads back from shadows for every field.
+        assert!(
+            out.contains("count: count,"),
+            "widened return must read from shadow local `count`:\n{out}"
+        );
+        assert!(
+            out.contains("msg: msg,"),
+            "widened return must read from shadow local `msg` (unmutated):\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_widened_body_lowers_if_guard_at_stmt_level() {
+        // The canonical `if (payload.has(...)) { <mutation> }`
+        // guard. Lowers to Fitz `if (payload.has("t")) { title
+        // = payload["t"] }` at stmt level.
+        let src = r#"component Widget {
+  state { title: Str = "" }
+  event set_title() {
+    if (payload.has("t")) {
+      title = payload["t"]
+    }
+  }
+  <template><span>{title}</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("let title = state.title"),
+            "wide emit must prime `title`:\n{out}"
+        );
+        assert!(
+            out.contains(r#"if (payload.has("t")) {"#),
+            "expected `if (payload.has(\"t\")) {{` at stmt level:\n{out}"
+        );
+        assert!(
+            out.contains(r#"title = payload["t"]"#),
+            "expected shadow mutation inside if arm:\n{out}"
+        );
+        assert!(
+            out.contains("title: title,"),
+            "widened return must read from shadow:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_widened_body_lowers_nested_if_guards() {
+        // Chat's `send_message` shape (simplified). Both
+        // guards must lower, mutation reaches the shadow.
+        let src = r#"component Chat {
+  state { last_msg: Str = "" }
+  event send() {
+    if (payload.has("author")) {
+      if (payload.has("text")) {
+        last_msg = payload["text"]
+      }
+    }
+  }
+  <template><div>{last_msg}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains(r#"if (payload.has("author"))"#),
+            "outer if must lower:\n{out}"
+        );
+        assert!(
+            out.contains(r#"if (payload.has("text"))"#),
+            "inner if must lower:\n{out}"
+        );
+        assert!(
+            out.contains(r#"last_msg = payload["text"]"#),
+            "inner mutation must reach shadow:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_widened_body_lowers_if_as_expression_in_let_rhs() {
+        // Kanban's canonical `card_editor_save` shape:
+        //   let new_text = if (payload.has("text")) {
+        //     payload["text"]
+        //   } else {
+        //     text
+        //   }
+        //   text = new_text
+        // The `if`-as-expression on the RHS of `let` walks
+        // through the widened walker's Expr::If arm.
+        let src = r#"component CardEditor {
+  state {
+    is_editing: Bool = false
+    text: Str = ""
+  }
+  event save() {
+    let new_text = if (payload.has("text")) { payload["text"] } else { text }
+    is_editing = false
+    text = new_text
+  }
+  <template><form></form></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // Prime shadows.
+        assert!(out.contains("let is_editing = state.is_editing"));
+        assert!(out.contains("let text = state.text"));
+        // `let new_text = if(...) { ... } else { ... }`.
+        assert!(
+            out.contains(
+                r#"let new_text = if (payload.has("text")) { payload["text"] } else { text }"#
+            ),
+            "expected let-with-if-as-expression RHS:\n{out}"
+        );
+        // Mutations.
+        assert!(
+            out.contains("is_editing = false"),
+            "expected `is_editing = false` mutation:\n{out}"
+        );
+        assert!(
+            out.contains("text = new_text"),
+            "expected `text = new_text` mutation:\n{out}"
+        );
+        // Return from shadows for every state field.
+        assert!(out.contains("is_editing: is_editing,"));
+        assert!(out.contains("text: text,"));
+    }
+
+    #[test]
+    fn phase_11_6_e_walker_accepts_struct_literal_in_wide_body_let() {
+        // Chat's inline `Message { author: ..., text: ... }`
+        // construction in an event body. Wide path (let
+        // binding forces it).
+        let src = r#"component Chat {
+  state { last_author: Str = "" }
+  event send() {
+    let m = Message { author: payload["a"], text: payload["b"] }
+    last_author = m.author
+  }
+  <template><div>{last_author}</div></template>
+}"#;
+        // The classic checker will complain about the free
+        // ident `Message` (it isn't imported) — but the emit
+        // pass runs even on programs with checker errors,
+        // and the walker only cares about AST shape. The
+        // view checker's own error path is a separate
+        // pipeline; we call the emitter directly so we can
+        // observe the emitted shape without relying on the
+        // checker's approval.
+        let raw = parse(src).expect("view::parse");
+        let file = expand(&raw).expect("view::expand");
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains(r#"let m = Message { author: payload["a"], text: payload["b"] }"#),
+            "expected struct-lit `let m = Message {{ ... }}`:\n{out}"
+        );
+        assert!(
+            out.contains("last_author = m.author"),
+            "expected `last_author = m.author` mutation:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_walker_accepts_struct_literal_in_trivial_body_rhs() {
+        // StructLit on the RHS of a trivial state-field
+        // mutation. Trivial path — the walker widens but the
+        // emit shape stays compact.
+        let src = r#"component Chat {
+  state { title: Str = "" }
+  event tag() {
+    title = Message { author: payload["a"], text: payload["b"] }.author
+  }
+  <template><span>{title}</span></template>
+}"#;
+        let raw = parse(src).expect("view::parse");
+        let file = expand(&raw).expect("view::expand");
+        let out = emit_module_ssr(&file).unwrap();
+        // Trivial path: compact `title: <rhs>,` shape.
+        assert!(
+            out.contains(r#"title: Message { author: payload["a"], text: payload["b"] }.author,"#),
+            "expected compact trivial shape with struct-lit RHS:\n{out}"
+        );
+        // No shadow-local prime — trivial path stays compact.
+        assert!(
+            !out.contains("let title = state.title"),
+            "trivial body must NOT prime shadow locals:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_trivial_body_still_uses_compact_shape() {
+        // Regression: trivial bodies (linear state-field
+        // mutations only) keep the compact
+        // `return X { <field>: <rhs>, ... }` shape from
+        // 11.6.b/c. No shadow-local prime.
+        let src = r#"component X {
+  state {
+    a: Int = 0
+    b: Int = 0
+  }
+  event reset() {
+    a = 0
+    b = 0
+  }
+  <template><div>{a}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            !out.contains("let a = state.a"),
+            "trivial body should NOT prime shadow locals:\n{out}"
+        );
+        assert!(
+            out.contains("a: 0,"),
+            "compact trivial shape must have `a: 0,`:\n{out}"
+        );
+        assert!(
+            out.contains("b: 0,"),
+            "compact trivial shape must have `b: 0,`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_if_arm_scope_does_not_leak_after_arm_closes() {
+        // Local `let` bindings inside an if arm live only
+        // inside that arm. After the arm closes, referencing
+        // the arm-local from the outer scope would fail
+        // classic Fitz's checker. The emitter models this by
+        // truncating `local_scope` back on arm exit.
+        //
+        // Constructing a test that OBSERVES the truncation
+        // is hard because a body that references a leaked
+        // ident post-arm would be an emit-time success + a
+        // classic-Fitz-checker failure (which we don't
+        // exercise here). Instead, the assertion below
+        // sanity-checks that the arm-local binding IS
+        // emitted inside the arm, and that the mutation
+        // AFTER the arm still works — i.e. the arm's own
+        // scope doesn't shadow state fields.
+        let src = r#"component X {
+  state { n: Int = 0 }
+  event bump() {
+    if (payload.has("k")) {
+      let x = 5
+      n = x
+    }
+    n = n + 1
+  }
+  <template><div>{n}</div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).unwrap();
+        // Arm-local `let x = 5` inside the if.
+        assert!(
+            out.contains("let x = 5"),
+            "arm-local `let x = 5` must be emitted:\n{out}"
+        );
+        // Arm mutation reaches shadow.
+        assert!(
+            out.contains("n = x"),
+            "arm mutation `n = x` must be emitted:\n{out}"
+        );
+        // Post-arm mutation using the shadow local `n`.
+        assert!(
+            out.contains("n = (n + 1)"),
+            "post-arm mutation `n = (n + 1)` must be emitted:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_widened_body_rejects_bare_expression_stmt() {
+        // A bare expression stmt (e.g. a hypothetical
+        // `xs.push(item)` side effect) can't be modelled by
+        // the shadow-local shape. Force the wide path via a
+        // `let` binding first, then use a bare
+        // `payload.has("k")` stmt to trip the reject.
+        let src = r#"component X {
+  state { n: Int = 0 }
+  event bump() {
+    let dummy = 1
+    payload.has("k")
+  }
+  <template><div>{n}</div></template>
+}"#;
+        let raw = parse(src).expect("view::parse");
+        let file = expand(&raw).expect("view::expand");
+        let err = emit_module_ssr(&file).unwrap_err();
+        assert!(
+            err.message.contains("bare expression statement"),
+            "error must cite bare expression stmt:\n{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("11.7+"),
+            "error must point at Phase 11.7+:\n{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_widened_body_rejects_index_target_assign() {
+        // `xs[0] = value` requires nested-mutation support
+        // outside the shadow-local model. Force wide path
+        // via a `let` binding, then Index-target assign.
+        let src = r#"component X {
+  state { xs: List<Int> = [] }
+  event set_first() {
+    let n = 5
+    xs[0] = n
+  }
+  <template><div>hi</div></template>
+}"#;
+        let raw = parse(src).expect("view::parse");
+        let file = expand(&raw).expect("view::expand");
+        let err = emit_module_ssr(&file).unwrap_err();
+        assert!(
+            err.message.contains("index"),
+            "expected `index` in error msg:\n{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("11.7+"),
+            "error must point at Phase 11.7+:\n{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn phase_11_6_e_widened_body_round_trips_through_classic_fitz() {
+        // Kanban's canonical `card_editor_save` shape lexes
+        // + parses cleanly through classic Fitz after the
+        // SSR emitter runs. This is the acceptance
+        // criterion: whatever we emit, classic Fitz reads.
+        let src = r#"component CardEditor {
+  state {
+    is_editing: Bool = false
+    text: Str = ""
+  }
+  event save() {
+    let new_text = if (payload.has("text")) { payload["text"] } else { text }
+    is_editing = false
+    text = new_text
+  }
+  event start() {
+    let seed = if (payload.has("current_title")) { payload["current_title"] } else { text }
+    is_editing = true
+    text = seed
+  }
+  event cancel() {
+    is_editing = false
+    text = ""
+  }
+  <template>
+    <div class="editor">
+      <button @click="start">edit</button>
+    </div>
+  </template>
+}"#;
+        let file = parse_expand(src);
+        let emitted = emit_module_ssr(&file).unwrap();
+        let tokens = crate::lexer::tokenize(&emitted).unwrap_or_else(|e| {
+            panic!("widened emit failed classic lex:\n---\n{emitted}\n---\nerr: {e}")
+        });
+        crate::parser::parse(tokens).unwrap_or_else(|e| {
+            panic!("widened emit failed classic parse:\n---\n{emitted}\n---\nerr: {e}")
+        });
     }
 
     #[test]
