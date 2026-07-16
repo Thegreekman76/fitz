@@ -4,6 +4,284 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🔴 View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — **ABIERTO 2026-07-16**
+
+**Trigger**: intento de migración del chat example de fitz-liveviews
+a `.fitzv` SFC syntax (Phase 8.4 del ROADMAP de fitz-liveviews).
+El chat es el 3er example atacado (post counter/dashboard) y el
+primero que ejerce shared-state con List<Message>.push(...) + form
+handling en template. La migración acumuló **5 blockers concretos**
+del view pipeline antes de que la funcionalidad fundamental
+(`.push()` bare expr stmt en shadow-local event body) sea siquiera
+testeada. La dogfooding cumplió su rol: el pattern "chat = shared
+List + push" no está soportado hoy end-to-end en `.fitzv` SFCs.
+
+### V-1 — HTML comments `<!-- ... -->` no soportados en template block
+
+**Síntoma** (fitz run al cargar el `.fitzv`):
+
+```
+Error at line 41:9 — view parse error in `<path>.fitzv`:
+  expected tag name after `<`
+```
+
+**Repro**:
+
+```
+component Foo {
+  state { count: Int = 0 }
+  <template>
+    <div>
+      <!-- This is a comment -->
+      <p>{count}</p>
+    </div>
+  </template>
+}
+```
+
+**Causa**: el view template parser (`src/view/parser.rs`,
+`parse_template_element`) ve `<` y espera un tag name; `!` no
+matchea el pattern y el parser aborta con "expected tag name".
+HTML5 comments son standard y common en templates reales.
+
+**Severity**: Low → Medium. Workaround: usar Fitz-style `//`
+comments AFUERA del template block; NO usar HTML comments adentro
+de `<template>`.
+
+**Fix sugerido**: en `parse_template_element`, cuando el next char
+después de `<` es `!`, matchear las 3 formas del HTML5 comment:
+- `<!-- ... -->` (comment)
+- `<!DOCTYPE ...>` (doctype — rare pero standard)
+- `<![CDATA[ ... ]]>` (CDATA — rare)
+
+Para MVP, solo cubrir `<!-- ... -->` (~30 LoC + 3 unit tests). Los
+otros dos son opcionales.
+
+### V-2 — Bare boolean HTML attrs (`required`, `data-flv-clear`, `disabled`, `checked`, etc.) rechazados
+
+**Síntoma**:
+
+```
+Error at line 43:63 — view parse error in `<path>.fitzv`:
+  attribute `required` requires a value in the POC —
+  bare boolean attrs land in Phase 11.2+
+```
+
+**Repro**:
+
+```
+<template>
+  <input name="user" required autocomplete="off" />
+</template>
+```
+
+**Causa**: el view template parser (documentado como Phase 11.2+
+gap en el mensaje de error) todavía no acepta HTML5 boolean
+attributes sin valor. HTML5 spec permite `<input required>` como
+equivalente a `<input required="">` o `<input required="required">`.
+
+**Severity**: Medium. Casos afectados en HTML real:
+- Forms: `required`, `disabled`, `readonly`, `autofocus`
+- Media: `controls`, `autoplay`, `loop`, `muted`
+- Semantics: `checked`, `selected`, `hidden`, `open`
+- Fitz LiveViews conventions: `data-flv-clear`, `data-flv-root`
+
+Workaround: forzar valor explícito (`required="required"`,
+`data-flv-clear="true"`). Funciona pero es non-idiomatic HTML.
+
+**Fix sugerido**: extender `parse_attribute` en el view template
+parser para aceptar el shape "attr name sin `=`". Emit como
+`attr_name=""` (HTML5 semantics) o similar. ~40 LoC + tests.
+
+### V-3 — Cross-file nominal type refs en `state { field: T }` no resueltos
+
+**Síntoma**:
+
+```
+Error at line 25:11 — view check errors in `<path>.fitzv` (1 error(s)):
+- unknown type `Message` (component 'ChatRoom': state field 'messages')
+```
+
+**Repro** (`ChatRoom.fitzv` con `Message` definido en parent
+`main.fitz`):
+
+```
+// ChatRoom.fitzv
+component ChatRoom {
+  state { messages: List<Message> = [] }
+  ...
+}
+
+// main.fitz
+type Message { author: Str, text: Str }
+from ChatRoom import ChatRoom
+```
+
+**Causa**: el view checker resuelve types del `state { ... }` block
+contra el TypeEnv **local** del `.fitzv` module. Nominal types
+definidos en otros archivos (parent `main.fitz` o siblings) no son
+visibles. El view module también no soporta `from` imports (esa es
+classic Fitz syntax, no view syntax).
+
+**Severity**: High. Chat NO puede tipar `List<Message>` como state
+sin este fix. Workaround: usar `List<Any>` (pierde tipado), o
+declarar el Message inline en el `.fitzv` (si es soportado — probable
+no).
+
+**Fix sugerido**: 3 opciones:
+
+- (a) **Cross-file resolution via env inheritance**: cuando el
+  loader transforma un `.fitzv`, pasar al view checker un TypeEnv
+  poblado con nominals del importer's env. Complejidad medio-alta
+  porque hay que timing-coordinate la carga del importer y del
+  imported.
+- (b) **`from X import Y` support en el view module syntax**:
+  permitir imports declarados en `.fitzv` mismo. Emerge la
+  pregunta de si el view lexer soporta el token de `from` (probable
+  sí — es keyword reusado del classic Fitz).
+- (c) **Type declarations inline en el `.fitzv`**: sumar syntax tipo
+  `type Message { ... }` fuera del `component` block. Menos
+  invasive pero cambia el shape del `.fitzv` (deja de ser 1
+  component per file).
+
+Opción (b) es probablemente la más pragmática. ~150-200 LoC (view
+lexer + parser + checker).
+
+### V-4 — `payload` no está en scope del view checker en event bodies
+
+**Síntoma**:
+
+```
+Error at line 27:3 — view check errors in `<path>.fitzv` (5 error(s)):
+- unknown variable `payload` (component 'X': event handler 'send_message')
+- unknown variable `payload` (component 'X': event handler 'send_message')
+...
+```
+
+**Repro**:
+
+```
+component X {
+  state { text: Str = "" }
+  event send_message() {
+    if (payload.has("text")) {
+      text = payload["text"]
+    }
+  }
+}
+```
+
+**Causa**: §9.z del plan Phase 11 fixed el SSR emitter para poblar
+`payload` en el event-body `local_scope` (usa `format_fitz_expr_scoped`
+con `&["payload"]`). Pero el view CHECKER (a different pipeline
+stage, corre ANTES del emit) todavía no incluye `payload` en el
+scope del event body. Resultado: código que EMITE correcto es
+REJECTED por el checker.
+
+**Severity**: High. Cualquier event body que necesita leer del
+payload (99% de forms + user input events) está bloqueado por el
+checker aunque el emit funcione. Sin workaround real — o el
+checker acepta `payload` O el user no puede escribir event bodies
+non-triviales.
+
+**Fix sugerido**: en `check_event_body` o equivalente del view
+checker, pre-poblar el local scope con `payload: Map<Str, Str>`
+antes de walker el body. Paralelo bit-a-bit al fix de §9.z pero
+en el checker. ~30 LoC.
+
+### V-5 — Cross-file nominal refs en struct literals dentro del event body también rechazados
+
+**Síntoma**: mismo error que V-3 pero en un context distinto:
+
+```
+- type `Message` does not exist to instantiate
+  (component 'X': event handler 'send_message')
+```
+
+**Repro**:
+
+```
+component X {
+  state { messages: List<Any> = [] }
+  event send_message() {
+    messages.push(Message { author: "x", text: "y" })
+    //           ^^^^^^^^^^^^^^^^^^^^^^^^ Message no está en scope
+  }
+}
+```
+
+**Causa**: mismo que V-3 pero para struct literal (no state
+annotation). El checker walka el event body y trata de resolver
+`Message { ... }` contra el TypeEnv local del `.fitzv`.
+
+**Severity**: High. Mismo blocker que V-3 desde otro angle — sin
+cross-file type resolution NO se pueden crear instancias de types
+del parent module en event bodies. Chat's `Message { author: ...,
+text: ... }` es el ejemplo canónico.
+
+**Fix sugerido**: mismo fix que V-3. Ambos (state annotation y
+event body struct literal) se resolverían juntos si el checker
+pobla el TypeEnv con cross-file nominals.
+
+### V-6 (PROBABLE, NO CONFIRMADO) — `.push()` bare expr stmt en shadow-local event body rechazado por §9.aa walker
+
+**Estado**: no confirmado empíricamente porque V-3/V-4/V-5 nos
+bloquearon antes. La chat migration probe usaba
+`messages.push(Message { ... })` en el event body, que el §9.aa
+walker rechaza si la política "solo Stmt::Assign a Ident +
+Stmt::Expr(Expr::If) accepted" está estricta.
+
+**Fix esperado**: extender §9.aa walker para aceptar bare method
+call stmts sobre shadow-local Lists (`.push(x)`, `.remove(idx)`).
+Mutation semantics preserved (Arc<Mutex<Vec<T>>> shared). ~40 LoC
++ tests. Alternativa cleaner: agregar `List<T>.appended(item) ->
+List<T>` immutable-return builtin (~80 LoC + tests + docs) —
+permite `messages = messages.appended(new_msg)` que ES un
+Stmt::Assign a Ident (accepted por §9.aa hoy).
+
+### Impacto acumulado
+
+**Chat migration BLOQUEADO** — 5 blockers confirmados + 1
+probable (`.push()`). La migración full-shape a `.fitzv` requiere
+cerrar V-3/V-4/V-5 mínimo (para tipar state + eventos con
+`Message`) más V-6 (para el append semantics). V-1 y V-2 son
+polish menor.
+
+**Kanban migration LIKELY-BLOCKED también** — kanban tiene el
+mismo pattern (`board.cards.push(...)` + `board.cards.map(...)` +
+`board.cards.filter(...)`). Solo el sub-componente `card_editor`
+(que §9.aa validated) fits porque su event body es re-assign
+puro (`text = new_text`) sin `.push()`.
+
+**Dashboards con SFC + shared-state pattern también bloqueados** —
+cualquier app real de fitz-liveviews que necesite append/remove
+to a shared List está en este bucket.
+
+**Contramedida**: continuar Phase 8 skipping chat (documentar como
+"BLOCKED por §9.cc-9.gg del Fitz core"), atacar Phase 8.5 kanban
+en modo partial (solo card_editor SFC), o pivot a un NUEVO example
+(CRUD contra Postgres) que sidesteps el pattern porque el "state"
+son DB rows, no una List mutada in-memory.
+
+### Fix roadmap propuesto (§9.cc → §9.gg en Fitz core)
+
+Sub-fases sugeridas para atacar en bloque coordinated (si el
+autor prioriza cerrar el gap):
+
+- **§9.cc** — V-4 (payload in checker scope) + V-6 (`.push()` en
+  event body). Chicos, ~70 LoC combinado + tests. Cierra el
+  event-body checker gap Y habilita append semantics. **Highest
+  return per LoC**.
+- **§9.dd** — V-3 + V-5 (cross-file nominals en state + struct
+  literals). Complejidad medio-alta (~150-200 LoC). Cierra el
+  cross-file scope gap. Habilita chat migration end-to-end.
+- **§9.ee** — V-1 (HTML comments) + V-2 (bare boolean attrs).
+  Polish del template parser. ~70 LoC combinado.
+
+Todo suma **~300-350 LoC coordinated** para desbloquear TODO el
+chat + kanban shared-state migration. Realístico en 1-2 sesiones
+dedicadas del Fitz core.
+
 ## 🟢 Fase 11 — Native frontend `.fitzv` compilada a WASM + SSR emitter for fitz-liveviews — **CERRADO por v0.21.0 (2026-07-16)**
 
 Release **mayor** aggregating Phase 11.1 → 11.5 + 11.6.a/b/c/d +

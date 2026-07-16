@@ -55,7 +55,7 @@ use super::expand::{
     ChildComponentProp, ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStateField,
     ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
 };
-use crate::ast::{AssignTarget, Expr, Pattern, Span, Stmt};
+use crate::ast::{AssignTarget, Expr, Pattern, Span, Stmt, TypeExpr};
 use crate::types::{check_program, Type};
 use std::fmt;
 
@@ -570,12 +570,44 @@ fn build_env_program(
     for_scope: &[ForBinding<'_>],
 ) -> Vec<Stmt> {
     let mut program: Vec<Stmt> =
-        Vec::with_capacity(component.state.len() + component.events.len() + 1);
+        Vec::with_capacity(component.state.len() + component.events.len() + 2);
     for field in &component.state {
         program.push(Stmt::Assign {
             target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
             type_: Some(field.type_expr.clone()),
             value: field.default.clone(),
+            span: Span::ZERO,
+        });
+    }
+    // §9.cc V-4 (2026-07-16) — When checking an event handler body,
+    // synth a top-level `let payload: Map<Str, Str> = {}` so the body
+    // can reference `payload.has(...)` / `payload["key"]` without
+    // "unknown variable" errors from the classic checker. Parallel to
+    // §9.z's SSR emitter fix (which populated `payload` in the walker's
+    // event-body local_scope) — this closes the same gap on the
+    // checker side. Only added for event-handler-body checks
+    // (`include_body_for.is_some()`); interpolation / if-cond passes
+    // call `build_env_program(..., None, ...)` so they never see
+    // `payload` (`payload` has no meaning outside event body context).
+    //
+    // Trade-off: the synth RHS `{}` is a placeholder. At runtime the
+    // real `payload` comes from the emitted fn signature (§9.z shape:
+    // `fn X_event(state: X, payload: Map<Str, Str>) -> X`), not from
+    // this initializer. Reassignments to `payload` inside the body
+    // are accepted by the checker (mutable `let`) but would fail at
+    // runtime (immutable param). Acceptable MVP gotcha; canonical
+    // usage is READ-ONLY payload lookup.
+    if include_body_for.is_some() {
+        program.push(Stmt::Assign {
+            target: AssignTarget::Ident("payload".to_string(), Span::ZERO),
+            type_: Some(TypeExpr::Generic {
+                name: "Map".to_string(),
+                args: vec![
+                    TypeExpr::Named("Str".to_string()),
+                    TypeExpr::Named("Str".to_string()),
+                ],
+            }),
+            value: Expr::Map(Vec::new(), Span::ZERO),
             span: Span::ZERO,
         });
     }
@@ -3122,5 +3154,137 @@ component Card {
         let ty = TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())));
         assert_eq!(coerce_child_prop_raw_value("null", &ty).unwrap(), "None");
         assert_eq!(coerce_child_prop_raw_value("5", &ty).unwrap(), "Some(5i64)");
+    }
+
+    // -----------------------------------------------------------------------
+    // §9.cc V-4 — `payload` in view checker event-body scope
+    // -----------------------------------------------------------------------
+    //
+    // The SSR emitter emits event handlers with signature
+    // `fn X_event(state: X, payload: Map<Str, Str>) -> X` (see §9.z).
+    // Before this fix, the view checker synthesised an empty-params
+    // fn (`fn X_event() { <body> }`) so any `payload.has(...)` /
+    // `payload["k"]` reference in the body errored with "unknown
+    // variable `payload`". The fix synthesises a top-level `let
+    // payload: Map<Str, Str> = {}` (only when checking an event
+    // handler body) so the classic checker's lexical scope resolves
+    // `payload` naturally. These tests lock the new behaviour.
+
+    #[test]
+    fn v4_payload_has_call_in_event_body_no_longer_unknown_variable() {
+        // The canonical chat-migration pattern: `payload.has("k")`
+        // inside a nested if. Pre-fix this errored with "unknown
+        // variable payload"; post-fix it type-checks clean.
+        let src = r#"component X {
+  state { text: Str = "" }
+
+  event send() {
+    if (payload.has("text")) {
+      text = payload["text"]
+    }
+  }
+}"#;
+        let errors = check_str(src);
+        assert!(errors.is_empty(), "expected zero errors; got: {:?}", errors);
+    }
+
+    #[test]
+    fn v4_payload_index_and_nested_guards_type_check() {
+        // The exact 2-level nested guard shape from the chat
+        // migration probe (also validated by §9.aa event-body
+        // widening on the emitter side).
+        let src = r#"component ChatRoom {
+  state { last_author: Str = "" }
+
+  event send_message() {
+    if (payload.has("author")) {
+      if (payload.has("text")) {
+        let author = payload["author"]
+        let text = payload["text"]
+        last_author = author
+      }
+    }
+  }
+}"#;
+        let errors = check_str(src);
+        assert!(
+            errors.is_empty(),
+            "expected zero errors on nested payload guards; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn v4_payload_typed_as_map_str_str_lookup_returns_str() {
+        // Reassigning a Str state field from `payload["k"]` (which
+        // types as `Str` per the Map<Str, Str> annotation) must be
+        // accepted. Pre-fix the checker would flag "unknown payload"
+        // before even reaching the type flow; post-fix the type flow
+        // works cleanly.
+        let src = r#"component X {
+  state { name: Str = "unset" }
+
+  event rename() {
+    name = payload["name"]
+  }
+}"#;
+        let errors = check_str(src);
+        assert!(
+            errors.is_empty(),
+            "expected zero errors when assigning a `Str` state field \
+             from `payload[\"key\"]` (Map<Str, Str> lookup returns \
+             Str); got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn v4_payload_not_visible_outside_event_body_context() {
+        // The V-4 fix only injects `payload` when
+        // `include_body_for.is_some()`. Interpolations / if-conds
+        // MUST NOT see it. This locks the scoping so a rogue
+        // template author writing `{payload["k"]}` gets a clean
+        // "unknown variable" error (as they should — `payload` is
+        // meaningful only in event bodies).
+        let src = r#"component X {
+  state { count: Int = 0 }
+
+  <template>
+    <p>{payload}</p>
+  </template>
+}"#;
+        let errors = check_str(src);
+        assert!(
+            !errors.is_empty(),
+            "expected at least one error citing `payload` in template \
+             interpolation scope; got zero errors"
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("payload")),
+            "expected error message referencing `payload`; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn v4_regression_events_without_payload_still_type_check() {
+        // Counter-shape event body (bare state re-assign, no payload
+        // reference) MUST still type-check clean. The V-4 fix only
+        // ADDS `payload` to scope; it doesn't remove or modify
+        // anything else.
+        let src = r#"component Counter {
+  state { count: Int = 0 }
+
+  event increment() { count = count + 1 }
+  event decrement() { count = count - 1 }
+  event reset() { count = 0 }
+}"#;
+        let errors = check_str(src);
+        assert!(
+            errors.is_empty(),
+            "counter-shape regression: expected zero errors on \
+             bare state re-assign events; got: {:?}",
+            errors
+        );
     }
 }
