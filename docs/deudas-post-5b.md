@@ -155,10 +155,106 @@ funciona bit-a-bit en el SSR emitter.
   aparecen en la práctica, refinable extendiendo el checker
   para type-check el `Expr` contra `field.type_expr`.
 
+### 🟢 K-4 — SSR emitter acepta imported top-level fn refs en templates + event bodies — **CERRADO 2026-07-16**
+
+**Síntoma**: al arrancar la Board.fitzv migration post-K-3, el
+SSR emitter rechazaba `{cards_in(cards, "todo").len()}` dentro
+del template Y `cards.map(fn(c) => move_one(target, c))` dentro
+del event body — el walker `format_fitz_expr_scoped` sólo
+aceptaba idents que fueran state fields o closure params, y
+rechazaba cualquier free-var con "free-var references need the
+module loader's scope resolution — deferred to Phase 11.7+".
+
+Esto forzaba a mover helper fns adentro del `.fitzv` (el parser
+no las acepta ahí — top-level fns sólo viven en `.fitz`
+classic), o a inlinear la lógica repetidamente en cada event
+body / template site (verbose, difícil de mantener). Bloqueaba
+un patrón MUY natural del framework: helpers en `.fitz`
+importados con `from helpers import move_one, cards_in` y
+llamados desde el SFC.
+
+**Cierre K-4 (post-K-3, 2026-07-16, ~200 LoC + 4 tests)**:
+`format_fitz_expr_scoped` gana un nuevo param `imported_names:
+&[&str]`. El resolution order para bare Idents queda:
+
+1. **`local_scope`** — closure params (`{#for x in xs}` inside
+   the template, `fn(c) => ...` inside event bodies) shadow todo.
+   Emit verbatim.
+2. **`state_field_names`** — bare state field ref. Rewrite a
+   `state.<name>`.
+3. **`imported_names`** — top-level fn / type / const brought
+   into scope via `from X import Y` at the top del `.fitzv` file
+   (§9.dd). Emit verbatim; el classic checker running sobre el
+   emitted module valida the reference contra su import table.
+4. **Otherwise** — hard error con mensaje que menciona la
+   imports table como fix hint. Real free-var (module-loader
+   resolution) remains Phase 11.7+.
+
+**Threading**: `ExpandedViewFile.imports` (ya poblado por §9.dd)
+se aplana en `emit_module_ssr` a un `Vec<&str>` de nombres, y
+pasa a través de la cadena entera del emitter — `emit_component_
+ssr_into` → `emit_render_fn` + `emit_event_fn` (trivial +
+widened) → `emit_template_node_to_pieces` + `lower_event_body_
+stmts` + `format_child_composition` + `emit_attr_to_pieces` +
+`format_event_rhs` + `format_if_arm_value` + el wrapper público
+`format_fitz_expr`. ~30 call sites tocados con un `imported_
+names` extra positional.
+
+**Patterns unlocked** post-K-4:
+
+```fitzv
+from helpers import cards_in, move_one
+
+component Board {
+  state { cards: List<Card> = [] }
+
+  event move_right() {
+    let target_id = payload["card_id"]
+    cards = cards.map(fn(c) => move_one(target_id, "right", c))
+  }
+
+  <template>
+    {#for c in cards_in(cards, "todo")}
+      <li>{c.title}</li>
+    {/for}
+  </template>
+}
+```
+
+En vez del workaround verboso (inline logic O top-level fns
+adentro del `.fitzv` que el parser rechaza), el user separa la
+lógica pura en un `.fitz` classic y la importa naturalmente al
+SFC. Los tres módulos (`.fitz` helpers, `.fitzv` component,
+`.fitz` main) mantienen sus responsabilidades limpias.
+
+**Sin cambio breaking**: el path viejo con state fields + closure
+params sigue funcionando idéntico. Solo cambia el rechazo
+inmediato del ident desconocido — ahora consulta la imports table
+antes de errorear.
+
+**Cambio funcional visible en la firma pública**:
+`ChildComponentProp` (K-3 remainder) + `format_child_composition`
+(K-3 remainder) + el resto de la cadena SSR ahora incluyen
+`imported_names` en su plumbing. Interno del emitter —
+consumers externos (`emit_module_ssr` como entry point único
+en producción) no ven el cambio.
+
+**Deudas residuales derivadas** (NO bloquean Board):
+
+- **Type-check estático del expr importado contra la fn signature**
+  — hoy trust runtime (classic checker corre sobre emitted
+  module). Refinable si false negatives aparecen (typo en el
+  nombre importado no descubierto hasta parse del emitted).
+- **Alias en imports** (`from X import Y as Z`) — el emitter
+  hoy usa `imp.names` directo (nombre original solamente). El
+  view parser de §9.dd tampoco soporta alias (verificado).
+  Refinable si demand aparece.
+
 ### Impacto acumulado + Phase 11.7+ scoping
 
-Post-K-3 (2026-07-16): las 3 K-debts (K-1 event bubbling,
-K-2 component state R/W, K-3 compound / interpolated props) están
+Post-K-4 (2026-07-16): las 4 K-debts (K-1 event bubbling,
+K-2 component state R/W, K-3 compound / interpolated props,
+K-4 imported fn refs en SFC templates + event bodies) están
 CERRADAS para el SSR path (fitz-liveviews target).
 
 - **K-1** shipped en fitz-liveviews v0.5.0 con `dispatch_to()`

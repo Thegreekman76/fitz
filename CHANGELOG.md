@@ -324,6 +324,66 @@ signature de `format_child_composition` para tomar
 disponible en el caller). 3711 → 3715 lib tests green, fmt +
 clippy limpios.
 
+### K-4 — SSR emitter acepta imported top-level fn refs en templates + event bodies — post-v0.21.0 (2026-07-16)
+
+**Discovered + fixed** during Board.fitzv migration probe: el SSR
+emitter rechazaba llamadas a top-level fns importadas via `from X
+import Y`, forzando workarounds verbose (inline logic repetido o
+top-level fns dentro del `.fitzv` que el parser rechaza). K-4
+extiende `format_fitz_expr_scoped` para resolver bare Idents
+contra la imports table del file (`ExpandedViewFile.imports`, ya
+poblado por §9.dd).
+
+- Nuevo param `imported_names: &[&str]` en `format_fitz_expr_
+  scoped`. Resolution order: local_scope > state_field >
+  imported_name > error.
+- Threading: `emit_module_ssr` aplana `file.imports` en un slice
+  de nombres y lo pasa por toda la cadena (~30 call sites de
+  `emit_component_ssr_into` → template + event body emitters
+  → `format_child_composition` → wrapper `format_fitz_expr`).
+- Error message cuando el ident no es state field ni imported
+  ahora menciona la imports table como fix hint (antes solo citaba
+  el generic Phase 11.7+ pointer).
+- `lower_event_body_stmts` gana un `#[allow(clippy::too_many_
+  arguments)]` — 8 params (stmts + state + local scope + imported
+  + component + event + indent + out). Justificado en el comment;
+  refactor a `ScopeCtx` struct queda deferrable.
+
+**Patterns unlocked** (SSR target):
+
+```fitzv
+from helpers import cards_in, move_one
+
+component Board {
+  state { cards: List<Card> = [] }
+  event move_right() {
+    let target_id = payload["card_id"]
+    cards = cards.map(fn(c) => move_one(target_id, "right", c))
+  }
+  <template>
+    {#for c in cards_in(cards, "todo")}
+      <li>{c.title}</li>
+    {/for}
+  </template>
+}
+```
+
+Board.fitzv migration en `fitz-liveviews` ahora puede separar
+helpers puros en un `.fitz` classic sibling e importarlos
+naturalmente al SFC — arquitectura limpia (state + event +
+template en el SFC, lógica pura en el módulo helper).
+
+**Sin cambio breaking**: el path viejo con state fields + closure
+params sigue igual. Solo cambia el rechazo del ident desconocido —
+ahora consulta la imports table antes de errorear.
+
+**Cambios técnicos**: ~200 LoC netos + 4 unit tests nuevos
+(`k4_ssr_template_can_call_imported_fn_from_from_import`,
+`k4_ssr_event_body_can_call_imported_fn_via_closure_arg`,
+`k4_ssr_unknown_ident_still_errors_with_updated_hint`,
+`k4_ssr_local_shadows_imported_name`). 3715 → 3719 lib tests
+green, fmt + clippy limpios.
+
 ## [v0.20.1] — 2026-07-13 — Implicit `flv_register(...)` for LiveView components (fitz-liveviews Phase 5, A.1)
 
 Primer sub-paso de la Fase 5 diferida post-Phase-4 de `fitz-liveviews`.
