@@ -267,14 +267,39 @@ Extensions. Detalle en
   `fitz_liveviews` missing-dep hint; §9.aa event-body widening;
   §9.bb cross-module auto-inject). Detalle exhaustivo en
   [`docs/fase-11-plan.md`](fase-11-plan.md) §9.a–§9.bb.
+- **Phase 11 refinements** (v0.21.1, 2026-07-17) — K-3
+  (compound props para `<Child />`) + K-4 (SSR emitter acepta
+  imported top-level fn refs en templates + event bodies).
+  Descubiertos + fixed durante la Board.fitzv migration en
+  `fitz-liveviews`. **K-3 List<primitive>** — `<Child tags="a,b,c"
+  />` con `tags: List<Str>` coerciona a `vec![...]` (checker +
+  WASM) y a `[...]` (SSR); empty string → `vec![]`/`[]`; nested
+  primitives recurse. **K-3 Interpolated (SSR)** — `<Child
+  prop="{expr}" />` inlina la expr parseada con state-field
+  rewriting del padre; nominal / compound types pasan
+  naturalmente por la interpolación. **K-4 imported fn refs
+  (SSR)** — el walker `format_fitz_expr_scoped` gana un
+  `imported_names: &[&str]` del `ExpandedViewFile.imports`
+  (§9.dd), threaded por ~30 call sites del emitter. Bare Idents
+  que matchean un import emiten verbatim; el classic checker
+  valida el call sobre el emitted module. Resolution order:
+  `local_scope > state_field > imported_name > error con hint`.
+  WASM path rechaza interpolated props citando Phase 11.7+
+  (reactive plumbing). Con esto la Board.fitzv migration en
+  `fitz-liveviews` queda "prolija, facil, con arquitectura
+  clara" — types en `card.fitz`, helpers puros en
+  `board_helpers.fitz`, SFC en `Board.fitzv`, HTTP + WS thin
+  wire-up en `main.fitz`. Sin cambio breaking. 3719 lib tests +
+  4 K-4 nuevos verdes.
 
 **Próximo norte**: **atacar deudas** — inventario en
 [`docs/deudas-post-5b.md`](deudas-post-5b.md). Fase 11
 remaining scope (11.7 client-side dynamic capabilities +
-kanban SPA port, 11.8 LSP inside `.fitzv`, 11.9 pedagogic
-docs), Fase 13+ (orquestación distribuida, multi-tenant, deploy
-targets extra `fly`/`railway`/`k8s`) según demanda real. Sin
-presión inmediata.
+kanban SPA port + WASM interpolated props con reactivity
+plumbing, 11.8 LSP inside `.fitzv`, 11.9 pedagogic docs), Fase
+13+ (orquestación distribuida, multi-tenant, deploy targets
+extra `fly`/`railway`/`k8s`) según demanda real. Sin presión
+inmediata.
 
 ---
 

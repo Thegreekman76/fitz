@@ -227,6 +227,21 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 ## [Unreleased]
 
+*(vacía — próximas entradas van acá antes del siguiente bump)*
+
+## [v0.21.1] — 2026-07-17 — Phase 11 refinements: K-3 (compound + interpolated props) + K-4 (imported fn refs) para SSR
+
+**Patch release** que agrupa tres refinements post-v0.21.0 al SFC
+pipeline (SSR path). Todos son aditivos, sin cambios breaking.
+Descubiertos + fixed durante la Board.fitzv migration probe en
+`fitz-liveviews` — el kanban SFC full-page migration los usa
+end-to-end. Con este bundle, la Board migration deja de necesitar
+workarounds (top-level fns inlined en cada event body, `<Child />`
+composition ugly, no computed values en template) y queda "prolija,
+facil, con arquitectura clara" — la triple splittéalo por
+responsabilidades: types en `.fitz`, helpers puros en `.fitz`,
+component SFC en `.fitzv`, HTTP + WS wire-up thin en `.fitz`.
+
 ### K-3 (partial) — `<Child prop />` static props para `List<primitive>` — post-v0.21.0 (2026-07-16)
 
 **Refinement** del feature `<Child prop="v" />` composition
