@@ -33,10 +33,11 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use fitz::ast::Program;
 use fitz::lsp::{
-    check_source_with_types_and_base_dir, completion_at_position_with_uri, definition_for_position,
-    fitz_errors_to_diagnostics_with_source, hover_for_position,
-    make_definition_location_with_source, make_hover_with_range, resolve_cross_module_definition,
-    signature_help_at_position, utf16_to_unicode_char,
+    check_source_with_types_and_base_dir, check_view_source, completion_at_position_with_uri,
+    definition_at_position_view, definition_for_position, fitz_errors_to_diagnostics_with_source,
+    hover_at_position_view, hover_for_position, make_definition_location_with_source,
+    make_hover_with_range, resolve_cross_module_definition, signature_help_at_position,
+    uri_is_fitzv, utf16_to_unicode_char,
 };
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
@@ -84,6 +85,37 @@ impl Backend {
     /// for handlers whose provider lives in `auth.fitz`. When the
     /// URI is not `file://` (rare), falls back to single-file mode.
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
+        // Session B — Phase 11.8.a (2026-07-18): dispatch on file
+        // extension. `.fitzv` files route through the view pipeline
+        // (view lexer → parser → expand → check) via
+        // `check_view_source`; anything else uses the classic Fitz
+        // pipeline via `check_source_with_types_and_base_dir`.
+        //
+        // For `.fitzv` we do NOT populate `program`/`type_env`/etc —
+        // those are the classic-Fitz side-tables used by hover /
+        // go-to-def / completions. View-side hover/go-to-def/
+        // completions are Session B follow-ups (11.8.b/c); today we
+        // stash empty defaults so hover requests over a `.fitzv`
+        // buffer resolve to `None` cleanly.
+        if uri_is_fitzv(&uri) {
+            let errors = check_view_source(&text);
+            let diagnostics = fitz_errors_to_diagnostics_with_source(&errors, &text);
+            self.documents.lock().insert(
+                uri.clone(),
+                DocumentState {
+                    text,
+                    program: Program::new(),
+                    type_env: TypeEnv::default(),
+                    type_info: TypeInfo::new(),
+                    def_info: DefinitionInfo::new(),
+                },
+            );
+            self.client
+                .publish_diagnostics(uri, diagnostics, version)
+                .await;
+            return;
+        }
+
         let base_dir = uri
             .to_file_path()
             .ok()
@@ -265,6 +297,15 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
+        // Session B — Phase 11.8.c (2026-07-18): dispatch on file
+        // extension. `.fitzv` files route through the view-aware
+        // hover helper (state field / event handler names of the
+        // enclosing component, resolved via heuristic scan of the
+        // raw source — robust to partially-broken sources).
+        if uri_is_fitzv(&uri) {
+            let hover = hover_at_position_view(&state.text, pos.line, pos.character);
+            return Ok(hover);
+        }
         // v0.13.2 — `pos.character` arrives from the client as
         // UTF-16 code units (LSP spec default). `hover_for_position`
         // and `make_hover_with_range` expect Unicode chars
@@ -311,6 +352,13 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
+        // Session B — Phase 11.8.d (2026-07-18): dispatch on file
+        // extension. `.fitzv` files route through the view-aware
+        // go-to-def helper.
+        if uri_is_fitzv(&uri) {
+            let loc = definition_at_position_view(&uri, &state.text, pos.line, pos.character);
+            return Ok(loc.map(GotoDefinitionResponse::Scalar));
+        }
         // v0.13.2 — we translate UTF-16 → Unicode chars once (same
         // reason as in `hover`). `definition_for_position` looks up
         // DefinitionInfo indexed by lexer Unicode chars;
@@ -360,6 +408,16 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
+        // Session B — Phase 11.8.b (2026-07-18): dispatch on file
+        // extension. `.fitzv` files route through the view-aware
+        // completion helper (template directives + event decorators
+        // + state fields + event handler names). Classic `.fitz`
+        // paths through the existing helper unchanged.
+        if uri_is_fitzv(&uri) {
+            let items =
+                fitz::lsp::completion_at_position_view(&state.text, pos.line, pos.character);
+            return Ok(Some(CompletionResponse::Array(items)));
+        }
         let items = completion_at_position_with_uri(
             &state.text,
             &state.program,

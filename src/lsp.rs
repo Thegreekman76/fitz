@@ -37,6 +37,723 @@ pub fn check_source(source: &str) -> Vec<FitzError> {
     errors
 }
 
+/// Session B — Phase 11.8.a (2026-07-18): LSP diagnostics pipeline for
+/// `.fitzv` view files. Runs the view lexer → view parser → view
+/// expand → view check pipeline and converts each error type
+/// (`ViewParseError`, `ExpandError`, `CheckError`) to `FitzError` shape
+/// so the existing `fitz_errors_to_diagnostics_with_source` (which the
+/// bin's `check_and_publish` already uses) works unchanged.
+///
+/// **Error kind mapping**:
+/// - `ViewParseError` → `ErrorKind::InvalidSyntax` (parser-level).
+/// - `ExpandError`    → `ErrorKind::InvalidSyntax` (still a shape issue).
+/// - `CheckError`     → `ErrorKind::TypeMismatch` (type-check level).
+///
+/// **Error policy**: the pipeline is short-circuiting per-layer — if the
+/// view parser fails, we don't run expand/check; if expand fails, we
+/// don't run check. This matches the CLI's `fitz check` behaviour on
+/// `.fitzv` files and produces cleaner diagnostics (no cascade errors
+/// from an already-broken tree).
+///
+/// **Cross-module resolution**: this MVP does NOT walk the SFC's
+/// `from X import Y` graph. False positives on cross-module refs live
+/// as documented residual debt (parallel to the classic Fitz `.fitz`
+/// path where the LSP does walk the graph via `_and_base_dir`; the
+/// view path can be extended when demand appears).
+pub fn check_view_source(source: &str) -> Vec<FitzError> {
+    use crate::error::ErrorKind;
+    // Layer 1 — view lexer + parser.
+    let raw = match crate::view::parse(source) {
+        Ok(f) => f,
+        Err(e) => {
+            return vec![FitzError {
+                kind: ErrorKind::InvalidSyntax,
+                line: e.line,
+                column: e.column,
+                message: e.message,
+                hint: None,
+            }];
+        }
+    };
+    // Layer 2 — expand.
+    let expanded = match crate::view::expand::expand(&raw) {
+        Ok(f) => f,
+        Err(e) => {
+            return vec![FitzError {
+                kind: ErrorKind::InvalidSyntax,
+                line: e.loc.line,
+                column: e.loc.column,
+                message: format!("{} ({})", e.message, e.context),
+                hint: None,
+            }];
+        }
+    };
+    // Layer 3 — type-check. Returns Vec<CheckError> — accumulates,
+    // doesn't short-circuit.
+    crate::view::check::check(&expanded)
+        .into_iter()
+        .map(|e| FitzError {
+            kind: ErrorKind::TypeMismatch {
+                expected: String::new(),
+                found: String::new(),
+            },
+            line: e.loc.line,
+            column: e.loc.column,
+            message: format!("{} ({})", e.message, e.context),
+            hint: None,
+        })
+        .collect()
+}
+
+/// Session B — Phase 11.8.b (2026-07-18): completion inside a `.fitzv`
+/// source. Offers:
+/// - **Template directives** — `{#if}`, `{#for}`, `{#else}`, `{/if}`,
+///   `{/for}` when the cursor is preceded by `{` at the last non-blank
+///   char before the cursor (or `{#` when the user is mid-typing).
+/// - **Event decorators** — `@click`, `@submit` when the cursor is
+///   preceded by `@` inside an HTML tag position (bare `@` at cursor —
+///   we don't fully parse the tag, so we accept any `@` prefix).
+/// - **State field names** of the component enclosing the cursor line
+///   as `FIELD` items — matches the SFC's template + event body
+///   scoping where bare state fields resolve to `state.<name>`.
+/// - **Event handler names** of the same component as `EVENT` items
+///   for `data-flv-click="..."` style refs (bare — the user typing the
+///   handler name inside a quoted string).
+///
+/// **Scope**: MVP — does NOT do fine-grained context detection (we
+/// don't distinguish "inside template" vs "inside state block" vs
+/// "outside component"). The suggestions are always accurate but may
+/// appear in slightly off contexts. Fine-grained routing lives as
+/// Session B follow-up if false-positive noise surfaces in practice.
+///
+/// **Cross-component / imports**: NOT surfaced by this MVP — those
+/// would need the same K-4 import-name aggregation the SSR emitter
+/// does, plus scope routing per template/event body. Deferred.
+pub fn completion_at_position_view(source: &str, line: u32, character: u32) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+
+    // Line-preceding text lets us dispatch on `{`, `{#`, `@` prefixes
+    // without needing a full lexer pass. `line` is 0-based here (LSP
+    // convention).
+    let line_text = source.lines().nth(line as usize).unwrap_or("");
+    let cursor_col = (character as usize).min(line_text.chars().count());
+    let prefix: String = line_text.chars().take(cursor_col).collect();
+    let trimmed = prefix.trim_end();
+
+    // (1) `{` or `{#` → template directive completions.
+    if trimmed.ends_with("{#") || trimmed.ends_with('{') {
+        items.extend(view_directive_completions());
+    }
+
+    // (2) `@` at cursor (inside a tag) → event decorator completions.
+    if trimmed.ends_with('@') {
+        items.extend(view_event_decorator_completions());
+    }
+
+    // (3) Always available: state field names + event handler names
+    // of the enclosing component. Bare identifiers in a template
+    // (`{count}`) or event body (`count = count + 1`) match against
+    // these directly. We accept the extra noise in offset positions
+    // for the MVP — filtering by "inside template" vs "inside state
+    // block" is a fine-grained routing debt.
+    //
+    // **Robust to partial parses** — the user typing an unterminated
+    // `{` in a template makes `view::parse` reject, but we still want
+    // to offer completions in that context. We use a lightweight
+    // heuristic pass over the source to extract state field names +
+    // event names WITHOUT going through the parser. Trade-off: catches
+    // extra idents (comments containing `<name>: <type>`, etc.); the
+    // false positives are cosmetic — the classic checker downstream
+    // catches misuses.
+    let (state_fields, event_names) =
+        heuristic_state_and_events_for_line(source, line as usize + 1);
+    for name in state_fields {
+        items.push(CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some("state field".to_string()),
+            ..Default::default()
+        });
+    }
+    for name in event_names {
+        items.push(CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::EVENT),
+            detail: Some("event handler".to_string()),
+            ..Default::default()
+        });
+    }
+
+    items
+}
+
+/// Session B — Phase 11.8.b (2026-07-18): heuristic extraction of
+/// state field names + event handler names from the enclosing
+/// component's `state { ... }` and `event <name>(...)` blocks,
+/// robust to partially-broken sources (unterminated templates,
+/// mid-typing braces, etc.). Runs on the raw source text without
+/// invoking the view parser.
+///
+/// Algorithm:
+/// 1. Walk lines forward, tracking the last-seen `component <Name> {`
+///    header up to (and including) `cursor_line`.
+/// 2. Inside that component's span (defined as the range up to the
+///    next `component` header or EOF), collect:
+///    - `<name>: <type>` shapes inside `state { ... }` block for
+///      state field names.
+///    - `event <name>(...)` header lines for event names.
+/// 3. Return the two vectors.
+///
+/// Trade-offs: catches idents from comments or nested blocks. False
+/// positives are cosmetic (extra items in the completion list);
+/// false negatives (missing valid items) only happen for very
+/// contrived shapes not seen in practice.
+fn heuristic_state_and_events_for_line(
+    source: &str,
+    cursor_line: usize,
+) -> (Vec<String>, Vec<String>) {
+    let mut state_fields: Vec<String> = Vec::new();
+    let mut event_names: Vec<String> = Vec::new();
+    let mut in_component: Option<()> = None;
+    let mut component_starts_at: usize = 0;
+    let mut in_state_block: bool = false;
+    let mut state_brace_depth: i32 = 0;
+
+    for (idx, line) in source.lines().enumerate() {
+        let line_number = idx + 1; // 1-based
+        let trimmed = line.trim_start();
+
+        // Component header — flush + start.
+        if trimmed.starts_with("component ") {
+            if line_number > cursor_line {
+                break;
+            }
+            state_fields.clear();
+            event_names.clear();
+            in_component = Some(());
+            component_starts_at = line_number;
+            in_state_block = false;
+            state_brace_depth = 0;
+            continue;
+        }
+        if in_component.is_none() {
+            continue;
+        }
+
+        // State block detection — enter on line containing `state {`.
+        if !in_state_block && trimmed.starts_with("state") && line.contains('{') {
+            in_state_block = true;
+            state_brace_depth = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            // Handle `state { count: Int = 0 }` all on one line.
+            if state_brace_depth == 0 {
+                extract_state_fields_from_line(line, &mut state_fields);
+                in_state_block = false;
+                continue;
+            }
+            continue;
+        }
+        if in_state_block {
+            let opens = line.matches('{').count() as i32;
+            let closes = line.matches('}').count() as i32;
+            state_brace_depth += opens - closes;
+            extract_state_fields_from_line(line, &mut state_fields);
+            if state_brace_depth <= 0 {
+                in_state_block = false;
+            }
+            continue;
+        }
+
+        // Event handler header — `event <name>(...)` on its own line.
+        if trimmed.starts_with("event ") {
+            if let Some(rest) = trimmed.strip_prefix("event ") {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    event_names.push(name);
+                }
+            }
+        }
+    }
+
+    let _ = component_starts_at;
+    (state_fields, event_names)
+}
+
+/// Extract `<ident>: <...>` state field names from a single line.
+/// Handles the two common shapes: `count: Int = 0` and
+/// `title: Str = "hi"`. The regex-free approach is simpler + faster.
+fn extract_state_fields_from_line(line: &str, out: &mut Vec<String>) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Skip the `state {` header itself.
+    if trimmed.starts_with("state ") || trimmed.starts_with("state{") {
+        return;
+    }
+    // Look for `<ident>:` at the start of the trimmed line.
+    let mut chars = trimmed.chars().peekable();
+    let mut name = String::new();
+    while let Some(&c) = chars.peek() {
+        if c.is_alphanumeric() || c == '_' {
+            name.push(c);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if name.is_empty() {
+        return;
+    }
+    // The next non-whitespace char should be `:` for it to count as
+    // a state field.
+    for c in chars {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c == ':' {
+            out.push(name);
+        }
+        return;
+    }
+}
+
+/// The 5 SFC template directives Fitz recognises today (§9.b of the
+/// view plan). Emitted as CompletionItems with `SNIPPET` insertText
+/// where useful so tabstops land inside the placeholder.
+fn view_directive_completions() -> Vec<CompletionItem> {
+    fn snippet(label: &str, insert: &str, detail: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            insert_text: Some(insert.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            detail: Some(detail.to_string()),
+            ..Default::default()
+        }
+    }
+    vec![
+        snippet(
+            "#if",
+            "#if $1}\n  $0\n{/if",
+            "template directive — conditional block",
+        ),
+        snippet(
+            "#for",
+            "#for $1 in $2}\n  $0\n{/for",
+            "template directive — iteration",
+        ),
+        snippet(
+            "#else",
+            "#else",
+            "template directive — else branch of `{#if}`",
+        ),
+        snippet("/if", "/if", "template directive — close `{#if}`"),
+        snippet("/for", "/for", "template directive — close `{#for}`"),
+    ]
+}
+
+/// The event decorators Fitz recognises on HTML tags today. Post
+/// §9.dd + §9.ee the parser accepts arbitrary `@<ident>=...` attrs,
+/// but the framework runtime only wires `@click` and `@submit` —
+/// surface those two to steer users toward the supported set.
+fn view_event_decorator_completions() -> Vec<CompletionItem> {
+    fn attr(label: &str, insert: &str, detail: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::EVENT),
+            insert_text: Some(insert.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            detail: Some(detail.to_string()),
+            ..Default::default()
+        }
+    }
+    vec![
+        attr("click", "click=\"$1\"", "event attr — bind DOM click"),
+        attr("submit", "submit=\"$1\"", "event attr — bind form submit"),
+    ]
+}
+
+// Note: initial MVP used a parser-backed `component_containing_line`
+// helper, but the raw view parser rejects partially-broken sources
+// (unterminated template braces, mid-typing shapes), which is the
+// exact context where the user needs completion the most. Replaced
+// with `heuristic_state_and_events_for_line` above — regex-free
+// line-by-line pass that survives arbitrary partial input.
+
+/// Dispatches on the URI's file extension:
+/// - `.fitzv` → view pipeline via `check_view_source`.
+/// - anything else → classic Fitz pipeline via `check_source`.
+///
+/// The URI is the primary discriminator; if the URI has no
+/// discernible extension (rare — REPL, stdin), the classic pipeline
+/// runs by default. Distinguishing on file NAME (rather than
+/// content-sniffing) matches how the CLI's `fitz check` /
+/// `fitz run` dispatch on the entry path's extension.
+pub fn check_source_by_uri(uri: &Url, source: &str) -> Vec<FitzError> {
+    if uri_is_fitzv(uri) {
+        check_view_source(source)
+    } else {
+        check_source(source)
+    }
+}
+
+/// True iff the URI's path ends with `.fitzv` (case-sensitive to
+/// match cross-platform filesystem conventions of the source-tree
+/// side; case-insensitive filesystems still work because the URI
+/// carries the on-disk name verbatim).
+pub fn uri_is_fitzv(uri: &Url) -> bool {
+    uri.path().ends_with(".fitzv")
+}
+
+/// Session B — Phase 11.8.d (2026-07-18): go-to-definition inside a
+/// `.fitzv` source. Returns a `Location` pointing at the declaration
+/// line of:
+/// - The state field declaration (`<name>: <type> = ...` inside the
+///   `state { ... }` block) when the cursor is over a bare state
+///   field reference in the template or an event body.
+/// - The event handler declaration (`event <name>() { ... }`) when
+///   the cursor is over the handler name (e.g. inside a
+///   `data-flv-click="inc"` string).
+///
+/// Returns `None` when the identifier under the cursor doesn't match
+/// any known state field or event handler in the enclosing
+/// component.
+///
+/// The `uri` is used to build the returned `Location` — the same
+/// `.fitzv` file (single-file go-to-def; cross-component refs are
+/// out of scope for the MVP).
+pub fn definition_at_position_view(
+    uri: &Url,
+    source: &str,
+    line: u32,
+    character: u32,
+) -> Option<Location> {
+    // Extract identifier under cursor (mirrors hover).
+    let line_text = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = line_text.chars().collect();
+    let cursor = (character as usize).min(chars.len());
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut start = cursor;
+    while start > 0 && is_ident(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < chars.len() && is_ident(chars[end]) {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    let ident: String = chars[start..end].iter().collect();
+
+    // Find the declaration line inside the enclosing component's
+    // state block or event blocks.
+    let cursor_line_1_based = line as usize + 1;
+    let (decl_line, decl_col) =
+        heuristic_declaration_position(source, cursor_line_1_based, &ident)?;
+
+    let range = Range {
+        start: Position::new(decl_line, decl_col),
+        end: Position::new(decl_line, decl_col + ident.chars().count() as u32),
+    };
+    Some(Location {
+        uri: uri.clone(),
+        range,
+    })
+}
+
+/// Heuristic — find the declaration position of `ident` inside the
+/// component enclosing `cursor_line`. Returns `(line, column)` both
+/// 0-based (LSP convention) pointing at the `<ident>` in either
+/// `<ident>: <type>` (state field decl) or `event <ident>(...)`
+/// (event handler decl).
+fn heuristic_declaration_position(
+    source: &str,
+    cursor_line: usize,
+    ident: &str,
+) -> Option<(u32, u32)> {
+    let mut in_component = false;
+    let mut in_state_block = false;
+    let mut state_brace_depth: i32 = 0;
+    let mut best: Option<(u32, u32)> = None;
+
+    for (idx, line) in source.lines().enumerate() {
+        let line_number = idx + 1;
+        if line_number > cursor_line {
+            // Don't scan past the cursor's component to avoid
+            // matching a same-named field of a later component.
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("component ") {
+                break;
+            }
+        }
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with("component ") {
+            in_component = true;
+            in_state_block = false;
+            state_brace_depth = 0;
+            best = None;
+            continue;
+        }
+        if !in_component {
+            continue;
+        }
+        // State block open.
+        if !in_state_block && trimmed.starts_with("state") && line.contains('{') {
+            in_state_block = true;
+            state_brace_depth = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            // Same-line state — check field decls now.
+            if let Some(col) = find_state_field_position(line, ident) {
+                best = Some((idx as u32, col));
+            }
+            if state_brace_depth == 0 {
+                in_state_block = false;
+            }
+            continue;
+        }
+        if in_state_block {
+            let opens = line.matches('{').count() as i32;
+            let closes = line.matches('}').count() as i32;
+            state_brace_depth += opens - closes;
+            if let Some(col) = find_state_field_position(line, ident) {
+                best = Some((idx as u32, col));
+            }
+            if state_brace_depth <= 0 {
+                in_state_block = false;
+            }
+            continue;
+        }
+        // Event handler decl on this line.
+        if let Some(rest) = trimmed.strip_prefix("event ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name == ident {
+                // Compute the column of `<name>` on the raw line.
+                let idx_ident = line.find("event ").map(|i| i + "event ".len())?;
+                best = Some((idx as u32, idx_ident as u32));
+            }
+        }
+    }
+    best
+}
+
+/// If `line` contains `<ident>: ...`, return the column of `<ident>`.
+fn find_state_field_position(line: &str, ident: &str) -> Option<u32> {
+    let trimmed = line.trim_start();
+    let leading = line.len() - trimmed.len();
+    let after_ident = trimmed.strip_prefix(ident)?;
+    // The next non-whitespace char must be `:` for it to count as
+    // a state field decl.
+    let after_ident_trimmed = after_ident.trim_start();
+    if after_ident_trimmed.starts_with(':') {
+        Some(leading as u32)
+    } else {
+        None
+    }
+}
+
+/// Session B — Phase 11.8.c (2026-07-18): hover inside a `.fitzv`
+/// source. Returns a markdown-formatted `Hover` when the cursor is
+/// over an identifier that matches:
+/// - A state field of the enclosing component → shows
+///   `<name>: <type_expr_raw> — state field of <Component>`.
+/// - An event handler of the enclosing component → shows
+///   `event <name>() — event handler of <Component>`.
+///
+/// Otherwise returns `None` (no hover). MVP scope — does NOT do
+/// TypeInfo-based per-node hover (that requires wiring the classic
+/// checker over the emitted classic Fitz source, which is a bigger
+/// piece of work — Session B follow-up if false-negatives surface).
+///
+/// The identifier extraction reuses `ident_under_cursor` (already
+/// used by the classic-Fitz hover/go-to-def paths). The `line` /
+/// `character` are LSP-style 0-based.
+pub fn hover_at_position_view(source: &str, line: u32, character: u32) -> Option<Hover> {
+    // 1. Extract the identifier under the cursor via the line's
+    //    ident-char sweep. We do this inline instead of reusing
+    //    `ident_range_at_position` because we want the STRING, not
+    //    just the range.
+    let line_text = source.lines().nth(line as usize)?;
+    let chars: Vec<char> = line_text.chars().collect();
+    let cursor = (character as usize).min(chars.len());
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut start = cursor;
+    while start > 0 && is_ident(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < chars.len() && is_ident(chars[end]) {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    let ident: String = chars[start..end].iter().collect();
+    // Bail out on Fitz keywords / SFC block markers that would trip
+    // false positives on hover.
+    let is_keyword = matches!(
+        ident.as_str(),
+        "component" | "state" | "event" | "from" | "import" | "as" | "template" | "style"
+    );
+    if is_keyword {
+        return None;
+    }
+
+    // 2. Heuristic component scan — same helper used by
+    //    completion_at_position_view. Returns the state field names
+    //    + event handler names of the component enclosing the cursor
+    //    line. To get the state field's *type*, do a second pass
+    //    matching `<ident>: <type_expr>` inside the same span.
+    let cursor_line_1_based = line as usize + 1;
+    let (state_fields, event_names) =
+        heuristic_state_and_events_for_line(source, cursor_line_1_based);
+
+    // 3a. State field?
+    if state_fields.iter().any(|n| n == &ident) {
+        let (component_name, type_hint) =
+            heuristic_state_field_type_for(source, cursor_line_1_based, &ident);
+        let body = match type_hint {
+            Some(t) => format!(
+                "```fitz\n{ident}: {t}\n```\n\n**state field** of `{}`",
+                component_name.as_deref().unwrap_or("component")
+            ),
+            None => format!(
+                "```fitz\n{ident}\n```\n\n**state field** of `{}`",
+                component_name.as_deref().unwrap_or("component")
+            ),
+        };
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: body,
+            }),
+            range: None,
+        });
+    }
+
+    // 3b. Event handler?
+    if event_names.iter().any(|n| n == &ident) {
+        let component_name = heuristic_component_name_for_line(source, cursor_line_1_based)
+            .unwrap_or_else(|| "component".to_string());
+        let body =
+            format!("```fitz\nevent {ident}()\n```\n\n**event handler** of `{component_name}`");
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: body,
+            }),
+            range: None,
+        });
+    }
+
+    None
+}
+
+/// Heuristic — extract the `<type_expr_raw>` associated with a state
+/// field named `field_name` from the component enclosing
+/// `cursor_line`. Returns `(component_name, Option<type_hint>)`.
+fn heuristic_state_field_type_for(
+    source: &str,
+    cursor_line: usize,
+    field_name: &str,
+) -> (Option<String>, Option<String>) {
+    let mut component_name: Option<String> = None;
+    let mut current_component_name: Option<String> = None;
+    let mut in_state_block = false;
+    let mut state_brace_depth: i32 = 0;
+    let mut type_hint: Option<String> = None;
+
+    for (idx, line) in source.lines().enumerate() {
+        let line_number = idx + 1;
+        let trimmed = line.trim_start();
+        if line_number > cursor_line {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("component ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                current_component_name = Some(name.clone());
+                component_name = Some(name);
+                in_state_block = false;
+                state_brace_depth = 0;
+                type_hint = None;
+            }
+            continue;
+        }
+        if !in_state_block && trimmed.starts_with("state") && line.contains('{') {
+            in_state_block = true;
+            state_brace_depth = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if state_brace_depth == 0 {
+                if let Some(t) = extract_field_type_from_line(line, field_name) {
+                    type_hint = Some(t);
+                }
+                in_state_block = false;
+            }
+            continue;
+        }
+        if in_state_block {
+            let opens = line.matches('{').count() as i32;
+            let closes = line.matches('}').count() as i32;
+            state_brace_depth += opens - closes;
+            if let Some(t) = extract_field_type_from_line(line, field_name) {
+                type_hint = Some(t);
+            }
+            if state_brace_depth <= 0 {
+                in_state_block = false;
+            }
+        }
+    }
+    let _ = current_component_name;
+    (component_name, type_hint)
+}
+
+/// Match a `<field_name>: <type_expr>` shape on the line and return
+/// the type_expr (trimmed, and truncated at `=` or end-of-line).
+fn extract_field_type_from_line(line: &str, field_name: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix(field_name)?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let (type_part, _) = rest.split_once('=').unwrap_or((rest, ""));
+    let cleaned = type_part.trim().trim_end_matches(',').trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+/// Look up the name of the component enclosing `cursor_line`.
+fn heuristic_component_name_for_line(source: &str, cursor_line: usize) -> Option<String> {
+    let mut current: Option<String> = None;
+    for (idx, line) in source.lines().enumerate() {
+        let line_number = idx + 1;
+        if line_number > cursor_line {
+            break;
+        }
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("component ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                current = Some(name);
+            }
+        }
+    }
+    current
+}
+
 /// LSP-style pipeline retaining `Program`, `TypeEnv`, `TypeInfo`, and
 /// `DefinitionInfo`. Variant of `check_source` for consumers that need
 /// the AST (Phase 9.x.4 — scope-level autocomplete enumerates
@@ -6441,5 +7158,292 @@ fn make_resp() -> Response {
                 e.message
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Session B — Phase 11.8.a — LSP diagnostics for `.fitzv` view files
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn b11_8_a_uri_is_fitzv_recognises_fitzv_extension() {
+        let uri = Url::parse("file:///tmp/Foo.fitzv").unwrap();
+        assert!(uri_is_fitzv(&uri));
+    }
+
+    #[test]
+    fn b11_8_a_uri_is_fitzv_rejects_classic_fitz_extension() {
+        let uri = Url::parse("file:///tmp/foo.fitz").unwrap();
+        assert!(!uri_is_fitzv(&uri));
+    }
+
+    #[test]
+    fn b11_8_a_uri_is_fitzv_rejects_other_extensions() {
+        let uri = Url::parse("file:///tmp/foo.md").unwrap();
+        assert!(!uri_is_fitzv(&uri));
+        let uri2 = Url::parse("file:///tmp/foo.rs").unwrap();
+        assert!(!uri_is_fitzv(&uri2));
+    }
+
+    #[test]
+    fn b11_8_a_check_view_source_clean_component_no_errors() {
+        // A valid `.fitzv` file should produce zero errors.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let errors = check_view_source(src);
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn b11_8_a_check_view_source_view_parse_error_surfaces_as_diagnostic() {
+        // Deliberately broken — missing `state {}` block delimiter.
+        let src = r#"component X {
+  state
+  <template><div>hi</div></template>
+}"#;
+        let errors = check_view_source(src);
+        assert!(!errors.is_empty(), "expected parse error, got none");
+        // The error should have line/column set to something reasonable
+        // in the .fitzv file (not a synthetic 0:0).
+        assert!(
+            errors[0].line > 0,
+            "line should be non-zero: {:?}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn b11_8_a_check_view_source_check_error_surfaces_with_component_context() {
+        // Type-check error: state field type doesn't match its default.
+        let src = r#"component X {
+  state { count: Int = "not an int" }
+  <template><div>{count}</div></template>
+}"#;
+        let errors = check_view_source(src);
+        assert!(!errors.is_empty(), "expected type error");
+        // The error message should carry the check context (component
+        // name, state field name) appended in parens.
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("component 'X'") || msg.contains("count"),
+            "message should carry context, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn b11_8_a_check_source_by_uri_routes_fitzv_to_view_pipeline() {
+        // The URI-based dispatcher must route a `.fitzv` URI through
+        // the view pipeline. Regression: if it routed through the
+        // classic Fitz pipeline, the classic parser would choke on
+        // `component X { ... }` (not a classic top-level construct).
+        let uri = Url::parse("file:///tmp/X.fitzv").unwrap();
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let errors = check_source_by_uri(&uri, src);
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn b11_8_a_check_source_by_uri_routes_classic_fitz_to_classic_pipeline() {
+        // A `.fitz` URI with classic-valid content routes through the
+        // classic Fitz pipeline (unchanged path).
+        let uri = Url::parse("file:///tmp/hello.fitz").unwrap();
+        let src = r#"let x = 42
+print(x)"#;
+        let errors = check_source_by_uri(&uri, src);
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    // -----------------------------------------------------------------------
+    // Session B — Phase 11.8.b — LSP completions inside `.fitzv`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn b11_8_b_view_completions_after_brace_offers_directives() {
+        // After `{` at line start, offer template directives.
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <div>{
+    </div>
+  </template>
+}"#;
+        // Line 3 (0-based), column 10 — right after `<div>{`.
+        let items = completion_at_position_view(src, 3, 10);
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"#if"), "labels: {:?}", labels);
+        assert!(labels.contains(&"#for"), "labels: {:?}", labels);
+    }
+
+    #[test]
+    fn b11_8_b_view_completions_after_at_offers_event_decorators() {
+        let src = r#"component X {
+  state { count: Int = 0 }
+  <template>
+    <button @
+    </button>
+  </template>
+}"#;
+        // Line 3 (0-based), column 13 — right after `<button @`.
+        let items = completion_at_position_view(src, 3, 13);
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"click"), "labels: {:?}", labels);
+        assert!(labels.contains(&"submit"), "labels: {:?}", labels);
+    }
+
+    #[test]
+    fn b11_8_b_view_completions_offer_state_field_names_of_enclosing_component() {
+        let src = r#"component App {
+  state {
+    count: Int = 0
+    title: Str = "hi"
+  }
+  <template>
+    <div>{
+    </div>
+  </template>
+}"#;
+        // Cursor inside the template — should offer state field names.
+        let items = completion_at_position_view(src, 6, 10);
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"count"), "labels: {:?}", labels);
+        assert!(labels.contains(&"title"), "labels: {:?}", labels);
+    }
+
+    #[test]
+    fn b11_8_b_view_completions_offer_event_names_of_enclosing_component() {
+        let src = r#"component App {
+  state { count: Int = 0 }
+  event inc() { count = count + 1 }
+  event dec() { count = count - 1 }
+  <template>
+    <div>{
+    </div>
+  </template>
+}"#;
+        // Cursor inside the template — should offer event names too.
+        let items = completion_at_position_view(src, 5, 10);
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"inc"), "labels: {:?}", labels);
+        assert!(labels.contains(&"dec"), "labels: {:?}", labels);
+    }
+
+    #[test]
+    fn b11_8_b_view_completions_directive_items_carry_snippet_insert_text() {
+        // The `#if` directive item should be a SNIPPET with tabstops.
+        let src = "component X { state {} <template>{";
+        let items = completion_at_position_view(src, 0, 34);
+        let if_item = items
+            .iter()
+            .find(|c| c.label == "#if")
+            .expect("missing #if in items");
+        assert_eq!(if_item.kind, Some(CompletionItemKind::SNIPPET));
+        assert!(
+            if_item.insert_text.is_some(),
+            "snippet should carry insert_text"
+        );
+        assert!(
+            if_item.insert_text.as_ref().unwrap().contains("{/if"),
+            "if snippet should close with /if"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Session B — Phase 11.8.c — LSP hover inside `.fitzv`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn b11_8_c_view_hover_over_state_field_shows_type_and_component() {
+        let src = "component App {\n  state {\n    count: Int = 0\n    title: Str = \"hi\"\n  }\n  <template><div>{count}</div></template>\n}";
+        // Line 5 (0-based), column 18 — on `count` inside the
+        // template interpolation `{count}`.
+        let hover = hover_at_position_view(src, 5, 18).expect("hover on state field");
+        let text = match hover.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(text.contains("count: Int"), "hover text: {text}");
+        assert!(text.contains("state field"), "hover text: {text}");
+        assert!(text.contains("App"), "hover text: {text}");
+    }
+
+    #[test]
+    fn b11_8_c_view_hover_over_event_handler_shows_event_and_component() {
+        let src = "component App {\n  state { count: Int = 0 }\n  event inc() { count = count + 1 }\n  <template><button data-flv-click=\"inc\">+</button></template>\n}";
+        // Line 2 (0-based), column 8 — on `inc` in the event decl.
+        let hover = hover_at_position_view(src, 2, 8).expect("hover on event handler");
+        let text = match hover.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => panic!("expected markup"),
+        };
+        assert!(text.contains("event inc"), "hover text: {text}");
+        assert!(text.contains("event handler"), "hover text: {text}");
+        assert!(text.contains("App"), "hover text: {text}");
+    }
+
+    #[test]
+    fn b11_8_c_view_hover_over_unknown_ident_returns_none() {
+        let src = "component App {\n  state { count: Int = 0 }\n  <template><div>{unknown_ident}</div></template>\n}";
+        let hover = hover_at_position_view(src, 2, 18);
+        assert!(hover.is_none(), "hover over unknown ident should be None");
+    }
+
+    #[test]
+    fn b11_8_c_view_hover_over_whitespace_returns_none() {
+        let src = "component App {\n  state { count: Int = 0 }\n}";
+        // Line 0, column 0 — on `c` of `component` (a keyword).
+        // `ident_under_cursor` returns the ident, but neither
+        // state fields nor event names include `component`, so
+        // hover returns None.
+        let hover = hover_at_position_view(src, 0, 0);
+        assert!(hover.is_none(), "hover on keyword should be None");
+    }
+
+    // -----------------------------------------------------------------------
+    // Session B — Phase 11.8.d — LSP go-to-def inside `.fitzv`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn b11_8_d_view_goto_def_over_state_field_ref_jumps_to_state_decl() {
+        let src = "component App {\n  state {\n    count: Int = 0\n  }\n  <template><div>{count}</div></template>\n}";
+        let uri = Url::parse("file:///tmp/App.fitzv").unwrap();
+        // Line 4 (0-based), column 20 — on `count` inside the
+        // template interpolation.
+        let loc =
+            definition_at_position_view(&uri, src, 4, 20).expect("goto-def on state field ref");
+        assert_eq!(loc.uri, uri);
+        // The declaration line is `    count: Int = 0` at line 2
+        // (0-based). The column should be 4 (the leading indent).
+        assert_eq!(loc.range.start.line, 2);
+        assert_eq!(loc.range.start.character, 4);
+        // Range covers `count` — 5 chars.
+        assert_eq!(loc.range.end.character, 9);
+    }
+
+    #[test]
+    fn b11_8_d_view_goto_def_over_event_ref_jumps_to_event_decl() {
+        let src =
+            "component App {\n  state { count: Int = 0 }\n  event inc() { count = count + 1 }\n}";
+        let uri = Url::parse("file:///tmp/App.fitzv").unwrap();
+        // Line 2 (0-based), column 8 — on `inc` in the event decl.
+        // (In practice you'd goto-def from a data-flv-click ref;
+        // here we just verify the decl-line lookup works.)
+        let loc =
+            definition_at_position_view(&uri, src, 2, 8).expect("goto-def on event handler ref");
+        assert_eq!(loc.uri, uri);
+        // Event decl is line 2. Column is after `  event ` (2 + 6 = 8).
+        assert_eq!(loc.range.start.line, 2);
+        assert_eq!(loc.range.start.character, 8);
+    }
+
+    #[test]
+    fn b11_8_d_view_goto_def_over_unknown_ident_returns_none() {
+        let src = "component App {\n  state { count: Int = 0 }\n  <template><div>{unknown}</div></template>\n}";
+        let uri = Url::parse("file:///tmp/App.fitzv").unwrap();
+        let loc = definition_at_position_view(&uri, src, 2, 20);
+        assert!(loc.is_none(), "goto-def on unknown ident should be None");
     }
 }

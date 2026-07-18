@@ -302,6 +302,63 @@ cubre el 100% del caso Board + el 95% del caso general
 post-Session A (Session A cerró 3 de 6 debts menores, 4th
 diferida por buenas razones).
 
+### 🟢 Phase 11.8 — LSP inside `.fitzv` — **CERRADO SESSION B (2026-07-18)**
+
+**Síntoma pre-Session B**: editar un `.fitzv` en VSCode era
+esencialmente texto plano — la extensión bundleada solo daba
+sintaxis coloring (TextMate grammar) pero cero diagnostics,
+completions, hover, go-to-def dentro del SFC. Los users tenían
+que correr `fitz check` en la terminal para ver errores del
+view lexer/parser/expand/check, lo cual rompía el flow de
+editing típico de VSCode + rust-analyzer / pyright.
+
+**Cierre Phase 11.8 (v0.21.3, 2026-07-18, ~620 LoC + 20 tests)**:
+4 sub-fases coordinadas cierran las 4 capabilities core del
+LSP para `.fitzv`. Sin cambios breaking.
+
+- **11.8.a Diagnostics** — nueva `check_view_source(source) ->
+  Vec<FitzError>` routea via view pipeline + mapea 3 tipos de
+  error (`ViewParseError`, `ExpandError`, `CheckError`) a
+  `FitzError` shape. Nueva `check_source_by_uri(uri, source)`
+  dispatch por extensión. Nueva `uri_is_fitzv(uri)` helper.
+  LSP bin `check_and_publish` routea `.fitzv` transparente.
+- **11.8.b Completions** — nueva
+  `completion_at_position_view(source, line, character)` con 4
+  clases: (1) template directives (`{#if}`/`{#for}`/`{#else}`/
+  `{/if}`/`{/for}` SNIPPETs tras `{` o `{#`); (2) event
+  decorators (`click`/`submit` tras `@`); (3) state field
+  names del enclosing component; (4) event handler names.
+  Heuristic scan robust to partial parses (unterminated `{`,
+  mid-typing). LSP bin `completion` dispatch.
+- **11.8.c Hover** — nueva `hover_at_position_view(source,
+  line, character) -> Option<Hover>` con markdown code fence +
+  label. Keyword filter evita false positives. LSP bin `hover`
+  dispatch.
+- **11.8.d Go-to-def** — nueva `definition_at_position_view(
+  uri, source, line, character) -> Option<Location>` salta a
+  `<name>: <type>` line en state block O `event <name>(...)`
+  line. Component boundary respect.
+
+**Deudas residuales derivadas** (NO bloquean uso real):
+
+- **Fine-grained context routing** en completion — MVP no
+  distingue "cursor inside template" vs "inside state block".
+  Suggestions siempre correctas pero pueden aparecer en
+  contexts adjacentes. Refinable si false-positive noise
+  aparece en práctica.
+- **Cross-module symbol lookup** — hover/go-to-def sobre un
+  ident importado por `from X import Y` no salta al target
+  module hoy. Refinable con plumbing paralelo al
+  `resolve_cross_module_definition` del path classic.
+- **TypeInfo-based hover** — hover MVP usa heuristic scan del
+  source; una integración full con el classic checker
+  corriendo sobre el emitted classic Fitz surface daría más
+  precision (bare ident refs en event body con complex expr
+  shapes). Sub-session B.2 si aparece demanda.
+- **Signature help / rename / references** dentro de `.fitzv`
+  — NOT implementados por este MVP. Refinables si entra
+  demanda concreta.
+
 ## 🟢 View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — **CERRADAS ENTERAS 2026-07-16** (§9.cc + §9.dd + §9.ee)
 
 **Cierre resumen** (post-v0.21.0, mismo día que la debt entry — el

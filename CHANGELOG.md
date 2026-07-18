@@ -229,6 +229,135 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 *(vacía — próximas entradas van acá antes del siguiente bump)*
 
+## [v0.21.3] — 2026-07-18 — Phase 11 Session B: LSP inside `.fitzv` (Phase 11.8 CERRADO)
+
+**Patch release aditivo** que cierra **Phase 11.8 entera** — el
+LSP ahora reconoce `.fitzv` como surface de primera clase con las
+cuatro capabilities core: diagnostics + completions + hover +
+go-to-definition. Editar un `.fitzv` en VSCode ya no es texto
+plano — la extensión bundleada con este release muestra errores
+de view lexer/parser/expand/check en tiempo real, completa
+directivas de template + state fields + event handlers, hover
+sobre state fields muestra tipo declarado, y go-to-def salta a
+la línea de declaración. Sin cambios breaking.
+
+### 11.8.a — Diagnostics para `.fitzv` (~150 LoC + 8 tests)
+
+- Nuevas fns públicas en `lsp.rs`: `check_view_source(source) ->
+  Vec<FitzError>` que routea via view lexer → parser → expand →
+  check y mapea los 3 tipos de error (`ViewParseError`,
+  `ExpandError`, `CheckError`) a `FitzError` shape; y
+  `check_source_by_uri(uri, source)` que dispatch por extensión.
+- Nuevo `uri_is_fitzv(uri)` helper.
+- LSP bin `check_and_publish` dispatch por `uri_is_fitzv(&uri)`
+  — `.fitzv` route al pipeline view, classic Fitz sigue por el
+  path original. `DocumentState` para `.fitzv` stashea `Program`/
+  `TypeEnv` vacíos (los usa el path classic).
+- Error kind mapping: `ViewParseError` → `InvalidSyntax`;
+  `ExpandError` → `InvalidSyntax`; `CheckError` → `TypeMismatch`.
+- Cross-module (`from X import Y`) NOT walked por este MVP —
+  paralelo al gap del path classic pre-W12/B10; refinable si
+  entra demanda.
+
+### 11.8.b — Completions inside `.fitzv` (~150 LoC + 5 tests)
+
+- Nueva `completion_at_position_view(source, line, character)`
+  con 4 clases de completion:
+  1. **Template directives** — `{#if}`, `{#for}`, `{#else}`,
+     `{/if}`, `{/for}` cuando el cursor está tras `{` o `{#`.
+     SNIPPETs con tabstops (`$1`, `$0`) para navegación de
+     placeholders.
+  2. **Event decorators** — `click`, `submit` (SNIPPETs con
+     `="$1"` tail) tras `@` en attribute position.
+  3. **State field names** del enclosing component.
+  4. **Event handler names** del enclosing component.
+- **Robust to partial parses** — heuristic scan del source raw
+  (line-by-line, brace-depth tracking) extrae state field
+  names + event names incluso cuando `view::parse` rejects
+  (unterminated `{`, mid-typing). Trade-off: false positives
+  cosméticos (extra items en la lista). Cero false negatives
+  en shapes reales.
+- LSP bin `completion` handler routea `.fitzv` via el nuevo
+  helper; classic sigue por el path K-4 con `imported_names`.
+
+### 11.8.c — Hover inside `.fitzv` (~200 LoC + 4 tests)
+
+- Nueva `hover_at_position_view(source, line, character) ->
+  Option<Hover>` — sobre bare ident del cursor devuelve markdown
+  con code fence + label:
+  - State field ref → `<name>: <type> — **state field** of
+    <Component>`.
+  - Event handler ref → `event <name>() — **event handler** of
+    <Component>`.
+- Keyword filter — `component`/`state`/`event`/`from`/`import`/
+  `as`/`template`/`style` return None (evita false positives).
+- Ident-under-cursor inline sweep con `is_ident` predicate
+  (char-based, no lexer pass).
+- Type hint extraído via `extract_field_type_from_line` — trim
+  al `=` del default o EOL.
+- LSP bin `hover` handler routea `.fitzv` via el nuevo helper;
+  classic sigue por TypeInfo.
+
+### 11.8.d — Go-to-definition inside `.fitzv` (~120 LoC + 3 tests)
+
+- Nueva `definition_at_position_view(uri, source, line,
+  character) -> Option<Location>` que retorna el Location del
+  decl-line del ident bajo el cursor:
+  - State field ref → salto a `<name>: <type>` line en el state
+    block (columna en el `<name>` position, no en el indent).
+  - Event handler ref → salto a `event <name>(...)` line en el
+    component.
+- Range del ident: 5 chars para `count`, etc. — start.character
+  al inicio del ident, end.character + longitud.
+- Component boundary respect — si el cursor está en `App` y el
+  next `component X { count: ... }` también tiene `count`,
+  goto-def apunta al de `App`.
+- LSP bin `goto_definition` handler routea `.fitzv` via el
+  nuevo helper; classic sigue por `DefinitionInfo`.
+
+### Deudas residuales derivadas (NO bloquean)
+
+- **Fine-grained context routing** — el completion MVP no
+  distingue "cursor inside template" vs "inside state block" —
+  las suggestions siempre son correctas pero pueden aparecer en
+  contexts adjacentes. Refinable si false-positive noise
+  aparece en práctica.
+- **Cross-module symbol lookup** — hover/go-to-def sobre un
+  ident importado por `from X import Y` no salta al target
+  module hoy. Refinable con plumbing paralelo al
+  `resolve_cross_module_definition` del path classic.
+- **TypeInfo-based hover** — hover MVP usa heuristic scan del
+  source; una integración full con el classic checker corriendo
+  sobre el emitted classic Fitz surface daría más precision
+  (para bare ident refs en event body con complex expr shapes).
+  Sub-session B.2 si aparece demanda.
+
+### Verificación pre-bump
+
+- **3741/3741** lib tests verde (default features, sin cambios
+  vs v0.21.2 — el path `.fitzv` es opt-in via `--features
+  lsp`).
+- **3897/3897** lib tests con `--features lsp` verde
+  (+156 vs default: los 20 tests B11.8 nuevos + 136 tests LSP
+  pre-existentes).
+- **115/115** cli_e2e verde.
+- `cargo fmt --all --check` limpio.
+- `cargo clippy --lib --tests --release --features lsp -- -D
+  warnings` limpio.
+- Smoke real Board.fitzv del kanban (`fitz-liveviews`):
+  `fitz check` verde. Sin regresión al SFC de Session A.
+- Docs/curso/boilerplates/examples: verificados sin necesitar
+  cambios (`.fitzv` LSP support es transparente al user
+  editing; docs pedagógicos son scope Session C).
+
+### Bump
+
+- `Cargo.toml` 0.21.2 → 0.21.3.
+- `editors/vscode/package.json` 0.21.2 → 0.21.3.
+- `.vsix` regenerado bundleando `fitz-lsp.exe` fresh v0.21.3.
+- `fitz.exe` global reinstalado en `~/.fitz/bin` +
+  `~/.cargo/bin`.
+
 ## [v0.21.2] — 2026-07-17 — Phase 11 Session A: Small residual debts (S.1 alias imports + S.2 Map<Str,Str> static props + S.3 type-check interpolated)
 
 **Patch release aditivo** que cierra 3 de las 6 deudas residuales

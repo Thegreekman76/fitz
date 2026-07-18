@@ -267,6 +267,39 @@ Extensions. Detalle en
   `fitz_liveviews` missing-dep hint; §9.aa event-body widening;
   §9.bb cross-module auto-inject). Detalle exhaustivo en
   [`docs/fase-11-plan.md`](fase-11-plan.md) §9.a–§9.bb.
+- **Phase 11 Session B — LSP inside `.fitzv`** (v0.21.3,
+  2026-07-18) — **Phase 11.8 CERRADO ENTERO**. El LSP ahora
+  reconoce `.fitzv` como surface de primera clase con las
+  cuatro capabilities core: **diagnostics + completions +
+  hover + go-to-definition**. Editar un `.fitzv` en VSCode ya
+  no es texto plano — la extensión bundleada muestra errores
+  del view lexer/parser/expand/check en tiempo real, completa
+  directivas de template (`{#if}`, `{#for}`, etc.) + state
+  fields + event handlers, hover sobre state fields muestra
+  tipo declarado, y go-to-def salta a la línea de declaración.
+  **11.8.a diagnostics** — nuevo `check_view_source(source) ->
+  Vec<FitzError>` routea via view pipeline + mapea 3 tipos de
+  error a `FitzError`; `check_source_by_uri(uri, source)`
+  dispatch por extensión; LSP bin `check_and_publish` routea
+  `.fitzv` transparente. **11.8.b completions** — nuevo
+  `completion_at_position_view` con 4 clases (directives +
+  event decorators + state fields + event names); heuristic
+  scan del source raw es robust to partial parses
+  (unterminated `{` mid-typing). **11.8.c hover** — nuevo
+  `hover_at_position_view` con markdown code fence + label
+  ("state field of Component" / "event handler of Component");
+  keyword filter evita false positives. **11.8.d go-to-def** —
+  nuevo `definition_at_position_view` salta a `<name>: <type>`
+  line en state block O `event <name>(...)` line; component
+  boundary respect. Sin cambios breaking. **~620 LoC + 20
+  tests nuevos**. Deudas residuales: fine-grained context
+  routing (completion suggestions correctas pero pueden
+  aparecer en contexts adjacentes); cross-module symbol
+  lookup en hover/go-to-def; TypeInfo-based hover para complex
+  expr shapes. **Solo Session C (Phase 11.9 pedagogic docs)
+  + Session D (Phase 11.7 client-side reactivity) siguen
+  abiertas** de las 3 Phase 11 sub-fases originales.
+
 - **Phase 11 Session A — Small residual debts** (v0.21.2,
   2026-07-17) — 3 deudas menores del SFC pipeline cerradas
   en bloque coordinado. **S.1 Alias en imports SFC** (`from X
