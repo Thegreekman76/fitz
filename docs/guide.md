@@ -9838,6 +9838,74 @@ Fitz tiene su propio **Language Server Protocol** (LSP) y una
     aparece en la lista; `let local = 42` previo también;
     `for item in xs { ... }` agrega `item` dentro del body.
 
+### En archivos `.fitzv`
+
+Desde v0.21.3 (Phase 11.8 CERRADO), la extensión + el binario
+`fitz-lsp` reconocen `.fitzv` como surface de primera clase.
+El pipeline es distinto al de classic Fitz — el LSP routea
+por extensión: `.fitzv` → view lexer + parser + expand + check;
+`.fitz` sigue por el path classic.
+
+Las 4 capabilities disponibles hoy:
+
+- **Diagnostics en vivo** — errores del view lexer/parser/
+  expand/check aparecen subrayados en rojo al tipear en un
+  `.fitzv`. Los tres error kinds del pipeline view mapean a
+  `FitzError` shape: `ViewParseError` → syntax error;
+  `ExpandError` → syntax error (con context — nombre del
+  componente + section); `CheckError` → type mismatch (con
+  context). Severity `ERROR`, source `"fitz"`.
+- **Completions** — cuatro clases contextuales:
+  1. **Template directives** tras `{` o `{#` — sugiere `#if`,
+     `#for`, `#else`, `/if`, `/for` como SNIPPETs con tabstops
+     (`$1`, `$0`) para completar los placeholders con Tab.
+  2. **Event decorators** tras `@` en attribute position —
+     `click`, `submit` con SNIPPET `="$1"` tail.
+  3. **State field names** del enclosing component.
+  4. **Event handler names** del enclosing component.
+
+  El scan del source es **robusto a parses parciales** (heurística
+  line-by-line con brace-depth tracking): mientras escribís un
+  `{...` sin cerrar, las suggestions siguen apareciendo — no
+  necesitás terminar la expresión para que el LSP funcione.
+- **Hover** sobre bare ident del cursor:
+  - Sobre state field ref (`{count}` en un template) →
+    `count: Int — **state field** of App`.
+  - Sobre event handler ref (`data-flv-click="inc"`) →
+    `event inc() — **event handler** of App`.
+  - Keywords (`component`, `state`, `event`, `from`, `import`,
+    `as`, `template`, `style`) no devuelven hover (evita false
+    positives).
+- **Go-to-definition** — F12/Ctrl+Click salta a la línea de
+  declaración con column al inicio del ident:
+  - State field ref → salto a `<name>: <type>` line en el
+    `state { ... }` block.
+  - Event handler ref → salto a `event <name>(...)` line.
+  - Component boundary respect — si el cursor está en un
+    componente `App` y otro sibling también tiene el mismo
+    field name, F12 apunta al de `App` (no al sibling).
+
+**Lo que no está en el MVP de 11.8**:
+
+- **Cross-module symbol lookup** — F12/hover sobre un ident
+  importado por `from X import Y` no salta al target module
+  hoy. Refinable con plumbing paralelo al
+  `resolve_cross_module_definition` del path classic.
+- **TypeInfo-based hover** — la MVP usa scan heurístico del
+  source; hover sobre complex expr shapes (BinOp, method
+  calls) puede quedar sin hint. Refinable con integración
+  full del classic checker corriendo sobre el emitted classic
+  Fitz surface.
+- **Fine-grained context routing en completion** — el MVP no
+  distingue "cursor inside template" vs "inside state block".
+  Suggestions siempre correctas pero pueden aparecer en
+  contexts adjacentes.
+- **Signature help / rename / references** dentro de `.fitzv`
+  — no implementados.
+
+Ver el capítulo 36 (Frontend nativo con `.fitzv`) para el
+detalle del lenguaje que estos LSP capabilities describen.
+
 ### Lo que viene
 
 El MVP del LSP está completo — las 5 sub-fases visibles (9.x.1
@@ -14362,7 +14430,526 @@ visible documentada:
 
 ---
 
-## 36. Plantillas y boilerplates
+## 36. Frontend nativo con `.fitzv` (SFC)
+
+Hasta acá la guía cubrió Fitz como lenguaje de backend: HTTP,
+async, auth, DB, jobs, interop Python. En la mayoría de esos
+capítulos el frontend fue "algo aparte" — HTML estático servido
+desde un handler, o boilerplate vanilla JavaScript que consume la
+API. Fase 11 cierra ese gap: **componentes visuales de primera
+clase dentro del lenguaje**, con extensión de archivo dedicada
+(`.fitzv`), parser + type checker propios, y dos backends de
+compilación — uno server-side (para `fitz-liveviews`) y uno
+client-side (WASM).
+
+### Panorama vecino
+
+- **Vue 3 SFC** — single-file components (`.vue`) con `<template>`
+  / `<script>` / `<style scoped>`. Reactive via `ref()`/`reactive()`.
+  Compila a JS a través de `@vue/compiler-sfc` (herramienta build
+  externa). Templating por directivas (`v-if`, `v-for`).
+- **Svelte** — sintaxis MUY parecida a Vue SFC. Componentes con
+  `.svelte`, reactivity implicit via let bindings, template con
+  `{#if}` / `{#each}`. Compila a JS optimizado a través del
+  compilador Svelte (herramienta build externa).
+- **React JSX** — components como fns JS, templating con JSX
+  (JavaScript-como-XML). Reactivity via hooks (`useState`,
+  `useEffect`). Compila con Babel/SWC/tsc (toolchain externa).
+- **Elm** — componentes como fns puras, template como HTML
+  DSL. Compilador Elm dedicado. Fuertemente tipado. Elm no
+  interopera con librerías JS sin puertos explícitos.
+- **HTMX + templating server-side** — Django templates, Jinja,
+  Handlebars, Blade. Cero JS del lado del user, cero build step,
+  pero cero components también — cada vista se re-arma manual.
+- **Phoenix LiveView (Elixir)** — templating server-side con
+  updates via WebSocket sin recargar. Cada vista es una fn
+  Elixir + template `.heex`. Compilador Phoenix.
+
+Todos comparten un mismo patrón: **herramienta build separada
+del lenguaje anfitrión** (Vue CLI, Vite, Rollup, Webpack, Elm
+compile step, etc.), y **template pinado a un backend** (Vue/
+Svelte/React → JS client-side, Elm → JS client-side, Phoenix
+LiveView → server-side updates via WS, HTMX → server-side full).
+
+### En Fitz
+
+Un `.fitzv` es **un archivo de Fitz** que el compilador reconoce
+por su extensión. Adentro escribís un `component <Name> { ... }`
+con 4 secciones (state / event / template / style), imports
+top-level (`from card import Card`), y opcionalmente helpers
+puros que consume el componente. El pipeline es:
+
+**view lexer → view parser → view expand → view check → emit** —
+donde `emit` es una de dos rutas:
+
+- **SSR** (`fitz run` / `fitz build` con `fitz-liveviews` como
+  dep) — el emitter produce classic Fitz que registra un
+  `@live_component` en el runtime del framework. El servidor
+  renderiza HTML por WebSocket con diff/patch — patrón Phoenix
+  LiveView.
+- **WASM client-side** (`fitz build --bin <web> --target
+  wasm-client`, opt-in con la feature `client-wasm`) — el
+  emitter produce Rust con `wasm-bindgen` + `web-sys` que
+  compila a `.wasm` + `.js` bindings. El componente vive en el
+  cliente y muta el DOM directo.
+
+**Ningún otro lenguaje moderno del cuadro combina** single-file
+components + type checker propio del template + dos backends
+alternativos (SSR + WASM) + LSP integrado + zero herramientas
+build externas — todo en el mismo binario `fitz`.
+
+### Las piezas
+
+Un `.fitzv` mínimo:
+
+```fitzv
+component Counter {
+  state { count: Int = 0 }
+
+  event inc() { count = count + 1 }
+
+  <template>
+    <div class="counter">
+      <span>{count}</span>
+      <button data-flv-click="inc">+</button>
+    </div>
+  </template>
+
+  <style scoped>
+    .counter { padding: 1rem; }
+    .counter span { font-size: 2rem; }
+  </style>
+}
+```
+
+**`component <Name> { ... }`** — bloque top-level. Cada archivo
+`.fitzv` puede declarar uno o varios componentes. El nombre debe
+empezar con mayúscula (convención de la view lexer).
+
+**`state { ... }`** — declaración de estado inicial del componente
+con anotaciones de tipo obligatorias + defaults obligatorios.
+Los campos aceptan primitivos (`Int`/`Float`/`Str`/`Bool`),
+`Nullable<T>`, `List<T>`, `Map<K, V>`, y tipos nominales
+importados (via `from X import Y`). Los defaults son literales
+del lenguaje (`0`, `""`, `[]`, `{}`, `null`, `User { id: 1 }`).
+
+**`event <name>(...) { ... }`** — handlers de eventos. La
+signature interna es `(state: <Component>, payload: Map<Str,
+Str>) -> <Component>` (el emitter la sintetiza), pero al
+escribirlo NO ponés `state`/`payload` explícitos: usás **bare
+state field names** (`count = count + 1`) que el emitter
+rewrite-a a `state.count`, y el `payload` está en scope como
+un `Map<Str, Str>`. Un evento puede referenciar helpers
+importados (`cards = cards.map(fn(c) => move_one(target, c))`,
+K-4 shipped 2026-07-17).
+
+**`<template>...</template>`** — el HTML del componente. Adentro:
+
+- **Interpolación de expresiones** con `{expr}` — bare state
+  field (`{count}`) rewrite a `state.count`; expressions más
+  ricas (`{count + 1}`, `{user.name}`) también funcionan.
+- **Directivas** — `{#if <cond>} ... {#else} ... {/if}` y
+  `{#for <x> in <iter>} ... {/for}` para conditionals + loops.
+- **Attribute interpolation** — `data-flv-value-card_id="{c.id}"`
+  con `"{expr}"` shape (K-3 shipped).
+- **Event decorators** — `data-flv-click="handler_name"`,
+  `data-flv-submit="handler_name"` para wire eventos del DOM a
+  event handlers declared en el componente.
+- **Composición** — `<Child prop="value" />` o `<Child
+  prop="{expr}" />` para componer components declarados en el
+  MISMO archivo (K-3 remainder). Cross-file composition
+  diferida (memoria — se ataca cuando el ejemplo grid + forms
+  aterrice).
+
+**`<style scoped>...</style>`** — CSS scoped al componente
+(class names se rename automáticamente para no chocar con otros
+components). También `<style global>` para CSS que se aplique a
+toda la página.
+
+**`from X import Y`** — imports top-level. Los `Y` importados
+quedan disponibles en `state` (para tipos nominales), en event
+bodies (para llamar helpers puros), y en templates (para
+computar valores derivados). El path `X` puede ser dotado
+(`from utils.shared import X`).
+
+**`from X import Y as Z`** — alias imports (S.1 shipped
+2026-07-17). El local binding es `Z`; el classic loader valida
+contra `Y` en el módulo origen.
+
+### Interpolación de expresiones
+
+El SSR emitter aplica una **regla de scoping** clara: el
+identifier bajo el cursor resuelve en este orden:
+
+1. **Closure params** (`{#for x in xs}` inside template,
+   `fn(c) => ...` inside event body) shadow todo lo demás.
+2. **State field name** — rewrite a `state.<name>`.
+3. **Imported name** — emit verbatim (K-4 shipped).
+4. **Otherwise** — error del checker con mensaje que menciona
+   la imports table como fix hint.
+
+Ejemplo poniendo los 4 casos:
+
+```fitzv
+from board_helpers import cards_in, move_one
+
+component Board {
+  state {
+    cards: List<Card> = []
+    filter_col: Str = "todo"
+  }
+
+  event move_right() {
+    let target = payload["card_id"]
+    // `move_one` viene de imports (regla 3), `target` es local
+    // (regla 1), `cards` es state field (regla 2 → state.cards).
+    cards = cards.map(fn(c) => move_one(target, "right", c))
+  }
+
+  <template>
+    <div class="board">
+      <!-- `cards_in` viene de imports; `cards` + `filter_col`
+           son state fields. -->
+      {#for c in cards_in(cards, filter_col)}
+        <li class="card">{c.title}</li>
+      {/for}
+    </div>
+  </template>
+}
+```
+
+### Cross-file types
+
+Los tipos custom del componente vienen normalmente de un
+archivo `.fitz` classic sibling, importado por
+`from <module> import <Type>`:
+
+```fitz
+// card.fitz
+type Card {
+  id: Str
+  title: Str
+  author: Str
+  column: Str
+}
+```
+
+```fitzv
+// Board.fitzv
+from card import Card
+
+component Board {
+  state { cards: List<Card> = [] }
+  // ...
+}
+```
+
+El view checker reconoce el nominal `Card` en el `state` block
+y lo valida contra el módulo origen (regresa al classic checker
+downstream). Vale también para struct literals inline en event
+bodies:
+
+```fitzv
+event add() {
+  cards.push(Card {
+    id: "1",
+    title: payload["title"],
+    author: payload["author"],
+    column: "todo"
+  })
+}
+```
+
+### Composición de components
+
+Cuando declarás dos components en el MISMO archivo, uno puede
+componer al otro con syntax XML-like `<Child />`:
+
+```fitzv
+component Board {
+  state { title: Str = "My Kanban" }
+  <template>
+    <div>
+      <h1>{title}</h1>
+      <Column name="To Do" />
+      <Column name="In Progress" />
+      <Column name="Done" />
+    </div>
+  </template>
+}
+
+component Column {
+  state { name: Str = "" }
+  <template>
+    <section>
+      <h2>{name}</h2>
+    </section>
+  </template>
+}
+```
+
+**Props** — cada attribute del `<Child ... />` matchea con un
+state field del child. Aceptado:
+
+- Primitivos (`Str`, `Int`, `Float`, `Bool`, `Nullable<T>`)
+  como valor de string (`name="Foo"`, `count="42"`).
+- `List<T>` de primitivos vía comma-separated (`tags="a,b,c"`,
+  K-3 shipped).
+- `Map<Str, Str>` vía `k=v,k=v` (S.2 shipped).
+- **Interpolación** `<Child prop="{expr}" />` (K-3 remainder
+  shipped) — `expr` es cualquier expresión Fitz que respete la
+  regla de scoping del parent's template.
+
+**Cross-file `<Child />` composition** — cuando el `<Child />`
+vive en un `.fitzv` SEPARADO (importado con `from ChildFile
+import ChildComponent`), el emitter hoy **NO** lo permite;
+usá el runtime API `component("ChildName", "instance-id")` del
+`fitz-liveviews` package para components importados. Refinable
+cuando aparezca demanda concreta (memoria del proyecto).
+
+### Estilos scoped
+
+`<style scoped>` aplica **rewriting automático** de class
+selectors — cada `.class` en el CSS se sufija con un scope
+único del componente (`.class-a1b2c3`), y el template rewrite-a
+los `class="foo"` para matchear. Resultado: cero colisiones con
+CSS de OTROS componentes o del layout global.
+
+```fitzv
+<template>
+  <div class="wrapper">
+    <span class="badge">{count}</span>
+  </div>
+</template>
+
+<style scoped>
+  .wrapper { padding: 1rem; }
+  .badge { font-weight: 600; }
+</style>
+```
+
+Emitted CSS (post-scoping):
+
+```css
+.wrapper-a1b2c3 { padding: 1rem; }
+.badge-a1b2c3 { font-weight: 600; }
+```
+
+`<style global>` NO aplica rewriting — el CSS va tal cual al
+DOM. Útil para reset de body, tipografía global, etc.
+
+### Los dos backends de compilación
+
+**Target SSR (fitz-liveviews)** — el default. `fitz run` /
+`fitz build` corren el pipeline view → emit classic Fitz →
+compile classic con la dep `fitz-liveviews` en el manifest.
+El emitted classic Fitz declara:
+
+- **`type <Component>`** con los state fields.
+- **Fn `<Component>_render(state: <Component>) -> Html`** que
+  produce el HTML del template.
+- **Fn `<Component>_<event>(state: <Component>, payload:
+  Map<Str, Str>) -> <Component>`** por cada event handler.
+- **`flv_register("Component", <Component> {}, <Component>_
+  render, {"event_name": <Component>_event, ...})`** al boot
+  (auto-inject via §9.bb).
+
+El runtime `fitz-liveviews` mount el componente vía
+`component("Component", "instance-id")` (llamado desde un
+`@get(...)` handler) y despacha eventos via
+`dispatch_component_events(frame)` en un `@ws(...)` handler.
+Ver el capítulo 29 (WebSockets) para el pattern completo.
+
+**Target WASM client-side** — opt-in con `fitz build --bin
+<web> --target wasm-client` bajo la feature `client-wasm`. El
+emitter produce Rust con `wasm-bindgen` que compila a `.wasm`
++ `.js` bindings via `wasm-pack`. Cada component se instancia
+con `<Component>::new().mount_into(root)`. El estado vive en
+`Rc<RefCell<T>>` cells por field; event handlers mutan
+directamente.
+
+Ejemplo de deploy del counter demo:
+
+```bash
+fitz build --bin counter-web --target wasm-client
+# → dist/counter-web/pkg/ contiene .wasm + .js
+# Servís con: python -m http.server -d dist/counter-web/
+```
+
+Bundle size del counter demo: **11.4 KB gzipped sobre 40 KB
+gate** (28.6 KB headroom, medido en la Phase 11.4.c).
+
+### Editor support (LSP)
+
+La extensión VSCode + el binario `fitz-lsp` reconocen `.fitzv`
+como surface de primera clase (Phase 11.8 shipped 2026-07-18,
+v0.21.3). Al editar un `.fitzv` obtenés:
+
+- **Diagnostics en vivo** — errores del view lexer/parser/
+  expand/check aparecen subrayados en rojo al tipear, con
+  mensaje + ubicación en el `.fitzv` (no en el emitted classic).
+- **Completions** en 4 clases:
+  - Template directives (`{#if}`, `{#for}`, etc.) tras `{` o
+    `{#` (SNIPPETs con tabstops).
+  - Event decorators (`click`, `submit`) tras `@` en attribute
+    position.
+  - State field names del enclosing component.
+  - Event handler names.
+- **Hover** sobre state field ref muestra `<name>: <type> —
+  state field of <Component>`. Sobre event handler ref muestra
+  `event <name>() — event handler of <Component>`.
+- **Go-to-definition** salta a la línea de declaración —
+  state field ref → `<name>: <type>` line en state block;
+  event handler ref → `event <name>(...)` line.
+
+Ver el capítulo 22 (Soporte para editores) para el flow
+general del LSP + cómo la extensión bundlea el binario.
+
+### Ejemplo runnable — Contador Fitz-LiveViews
+
+Este ejemplo vive en `d:/fitz-liveviews/examples/counter/`.
+Estructura:
+
+```
+counter/
+├── fitz.toml         # dep de fitz-liveviews
+├── src/
+│   ├── Counter.fitzv # el componente
+│   └── main.fitz     # HTTP + WS wire-up
+```
+
+`Counter.fitzv`:
+
+```fitzv
+component Counter {
+  state { count: Int = 0 }
+
+  event inc() { count = count + 1 }
+  event dec() { count = count - 1 }
+  event reset() { count = 0 }
+
+  <template>
+    <div id="counter-app">
+      <h1>Counter: {count}</h1>
+      <button data-flv-click="dec">−</button>
+      <button data-flv-click="inc">+</button>
+      <button data-flv-click="reset">Reset</button>
+    </div>
+  </template>
+
+  <style scoped>
+    #counter-app { padding: 2rem; font-family: system-ui; }
+    button { padding: 0.5rem 1rem; margin: 0 0.25rem; }
+  </style>
+}
+```
+
+`main.fitz`:
+
+```fitz
+from fitz_liveviews import Html, html, live_layout,
+  html_response, LiveFrame, diff_html, component,
+  dispatch_component_events, flv_register
+from Counter import Counter, Counter_render,
+  Counter_inc, Counter_dec, Counter_reset
+
+let last_html: Str = ""
+
+@get("/")
+fn page() -> Response {
+  let initial = component("Counter", "main")
+  return html_response(live_layout(
+    "/live/counter", "counter-app", initial
+  ))
+}
+
+@ws("/live/counter")
+async fn socket(ws: WsConn<LiveFrame>) {
+  loop {
+    let frame = ws.recv()?
+    if (last_html == "") {
+      last_html = component("Counter", "main").raw
+    }
+    let _handled = dispatch_component_events(frame)
+    let new_html = component("Counter", "main").raw
+    let patches = diff_html(last_html, new_html)
+    ws.broadcast(LiveFrame {
+      html: new_html,
+      patches: patches
+    })?
+    last_html = new_html
+  }
+}
+
+@server(3000)
+fn main() => 0
+```
+
+Correr:
+
+```bash
+fitz run
+# → http://127.0.0.1:3000/ — clickeá los botones, mirá el
+#   contador subir/bajar. El estado vive en el server; cada
+#   click manda un frame WS, el servidor recomputa el HTML +
+#   emite un diff, el cliente aplica el patch.
+```
+
+### Compatibilidad con classic Fitz
+
+Un mismo proyecto puede mezclar `.fitz` (classic) y `.fitzv`
+libremente:
+
+- Los `.fitz` importan tipos y helpers de otros `.fitz` como
+  siempre.
+- Los `.fitzv` importan tipos y helpers **classic** con
+  `from X import Y` (donde `X` es un `.fitz` sibling).
+- Los `.fitz` **NO** importan components de `.fitzv` — es el
+  runtime `fitz-liveviews` (`component("Name", "id")`) el que
+  bridgea el mundo classic al mundo view.
+
+Cuando un módulo classic Y un `.fitzv` con el mismo stem
+existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
+(memoria — la migración desde classic es opt-in y additiva).
+
+### Qué no está en el MVP
+
+- **Cross-file `<Child />` composition** — components
+  importados de otro `.fitzv` no se pueden componer con syntax
+  XML-like hoy. Workaround: runtime API `component("Name",
+  "id")` del `fitz-liveviews`. Refinable cuando entre el
+  ejemplo grid + forms del companion UI library como driver.
+- **WASM interpolated props** — el target WASM rechaza
+  `<Child prop="{expr}" />` porque necesita reactive prop
+  propagation (parent state → mounted child) con child-
+  lifecycle hooks + prop watchers. Phase 11.7+ scope.
+  Workaround: static values (`prop="hi"`) o composición
+  top-level.
+- **Cross-component event bubbling** — la K-1 shipped en
+  `fitz-liveviews` v0.5.0 con `dispatch_to(...)` explicit
+  event API; implicit bubbling (`@parent.event` decorator)
+  queda para futuro si aparece demanda.
+- **`<slot />` fallback** — Phase 11.7+.
+- **Persistent child state** across mount/unmount — Phase
+  11.7+.
+- **Signature help / rename / references** dentro de `.fitzv`
+  — no implementados por el LSP MVP.
+
+### Cross-links
+
+- **Cap 22 — Soporte para editores** — flow LSP general +
+  extensión VSCode.
+- **Cap 29 — WebSockets tipados** — el runtime al que apunta
+  el emitted classic Fitz de un `.fitzv` con target SSR.
+- **[docs/fase-11-plan.md](../fase-11-plan.md)** — plan
+  técnico exhaustivo con las 11.1 → 11.9 sub-fases +
+  §9.a–§9.bb.
+- **[fitz-liveviews](https://github.com/Thegreekman76/fitz-liveviews)**
+  — repo separado del framework SSR.
+
+---
+
+## 37. Plantillas y boilerplates
 
 Si llegaste hasta acá leyendo, ya viste cada feature de Fitz por
 separado: HTTP nativo, auth, WebSockets, jobs, interop Python,
@@ -14425,7 +15012,7 @@ escribir desde cero.
 
 ---
 
-## 37. Qué sigue
+## 38. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
@@ -14584,17 +15171,36 @@ con todo el stack del lenguaje + ecosistema:
   `@has_one`. SQL constante en codegen-time, paridad bit-a-bit
   `fitz run` ↔ `fitz build`.
 
-**Lo que viene** (próximos nortes grandes):
+**Lo que ya bajó de "especulativo" a REALIDAD** (post-v0.21.0):
 
-- **Frontend en `.fitz`** (SFC + SSR, especulativo): single-file
-  components estilo Vue, WASM/JS targets, SSR built-in, sharing
-  de `type` entre back y front. Resuelve el doble tipado.
-- **Deployment ciudadano primera clase**: `fitz deploy`,
-  Dockerfile autogenerado, observability nativa (`@trace`/
-  `@metric`), secrets management, feature flags built-in.
-- **Migraciones automáticas para el ORM**: `fitz db diff`/`migrate`
-  basado en el diff entre el shape declarado en `type` y el real
-  en Postgres.
+- **Frontend nativo con `.fitzv` (SFC + SSR + WASM)** — Fase 11
+  CERRADA. Single-file components estilo Vue/Svelte, dos
+  backends de compilación (SSR con `fitz-liveviews`, WASM
+  client-side opt-in), template DSL con directivas + sharing
+  de `type` entre back y front (los tipos custom viven en
+  `.fitz` classic, los components en `.fitzv` los importan).
+  LSP con las 4 capabilities core (diagnostics + completions +
+  hover + go-to-def) desde v0.21.3. Ver cap 36.
+- **Deployment ciudadano primera clase** — Fase 12 CERRADA.
+  `fitz deploy` (12.6), Dockerfile + compose autogenerado
+  (12.4), observability nativa con `@trace`/`@metric` (12.7),
+  feature flags built-in (12.8), secrets management (12.2).
+- **Migraciones automáticas para el ORM** — Fase 10.6 CERRADA.
+  `fitz db diff/migrate/status/new/rollback/check/history/
+  squash/inspect/stamp` con tracking en `_fitz_migrations`.
+
+**Lo que sigue** (post-Fase 11 nortes):
+
+- **Phase 11.7 — Client-side dynamic capabilities + kanban SPA
+  port** — reactive prop propagation from parent state to
+  mounted child, `<Child />` composition inside `{#for}` bodies,
+  event bubbling framework-level, `<slot />` fallback,
+  persistent child state, drag-drop primitives. Sub-fase
+  siguiente al Phase 11.9 pedagogic docs.
+- **Companion UI library de components reusables** (grid,
+  forms, table, modal, ...) sobre `fitz-liveviews` — anotada
+  como candidato en `docs/deudas-post-5b.md`. Driver concreto:
+  showcase real de una app admin/dashboard.
 
 Ver [docs/roadmap.md](roadmap.md) y
 [docs/deudas-post-5b.md](deudas-post-5b.md) para el detalle.

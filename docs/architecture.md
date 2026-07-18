@@ -918,6 +918,71 @@ bool flag (`--loud`). Auto-generated help with `mybin --help` +
 `mybin <cmd> --help`. The `fitz run` interpreter can also run
 CLI programs.
 
+### view/ — `.fitzv` single-file components (Phase 11)
+
+Since v0.21.0, Fitz recognises `.fitzv` as a first-class file
+extension for single-file components — a self-contained module
+with `<template>`/`<style>`/state/event blocks that compiles to
+either **SSR** (classic Fitz consumed by `fitz-liveviews`) or
+**WASM client-side** (Rust with `wasm-bindgen`, opt-in feature
+`client-wasm`).
+
+The pipeline lives entirely under `src/view/`:
+
+- **`view/lexer.rs`** — tokenizes the `.fitzv` source. Distinct
+  from the classic Fitz lexer: recognises `component`, `state`,
+  `event`, `from`, `import`, `as` (S.1, v0.21.2) as keywords;
+  captures `<template>...</template>` and `<style scoped>...
+  </style>` as `TemplateRaw`/`StyleRaw` tokens (the classic
+  Fitz lexer would choke on the raw HTML/CSS).
+- **`view/parser.rs`** — builds the raw view AST
+  (`view/ast.rs`): `ViewFile { imports, components }`.
+  Component blocks have state fields with type + default,
+  events with body raw blob, template as raw string, and
+  optional style. The parser is intentionally lightweight —
+  raw blobs (template body, event body, state field type/
+  default) are captured verbatim as strings and re-parsed
+  later by the classic Fitz parser during the expand pass.
+- **`view/expand.rs`** — converts the raw view AST to
+  `ExpandedViewFile` by parsing each raw blob into a classic
+  Fitz `Expr` / `Stmt` AST node. Applies template directives
+  (`{#if}`, `{#for}`, `{#else}`) to nested nodes. Also runs the
+  `<style scoped>` rewriting (CSS class selectors get suffixed
+  with a per-component scope class) via
+  `view/css_parser.rs`.
+- **`view/check.rs`** — the view type checker. Validates state
+  field defaults against their declared types, event body
+  RHS against state field types, template interpolation
+  identifiers against the enclosing scope (with the K-4
+  imported-name resolution shipped v0.21.1). Errors are
+  `CheckError { message, loc, context }` with the SFC's own
+  line/column + a context label naming the offending block
+  (e.g. `"component 'App': event 'save' body"`).
+- **`view/codegen_ssr.rs`** — emits classic Fitz source for the
+  SSR target: a `type <Component>` with the state fields, a
+  `<Component>_render(state)` fn producing the HTML, one
+  `<Component>_<event>(state, payload)` per event, and a
+  `flv_register(...)` at boot (auto-injected via §9.bb).
+- **`view/codegen_wasm.rs`** — emits Rust source for the WASM
+  target: a struct with `RefCell` fields, a `render()` method
+  that mutates the DOM via `web-sys`, event handlers that
+  update the state cells. Compiles with `wasm-pack`.
+- **`view/wasm_build.rs`** — builds the WASM crate scaffolding
+  (Cargo.toml + lib.rs) and invokes `wasm-pack build`.
+
+**Two emit branches, one check pass**: both the SSR and WASM
+emitters consume the same `ExpandedViewFile` — the view checker
+runs ONCE regardless of target. The SSR target sees a broader
+type surface (compound props, nominal-type interpolated props);
+the WASM target has stricter restrictions on prop shapes
+(reactive prop propagation is Phase 11.7+ scope).
+
+**Module loader integration** — the classic Fitz module loader
+routes `.fitzv` transparent: `from Card import Card` resolves
+first to `Card.fitz` (classic wins if both exist), then to
+`Card.fitzv` (view path). This makes the migration from classic
+to view opt-in and additive.
+
 ### format.rs — `FormatSpec` applied to a `Value` (mini-batch Fm)
 
 Implements the full Python-style format-spec semantics over

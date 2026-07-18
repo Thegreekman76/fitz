@@ -267,6 +267,40 @@ Extensions. Detalle en
   `fitz_liveviews` missing-dep hint; §9.aa event-body widening;
   §9.bb cross-module auto-inject). Detalle exhaustivo en
   [`docs/fase-11-plan.md`](fase-11-plan.md) §9.a–§9.bb.
+- **Phase 11 Session C — Pedagogic docs** (v0.21.4,
+  2026-07-18) — **Phase 11.9 CERRADO ENTERO**. La última
+  sub-fase visible de Fase 11 cierra con **cero código
+  Rust nuevo** — todo el diff es contenido pedagógico
+  cross-doc: guía + curso + architecture. **Cap 36 nuevo en
+  `docs/guide.md`** (~1050 LoC) dedicado a `.fitzv` (SFC)
+  con panorama vecino (Vue/Svelte/React/Elm/HTMX/Phoenix
+  LiveView) + Las piezas + interpolación con la regla de
+  scoping de 4 niveles + cross-file types + composición de
+  components + los dos backends (SSR + WASM 11.4 KB gzipped
+  sobre 40 KB gate) + LSP support (cross-link cap 22) +
+  ejemplo runnable Counter completo + compatibilidad con
+  classic Fitz + qué no está en el MVP. **Cap 22 refresh**
+  con nueva sub-sección "En archivos `.fitzv`" que cita las
+  4 capabilities LSP de Phase 11.8. **Cap 38 (Qué sigue)
+  refresh** — sección "Lo que ya bajó de especulativo a
+  REALIDAD" mueve SFC + deployment + migrations desde
+  "roadmap futuro" a "shipped features". **`docs/architecture.md`
+  refresh** con nueva sección `view/` que describe los 7
+  módulos del pipeline view (lexer/parser/expand/check/
+  codegen_ssr/codegen_wasm/wasm_build), la relación 2-emit-
+  branches + 1-check-pass, y la integración con el module
+  loader. **Nuevo módulo del curso M9 — Frontend nativo con
+  `.fitzv`** con 3 caps pedagógicos: C1 (Counter primer
+  contact), C2 (Template DSL profundo — interpolación +
+  directivas + composición + event wiring), C3 (Board.fitzv
+  full-page migration del kanban como acceptance criterion).
+  `docs/curso/index.md` y `mkdocs.yml` actualizados. **Con
+  este release Phase 11 queda cerrada por completo** — solo
+  Phase 11.7 (client-side dynamic capabilities + kanban SPA
+  port) queda como sub-fase FUTURA schedule-TBD (SSR path
+  cubre el 100% del caso Board y el 95% del caso general;
+  Phase 11.7 unlockea drag&drop + offline).
+
 - **Phase 11 Session B — LSP inside `.fitzv`** (v0.21.3,
   2026-07-18) — **Phase 11.8 CERRADO ENTERO**. El LSP ahora
   reconoce `.fitzv` como surface de primera clase con las

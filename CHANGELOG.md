@@ -229,6 +229,153 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 *(vacía — próximas entradas van acá antes del siguiente bump)*
 
+## [v0.21.4] — 2026-07-18 — Phase 11 Session C: Pedagogic docs (Phase 11.9 CERRADO)
+
+**Docs-only release** que cierra **Phase 11.9 entera** — la
+última sub-fase visible de Fase 11. Cero código Rust nuevo,
+cero features runtime. Todo es **contenido pedagógico**
+cross-doc: guía + curso + architecture. **Con este release
+Phase 11 queda cerrada por completo — todas las 3 sub-fases
+finales (11.8 LSP, 11.9 docs, y 11.7 client-side reactivity
+scheduled next) apuntadas al roadmap**.
+
+### Cap 36 nuevo en `docs/guide.md` — Frontend nativo con `.fitzv` (SFC)
+
+**~1050 LoC** de markdown pedagógico que cubre la superficie
+completa del `.fitzv` con el mismo estilo del resto de la guía
+(panorama vecino + "En Fitz..." + Las piezas + ejemplos +
+cross-links). Secciones:
+
+- **Panorama vecino** — Vue SFC, Svelte, React JSX, Elm,
+  HTMX+Jinja, Phoenix LiveView. Contexto competitivo real.
+- **En Fitz** — el `.fitzv` como extensión, dos backends
+  (SSR + WASM), sin herramientas build externas.
+- **Las piezas** — `component <Name> { ... }`, state, event,
+  `<template>`, `<style scoped|global>`, imports con `as`
+  (S.1 shipped v0.21.2).
+- **Interpolación de expresiones** — regla de scoping en 4
+  niveles (local scope > state field > imported name > error).
+- **Cross-file types** — `.fitzv` importa tipos de `.fitz`
+  classic sibling.
+- **Composición de components** — `<Child prop="v" />` con las
+  4 formas de props (primitives, List<primitive>, Map<Str,Str>,
+  interpolated).
+- **Estilos scoped** — CSS rewriting automático + `<style
+  global>` para reset/global.
+- **Los dos backends de compilación** — SSR (fitz-liveviews) +
+  WASM client-side (opt-in). Bundle size del counter demo:
+  11.4 KB gzipped sobre 40 KB gate.
+- **Editor support (LSP)** — cross-link al cap 22.
+- **Ejemplo runnable — Contador Fitz-LiveViews** completo con
+  `Counter.fitzv` + `main.fitz`.
+- **Compatibilidad con classic Fitz** — .fitz + .fitzv en el
+  mismo proyecto, `.fitz` gana cuando coexisten.
+- **Qué no está en el MVP** — Cross-file `<Child />`, WASM
+  interpolated props, event bubbling implícito, `<slot />`
+  fallback, persistent child state.
+
+Renumeración: cap 36 (Boilerplates) → 37, cap 37 (Qué sigue)
+→ 38.
+
+### Cap 22 (Soporte para editores) refresh
+
+Nueva sub-sección "**En archivos `.fitzv`**" con las 4
+capabilities LSP de Phase 11.8 (v0.21.3): diagnostics en vivo
++ 4 clases de completions + hover + go-to-def. Detalle de las
+deudas residuales (cross-module symbol lookup, TypeInfo-based
+hover, fine-grained context routing, signature help / rename).
+
+### Cap 38 (Qué sigue) refresh
+
+Sección "**Lo que ya bajó de especulativo a REALIDAD**" —
+`.fitzv` frontend + Fase 12 deployment + Fase 10.6 migraciones
+CERRADAS. Nueva sección "**Lo que sigue**" apunta a Phase
+11.7 (client-side dynamic capabilities + kanban SPA port) y
+companion UI library como próximos nortes.
+
+### `docs/architecture.md` refresh
+
+Nueva sección **`view/` — `.fitzv` single-file components
+(Phase 11)** que describe los 7 módulos del pipeline view:
+`lexer.rs` / `parser.rs` / `expand.rs` / `check.rs` /
+`codegen_ssr.rs` / `codegen_wasm.rs` / `wasm_build.rs`. Explica
+las 2 branches de emit compartiendo 1 check pass, y la
+integración con el module loader (`.fitz` gana cuando coexiste
+con `.fitzv` del mismo stem).
+
+### Nuevo módulo del curso — M9 Frontend nativo con `.fitzv`
+
+Nuevo folder `docs/curso/m9-fitzv-frontend/` con 3 caps
+pedagógicos + entrada en `docs/curso/index.md` + entrada en
+`mkdocs.yml` nav:
+
+- **[C1 — Tu primer `.fitzv` (Counter component)](docs/curso/m9-fitzv-frontend/c1-primer-fitzv.md)**
+  (~250 LoC) — el "hola mundo" del `.fitzv`. Counter con state
+  + 3 events + template + style. Wire-up completo con
+  `fitz-liveviews`. Troubleshooting típico.
+- **[C2 — Template DSL](docs/curso/m9-fitzv-frontend/c2-template-dsl.md)**
+  (~350 LoC) — las 5 features del template en profundidad:
+  interpolación de expresiones (bare state + field access +
+  method calls + inline math), attribute interpolation,
+  directivas `{#if}` / `{#else}` / `{/if}` + `{#for x in xs}`
+  / `{/for}`, wire de eventos con `data-flv-*`, composición
+  de components. Ejemplo TodoList runnable.
+- **[C3 — Full-page SFC: Board.fitzv migration del kanban](docs/curso/m9-fitzv-frontend/c3-full-page-sfc.md)**
+  (~350 LoC) — el **acceptance criterion del módulo**. Kanban
+  migrado con el pattern canónico: `card.fitz` (types) +
+  `board_helpers.fitz` (helpers puros) + `Board.fitzv` (SFC
+  full-page con 4 events + template con 3 columnas) +
+  `main.fitz` (HTTP + WS wire-up de 30 LoC). Comparación pre/
+  post migration numbers.
+
+### `docs/curso/index.md` refresh
+
+Tabla de módulos actualizada: M9 nuevo con "✅ MVP (C1-C3,
+v0.21.4)". Sección "M9 — Frontend nativo con `.fitzv`"
+completa con requisitos, links a los 3 caps, y entregable
+del módulo.
+
+### `mkdocs.yml` nav refresh
+
+Nueva entrada `M9 — Frontend nativo con `.fitzv`` con los 3
+caps entre M8 y "Construyendo TaskHub".
+
+### `docs/index.md` refresh
+
+Nueva entry "**Phase 11 Session C — Pedagogic docs**" que
+cita el cap 36 nuevo, el M9 nuevo, y la refresh de architecture.
+
+### Verificación pre-bump
+
+- 3741/3741 lib tests default features verde.
+- 3897/3897 lib tests con `--features lsp` verde.
+- 115/115 cli_e2e verde.
+- `cargo fmt --all --check` limpio.
+- `cargo clippy --lib --tests --release --features lsp -- -D
+  warnings` limpio.
+- Docs: cero código Rust nuevo. Todo el diff es markdown +
+  mkdocs.yml.
+- Smoke real Board.fitzv del kanban (`fitz-liveviews`)
+  `fitz check` verde — sin regresión.
+
+### Bump
+
+- `Cargo.toml` 0.21.3 → 0.21.4.
+- `editors/vscode/package.json` 0.21.3 → 0.21.4.
+- `.vsix` regenerado (no cambios al binario ni al grammar —
+  regen para paridad de versión numérica con el resto del
+  ecosistema).
+
+### Estado post-Session C
+
+**Phase 11 CERRADA ENTERA post-v0.21.4**: 11.1 → 11.6 shipped
+en v0.21.0 (base + SFC pipeline); 11.8 shipped en v0.21.3
+(LSP inside `.fitzv`); 11.9 shipped en v0.21.4 (pedagogic
+docs). **Solo queda Phase 11.7 (client-side dynamic
+capabilities + kanban SPA port) como sub-fase futura de
+Phase 11** — schedule TBD, no bloquea uso real (SSR path
+cubre el 100% del caso Board y el 95% del caso general).
+
 ## [v0.21.3] — 2026-07-18 — Phase 11 Session B: LSP inside `.fitzv` (Phase 11.8 CERRADO)
 
 **Patch release aditivo** que cierra **Phase 11.8 entera** — el

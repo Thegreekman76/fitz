@@ -44,6 +44,7 @@ asume VSCode para los screenshots ASCII.
 | M6 — Capstone Postgres + ORM nativo | 7 | ✅ cerrado (C1-C7) |
 | M7 — Interop Python | 3 | ✅ cerrado (C1-C3) |
 | M8 — Producción y deployment | 5 | ✅ cerrado (C1-C5) |
+| M9 — Frontend nativo con `.fitzv` | 3 | ✅ MVP (C1-C3, v0.21.4) |
 
 Total: **8 módulos, 43 capítulos**. Cada módulo es **unidad releasable
 independiente** — no hace falta esperar que esté todo para empezar.
@@ -202,6 +203,38 @@ agrega `fitz build --bundle-python --bundle-pip` para empaquetar
 CPython + tus paquetes pip adentro del binario — **deploy = un solo
 archivo, sin Python instalado en el destino**. **12-factor compliance
 por default** sin instalar nada extra.
+
+## M9 — Frontend nativo con `.fitzv`
+
+Requisito explícito: M4 completo (HTTP first-class). El módulo
+opcionalmente encaja post-M5 si querés WebSockets como
+transport, pero podés hacer los caps con solo HTTP `@get` +
+`fitz-liveviews` como dep.
+
+Phase 11 CERRADA en el compilador (v0.21.0 → v0.21.3): Fitz
+tiene una NUEVA extensión de archivo `.fitzv` con componentes
+visuales de primera clase, template DSL con directivas, dos
+backends de compilación (SSR y WASM client-side), y LSP full
+para editar en VSCode con diagnostics + completions + hover +
+go-to-def.
+
+- **[C1 — Tu primer `.fitzv` (Counter component)](m9-fitzv-frontend/c1-primer-fitzv.md)**
+- **[C2 — Template DSL: interpolación, directivas, composición](m9-fitzv-frontend/c2-template-dsl.md)**
+- **[C3 — Full-page SFC: Board.fitzv migration del kanban](m9-fitzv-frontend/c3-full-page-sfc.md)**
+
+**Entregable del módulo**: tenés un componente `.fitzv`
+corriendo end-to-end con el runtime `fitz-liveviews` (WebSocket
++ diff/patch), sabés escribir templates con directivas
+(`{#if}`/`{#for}`) + interpolaciones + composición (`<Child
+prop="v" />`), y viste la Board.fitzv full-page migration del
+kanban como acceptance criterion — el pattern de architecture
+`.fitz` (types + helpers) + `.fitzv` (SFC) + `main.fitz`
+(HTTP+WS thin wire-up) queda en tu toolkit.
+
+Este módulo introduce la **superficie más nueva del lenguaje**
+(post-v0.21.0). Las Phase 11.7 (client-side dynamic
+capabilities + kanban SPA port) y post-11.9 (companion UI
+library) son follow-ups que crecen sobre este módulo.
 
 ## Cómo está pensado el curso
 

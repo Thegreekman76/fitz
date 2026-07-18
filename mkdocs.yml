@@ -181,6 +181,10 @@ nav:
           - 'C3 — Secrets management (secret() + Secret<T>)': curso/m8-produccion-deploy/c3-secrets-config.md
           - 'C4 — Deploy avanzado (Docker + healthz + K8s)': curso/m8-produccion-deploy/c4-deploy-docker-k8s.md
           - 'C5 — Deploy real con interop Python (--bundle-python + --bundle-pip)': curso/m8-produccion-deploy/c5-bundle-python-pip-deploy.md
+      - 'M9 — Frontend nativo con `.fitzv`':
+          - 'C1 — Tu primer .fitzv (Counter)': curso/m9-fitzv-frontend/c1-primer-fitzv.md
+          - 'C2 — Template DSL (interpolación + directivas + composición)': curso/m9-fitzv-frontend/c2-template-dsl.md
+          - 'C3 — Full-page SFC (Board.fitzv kanban)': curso/m9-fitzv-frontend/c3-full-page-sfc.md
   - 'Construyendo TaskHub':
       - taskhub/index.md
       - 'C1 — Setup Docker-first': taskhub/c1-setup-docker-first.md
