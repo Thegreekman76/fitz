@@ -209,6 +209,16 @@ pub enum ExpandedTemplateNode {
     ChildComponent {
         name: String,
         props: Vec<ChildComponentProp>,
+        /// Phase 11.7.b R2b — the `key="{expr}"` attribute, parsed as
+        /// a classic-Fitz expression. Set when the child site carries
+        /// a `key` attribute (the canonical shape for a `<Child />`
+        /// inside a `{#for}`: `<Card key="{x}" ... />`). `None` for
+        /// static sites. The WASM emitter uses it to give each
+        /// dynamic child a stable identity so its instance (and its
+        /// local state) is reused across re-renders via a keyed
+        /// instance cache + reconciliation. The `key` is NOT a prop —
+        /// it is stripped from `props` at expand time.
+        key: Option<fast::Expr>,
         loc: Loc,
     },
 }
@@ -768,8 +778,37 @@ fn expand_child_component(
     }
 
     let mut props = Vec::with_capacity(attrs.len());
+    let mut key: Option<fast::Expr> = None;
     for a in attrs {
         match a {
+            // Phase 11.7.b R2b — `key="{expr}"` is a reserved
+            // attribute, NOT a prop. It gives a `<Child />` inside a
+            // `{#for}` a stable identity so the WASM emitter can reuse
+            // the child instance (and its local state) across
+            // re-renders. Parse the interpolated expression and stash
+            // it in `key`; never push it into `props`.
+            RawAttr::Interpolation {
+                name,
+                expr_raw,
+                loc: aloc,
+            } if name == "key" => {
+                let ctx = format!("component template <{tag} /> key attribute");
+                key = Some(parse_expr_at(expr_raw, *aloc, ctx)?);
+            }
+            RawAttr::Static {
+                name, loc: aloc, ..
+            } if name == "key" => {
+                return Err(ExpandError {
+                    message: format!(
+                        "`key=\"...\"` on `<{tag} />` must be an interpolated \
+                         expression (`key=\"{{x}}\"`), not a static string. The \
+                         key gives the child a stable identity inside a `{{#for}}` \
+                         loop and is typically the loop variable."
+                    ),
+                    loc: *aloc,
+                    context: "template (child component composition)".to_string(),
+                });
+            }
             RawAttr::Static { name, value, loc } => {
                 props.push(ChildComponentProp {
                     field_name: name.clone(),
@@ -827,6 +866,7 @@ fn expand_child_component(
     Ok(ExpandedTemplateNode::ChildComponent {
         name: tag.to_string(),
         props,
+        key,
         loc,
     })
 }

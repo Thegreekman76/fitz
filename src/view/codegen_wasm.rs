@@ -201,11 +201,15 @@ fn emit_component_impl(
 ) -> EmitResult<()> {
     let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
 
-    // Phase 11.7.e — collect the static `<Child />` composition sites
+    // Phase 11.7.e / R2b — collect every `<Child />` composition site
     // (in DFS order) so the struct can carry a typed instance-cache
-    // slot per site. The render walk hits the same sites in the same
-    // order (both only descend into `Element` children), so the slot
-    // index assigned here matches the one the render emits.
+    // slot per site. Each site is classified STATIC (fixed position,
+    // one instance → `__child_slot_<n>: RefCell<Option<Rc<T>>>`) or
+    // DYNAMIC (inside a `{#for}`, one instance PER key →
+    // `__child_map_<n>: RefCell<HashMap<String, Rc<T>>>`). The render
+    // walk descends identically (Element / If / For), assigning the
+    // same static + dynamic indices in the same order, so the field
+    // an index names here matches the one the render reads.
     let child_sites = collect_child_site_types(component);
 
     emit_struct_and_new(component, &child_sites, out)?;
@@ -217,31 +221,66 @@ fn emit_component_impl(
     Ok(())
 }
 
-/// Collect the child-component type of every static `<Child />`
-/// composition site in `component`'s template, in DFS order. Phase
-/// 11.7.e uses this to declare one instance-cache slot per site so
-/// the child instance (and its state) survives parent re-renders.
+/// A `<Child />` composition site discovered in a component's
+/// template. Phase 11.7.e (static) + R2b (dynamic).
+struct ChildSite {
+    /// The child component's declared name (`"Card"`), used both as
+    /// the Rust type in the cache field and to look the child up when
+    /// emitting props.
+    child_ty: String,
+    /// `true` when the site sits inside a `{#for}` loop. A dynamic
+    /// site maps a stable `key` → one child instance
+    /// (`HashMap<String, Rc<T>>`); a static site holds a single
+    /// optional instance (`Option<Rc<T>>`).
+    dynamic: bool,
+}
+
+/// Collect every `<Child />` composition site in `component`'s
+/// template, in DFS order, classified static vs dynamic (Phase
+/// 11.7.e + R2b).
 ///
-/// Only descends into `Element` children — `{#if}` / `{#for}` /
-/// `<slot>` are rejected by the render walk before it reaches any
-/// child site inside them, so descending into them here would
-/// misalign the slot-index counter with the render walk.
-fn collect_child_site_types(component: &ExpandedComponent) -> Vec<String> {
+/// Descends into `Element`, `{#if}` (both branches), and `{#for}`
+/// children — the SAME descent the render walk does — so the static
+/// / dynamic index a site is assigned here matches the counter the
+/// render advances. Sites inside a `{#for}` are marked `dynamic`.
+fn collect_child_site_types(component: &ExpandedComponent) -> Vec<ChildSite> {
     let mut sites = Vec::new();
     if let Some(template) = &component.template {
         for node in &template.roots {
-            collect_sites_in_node(node, &mut sites);
+            collect_sites_in_node(node, false, &mut sites);
         }
     }
     sites
 }
 
-fn collect_sites_in_node(node: &ExpandedTemplateNode, sites: &mut Vec<String>) {
+fn collect_sites_in_node(node: &ExpandedTemplateNode, in_for: bool, sites: &mut Vec<ChildSite>) {
     match node {
-        ExpandedTemplateNode::ChildComponent { name, .. } => sites.push(name.clone()),
+        ExpandedTemplateNode::ChildComponent { name, .. } => sites.push(ChildSite {
+            child_ty: name.clone(),
+            dynamic: in_for,
+        }),
         ExpandedTemplateNode::Element { children, .. } => {
             for child in children {
-                collect_sites_in_node(child, sites);
+                collect_sites_in_node(child, in_for, sites);
+            }
+        }
+        ExpandedTemplateNode::If {
+            children,
+            else_children,
+            ..
+        } => {
+            for child in children {
+                collect_sites_in_node(child, in_for, sites);
+            }
+            if let Some(else_kids) = else_children {
+                for child in else_kids {
+                    collect_sites_in_node(child, in_for, sites);
+                }
+            }
+        }
+        ExpandedTemplateNode::For { children, .. } => {
+            for child in children {
+                collect_sites_in_node(child, true, sites);
             }
         }
         _ => {}
@@ -254,7 +293,7 @@ fn collect_sites_in_node(node: &ExpandedTemplateNode, sites: &mut Vec<String>) {
 
 fn emit_struct_and_new(
     component: &ExpandedComponent,
-    child_sites: &[String],
+    child_sites: &[ChildSite],
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
@@ -270,17 +309,33 @@ fn emit_struct_and_new(
         })?;
         writeln!(out, "    {}: RefCell<{}>,", field.name, rust_ty).unwrap();
     }
-    // Phase 11.7.e — one instance-cache slot per static `<Child />`
-    // site. Holds the child's `Rc` across parent re-renders so the
-    // child's state persists (the parent re-render rebuilds the DOM
-    // but reuses the cached instance instead of `Child::new()`ing it).
-    for (i, child_ty) in child_sites.iter().enumerate() {
-        writeln!(
-            out,
-            "    __child_slot_{}: RefCell<Option<Rc<{}>>>,",
-            i, child_ty
-        )
-        .unwrap();
+    // Phase 11.7.e / R2b — one instance-cache field per `<Child />`
+    // site. STATIC sites hold a single optional instance so the child
+    // survives parent re-renders (its state persists — the DOM is
+    // rebuilt but the cached instance is reused instead of
+    // `Child::new()`). DYNAMIC sites (inside a `{#for}`) map a stable
+    // `key` → one instance, so each keyed child keeps its own state
+    // across re-renders and reconciliation evicts vanished keys.
+    let mut static_idx = 0usize;
+    let mut dyn_idx = 0usize;
+    for site in child_sites {
+        if site.dynamic {
+            writeln!(
+                out,
+                "    __child_map_{}: RefCell<std::collections::HashMap<String, Rc<{}>>>,",
+                dyn_idx, site.child_ty
+            )
+            .unwrap();
+            dyn_idx += 1;
+        } else {
+            writeln!(
+                out,
+                "    __child_slot_{}: RefCell<Option<Rc<{}>>>,",
+                static_idx, site.child_ty
+            )
+            .unwrap();
+            static_idx += 1;
+        }
     }
     writeln!(out, "    root: RefCell<Option<HtmlElement>>,").unwrap();
     writeln!(out, "}}\n").unwrap();
@@ -304,8 +359,26 @@ fn emit_struct_and_new(
         )
         .unwrap();
     }
-    for (i, _) in child_sites.iter().enumerate() {
-        writeln!(out, "            __child_slot_{}: RefCell::new(None),", i).unwrap();
+    let mut static_idx = 0usize;
+    let mut dyn_idx = 0usize;
+    for site in child_sites {
+        if site.dynamic {
+            writeln!(
+                out,
+                "            __child_map_{}: RefCell::new(std::collections::HashMap::new()),",
+                dyn_idx
+            )
+            .unwrap();
+            dyn_idx += 1;
+        } else {
+            writeln!(
+                out,
+                "            __child_slot_{}: RefCell::new(None),",
+                static_idx
+            )
+            .unwrap();
+            static_idx += 1;
+        }
     }
     writeln!(out, "            root: RefCell::new(None),").unwrap();
     writeln!(out, "        }})").unwrap();
@@ -467,11 +540,19 @@ struct RenderCtx<'a> {
     /// items}` can resolve `items`'s element type (`List<T>` → `T`).
     state_fields: &'a [ExpandedStateField],
     var_counter: usize,
-    /// Phase 11.7.e — running index of the `<Child />` composition
-    /// site being emitted. Incremented per site (in the same DFS
-    /// order as `collect_child_site_types`) so each site reads its
-    /// matching `__child_slot_<n>` instance-cache field.
-    child_site_counter: usize,
+    /// Phase 11.7.e — running index of the STATIC `<Child />` site
+    /// being emitted (matches `__child_slot_<n>`). Incremented per
+    /// static site in the same DFS order as `collect_child_site_types`.
+    static_site_counter: usize,
+    /// Phase 11.7.b R2b — running index of the DYNAMIC `<Child />`
+    /// site being emitted (matches `__child_map_<n>`). Incremented per
+    /// dynamic site (one inside a `{#for}`) in the same DFS order.
+    dyn_site_counter: usize,
+    /// Phase 11.7.b R2b — `true` while emitting the children of a
+    /// `{#for}` loop. Tells `emit_child_component` to reconcile the
+    /// child through the keyed instance cache (`__child_map_<n>`)
+    /// instead of the single static slot.
+    in_for: bool,
     /// Phase 11.7.b — loop variables currently in scope (from
     /// enclosing `{#for x in ...}`). An `Expr::Ident` that names a
     /// local resolves to the Rust loop var directly, shadowing state.
@@ -491,7 +572,9 @@ impl<'a> RenderCtx<'a> {
             state_fields,
             file,
             var_counter: 0,
-            child_site_counter: 0,
+            static_site_counter: 0,
+            dyn_site_counter: 0,
+            in_for: false,
             locals: Vec::new(),
         }
     }
@@ -502,11 +585,19 @@ impl<'a> RenderCtx<'a> {
         format!("__{}{}", prefix, id)
     }
 
-    /// Return the slot index for the current `<Child />` site and
-    /// advance the counter.
-    fn next_child_site(&mut self) -> usize {
-        let idx = self.child_site_counter;
-        self.child_site_counter += 1;
+    /// Return the slot index for the current STATIC `<Child />` site
+    /// and advance the counter.
+    fn next_static_site(&mut self) -> usize {
+        let idx = self.static_site_counter;
+        self.static_site_counter += 1;
+        idx
+    }
+
+    /// Return the map index for the current DYNAMIC `<Child />` site
+    /// (inside a `{#for}`) and advance the counter.
+    fn next_dyn_site(&mut self) -> usize {
+        let idx = self.dyn_site_counter;
+        self.dyn_site_counter += 1;
         idx
     }
 }
@@ -554,9 +645,9 @@ fn emit_template_node(
             message: "`<slot />` composition — deferred to Phase 11.5".to_string(),
             context: format!("template of component `{}`", ctx.component_name),
         }),
-        ExpandedTemplateNode::ChildComponent { name, props, .. } => {
-            emit_child_component(name, props, parent_var, ctx, out)
-        }
+        ExpandedTemplateNode::ChildComponent {
+            name, props, key, ..
+        } => emit_child_component(name, props, key.as_ref(), parent_var, ctx, out),
     }
 }
 
@@ -712,6 +803,26 @@ fn emit_for(
         });
     }
 
+    // Phase 11.7.b R2b — keyed `<Child />` composition inside `{#for}`.
+    // Pre-scan the body for the DYNAMIC child sites it contains (the
+    // same descent the render walk does, NOT into a nested `{#for}`).
+    // Their `__child_map_<n>` indices are the contiguous range starting
+    // at the current dynamic counter. For each, declare a per-render
+    // `__seen_<n>` set BEFORE the loop; the child mount inserts its key
+    // into it; after the loop, `retain` evicts every child whose key
+    // vanished this render (reconciliation). The instance for a
+    // surviving key is reused from the map, so its local state persists.
+    let dyn_base = ctx.dyn_site_counter;
+    let dyn_count = count_dynamic_child_sites(children);
+    for i in dyn_base..dyn_base + dyn_count {
+        writeln!(
+            out,
+            "        let mut __seen_{} = std::collections::HashSet::<String>::new();",
+            i
+        )
+        .unwrap();
+    }
+
     let snap = ctx.fresh("for");
     writeln!(
         out,
@@ -721,6 +832,8 @@ fn emit_for(
     .unwrap();
     writeln!(out, "        for {} in {}.iter().cloned() {{", var, snap).unwrap();
     ctx.locals.push(var.to_string());
+    let prev_in_for = ctx.in_for;
+    ctx.in_for = true;
     let mut result = Ok(());
     for child in children {
         if let Err(e) = emit_template_node(child, parent_var, ctx, out) {
@@ -728,10 +841,54 @@ fn emit_for(
             break;
         }
     }
+    ctx.in_for = prev_in_for;
     ctx.locals.pop();
     result?;
     writeln!(out, "        }}").unwrap();
+
+    // Reconciliation sweep — evict any keyed child not touched this
+    // render so vanished list items release their cached instance.
+    for i in dyn_base..dyn_base + dyn_count {
+        writeln!(
+            out,
+            "        self.__child_map_{}.borrow_mut().retain(|__k, _| __seen_{}.contains(__k));",
+            i, i
+        )
+        .unwrap();
+    }
     Ok(())
+}
+
+/// Count the DYNAMIC `<Child />` sites directly inside a `{#for}`
+/// body — the ones that share this loop's keyed instance caches.
+/// Descends into `Element` and `{#if}` children (the render walk
+/// reaches child sites through both) but NOT into a nested `{#for}`
+/// (that inner loop owns its own contiguous range of dynamic
+/// indices, pre-scanned when its own `emit_for` runs). Kept in lock-
+/// step with the DFS descent of `collect_child_site_types` /
+/// `emit_template_node` so the index range reserved here matches the
+/// `__child_map_<n>` fields the children actually read.
+fn count_dynamic_child_sites(children: &[ExpandedTemplateNode]) -> usize {
+    fn count_node(node: &ExpandedTemplateNode) -> usize {
+        match node {
+            ExpandedTemplateNode::ChildComponent { .. } => 1,
+            ExpandedTemplateNode::Element { children, .. } => children.iter().map(count_node).sum(),
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                let then: usize = children.iter().map(count_node).sum();
+                let els: usize = else_children
+                    .as_deref()
+                    .map(|kids| kids.iter().map(count_node).sum())
+                    .unwrap_or(0);
+                then + els
+            }
+            _ => 0,
+        }
+    }
+    children.iter().map(count_node).sum()
 }
 
 /// Lower a `{#if}` condition to a Rust `bool` expression. Supports
@@ -892,6 +1049,7 @@ fn emit_static_attr(name: &str, value: &str, el_var: &str, out: &mut String) {
 fn emit_child_component(
     child_name: &str,
     props: &[super::expand::ChildComponentProp],
+    key: Option<&Expr>,
     parent_var: &str,
     ctx: &mut RenderCtx,
     out: &mut String,
@@ -916,28 +1074,74 @@ fn emit_child_component(
     )
     .unwrap();
 
-    // Phase 11.7.e — get-or-create the child from this site's
-    // instance-cache slot instead of `Child::new()`ing it fresh every
-    // render. Reusing the cached `Rc` preserves the child's state
-    // (its `RefCell` fields) across parent re-renders; only the
-    // child's DOM is rebuilt (via the `mount_into` → `render` below).
-    let slot_idx = ctx.next_child_site();
     let child_var = ctx.fresh("child");
-    writeln!(out, "        let {} = {{", child_var).unwrap();
-    writeln!(
-        out,
-        "            let mut __slot = self.__child_slot_{}.borrow_mut();",
-        slot_idx
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "            if __slot.is_none() {{ *__slot = Some({}::new()); }}",
-        child_name
-    )
-    .unwrap();
-    writeln!(out, "            __slot.as_ref().unwrap().clone()").unwrap();
-    writeln!(out, "        }};").unwrap();
+    if ctx.in_for {
+        // Phase 11.7.b R2b — DYNAMIC site inside a `{#for}`. Reconcile
+        // the child through this site's keyed instance cache
+        // (`__child_map_<idx>`) so the instance for a stable key — and
+        // its local state — survives re-renders. The `key` attribute
+        // gives the identity; `__seen_<idx>` (declared by the enclosing
+        // `emit_for`) records the keys touched this render so the
+        // post-loop `retain` can evict vanished ones.
+        let key_expr = key.ok_or_else(|| EmitError {
+            message: format!(
+                "`<{child_name} />` inside a `{{#for}}` needs a `key=\"{{...}}\"` \
+                 attribute so each item keeps a stable identity across re-renders \
+                 (e.g. `<{child_name} key=\"{{x}}\" ... />`, where `x` is the loop \
+                 variable). Without a key the client-WASM target can't reconcile \
+                 the keyed instance cache."
+            ),
+            context: format!("template of component `{}`", ctx.component_name),
+        })?;
+        let key_rust = lower_expr(key_expr, ctx.state_names, &ctx.locals).map_err(|mut e| {
+            e.message = format!(
+                "`<{child_name} key=\"{{...}}\" />`: {}. The key must lower to a \
+                 primitive (typically the loop variable) on the client-WASM target.",
+                e.message
+            );
+            e.context = format!("template of component `{}`", ctx.component_name);
+            e
+        })?;
+        let map_idx = ctx.next_dyn_site();
+        writeln!(out, "        let __key = format!(\"{{}}\", {});", key_rust).unwrap();
+        writeln!(out, "        __seen_{}.insert(__key.clone());", map_idx).unwrap();
+        writeln!(out, "        let {} = {{", child_var).unwrap();
+        writeln!(
+            out,
+            "            let mut __map = self.__child_map_{}.borrow_mut();",
+            map_idx
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            __map.entry(__key.clone()).or_insert_with(|| {}::new()).clone()",
+            child_name
+        )
+        .unwrap();
+        writeln!(out, "        }};").unwrap();
+    } else {
+        // Phase 11.7.e — STATIC site. Get-or-create the child from this
+        // site's single instance-cache slot instead of `Child::new()`ing
+        // it fresh every render. Reusing the cached `Rc` preserves the
+        // child's state (its `RefCell` fields) across parent re-renders;
+        // only the child's DOM is rebuilt (via `mount_into` → `render`).
+        let slot_idx = ctx.next_static_site();
+        writeln!(out, "        let {} = {{", child_var).unwrap();
+        writeln!(
+            out,
+            "            let mut __slot = self.__child_slot_{}.borrow_mut();",
+            slot_idx
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            if __slot.is_none() {{ *__slot = Some({}::new()); }}",
+            child_name
+        )
+        .unwrap();
+        writeln!(out, "            __slot.as_ref().unwrap().clone()").unwrap();
+        writeln!(out, "        }};").unwrap();
+    }
 
     // Look up the child component to know each prop's declared
     // type. The checker already validated the child exists +
@@ -2814,6 +3018,199 @@ component Card {
         assert!(
             out.contains(r#".label.borrow_mut() = "hi".to_string();"#),
             "static prop must still coerce to a Rust literal:\n{out}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 11.7.b R2b — keyed `<Child />` composition inside `{#for}`
+    // ---------------------------------------------------------------------
+
+    /// Canonical R2b shape: a `<Child key="{x}" prop="{x}" />` inside a
+    /// `{#for x in items}` over `List<Str>` emits a keyed instance
+    /// cache (`__child_map_0`), a per-render `__seen_0` set, the
+    /// get-or-create via the map's `entry(...)` API, and a
+    /// reconciliation `retain` after the loop.
+    fn keyed_for_src() -> &'static str {
+        r#"component Board {
+  state { tags: List<Str> = ["a", "b", "c"] }
+  <template>
+    <ul>
+      {#for x in tags}
+        <Card key="{x}" label="{x}" />
+      {/for}
+    </ul>
+  </template>
+}
+component Card {
+  state {
+    label: Str = ""
+    taps: Int = 0
+  }
+  event tap() { taps = taps + 1 }
+  <template><li>{label} ({taps})</li></template>
+}"#
+    }
+
+    #[test]
+    fn phase_11_7_b_r2b_dynamic_child_emits_keyed_map_field() {
+        let file = parse_expand(keyed_for_src());
+        let out = emit_module(&file).expect("keyed for must emit");
+        assert!(
+            out.contains("__child_map_0: RefCell<std::collections::HashMap<String, Rc<Card>>>,"),
+            "a `<Child />` inside `{{#for}}` must get a keyed instance cache field:\n{out}"
+        );
+        assert!(
+            out.contains("__child_map_0: RefCell::new(std::collections::HashMap::new()),"),
+            "new() must init the keyed map empty:\n{out}"
+        );
+        // A dynamic site must NOT also get a static slot.
+        assert!(
+            !out.contains("__child_slot_"),
+            "a dynamic site must not emit a static slot:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_b_r2b_dynamic_child_emits_seen_set_and_retain() {
+        let file = parse_expand(keyed_for_src());
+        let out = emit_module(&file).expect("keyed for must emit");
+        assert!(
+            out.contains("let mut __seen_0 = std::collections::HashSet::<String>::new();"),
+            "the enclosing for must declare a per-render seen set:\n{out}"
+        );
+        assert!(
+            out.contains(r#"let __key = format!("{}", x);"#),
+            "the key must lower to `format!(\"{{}}\", x)` from the loop var:\n{out}"
+        );
+        assert!(
+            out.contains("__seen_0.insert(__key.clone());"),
+            "each rendered child must record its key as seen:\n{out}"
+        );
+        assert!(
+            out.contains("__map.entry(__key.clone()).or_insert_with(|| Card::new()).clone()"),
+            "the child must be get-or-created through the keyed map:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "self.__child_map_0.borrow_mut().retain(|__k, _| __seen_0.contains(__k));"
+            ),
+            "after the loop, vanished keys must be evicted (reconciliation):\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_b_r2b_dynamic_child_without_key_rejects() {
+        let src = r#"component Board {
+  state { tags: List<Str> = ["a"] }
+  <template>
+    <ul>
+      {#for x in tags}
+        <Card label="{x}" />
+      {/for}
+    </ul>
+  </template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><li>{label}</li></template>
+}"#;
+        let file = parse_expand(src);
+        let err = emit_module(&file).expect_err("a keyless dynamic child must reject");
+        assert!(
+            err.message.contains("key=") && err.message.contains("{#for}"),
+            "the error must ask for a `key` inside `{{#for}}`:\n{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn phase_11_7_b_r2b_static_key_attr_rejects_at_expand() {
+        // `key="literal"` (not interpolated) is a mistake — the key is
+        // meant to be the loop variable. Rejected at expand time.
+        let src = r#"component Board {
+  state { tags: List<Str> = ["a"] }
+  <template>
+    <ul>
+      {#for x in tags}
+        <Card key="static" label="{x}" />
+      {/for}
+    </ul>
+  </template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><li>{label}</li></template>
+}"#;
+        let raw = parse(src).expect("parse ok");
+        let err = expand(&raw).expect_err("static key must reject at expand");
+        assert!(
+            err.to_string().contains("key="),
+            "expand must reject a static key attribute:\n{err}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_b_r2b_static_and_dynamic_sites_get_aligned_indices() {
+        // A static `<Header />` (slot 0) followed by a `{#for}` with a
+        // dynamic `<Card />` (map 0): the two index spaces are
+        // independent and each field is typed to its own child.
+        let src = r#"component Board {
+  state { tags: List<Str> = ["a"] }
+  <template>
+    <div>
+      <Header label="hi" />
+      <ul>
+        {#for x in tags}
+          <Card key="{x}" label="{x}" />
+        {/for}
+      </ul>
+    </div>
+  </template>
+}
+component Header {
+  state { label: Str = "" }
+  <template><h1>{label}</h1></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><li>{label}</li></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).expect("mixed sites must emit");
+        assert!(
+            out.contains("__child_slot_0: RefCell<Option<Rc<Header>>>,"),
+            "the static site must be slot 0 typed to Header:\n{out}"
+        );
+        assert!(
+            out.contains("__child_map_0: RefCell<std::collections::HashMap<String, Rc<Card>>>,"),
+            "the dynamic site must be map 0 typed to Card:\n{out}"
+        );
+        assert!(
+            out.contains("if __slot.is_none() {") && out.contains("Header::new()"),
+            "the static child must still get-or-create from its slot:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_b_r2b_for_without_child_emits_no_seen_set() {
+        // Regression: a `{#for}` over `List<primitive>` with no child
+        // composition (the 11.7.b control-flow shape) must NOT gain a
+        // seen set / map / retain.
+        let src = r#"component App {
+  state { labels: List<Str> = ["a", "b"] }
+  <template>
+    <ul>
+      {#for label in labels}
+        <li>{label}</li>
+      {/for}
+    </ul>
+  </template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).expect("plain for must emit");
+        assert!(
+            !out.contains("__seen_") && !out.contains("__child_map_"),
+            "a for without child composition must not reconcile:\n{out}"
         );
     }
 }

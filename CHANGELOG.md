@@ -229,6 +229,83 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 *(vacía — próximas entradas van acá antes del siguiente bump)*
 
+## [v0.21.7] — 2026-07-18 — Phase 11.7 (R2b): keyed `<Child />` composition dentro de `{#for}` en el target WASM
+
+**Patch release aditivo** — el último slice del "rendering core" de
+**Phase 11.7** (client-side dynamic capabilities) antes de event
+bubbling / slots (11.7.c/d) y nominales + kanban (R3). Trae al
+target **client-WASM** de `.fitzv` la composición de **children
+dinámicos con identidad estable** dentro de un `{#for}`, sobre
+`List<primitive>`:
+
+```fitzv
+{#for name in columns}
+  <Column key="{name}" title="{name}" />
+{/for}
+```
+
+**El atributo `key="{expr}"`** — nuevo, reservado — le da a cada
+child una identidad estable. NO es un prop: se extrae en expand
+time y nunca llega al struct literal del child. El WASM emitter
+mantiene una **keyed instance cache** por sitio dinámico
+(`__child_map_<n>: RefCell<HashMap<String, Rc<Child>>>`) y hace
+get-or-create con `map.entry(key).or_insert_with(|| Child::new())`.
+Una key existente **reusa** la instancia (su state local sobrevive
+el re-render del parent, igual que 11.7.e para sites estáticos); una
+key nueva la crea. Entre renders, un sweep de **reconciliation**
+(`retain`) evicta las keys que desaparecieron de la lista.
+
+**Cómo funciona la reconciliation**: el `emit_for` declara un set
+`__seen_<n>` por sitio dinámico ANTES del loop; cada child mounteado
+inserta su key; después del loop, `self.__child_map_<n>.retain(|k,
+_| __seen_<n>.contains(k))` libera las instancias huérfanas. El
+`key` lowerea vía `format!("{}", <key_expr>)` (típicamente la loop
+var), unificando `List<Str>`/`List<Int>`/etc a una `String` key.
+
+**Cambios técnicos**:
+- **`src/view/expand.rs`**: `ExpandedTemplateNode::ChildComponent`
+  gana `key: Option<fast::Expr>`; `expand_child_component`
+  special-casea el atributo `key` (interpolado → key expr, static
+  `key="..."` → error citando que debe ser `{...}`).
+- **`src/view/check.rs`**: destructure con `..` (el key se valida en
+  emit time — requerido para dynamic, ignorado para static).
+- **`src/view/codegen_ssr.rs`**: passthrough (SSR re-renderiza el
+  HTML entero, la key es irrelevante) — sin cambio de comportamiento.
+- **`src/view/codegen_wasm.rs`** (~250 LoC): `collect_child_site_types`
+  clasifica sites STATIC vs DYNAMIC (dentro de `{#for}`) y desciende
+  igual que el render walk (Element / If / For); `emit_struct_and_new`
+  emite `__child_slot_<n>` (static) o `__child_map_<n>` (dynamic);
+  `RenderCtx` gana `static_site_counter` + `dyn_site_counter` +
+  `in_for`; `emit_for` pre-escanea sus dynamic child sites, declara
+  los seen sets y emite los retains; `emit_child_component` recibe el
+  `key` y ramifica static (slot) vs dynamic (keyed map + seen +
+  reconciliation). Índices static/dynamic independientes, alineados
+  entre collect y render por DFS idéntico.
+
+**Tests** (`codegen_wasm`, +6): `phase_11_7_b_r2b_*` — keyed map
+field, seen set + retain, keyless dynamic child rechaza, static
+`key="literal"` rechaza en expand, static+dynamic indices alineados,
+`{#for}` sin child no reconcilia.
+
+**Ejemplo runnable nuevo**: `examples/view/keyed-composition/` — un
+`App` con 3 columnas (`List<Str>`), cada `<Column key="{name}" />`
+con su propio contador `taps`; el botón "re-render parent" prueba
+que los contadores sobreviven. Compila a WASM real 40 KB. Smoke
+`tests/view_keyed_composition_wasm_smoke.rs`.
+
+**Deferido con pointers claros**: `{#for}` sobre `List<nominal>`
+(kanban, R3 prereq — nominales en WASM); event bodies que mutan la
+lista (push/remove — 11.4.c debt, la lista del ejemplo es constante
+así que la reconciliation corre pero nunca evicta live); event
+bubbling (11.7.c) + `<slot />` (11.7.d).
+
+**Verificación pre-bump**: 3755 lib (default, +6) + 3911 lib
+(`--features lsp`, +6) verde; 115 cli_e2e verde; `cargo fmt --all
+--check` + `cargo clippy --all-targets -- -D warnings` (default +
+lsp) limpios; smokes de `counter`/`showcase`/`reactive-props`/
+`control-flow` regeneran sin cambios (static path bit-a-bit
+idéntico); `keyed-composition` compila a WASM real end-to-end.
+
 ## [v0.21.6] — 2026-07-18 — Phase 11.7 (R2): control-flow (`{#if}`/`{#for}`) + persistent child state en el target WASM
 
 **Patch release aditivo** — segundo slice de **Phase 11.7**

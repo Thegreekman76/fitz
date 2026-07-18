@@ -327,15 +327,24 @@ parent state y mounted children).
     - **List/Str mutation en event bodies** (`labels.push(...)`)
       — deuda pre-existente de 11.4.c (event bodies solo hacen
       `state = numeric`).
-  - **`<Child />` composition dentro de `{#for}` (keyed dynamic
-    children)** — **R2b (v0.21.7)**. Resultó más grande de lo
-    estimado: necesita el atributo `key` fluyendo cross-module
-    (view parser → expand → check, special-caseado para no
-    tratarse como prop desconocido) + per-item `HashMap` instance
-    cache + reconciliation. Limitado a `List<primitive>` hasta que
-    aterricen los nominales. Decisión de key-syntax tomada
-    2026-07-18: **explicit `key` attribute** (`<Card key="{c.id}"
-    ... />`), robusto ante reorder/insert/delete.
+  - **🟢 `<Child />` composition dentro de `{#for}` (keyed dynamic
+    children)** — **CERRADO R2b (v0.21.7)**. El atributo
+    `key="{expr}"` fluye cross-module (view parser → expand →
+    check), special-caseado en `expand_child_component` para NO
+    tratarse como prop (se guarda en `ChildComponent.key`; static
+    `key="literal"` rechaza en expand). El WASM emitter clasifica
+    sites STATIC vs DYNAMIC (`collect_child_site_types` desciende
+    Element/If/For como el render walk) y emite `__child_map_<n>:
+    RefCell<HashMap<String, Rc<Child>>>` por sitio dinámico. El
+    child se reconcilia con `entry(key).or_insert_with(|| Child::
+    new())` (reusa la instancia → state local sobrevive) + un seen
+    set per-render + `retain` post-loop (evicta keys huérfanas). El
+    `key` lowerea vía `format!("{}", <expr>)`, típicamente la loop
+    var. Ejemplo `examples/view/keyed-composition/` (WASM 40 KB).
+    **Residual**: la lista es constante (event bodies que mutan la
+    lista siguen siendo 11.4.c debt), así que la reconciliation
+    corre pero nunca evicta live; `List<nominal>` sigue bloqueado
+    por R3.
   - **Event bubbling** (11.7.c) + **`<slot />` fallback** (11.7.d)
     — R2b+/posterior.
 - **Nominal-type STATIC props** — workaround: interpolación cubre.

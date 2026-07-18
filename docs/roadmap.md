@@ -9848,12 +9848,25 @@ de 3 releases:
   `{#for}` sobre `List<nominal>` (lo que el kanban necesita) está
   bloqueado por la falta de soporte de tipos nominales en WASM
   (R3 prereq).
-- ⏳ **11.7.b (R2b, v0.21.7)** — keyed `<Child />` composition
+- ✅ **11.7.b (R2b, v0.21.7)** — keyed `<Child />` composition
   dentro de `{#for}` (dynamic children con atributo `key` para
-  identidad estable). Resultó más grande: plumbing del `key`
-  cross-module (view parser → expand → check) + per-item cache +
-  reconciliation, limitado a `List<primitive>` hasta que aterricen
-  los nominales.
+  identidad estable), sobre `List<primitive>`. `key="{expr}"` es un
+  atributo reservado (NO un prop): se extrae en expand time y da la
+  identidad. El WASM emitter mantiene una keyed instance cache por
+  sitio dinámico (`__child_map_<n>: RefCell<HashMap<String,
+  Rc<Child>>>`), hace get-or-create con `entry(key).or_insert_with`,
+  y reconcilia después del loop (`retain` sobre un seen set
+  per-render). Índices static (`__child_slot`) vs dynamic
+  (`__child_map`) independientes, alineados entre `collect_child_
+  site_types` y el render walk por DFS idéntico. `expand.rs`
+  (`ChildComponent.key`) + `check.rs` (destructure `..`) +
+  `codegen_ssr.rs` (passthrough) + `codegen_wasm.rs` (~250 LoC). 6
+  unit tests `phase_11_7_b_r2b_*` + ejemplo runnable
+  `examples/view/keyed-composition/` (compila a WASM 40 KB). Ver
+  CHANGELOG v0.21.7. **Límite**: la lista es constante (event bodies
+  que mutan la lista son 11.4.c debt), así que la reconciliation
+  corre pero nunca evicta live; `List<nominal>` sigue bloqueado por
+  R3 (nominales en WASM).
 - ⏳ **11.7.c/d (R2b+)** — event bubbling + `<slot />` fallback.
 - ⏳ **11.7 nominales + f/g (R3, v0.22.0)** — soporte de tipos
   nominales en WASM (prereq del kanban) + drag-drop primitives +

@@ -1,0 +1,88 @@
+// Phase 11.7.b R2b — keyed `<Child />` composition inside `{#for}`
+// (`.fitzv` → WASM). The last "rendering core" slice of Phase 11.7:
+// dynamic children with a stable identity + reconciliation, over a
+// `List<primitive>` state field.
+//
+//   {#for name in columns}
+//     <Column key="{name}" title="{name}" />
+//   {/for}
+//
+// The `key="{...}"` attribute is NOT a prop — it gives each mounted
+// child a stable identity. The WASM emitter keeps one instance PER
+// key in a keyed cache (`HashMap<String, Rc<Column>>`), so a child —
+// AND its local state — survives parent re-renders. Between renders a
+// reconciliation sweep evicts any key that vanished from the list.
+//
+// WHY IT MATTERS (try it in the browser):
+//   1. Click a column's "taps" button a few times — its own counter
+//      goes up. Each `<Column />` holds its OWN `taps` state.
+//   2. Click "re-render parent" — the parent's `bumps` changes, so
+//      `App` re-renders and rebuilds the `{#for}` loop.
+//   3. Every column's `taps` is STILL there. Because each key
+//      (`"To Do"`, `"In Progress"`, `"Done"`) maps to the same cached
+//      `Column` instance, its state is reused instead of reset.
+//
+// Contract of shape (R2b subset):
+//   - `{#for x in <field>}` over `List<Int|Float|Str|Bool>` (11.7.b).
+//   - `<Child key="{expr}" ... />` where `key` lowers to a primitive
+//     — typically the loop variable. Interpolated props (`{expr}`)
+//     into primitive child fields flow reactively (11.7.a).
+//
+// DEFERRED (clear pointers in the emitter): `{#for}` over a
+// `List<nominal>` (e.g. `List<Card>`, needed by the kanban) waits on
+// nominal-type support in the WASM target (Phase 11.7 R3 prereq);
+// event bodies that push/remove list items (so keys appear/disappear
+// at runtime and reconciliation is exercised live) are a separate
+// 11.4.c debt — here the list is constant, so reconciliation runs but
+// never evicts.
+
+component App {
+  state {
+    columns: List<Str> = ["To Do", "In Progress", "Done"]
+    bumps: Int = 0
+  }
+
+  event bump() { bumps = bumps + 1 }
+
+  <template>
+    <div class="board">
+      <h1>Keyed children on WASM</h1>
+      <p class="hint">Each column keeps its own tap counter. Tap a column, then re-render the parent — the counters survive because each key maps to a cached instance.</p>
+      <button class="bump" @click="bump">re-render parent ({bumps})</button>
+      <div class="columns">
+        {#for name in columns}
+          <Column key="{name}" title="{name}" />
+        {/for}
+      </div>
+    </div>
+  </template>
+
+  <style scoped>
+    .board { font-family: system-ui, sans-serif; }
+    .hint { color: #666; font-size: 0.9em; }
+    .bump { padding: 8px 16px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; margin-bottom: 16px; }
+    .columns { display: flex; flex-wrap: wrap; gap: 12px; }
+  </style>
+}
+
+component Column {
+  state {
+    title: Str = ""
+    taps: Int = 0
+  }
+
+  event tap() { taps = taps + 1 }
+
+  <template>
+    <div class="column">
+      <div class="title">{title}</div>
+      <button class="tap" @click="tap">taps: {taps}</button>
+    </div>
+  </template>
+
+  <style scoped>
+    .column { flex: 1 1 140px; min-width: 120px; border: 1px solid #ddd; border-radius: 8px; padding: 16px; background: #fafafa; }
+    .title { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: #666; margin-bottom: 8px; }
+    .tap { padding: 6px 12px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+  </style>
+}

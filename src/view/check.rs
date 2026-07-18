@@ -1080,7 +1080,13 @@ fn walk_child_components(
     errors: &mut Vec<CheckError>,
 ) {
     match node {
-        ExpandedTemplateNode::ChildComponent { name, props, loc } => {
+        ExpandedTemplateNode::ChildComponent {
+            name, props, loc, ..
+        } => {
+            // Phase 11.7.b R2b — the `key="{expr}"` attribute is
+            // validated at emit time (required for a `<Child />` inside
+            // a `{#for}`, ignored for static sites). The checker only
+            // needs to validate the child exists and its props coerce.
             validate_child_site(name, props, *loc, component_map, parent_name, errors);
         }
         ExpandedTemplateNode::Element { children, .. } => {

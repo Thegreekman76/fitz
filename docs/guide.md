@@ -14707,6 +14707,34 @@ usá el runtime API `component("ChildName", "instance-id")` del
 `fitz-liveviews` package para components importados. Refinable
 cuando aparezca demanda concreta (memoria del proyecto).
 
+**Keyed children dentro de `{#for}`** (target WASM, R2b shipped)
+— podés componer un child DENTRO de un loop, dándole una
+identidad estable con el atributo reservado `key="{expr}"`:
+
+```fitzv
+component App {
+  state { columns: List<Str> = ["To Do", "In Progress", "Done"] }
+  <template>
+    <div class="columns">
+      {#for name in columns}
+        <Column key="{name}" title="{name}" />
+      {/for}
+    </div>
+  </template>
+}
+```
+
+El `key` NO es un prop — es la identidad del child. En el target
+WASM el emitter mantiene una **keyed instance cache** (una
+instancia por `key`): una key que ya existe **reusa** su
+instancia (su state local sobrevive el re-render del parent),
+una key nueva la crea, y las keys que desaparecen de la lista se
+evictan (reconciliation). Así cada child en el loop conserva su
+propio state — igual que la persistencia de sites estáticos, pero
+por-key. Hoy aplica a `List<primitive>`; `List<nominal>` (lo que
+el kanban necesita) espera soporte de nominales en WASM (R3).
+Ejemplo runnable: `examples/view/keyed-composition/`.
+
 ### Estilos scoped
 
 `<style scoped>` aplica **rewriting automático** de class
@@ -14944,10 +14972,17 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   sobre `List<nominal>` (ej `List<Card>`, lo que el kanban
   necesita) espera soporte de tipos nominales en WASM (R3 prereq).
 - **`<Child />` composition dentro de `{#for}`** (keyed dynamic
-  children) — dynamic children en loops con atributo `key` para
-  identidad estable. Resultó más grande de lo estimado (plumbing
-  del `key` cross-module + limitado a `List<primitive>` hasta los
-  nominales). Phase 11.7.b continuación (R2b, v0.21.7).
+  children) — **CERRADO en Phase 11.7.b R2b (v0.21.7)**: un
+  `<Child key="{x}" ... />` dentro de un `{#for x in items}` sobre
+  `List<primitive>` ya compila a WASM. El atributo `key="{expr}"`
+  (típicamente la loop var) le da a cada child una identidad
+  estable; el emitter mantiene una keyed instance cache
+  (`HashMap<String, Rc<Child>>`) — la instancia (y su state local)
+  se reusa entre re-renders, y un sweep de reconciliation evicta
+  las keys que desaparecen. Ejemplo runnable:
+  `examples/view/keyed-composition/`. **Deferido**: `{#for}` sobre
+  `List<nominal>` (kanban, R3); event bodies que mutan la lista
+  (11.4.c debt — la lista del ejemplo es constante).
 - **Cross-component event bubbling** — la K-1 shipped en
   `fitz-liveviews` v0.5.0 con `dispatch_to(...)` explicit
   event API; implicit bubbling (`@parent.event` decorator)
