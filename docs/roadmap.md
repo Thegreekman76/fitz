@@ -9834,11 +9834,30 @@ de 3 releases:
   (`lower_child_prop_value` + `is_wasm_prop_simple_target`), 5
   unit tests + ejemplo runnable `examples/view/reactive-props/`
   (compila a WASM 32.2 KB). Ver CHANGELOG v0.21.5.
-- ⏳ **11.7.b/c/d/e (R2, v0.21.6)** — `{#for}` composition +
-  event bubbling + `<slot />` + persistent child state (keyed
-  instance cache).
-- ⏳ **11.7.f/g (R3, v0.22.0)** — drag-drop primitives + kanban
-  SPA port (acceptance criterion).
+- ✅ **11.7.e + control-flow (R2, v0.21.6)** — persistent child
+  state (keyed instance cache, sites estáticos) + `{#if}` + `{#for}`
+  sobre `List<primitive>` en el target WASM. Los directives
+  estaban deferidos desde 11.4.c y nunca se habían implementado en
+  el emitter WASM. 11.7.e: slot tipado `__child_slot_<n>` +
+  get-or-create (el child se reusa → su state local sobrevive).
+  `{#if}`: comparaciones + `&&`/`||`/`!` + `{#else}`. `{#for}`:
+  snapshot del `Vec` + loop-local scope. `emit_if`/`emit_for`/
+  `lower_cond_expr` + `RenderCtx.locals`/`state_fields`. 8 unit
+  tests + ejemplo runnable `examples/view/control-flow/` (compila
+  a WASM 26 KB). Ver CHANGELOG v0.21.6. **Hallazgo de scope**:
+  `{#for}` sobre `List<nominal>` (lo que el kanban necesita) está
+  bloqueado por la falta de soporte de tipos nominales en WASM
+  (R3 prereq).
+- ⏳ **11.7.b (R2b, v0.21.7)** — keyed `<Child />` composition
+  dentro de `{#for}` (dynamic children con atributo `key` para
+  identidad estable). Resultó más grande: plumbing del `key`
+  cross-module (view parser → expand → check) + per-item cache +
+  reconciliation, limitado a `List<primitive>` hasta que aterricen
+  los nominales.
+- ⏳ **11.7.c/d (R2b+)** — event bubbling + `<slot />` fallback.
+- ⏳ **11.7 nominales + f/g (R3, v0.22.0)** — soporte de tipos
+  nominales en WASM (prereq del kanban) + drag-drop primitives +
+  kanban SPA port (acceptance criterion).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

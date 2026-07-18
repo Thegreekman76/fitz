@@ -32,12 +32,18 @@ use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement};
 
 pub struct Board {
+    __child_slot_0: RefCell<Option<Rc<MetricCard>>>,
+    __child_slot_1: RefCell<Option<Rc<MetricCard>>>,
+    __child_slot_2: RefCell<Option<Rc<MetricCard>>>,
     root: RefCell<Option<HtmlElement>>,
 }
 
 impl Board {
     pub fn new() -> Rc<Self> {
         Rc::new(Board {
+            __child_slot_0: RefCell::new(None),
+            __child_slot_1: RefCell::new(None),
+            __child_slot_2: RefCell::new(None),
             root: RefCell::new(None),
         })
     }
@@ -79,7 +85,11 @@ impl Board {
         let __el4 = document.create_element("div").unwrap();
         __el4.set_attribute("class", "__fitz-child-MetricCard").unwrap();
         __el3.append_child(&__el4).unwrap();
-        let __child5 = MetricCard::new();
+        let __child5 = {
+            let mut __slot = self.__child_slot_0.borrow_mut();
+            if __slot.is_none() { *__slot = Some(MetricCard::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
         *__child5.title.borrow_mut() = "Requests".to_string();
         *__child5.value.borrow_mut() = 1240i64;
         *__child5.trend.borrow_mut() = "up".to_string();
@@ -88,7 +98,11 @@ impl Board {
         let __el6 = document.create_element("div").unwrap();
         __el6.set_attribute("class", "__fitz-child-MetricCard").unwrap();
         __el3.append_child(&__el6).unwrap();
-        let __child7 = MetricCard::new();
+        let __child7 = {
+            let mut __slot = self.__child_slot_1.borrow_mut();
+            if __slot.is_none() { *__slot = Some(MetricCard::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
         *__child7.title.borrow_mut() = "Errors".to_string();
         *__child7.value.borrow_mut() = 7i64;
         *__child7.trend.borrow_mut() = "down".to_string();
@@ -97,7 +111,11 @@ impl Board {
         let __el8 = document.create_element("div").unwrap();
         __el8.set_attribute("class", "__fitz-child-MetricCard").unwrap();
         __el3.append_child(&__el8).unwrap();
-        let __child9 = MetricCard::new();
+        let __child9 = {
+            let mut __slot = self.__child_slot_2.borrow_mut();
+            if __slot.is_none() { *__slot = Some(MetricCard::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
         *__child9.title.borrow_mut() = "Latency".to_string();
         *__child9.value.borrow_mut() = 42i64;
         *__child9.trend.borrow_mut() = "flat".to_string();

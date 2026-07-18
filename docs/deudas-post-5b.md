@@ -302,13 +302,42 @@ parent state y mounted children).
     imported names) rechazan con pointer a un slice posterior /
     el SSR target. Requieren `__FitzValue`-style marshaling +
     coerción tipo-consciente.
-  - **Persistent child state** (R2, Phase 11.7.e) — hoy el
-    child se recrea en cada re-render del parent (sin keyed
-    instance cache), así que su state local se resetearía. El
-    ejemplo `reactive-props` documenta esto como el límite
-    R1→R2 (su child es puro display, sin state propio).
-  - **`{#for}` composition** (R2, Phase 11.7.b) — dynamic
-    children en loops del template todavía rechazan.
+  - **🟢 Persistent child state** — **CERRADO Phase 11.7.e
+    (v0.21.6)** para sites estáticos. El parent cachea cada
+    `<Child />` en un slot tipado `__child_slot_<n>` +
+    get-or-create; el child se reusa entre re-renders → su state
+    local sobrevive. El ejemplo `reactive-props` ahora lo
+    demuestra (`Badge` con contador `taps` propio que aguanta el
+    bump del parent).
+  - **🟢 `{#if}` / `{#for}` en WASM** — **CERRADO Phase 11.7.b
+    (v0.21.6)**. Estaban deferidos desde 11.4.c y nunca se habían
+    implementado en el emitter WASM. `{#if}` (comparaciones +
+    `&&`/`||`/`!` + `{#else}`), `{#for}` sobre `List<primitive>`
+    (snapshot + loop-local scope). `emit_if`/`emit_for`/
+    `lower_cond_expr`. Ejemplo `examples/view/control-flow/`
+    (WASM 26 KB). **Residual**:
+    - **`{#for}` sobre `List<nominal>`** (ej `List<Card>`, lo que
+      el kanban necesita) — bloqueado por la falta de soporte de
+      tipos nominales en el target WASM. `type_expr_to_rust`
+      rechaza nominales; hace falta emitir/importar el struct
+      Rust del tipo classic. **Prereq del kanban (R3)**.
+    - **`{#for}` con iterable no-ident** (method calls,
+      imported fns) — necesita expr lowering más rico o el SSR
+      target.
+    - **List/Str mutation en event bodies** (`labels.push(...)`)
+      — deuda pre-existente de 11.4.c (event bodies solo hacen
+      `state = numeric`).
+  - **`<Child />` composition dentro de `{#for}` (keyed dynamic
+    children)** — **R2b (v0.21.7)**. Resultó más grande de lo
+    estimado: necesita el atributo `key` fluyendo cross-module
+    (view parser → expand → check, special-caseado para no
+    tratarse como prop desconocido) + per-item `HashMap` instance
+    cache + reconciliation. Limitado a `List<primitive>` hasta que
+    aterricen los nominales. Decisión de key-syntax tomada
+    2026-07-18: **explicit `key` attribute** (`<Card key="{c.id}"
+    ... />`), robusto ante reorder/insert/delete.
+  - **Event bubbling** (11.7.c) + **`<slot />` fallback** (11.7.d)
+    — R2b+/posterior.
 - **Nominal-type STATIC props** — workaround: interpolación cubre.
 - **Cross-file `<Child />` composition (S.6)** — deferido hasta
   el ejemplo grid + forms del companion UI library como driver

@@ -21,12 +21,15 @@
 //     separate 11.4.c debt), so `title` is constant here — it
 //     still exercises the interpolated Str-prop emit path.
 //
-// KNOWN R1 LIMITATION — the child is RECREATED on every parent
-// re-render (no keyed instance cache yet). A child with its own
-// local state would see that state reset when the parent bumps.
-// Persistent child state across parent re-render is the R2 work
-// (Phase 11.7.e); that's why `Badge` below is a pure display
-// component with no local state of its own.
+// PERSISTENT CHILD STATE (Phase 11.7.e, R2 v0.21.6) — the parent
+// caches each `<Child />` instance in a typed slot, so a child is
+// REUSED (not recreated) across parent re-renders. That means a
+// child can hold its own local state and keep it: `Badge` below has
+// a `taps` counter with its own `@click` — click the badge a few
+// times, then click "bump the parent"; the parent re-renders (the
+// `count` prop updates) but the badge's `taps` survives, because the
+// same cached `Badge` instance is re-mounted. Before 11.7.e (R1) the
+// child was recreated on every parent re-render and `taps` reset.
 
 component App {
   state {
@@ -56,18 +59,23 @@ component Badge {
   state {
     heading: Str = ""
     count: Int = 0
+    taps: Int = 0
   }
+
+  event tap() { taps = taps + 1 }
 
   <template>
     <div class="badge">
       <div class="heading">{heading}</div>
       <div class="count">parent bumps + 1 = {count}</div>
+      <button class="tap" @click="tap">my own taps: {taps}</button>
     </div>
   </template>
 
   <style scoped>
     .badge { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-top: 16px; background: #fafafa; }
     .heading { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
-    .count { font-size: 1.6em; font-weight: bold; margin: 8px 0 0; }
+    .count { font-size: 1.6em; font-weight: bold; margin: 8px 0; }
+    .tap { padding: 6px 12px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
   </style>
 }

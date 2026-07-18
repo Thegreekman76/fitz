@@ -34,6 +34,7 @@ use web_sys::{Event, HtmlElement};
 pub struct App {
     title: RefCell<String>,
     clicks: RefCell<i64>,
+    __child_slot_0: RefCell<Option<Rc<Badge>>>,
     root: RefCell<Option<HtmlElement>>,
 }
 
@@ -42,6 +43,7 @@ impl App {
         Rc::new(App {
             title: RefCell::new("Fitz reactive props".to_string()),
             clicks: RefCell::new(0i64),
+            __child_slot_0: RefCell::new(None),
             root: RefCell::new(None),
         })
     }
@@ -118,7 +120,11 @@ impl App {
         let __el14 = document.create_element("div").unwrap();
         __el14.set_attribute("class", "__fitz-child-Badge").unwrap();
         __el0.append_child(&__el14).unwrap();
-        let __child15 = Badge::new();
+        let __child15 = {
+            let mut __slot = self.__child_slot_0.borrow_mut();
+            if __slot.is_none() { *__slot = Some(Badge::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
         *__child15.heading.borrow_mut() = (*self.title.borrow()).clone();
         *__child15.count.borrow_mut() = ((*self.clicks.borrow()) + 1i64);
         let __el14_html = __el14.clone().dyn_into::<HtmlElement>().unwrap();
@@ -140,6 +146,7 @@ fn __inject_style_App_app_c_811ecb28() {
 pub struct Badge {
     heading: RefCell<String>,
     count: RefCell<i64>,
+    taps: RefCell<i64>,
     root: RefCell<Option<HtmlElement>>,
 }
 
@@ -148,8 +155,15 @@ impl Badge {
         Rc::new(Badge {
             heading: RefCell::new("".to_string()),
             count: RefCell::new(0i64),
+            taps: RefCell::new(0i64),
             root: RefCell::new(None),
         })
+    }
+
+    fn tap(self: &Rc<Self>) {
+        let __rhs = ((*self.taps.borrow()) + 1i64);
+        *self.taps.borrow_mut() = __rhs;
+        self.render();
     }
 
     pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(), JsValue> {
@@ -162,7 +176,7 @@ impl Badge {
     }
 
     pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
-        __inject_style_Badge_badge_c_ae55b5a3();
+        __inject_style_Badge_badge_c_35b0b638();
         *self.root.borrow_mut() = Some(root);
         self.render();
         Ok(())
@@ -179,32 +193,48 @@ impl Badge {
         }
         let document = web_sys::window().unwrap().document().unwrap();
         let __el0 = document.create_element("div").unwrap();
-        __el0.set_attribute("class", "badge badge-badge-c-ae55b5a3").unwrap();
+        __el0.set_attribute("class", "badge badge-badge-c-35b0b638").unwrap();
         let __el1 = document.create_element("div").unwrap();
-        __el1.set_attribute("class", "heading heading-badge-c-ae55b5a3").unwrap();
+        __el1.set_attribute("class", "heading heading-badge-c-35b0b638").unwrap();
         let __interp2 = format!("{}", (*self.heading.borrow()));
         let __t3 = document.create_text_node(&__interp2);
         __el1.append_child(&__t3).unwrap();
         __el0.append_child(&__el1).unwrap();
         let __el4 = document.create_element("div").unwrap();
-        __el4.set_attribute("class", "count count-badge-c-ae55b5a3").unwrap();
+        __el4.set_attribute("class", "count count-badge-c-35b0b638").unwrap();
         let __t5 = document.create_text_node("parent bumps + 1 = ");
         __el4.append_child(&__t5).unwrap();
         let __interp6 = format!("{}", (*self.count.borrow()));
         let __t7 = document.create_text_node(&__interp6);
         __el4.append_child(&__t7).unwrap();
         __el0.append_child(&__el4).unwrap();
+        let __el8 = document.create_element("button").unwrap();
+        __el8.set_attribute("class", "tap tap-badge-c-35b0b638").unwrap();
+        {
+            let __self_clone = self.clone();
+            let __closure = Closure::wrap(Box::new(move |_evt: Event| {
+                Badge::tap(&__self_clone);
+            }) as Box<dyn FnMut(Event)>);
+            __el8.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        let __t9 = document.create_text_node("my own taps: ");
+        __el8.append_child(&__t9).unwrap();
+        let __interp10 = format!("{}", (*self.taps.borrow()));
+        let __t11 = document.create_text_node(&__interp10);
+        __el8.append_child(&__t11).unwrap();
+        __el0.append_child(&__el8).unwrap();
         root.append_child(&__el0).unwrap();
     }
 }
 
-fn __inject_style_Badge_badge_c_ae55b5a3() {
+fn __inject_style_Badge_badge_c_35b0b638() {
     static INJECTED: AtomicBool = AtomicBool::new(false);
     if INJECTED.swap(true, Ordering::SeqCst) { return; }
     let document = web_sys::window().unwrap().document().unwrap();
     let head = document.head().unwrap();
     let style_el = document.create_element("style").unwrap();
-    style_el.set_text_content(Some("\n    .badge-badge-c-ae55b5a3 { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-top: 16px; background: #fafafa; }\n    .heading-badge-c-ae55b5a3 { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }\n    .count-badge-c-ae55b5a3 { font-size: 1.6em; font-weight: bold; margin: 8px 0 0; }\n  "));
+    style_el.set_text_content(Some("\n    .badge-badge-c-35b0b638 { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-top: 16px; background: #fafafa; }\n    .heading-badge-c-35b0b638 { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }\n    .count-badge-c-35b0b638 { font-size: 1.6em; font-weight: bold; margin: 8px 0; }\n    .tap-badge-c-35b0b638 { padding: 6px 12px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }\n  "));
     let _ = head.append_child(&style_el);
 }
 

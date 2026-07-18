@@ -69,8 +69,8 @@
 
 use crate::ast::{AssignTarget, BinOpKind, Expr, Stmt, TypeExpr};
 use crate::view::{
-    ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStyle, ExpandedTemplateNode,
-    ExpandedViewFile,
+    ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStateField, ExpandedStyle,
+    ExpandedTemplateNode, ExpandedViewFile,
 };
 use std::fmt::Write;
 
@@ -201,7 +201,14 @@ fn emit_component_impl(
 ) -> EmitResult<()> {
     let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
 
-    emit_struct_and_new(component, out)?;
+    // Phase 11.7.e — collect the static `<Child />` composition sites
+    // (in DFS order) so the struct can carry a typed instance-cache
+    // slot per site. The render walk hits the same sites in the same
+    // order (both only descend into `Element` children), so the slot
+    // index assigned here matches the one the render emits.
+    let child_sites = collect_child_site_types(component);
+
+    emit_struct_and_new(component, &child_sites, out)?;
     emit_event_handlers(component, &state_names, out)?;
     emit_mount_and_render(component, &state_names, file, out)?;
     if let Some(style) = &component.style {
@@ -210,11 +217,46 @@ fn emit_component_impl(
     Ok(())
 }
 
+/// Collect the child-component type of every static `<Child />`
+/// composition site in `component`'s template, in DFS order. Phase
+/// 11.7.e uses this to declare one instance-cache slot per site so
+/// the child instance (and its state) survives parent re-renders.
+///
+/// Only descends into `Element` children — `{#if}` / `{#for}` /
+/// `<slot>` are rejected by the render walk before it reaches any
+/// child site inside them, so descending into them here would
+/// misalign the slot-index counter with the render walk.
+fn collect_child_site_types(component: &ExpandedComponent) -> Vec<String> {
+    let mut sites = Vec::new();
+    if let Some(template) = &component.template {
+        for node in &template.roots {
+            collect_sites_in_node(node, &mut sites);
+        }
+    }
+    sites
+}
+
+fn collect_sites_in_node(node: &ExpandedTemplateNode, sites: &mut Vec<String>) {
+    match node {
+        ExpandedTemplateNode::ChildComponent { name, .. } => sites.push(name.clone()),
+        ExpandedTemplateNode::Element { children, .. } => {
+            for child in children {
+                collect_sites_in_node(child, sites);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Struct + new()
 // ---------------------------------------------------------------------------
 
-fn emit_struct_and_new(component: &ExpandedComponent, out: &mut String) -> EmitResult<()> {
+fn emit_struct_and_new(
+    component: &ExpandedComponent,
+    child_sites: &[String],
+    out: &mut String,
+) -> EmitResult<()> {
     let name = &component.name;
 
     writeln!(out, "pub struct {} {{", name).unwrap();
@@ -227,6 +269,18 @@ fn emit_struct_and_new(component: &ExpandedComponent, out: &mut String) -> EmitR
             e
         })?;
         writeln!(out, "    {}: RefCell<{}>,", field.name, rust_ty).unwrap();
+    }
+    // Phase 11.7.e — one instance-cache slot per static `<Child />`
+    // site. Holds the child's `Rc` across parent re-renders so the
+    // child's state persists (the parent re-render rebuilds the DOM
+    // but reuses the cached instance instead of `Child::new()`ing it).
+    for (i, child_ty) in child_sites.iter().enumerate() {
+        writeln!(
+            out,
+            "    __child_slot_{}: RefCell<Option<Rc<{}>>>,",
+            i, child_ty
+        )
+        .unwrap();
     }
     writeln!(out, "    root: RefCell<Option<HtmlElement>>,").unwrap();
     writeln!(out, "}}\n").unwrap();
@@ -249,6 +303,9 @@ fn emit_struct_and_new(component: &ExpandedComponent, out: &mut String) -> EmitR
             field.name, default_rust
         )
         .unwrap();
+    }
+    for (i, _) in child_sites.iter().enumerate() {
+        writeln!(out, "            __child_slot_{}: RefCell::new(None),", i).unwrap();
     }
     writeln!(out, "            root: RefCell::new(None),").unwrap();
     writeln!(out, "        }})").unwrap();
@@ -380,7 +437,7 @@ fn emit_mount_and_render(
     .unwrap();
 
     if let Some(template) = &component.template {
-        let mut ctx = RenderCtx::new(name, state_names, file);
+        let mut ctx = RenderCtx::new(name, state_names, &component.state, file);
         for root_node in &template.roots {
             emit_template_node(root_node, "root", &mut ctx, out)?;
         }
@@ -406,16 +463,36 @@ struct RenderCtx<'a> {
     /// resolve the child's declared state-field types when
     /// coercing static prop values into Rust literals.
     file: &'a ExpandedViewFile,
+    /// Phase 11.7.b — the component's state fields, so `{#for x in
+    /// items}` can resolve `items`'s element type (`List<T>` → `T`).
+    state_fields: &'a [ExpandedStateField],
     var_counter: usize,
+    /// Phase 11.7.e — running index of the `<Child />` composition
+    /// site being emitted. Incremented per site (in the same DFS
+    /// order as `collect_child_site_types`) so each site reads its
+    /// matching `__child_slot_<n>` instance-cache field.
+    child_site_counter: usize,
+    /// Phase 11.7.b — loop variables currently in scope (from
+    /// enclosing `{#for x in ...}`). An `Expr::Ident` that names a
+    /// local resolves to the Rust loop var directly, shadowing state.
+    locals: Vec<String>,
 }
 
 impl<'a> RenderCtx<'a> {
-    fn new(component_name: &'a str, state_names: &'a [String], file: &'a ExpandedViewFile) -> Self {
+    fn new(
+        component_name: &'a str,
+        state_names: &'a [String],
+        state_fields: &'a [ExpandedStateField],
+        file: &'a ExpandedViewFile,
+    ) -> Self {
         RenderCtx {
             component_name,
             state_names,
+            state_fields,
             file,
             var_counter: 0,
+            child_site_counter: 0,
+            locals: Vec::new(),
         }
     }
 
@@ -423,6 +500,14 @@ impl<'a> RenderCtx<'a> {
         let id = self.var_counter;
         self.var_counter += 1;
         format!("__{}{}", prefix, id)
+    }
+
+    /// Return the slot index for the current `<Child />` site and
+    /// advance the counter.
+    fn next_child_site(&mut self) -> usize {
+        let idx = self.child_site_counter;
+        self.child_site_counter += 1;
+        idx
     }
 }
 
@@ -446,14 +531,25 @@ fn emit_template_node(
             children,
             ..
         } => emit_element(tag, attrs, children, parent_var, ctx, out),
-        ExpandedTemplateNode::If { .. } => Err(EmitError {
-            message: "`{#if ...}` — deferred to Phase 11.4.c".to_string(),
-            context: format!("template of component `{}`", ctx.component_name),
-        }),
-        ExpandedTemplateNode::For { .. } => Err(EmitError {
-            message: "`{#for ...}` — deferred to Phase 11.4.c".to_string(),
-            context: format!("template of component `{}`", ctx.component_name),
-        }),
+        ExpandedTemplateNode::If {
+            cond,
+            children,
+            else_children,
+            ..
+        } => emit_if(
+            cond,
+            children,
+            else_children.as_deref(),
+            parent_var,
+            ctx,
+            out,
+        ),
+        ExpandedTemplateNode::For {
+            var,
+            iter,
+            children,
+            ..
+        } => emit_for(var, iter, children, parent_var, ctx, out),
         ExpandedTemplateNode::Slot { .. } => Err(EmitError {
             message: "`<slot />` composition — deferred to Phase 11.5".to_string(),
             context: format!("template of component `{}`", ctx.component_name),
@@ -494,7 +590,7 @@ fn emit_interpolation(
 ) -> EmitResult<()> {
     let var_interp = ctx.fresh("interp");
     let var_node = ctx.fresh("t");
-    let expr_rust = lower_expr(expr, ctx.state_names)?;
+    let expr_rust = lower_expr(expr, ctx.state_names, &ctx.locals)?;
     writeln!(
         out,
         "        let {} = format!(\"{{}}\", {});",
@@ -514,6 +610,196 @@ fn emit_interpolation(
     )
     .unwrap();
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Control-flow directives — `{#if}` / `{#for}` (Phase 11.7.b)
+// ---------------------------------------------------------------------------
+
+/// `{#if cond}...{/if}` / `{#if cond}...{#else}...{/if}`.
+///
+/// Naive re-render model: the condition is evaluated at render time
+/// and the matching branch's children are emitted into `parent_var`.
+/// `cond` must lower to a Rust `bool` via [`lower_cond_expr`].
+fn emit_if(
+    cond: &Expr,
+    children: &[ExpandedTemplateNode],
+    else_children: Option<&[ExpandedTemplateNode]>,
+    parent_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let cond_rust = lower_cond_expr(cond, ctx.state_names, &ctx.locals).map_err(|mut e| {
+        e.context = format!("template of component `{}`", ctx.component_name);
+        e
+    })?;
+    writeln!(out, "        if {} {{", cond_rust).unwrap();
+    for child in children {
+        emit_template_node(child, parent_var, ctx, out)?;
+    }
+    if let Some(else_kids) = else_children {
+        writeln!(out, "        }} else {{").unwrap();
+        for child in else_kids {
+            emit_template_node(child, parent_var, ctx, out)?;
+        }
+    }
+    writeln!(out, "        }}").unwrap();
+    Ok(())
+}
+
+/// `{#for x in <iter>}...{/for}`.
+///
+/// MVP (Phase 11.7.b): the iterable must be a bare state field of
+/// `List<primitive>` type. Snapshots the state `Vec` (`.clone()`) and
+/// iterates by value so the loop body can mutate other state freely,
+/// binding `x` as a Rust loop variable in scope for the children.
+///
+/// Deferred with clear pointers: nominal-element lists (e.g.
+/// `List<Card>`, needed by the kanban) wait on nominal-type support in
+/// the WASM target (Phase 11.7 R3 prereq); non-ident iterables (method
+/// calls, imported fns) wait on richer expr lowering or the SSR target.
+fn emit_for(
+    var: &str,
+    iter: &Expr,
+    children: &[ExpandedTemplateNode],
+    parent_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let ctx_label = format!("template of component `{}`", ctx.component_name);
+    let field_name = match iter {
+        Expr::Ident(n, _) => n,
+        _ => {
+            return Err(EmitError {
+                message: "`{#for}` iterable must be a state-field identifier on the \
+                          client-WASM target (Phase 11.7.b); method calls / imported \
+                          fns defer to a later slice or the SSR target"
+                    .to_string(),
+                context: ctx_label,
+            })
+        }
+    };
+    let field = ctx
+        .state_fields
+        .iter()
+        .find(|f| &f.name == field_name)
+        .ok_or_else(|| EmitError {
+            message: format!("`{{#for}}` iterates `{field_name}`, which is not a state field"),
+            context: ctx_label.clone(),
+        })?;
+    let elem_ty = match &field.type_expr {
+        TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => &args[0],
+        _ => {
+            return Err(EmitError {
+                message: format!(
+                    "`{{#for x in {field_name}}}` requires `{field_name}` to be a \
+                     `List<...>` state field"
+                ),
+                context: ctx_label,
+            })
+        }
+    };
+    if !is_wasm_prop_simple_target(elem_ty) {
+        return Err(EmitError {
+            message: format!(
+                "`{{#for}}` over `{field_name}`: the client-WASM target only iterates \
+                 `List<Int|Float|Str|Bool>` today — nominal-element lists (e.g. \
+                 `List<Card>`) need nominal-type support in the WASM target (Phase \
+                 11.7 R3 / kanban prereq). Use a primitive-element list or the SSR \
+                 target."
+            ),
+            context: ctx_label,
+        });
+    }
+
+    let snap = ctx.fresh("for");
+    writeln!(
+        out,
+        "        let {} = (*self.{}.borrow()).clone();",
+        snap, field_name
+    )
+    .unwrap();
+    writeln!(out, "        for {} in {}.iter().cloned() {{", var, snap).unwrap();
+    ctx.locals.push(var.to_string());
+    let mut result = Ok(());
+    for child in children {
+        if let Err(e) = emit_template_node(child, parent_var, ctx, out) {
+            result = Err(e);
+            break;
+        }
+    }
+    ctx.locals.pop();
+    result?;
+    writeln!(out, "        }}").unwrap();
+    Ok(())
+}
+
+/// Lower a `{#if}` condition to a Rust `bool` expression. Supports
+/// bool literals, bool state fields / loop vars used directly, numeric
+/// comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`), and `&&` / `||` / `!`
+/// over those. Str comparisons + method-call conditions defer to a
+/// later 11.7 slice or the SSR target.
+fn lower_cond_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitResult<String> {
+    match expr {
+        Expr::Bool(b, _) => Ok(b.to_string()),
+        // A bool state field / loop var used directly as a condition.
+        // The checker guarantees it's Bool-typed.
+        Expr::Ident(..) => lower_expr(expr, state_names, locals),
+        Expr::UnaryOp {
+            op: crate::ast::UnaryOpKind::Not,
+            operand,
+            ..
+        } => {
+            let inner = lower_cond_expr(operand, state_names, locals)?;
+            Ok(format!("(!{})", inner))
+        }
+        Expr::BinOp {
+            op, left, right, ..
+        } => match op {
+            BinOpKind::And => {
+                let l = lower_cond_expr(left, state_names, locals)?;
+                let r = lower_cond_expr(right, state_names, locals)?;
+                Ok(format!("({} && {})", l, r))
+            }
+            BinOpKind::Or => {
+                let l = lower_cond_expr(left, state_names, locals)?;
+                let r = lower_cond_expr(right, state_names, locals)?;
+                Ok(format!("({} || {})", l, r))
+            }
+            BinOpKind::Eq
+            | BinOpKind::NotEq
+            | BinOpKind::Lt
+            | BinOpKind::LtEq
+            | BinOpKind::Gt
+            | BinOpKind::GtEq => {
+                let cmp = match op {
+                    BinOpKind::Eq => "==",
+                    BinOpKind::NotEq => "!=",
+                    BinOpKind::Lt => "<",
+                    BinOpKind::LtEq => "<=",
+                    BinOpKind::Gt => ">",
+                    BinOpKind::GtEq => ">=",
+                    _ => unreachable!(),
+                };
+                let l = lower_expr(left, state_names, locals)?;
+                let r = lower_expr(right, state_names, locals)?;
+                Ok(format!("({} {} {})", l, cmp, r))
+            }
+            _ => Err(EmitError {
+                message: "`{#if}` condition — only comparisons (==/!=/</<=/>/>=) and \
+                          &&/||/! are booleans on the client-WASM target (Phase 11.7.b)"
+                    .to_string(),
+                context: "if condition".to_string(),
+            }),
+        },
+        _ => Err(EmitError {
+            message: "`{#if}` condition — supported: bool state field / loop var, \
+                      numeric comparison, and &&/||/!. Str comparisons + method-call \
+                      conditions defer to a later 11.7 slice or the SSR target"
+                .to_string(),
+            context: "if condition".to_string(),
+        }),
+    }
 }
 
 fn emit_element(
@@ -630,8 +916,28 @@ fn emit_child_component(
     )
     .unwrap();
 
+    // Phase 11.7.e — get-or-create the child from this site's
+    // instance-cache slot instead of `Child::new()`ing it fresh every
+    // render. Reusing the cached `Rc` preserves the child's state
+    // (its `RefCell` fields) across parent re-renders; only the
+    // child's DOM is rebuilt (via the `mount_into` → `render` below).
+    let slot_idx = ctx.next_child_site();
     let child_var = ctx.fresh("child");
-    writeln!(out, "        let {} = {}::new();", child_var, child_name).unwrap();
+    writeln!(out, "        let {} = {{", child_var).unwrap();
+    writeln!(
+        out,
+        "            let mut __slot = self.__child_slot_{}.borrow_mut();",
+        slot_idx
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            if __slot.is_none() {{ *__slot = Some({}::new()); }}",
+        child_name
+    )
+    .unwrap();
+    writeln!(out, "            __slot.as_ref().unwrap().clone()").unwrap();
+    writeln!(out, "        }};").unwrap();
 
     // Look up the child component to know each prop's declared
     // type. The checker already validated the child exists +
@@ -681,11 +987,17 @@ fn emit_child_component(
                 ),
                 context: format!("template of component `{}`", ctx.component_name),
             })?;
-            lower_child_prop_value(expr, &prop.field_name, &field.type_expr, ctx.state_names)
-                .map_err(|mut e| {
-                    e.context = format!("template of component `{}`", ctx.component_name);
-                    e
-                })?
+            lower_child_prop_value(
+                expr,
+                &prop.field_name,
+                &field.type_expr,
+                ctx.state_names,
+                &ctx.locals,
+            )
+            .map_err(|mut e| {
+                e.context = format!("template of component `{}`", ctx.component_name);
+                e
+            })?
         } else {
             super::check::coerce_child_prop_raw_value(&prop.raw_value, &field.type_expr).map_err(
                 |msg| EmitError {
@@ -864,18 +1176,22 @@ fn style_helper_ident(component_name: &str, style: &ExpandedStyle) -> String {
 /// Todo lo demás (Str literal, StrInterp, Ident no-state, Call,
 /// Field, Index, comparisons, logical ops, etc.) devuelve `EmitError`
 /// citando la sub-fase donde se cierra.
-fn lower_expr(expr: &Expr, state_names: &[String]) -> EmitResult<String> {
+fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitResult<String> {
     match expr {
         Expr::Int(n, _) => Ok(format!("{}i64", n)),
         Expr::Float(n, _) => Ok(format!("{}f64", n)),
         Expr::Bool(b, _) => Ok(b.to_string()),
         Expr::Ident(name, _) => {
-            if state_names.iter().any(|s| s == name) {
+            if locals.iter().any(|s| s == name) {
+                // Phase 11.7.b — a loop var (`{#for x in ...}`) is a
+                // plain Rust binding in scope; emit it directly.
+                Ok(name.clone())
+            } else if state_names.iter().any(|s| s == name) {
                 Ok(format!("(*self.{}.borrow())", name))
             } else {
                 Err(EmitError {
                     message: format!(
-                        "identifier `{}` is not a state field — non-state refs deferred to Phase 11.4.c",
+                        "identifier `{}` is not a state field nor a loop variable — non-state refs deferred to Phase 11.4.c",
                         name
                     ),
                     context: "expression".to_string(),
@@ -886,8 +1202,8 @@ fn lower_expr(expr: &Expr, state_names: &[String]) -> EmitResult<String> {
             op, left, right, ..
         } => {
             let op_str = lower_binop(op)?;
-            let l = lower_expr(left, state_names)?;
-            let r = lower_expr(right, state_names)?;
+            let l = lower_expr(left, state_names, locals)?;
+            let r = lower_expr(right, state_names, locals)?;
             Ok(format!("({} {} {})", l, op_str, r))
         }
         Expr::Str(_, _)
@@ -1003,6 +1319,7 @@ fn lower_child_prop_value(
     field_name: &str,
     target_type: &TypeExpr,
     state_names: &[String],
+    locals: &[String],
 ) -> EmitResult<String> {
     if !is_wasm_prop_simple_target(target_type) {
         return Err(EmitError {
@@ -1024,6 +1341,10 @@ fn lower_child_prop_value(
         // for every primitive (i64/f64/String/bool all impl Clone). The
         // checker (S.3 `light_check_interpolated_prop`) already verified
         // the parent field's type matches the child field's type.
+        // Loop-var ref (`{#for c in ...}<Child prop="{c}" />`) — the
+        // local is an owned primitive value; clone it for the child's
+        // `RefCell<T>` assignment. Phase 11.7.b.
+        Expr::Ident(name, _) if locals.iter().any(|s| s == name) => Ok(format!("{name}.clone()")),
         Expr::Ident(name, _) if state_names.iter().any(|s| s == name) => {
             Ok(format!("(*self.{name}.borrow()).clone()"))
         }
@@ -1031,7 +1352,7 @@ fn lower_child_prop_value(
         // (`{n + 1}`). Only for numeric child targets — reusing the
         // event-body lowerer produces Copy values (no clone needed).
         Expr::Int(..) | Expr::Float(..) | Expr::BinOp { .. } if matches!(target_type, TypeExpr::Named(n) if n == "Int" || n == "Float") => {
-            lower_expr(expr, state_names).map_err(|_| EmitError {
+            lower_expr(expr, state_names, locals).map_err(|_| EmitError {
                 message: format!(
                     "interpolated prop `{field_name}={{...}}` — only bare parent \
                      state fields and numeric arithmetic over them are supported \
@@ -1078,7 +1399,9 @@ fn lower_stmt(
                         context: "statement".to_string(),
                     });
                 }
-                let rhs = lower_expr(value, state_names)?;
+                // Event bodies run outside any `{#for}` scope, so no
+                // loop locals are in scope here.
+                let rhs = lower_expr(value, state_names, &[])?;
                 writeln!(out, "{}let __rhs = {};", indent, rhs).unwrap();
                 writeln!(out, "{}*self.{}.borrow_mut() = __rhs;", indent, name).unwrap();
                 Ok(())
@@ -1807,27 +2130,75 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 11.7.b — `{#if}` / `{#for}` in the WASM emitter
+    // ---------------------------------------------------------------------
+
     #[test]
-    fn emit_rejects_if_directive() {
+    fn phase_11_7_b_if_directive_emits_rust_if_with_comparison() {
         let src = r#"component Foo {
   state { x: Int = 0 }
 
   <template>
-    <div>{#if x > 0}<span>positive</span>{/if}</div>
+    <div>{#if x > 0}<span>positive</span>{#else}<span>zero</span>{/if}</div>
   </template>
 }"#;
         let expanded = parse_expand(src);
-        let err = emit_component(&expanded.components[0]).unwrap_err();
-        assert!(err.message.contains("`{#if"), "if error:\n{}", err);
+        let out = emit_component(&expanded.components[0]).unwrap();
         assert!(
-            err.message.contains("11.4.c"),
-            "deferred citation:\n{}",
-            err
+            out.contains("if ((*self.x.borrow()) > 0i64) {"),
+            "if condition must lower to a Rust comparison:\n{out}"
+        );
+        assert!(
+            out.contains("} else {"),
+            "the {{#else}} branch must emit a Rust else:\n{out}"
         );
     }
 
     #[test]
-    fn emit_rejects_for_directive() {
+    fn phase_11_7_b_if_bool_state_field_used_directly() {
+        let src = r#"component Foo {
+  state { visible: Bool = false }
+
+  <template>
+    <div>{#if visible}<span>shown</span>{/if}</div>
+  </template>
+}"#;
+        let expanded = parse_expand(src);
+        let out = emit_component(&expanded.components[0]).unwrap();
+        assert!(
+            out.contains("if (*self.visible.borrow()) {"),
+            "a bool state field must be usable directly as a condition:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_b_for_over_list_str_emits_snapshot_and_loop() {
+        let src = r#"component Foo {
+  state { tags: List<Str> = [] }
+
+  <template>
+    <ul>{#for tag in tags}<li>{tag}</li>{/for}</ul>
+  </template>
+}"#;
+        let expanded = parse_expand(src);
+        let out = emit_component(&expanded.components[0]).unwrap();
+        assert!(
+            out.contains("= (*self.tags.borrow()).clone();"),
+            "for must snapshot the state Vec:\n{out}"
+        );
+        assert!(
+            out.contains("for tag in ") && out.contains(".iter().cloned() {"),
+            "for must iterate the snapshot binding the loop var:\n{out}"
+        );
+        assert!(
+            out.contains(r#"format!("{}", tag)"#),
+            "the loop var must be usable in an interpolation:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_b_for_non_ident_iterable_rejects() {
         let src = r#"component Foo {
   state { x: Int = 0 }
   event bump() { x = 1 }
@@ -1838,10 +2209,9 @@ mod tests {
 }"#;
         let expanded = parse_expand(src);
         let err = emit_component(&expanded.components[0]).unwrap_err();
-        assert!(err.message.contains("`{#for"), "for error:\n{}", err);
         assert!(
-            err.message.contains("11.4.c"),
-            "deferred citation:\n{}",
+            err.message.contains("state-field identifier") && err.message.contains("11.7.b"),
+            "non-ident iterable must reject citing the MVP restriction:\n{}",
             err
         );
     }
@@ -2014,8 +2384,18 @@ component Card {
             out.contains(r#"set_attribute("class", "__fitz-child-Card")"#),
             "wrapper class must include `__fitz-child-Card`:\n{out}"
         );
-        // Child instantiated + props coerced + mounted.
-        assert!(out.contains("Card::new();"), "child instantiation missing");
+        // Phase 11.7.e — child instantiated via the instance-cache
+        // slot (get-or-create) instead of a fresh `Card::new()` each
+        // render, so its state persists across parent re-renders.
+        assert!(
+            out.contains("__child_slot_0: RefCell<Option<Rc<Card>>>,"),
+            "parent struct must carry an instance-cache slot for the Card site:\n{out}"
+        );
+        assert!(
+            out.contains("let mut __slot = self.__child_slot_0.borrow_mut();")
+                && out.contains("if __slot.is_none() { *__slot = Some(Card::new()); }"),
+            "child must be instantiated via get-or-create from the cache slot:\n{out}"
+        );
         assert!(
             out.contains(r#"*__child1.title.borrow_mut() = "Hello".to_string();"#)
                 || out.contains(r#"*__child1.title.borrow_mut() = "Hello""#),
@@ -2348,6 +2728,73 @@ component Card {
             err.message.contains("11.7"),
             "message must point at a later 11.7 slice / SSR: {}",
             err.message
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 11.7.e — persistent child state via keyed instance cache
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn phase_11_7_e_two_child_sites_get_two_aligned_cache_slots() {
+        // Two static <Child /> sites → two typed slots. The slot
+        // index the render reads must match the struct field, in DFS
+        // order (A before B).
+        let src = r#"component Parent {
+  state {}
+  <template>
+    <div>
+      <Alpha label="a" />
+      <Beta label="b" />
+    </div>
+  </template>
+}
+component Alpha {
+  state { label: Str = "" }
+  <template><span>a</span></template>
+}
+component Beta {
+  state { label: Str = "" }
+  <template><span>b</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).expect("two child sites must emit");
+        assert!(
+            out.contains("__child_slot_0: RefCell<Option<Rc<Alpha>>>,"),
+            "site 0 slot must be typed to Alpha:\n{out}"
+        );
+        assert!(
+            out.contains("__child_slot_1: RefCell<Option<Rc<Beta>>>,"),
+            "site 1 slot must be typed to Beta:\n{out}"
+        );
+        assert!(
+            out.contains("*__slot = Some(Alpha::new());")
+                && out.contains("*__slot = Some(Beta::new());"),
+            "both children must be get-or-created from their slot:\n{out}"
+        );
+        // new() initialises both slots to None. Total `RefCell::new(None)`:
+        // Parent = 2 child slots + 1 root; Alpha = 1 root; Beta = 1 root → 5.
+        assert_eq!(
+            out.matches("RefCell::new(None),").count(),
+            5,
+            "each component's new() inits its child slots + root to None:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_e_no_child_sites_emits_no_slots() {
+        // Regression: a component with no <Child /> must not gain any
+        // `__child_slot_*` field (counter stays at 0).
+        let src = r#"component Solo {
+  state { n: Int = 0 }
+  event tick() { n = n + 1 }
+  <template><button @click="tick">{n}</button></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).expect("no-child component must emit");
+        assert!(
+            !out.contains("__child_slot_"),
+            "a component with no <Child /> must emit no cache slots:\n{out}"
         );
     }
 

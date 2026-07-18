@@ -1,0 +1,59 @@
+// Phase 11.7.b — control-flow directives in the client-WASM target
+// (`.fitzv` → WASM). Demonstrates `{#if}` / `{#else}` and `{#for}`
+// over a `List<primitive>` state field, all compiled to WebAssembly.
+//
+// Before 11.7.b the WASM emitter rejected `{#if}` and `{#for}`
+// (deferred at 11.4.c, never implemented) — the counter/showcase
+// demos never used them. This demo exercises both end-to-end.
+//
+// Contract of shape (Phase 11.7.b subset):
+//   - `{#if cond}` where `cond` is a bool state field / loop var, a
+//     numeric comparison (`>`/`<`/`==`/...), or `&&`/`||`/`!` over
+//     those. `{#else}` optional.
+//   - `{#for x in <field>}` where `<field>` is a state field of type
+//     `List<Int|Float|Str|Bool>`. `x` is bound as a loop variable in
+//     scope for the children (usable in `{x}` interpolation).
+//   - Event bodies stay numeric (assigning a `Str` / pushing to a
+//     list are separate 11.4.c debts), so `labels` is constant here.
+//
+// DEFERRED (clear pointers in the emitter): `{#for}` over a
+// `List<nominal>` (e.g. `List<Card>`, needed by the kanban) waits on
+// nominal-type support in the WASM target; `<Child />` composition
+// inside `{#for}` (keyed dynamic children) is R2b (Phase 11.7.b
+// continuation).
+
+component App {
+  state {
+    count: Int = 0
+    labels: List<Str> = ["design", "build", "ship"]
+  }
+
+  event bump() { count = count + 1 }
+
+  <template>
+    <div class="demo">
+      <h1>Control flow on WASM</h1>
+      <button class="bump" @click="bump">clicked {count} times</button>
+      {#if count > 0}
+        <p class="active">You have clicked at least once.</p>
+      {#else}
+        <p class="idle">Click the button to begin.</p>
+      {/if}
+      <h2>Steps</h2>
+      <ul class="labels">
+        {#for label in labels}
+          <li>{label}</li>
+        {/for}
+      </ul>
+    </div>
+  </template>
+
+  <style scoped>
+    .demo { font-family: system-ui, sans-serif; }
+    .bump { padding: 8px 16px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+    .active { color: #178a4c; font-weight: bold; }
+    .idle { color: #888; }
+    .labels { padding-left: 20px; }
+    .labels li { margin: 4px 0; }
+  </style>
+}

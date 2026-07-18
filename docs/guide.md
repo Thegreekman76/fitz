@@ -14930,17 +14930,29 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   (nullable / nominal / list) + shapes ricos (method calls,
   concat de Str) siguen para un slice posterior de 11.7 / el
   target SSR.
-- **Persistent child state** across parent re-render — hoy
-  el child se **recrea** en cada re-render del parent (sin
-  keyed instance cache), así que un child con state local lo
-  perdería. Phase 11.7.e (R2).
-- **`<Child />` composition dentro de `{#for}`** — dynamic
-  children en loops del template. Phase 11.7.b (R2).
+- **Persistent child state** across parent re-render —
+  **CERRADO en Phase 11.7.e (v0.21.6)** para sites estáticos: el
+  parent cachea cada `<Child />` en un slot tipado y lo reusa, así
+  que un child con state local lo **conserva** entre re-renders del
+  parent. Ejemplo: `examples/view/reactive-props/` (el `Badge`
+  tiene un contador `taps` propio que sobrevive el bump del
+  parent).
+- **`{#if}` / `{#for}` en el target WASM** — **CERRADO en Phase
+  11.7.b (v0.21.6)**: `{#if}` (comparaciones + `&&`/`||`/`!` +
+  `{#else}`) y `{#for}` sobre `List<primitive>` ya compilan a WASM.
+  Ejemplo: `examples/view/control-flow/`. **Deferido**: `{#for}`
+  sobre `List<nominal>` (ej `List<Card>`, lo que el kanban
+  necesita) espera soporte de tipos nominales en WASM (R3 prereq).
+- **`<Child />` composition dentro de `{#for}`** (keyed dynamic
+  children) — dynamic children en loops con atributo `key` para
+  identidad estable. Resultó más grande de lo estimado (plumbing
+  del `key` cross-module + limitado a `List<primitive>` hasta los
+  nominales). Phase 11.7.b continuación (R2b, v0.21.7).
 - **Cross-component event bubbling** — la K-1 shipped en
   `fitz-liveviews` v0.5.0 con `dispatch_to(...)` explicit
   event API; implicit bubbling (`@parent.event` decorator)
-  queda para Phase 11.7.c (R2).
-- **`<slot />` fallback** — Phase 11.7.d (R2).
+  queda para Phase 11.7.c (R2b+).
+- **`<slot />` fallback** — Phase 11.7.d (R2b+).
 - **Signature help / rename / references** dentro de `.fitzv`
   — no implementados por el LSP MVP.
 

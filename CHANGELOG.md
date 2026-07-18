@@ -229,6 +229,73 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 *(vacía — próximas entradas van acá antes del siguiente bump)*
 
+## [v0.21.6] — 2026-07-18 — Phase 11.7 (R2): control-flow (`{#if}`/`{#for}`) + persistent child state en el target WASM
+
+**Patch release aditivo** — segundo slice de **Phase 11.7**
+(client-side dynamic capabilities). Trae al target **client-WASM**
+de `.fitzv` tres capacidades que le faltaban: **persistencia de
+state del child** (11.7.e) + los directives de control-flow
+**`{#if}`** y **`{#for}`** (que estaban deferidos desde 11.4.c y
+nunca se habían implementado en el emitter WASM — el counter/
+showcase no los usaban, por eso pasó desapercibido).
+
+**11.7.e — Persistent child state (keyed instance cache, sites
+estáticos)**: el parent ahora cachea cada `<Child />` en un slot
+tipado (`__child_slot_<n>: RefCell<Option<Rc<Child>>>`) y hace
+get-or-create en vez de `Child::new()` en cada render. El child se
+**reusa** entre re-renders del parent, así que su state local
+**sobrevive** (antes de 11.7.e se recreaba y se reseteaba). El
+ejemplo `examples/view/reactive-props/` ahora lo demuestra: el
+`Badge` tiene un contador `taps` propio que aguanta el "bump" del
+parent.
+
+**`{#if}` en WASM**: `{#if cond}...{/if}` / `{#if
+cond}...{#else}...{/if}`. `cond` lowerea a un `bool` Rust — bool
+state field / loop var usado directo, comparación numérica
+(`>`/`<`/`==`/`!=`/`<=`/`>=`), o `&&`/`||`/`!` sobre esos.
+Evaluado en render time bajo el modelo dirty-flag.
+
+**`{#for}` en WASM sobre `List<primitive>`**: `{#for x in
+<field>}` donde `<field>` es un state field `List<Int|Float|Str|
+Bool>`. Snapshotea el `Vec` (`.clone()`), itera por valor, y
+bindea `x` como loop var Rust en scope para los children
+(usable en `{x}`). El expr lowering (`lower_expr`) gana un
+parámetro `locals` para resolver loop vars, y `RenderCtx` gana el
+stack de `locals` + los `state_fields` (para resolver el element
+type del iterable).
+
+**Cambios técnicos** (`src/view/codegen_wasm.rs`, ~350 LoC + 8
+tests): `collect_child_site_types` + slot fields en
+`emit_struct_and_new` + get-or-create en `emit_child_component`
+(11.7.e); `emit_if` + `emit_for` + `lower_cond_expr` +
+`RenderCtx.locals`/`state_fields` (control-flow). Tests
+`phase_11_7_e_*` (2) + `phase_11_7_b_*` (4). Los tests stale
+`emit_rejects_if_directive`/`emit_rejects_for_directive`
+reemplazados por el shape de aceptación.
+
+**Ejemplo runnable nuevo**: `examples/view/control-flow/` (`{#if}`
+/`{#else}` + `{#for}` sobre `List<Str>`, botón que flipa el
+condicional), compila a WASM real 26 KB. Smoke
+`tests/view_control_flow_wasm_smoke.rs`.
+
+**Deferido con pointers claros** (para slices posteriores):
+- **`{#for}` sobre `List<nominal>`** (ej `List<Card>`, lo que el
+  kanban necesita) — espera soporte de tipos nominales en el
+  target WASM (Phase 11.7 R3 prereq).
+- **`<Child />` composition dentro de `{#for}`** (keyed dynamic
+  children con atributo `key`) — R2b (v0.21.7). Resultó más
+  grande de lo estimado: necesita plumbing del `key` cross-module
+  (view parser → expand → check) + per-item cache + reconciliation,
+  y está limitado a `List<primitive>` hasta que aterricen los
+  nominales.
+- **Event bubbling** + **`<slot />`** — R2b/posterior.
+
+**Verificación pre-bump**: 3749 lib (default) + 3905 lib
+(`--features lsp`) verde; cli_e2e verde; `cargo fmt --all --check`
++ `cargo clippy --all-targets -- -D warnings` limpios; smokes de
+`counter`/`showcase`/`reactive-props`/`control-flow` regeneran +
+compilan a WASM.
+
 ## [v0.21.5] — 2026-07-18 — Phase 11.7.a (R1): reactive interpolated child props en el target WASM
 
 **Patch release aditivo** — primer slice de **Phase 11.7**
