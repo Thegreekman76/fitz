@@ -267,6 +267,29 @@ Extensions. Detalle en
   `fitz_liveviews` missing-dep hint; §9.aa event-body widening;
   §9.bb cross-module auto-inject). Detalle exhaustivo en
   [`docs/fase-11-plan.md`](fase-11-plan.md) §9.a–§9.bb.
+- **Phase 11 Session A — Small residual debts** (v0.21.2,
+  2026-07-17) — 3 deudas menores del SFC pipeline cerradas
+  en bloque coordinado. **S.1 Alias en imports SFC** (`from X
+  import Y as Z`) — `Token::As` nuevo en el view lexer,
+  `ViewImport.names: Vec<(String, Option<String>)>` mirror de
+  PreF8.4, SSR emitter aplana aliases a `imported_names` (K-4)
+  usando el alias local en scope; emite `from X import Y as Z`
+  verbatim en el classic module. **S.2 `Map<Str, Str>` static
+  props** vía `k=v,k=v` convention — `<Child meta="role=admin,
+  scope=full" />` con `meta: Map<Str, Str>` coerciona a `vec![
+  (...), (...)]` (checker + WASM) y a `{"role": "admin", ...}`
+  (SSR); empty → `vec![]`/`{}`; restrict a `Map<Str, Str>`
+  only, richer shapes vía interpolación. **S.3 Type-check
+  estático del expr interpolado** — nueva `light_check_
+  interpolated_prop` en `view/check.rs` catchea bare Ident
+  refs con parent state field type mismatch (Str vs Int, etc.)
+  en check time en vez de propagarse hasta el emitted module.
+  Richer expr shapes skipping. **S.6 Cross-file `<Child />`
+  composition** DIFERIDO — design decision needed, ningún
+  ejemplo existente lo necesita; ataca cuando llegue el
+  companion UI library con grid + forms. Sin cambios breaking.
+  3719 → 3741 lib tests verde (+22 tests netos).
+
 - **Phase 11 refinements** (v0.21.1, 2026-07-17) — K-3
   (compound props para `<Child />`) + K-4 (SSR emitter acepta
   imported top-level fn refs en templates + event bodies).

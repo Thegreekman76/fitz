@@ -597,7 +597,10 @@ fn imports_to_from_import_stmts(imports: &[ExpandedViewImport]) -> Vec<Stmt> {
         .iter()
         .map(|imp| Stmt::FromImport {
             path: imp.path.clone(),
-            names: imp.names.iter().map(|n| (n.clone(), None)).collect(),
+            // Post S.1 (2026-07-17): `imp.names` is now `Vec<(String,
+            // Option<String>)>` — pass through directly to the
+            // classic AST which uses the same shape (PreF8.4).
+            names: imp.names.clone(),
             span: Span::ZERO,
         })
         .collect()
@@ -1205,14 +1208,34 @@ fn validate_child_site(
             }
         };
 
-        // K-3 remainder: interpolated props (`prop={expr}`) bypass
-        // the coercion helper — the value is a Fitz expression the
-        // emitter inlines verbatim (SSR path) or rejects (WASM path
-        // today). Type checking the expression against the field
-        // type is deferred to a follow-up if false negatives / typos
-        // surface in practice; today the classic-Fitz surface of the
-        // emitted module catches most mismatches at emit-time.
+        // K-3 remainder + S.3: interpolated props (`prop="{expr}"`)
+        // bypass the coercion helper — the value is a Fitz expression
+        // the SSR emitter inlines verbatim. Post S.3 (2026-07-17) we
+        // do a light type-check for the safest shape: bare `Ident`
+        // referring to a parent state field. If the parent's field
+        // type is not compatible with the child's declared field
+        // type, surface it at check time. Richer expr shapes (BinOp,
+        // Call, Field access, etc.) still skip — full type inference
+        // would need to route the classic checker's TypeEnv through
+        // this pass, which is out of scope for a small refinement.
+        // False negatives on those shapes still show up at classic-
+        // checker time on the emitted module.
         if prop.is_interpolated() {
+            if let Some(expr) = &prop.expr {
+                if let Some(msg) = light_check_interpolated_prop(
+                    expr,
+                    &field.type_expr,
+                    &field.name,
+                    child_name,
+                    component_map.get(parent_name).copied(),
+                ) {
+                    errors.push(CheckError {
+                        message: msg,
+                        loc: prop.loc,
+                        context: format!("component '{parent_name}': template `<{child_name} />`"),
+                    });
+                }
+            }
             continue;
         }
 
@@ -1276,6 +1299,78 @@ fn format_field_list(names: &[&str]) -> String {
 /// This helper is `pub(crate)` so `codegen_wasm.rs::emit_child_
 /// component` uses the SAME coercion when emitting, ensuring the
 /// checker and the emitter agree bit-for-bit.
+/// S.3 (2026-07-17) — light type-check for interpolated `<Child
+/// prop="{expr}" />` props. Catches the common typo pattern of a
+/// bare `Ident` referring to a parent state field whose type is
+/// incompatible with the child's declared field type. Richer expr
+/// shapes (`{n + 1}`, `{obj.field}`, method calls, imports) skip —
+/// full type inference isn't in scope for this small refinement,
+/// and the classic checker running over the emitted module still
+/// catches those mismatches downstream. Returns `Some(msg)` on
+/// mismatch, `None` otherwise.
+fn light_check_interpolated_prop(
+    expr: &crate::ast::Expr,
+    child_field_type: &crate::ast::TypeExpr,
+    child_field_name: &str,
+    child_name: &str,
+    parent: Option<&ExpandedComponent>,
+) -> Option<String> {
+    let name = match expr {
+        crate::ast::Expr::Ident(n, _) => n,
+        _ => return None, // Only bare Ident — see fn doc.
+    };
+    let parent = parent?;
+    // Look up the ident on the parent's state fields. If not a
+    // state field, it's likely an imported name or an outer local
+    // (`{#for x in xs}`) — those we can't check here. Skip.
+    let parent_field = parent.state.iter().find(|f| &f.name == name)?;
+    if type_expr_compatible(&parent_field.type_expr, child_field_type) {
+        return None;
+    }
+    Some(format!(
+        "interpolated prop `{child_field_name}=\"{{{name}}}\"` on `<{child_name} />` — \
+         parent state field `{name}: {}` is not compatible with the child's declared \
+         field type `{}: {}`. Either declare the parent's `{name}` with a matching type \
+         or wrap the value (e.g. `\"{{{name}.to_string()}}\"` if the target expects `Str`).",
+        parent_field.type_expr.display_name(),
+        child_field_name,
+        child_field_type.display_name(),
+    ))
+}
+
+/// Structural compatibility between two view-side `TypeExpr`s.
+/// Rules:
+/// - Same shape → compatible (recursive Named / Generic / Nullable).
+/// - `T` is compatible with `T?` (assignment lifts to Some).
+/// - `Null` shape from parent isn't representable here (parent state
+///   defaults are concrete types), so we don't handle it.
+///
+/// Kept local to the view checker — the classic checker's
+/// `types::is_compatible` operates on resolved `Type`s, not on the
+/// syntactic `TypeExpr` we have at this point in the pipeline.
+fn type_expr_compatible(parent_ty: &crate::ast::TypeExpr, child_ty: &crate::ast::TypeExpr) -> bool {
+    use crate::ast::TypeExpr as T;
+    // T is compatible with T? (child promoted to Nullable).
+    if let T::Nullable(inner) = child_ty {
+        if !matches!(parent_ty, T::Nullable(_)) {
+            return type_expr_compatible(parent_ty, inner);
+        }
+    }
+    match (parent_ty, child_ty) {
+        (T::Named(a), T::Named(b)) => a == b,
+        (T::Nullable(a), T::Nullable(b)) => type_expr_compatible(a, b),
+        (T::Generic { name: na, args: aa }, T::Generic { name: nb, args: ab }) => {
+            na == nb
+                && aa.len() == ab.len()
+                && aa
+                    .iter()
+                    .zip(ab.iter())
+                    .all(|(x, y)| type_expr_compatible(x, y))
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn coerce_child_prop_raw_value(
     raw: &str,
     type_expr: &crate::ast::TypeExpr,
@@ -1338,13 +1433,59 @@ pub(crate) fn coerce_child_prop_raw_value(
                     lits.push(lit);
                 }
                 Ok(format!("vec![{}]", lits.join(", ")))
+            } else if name == "Map" && args.len() == 2 {
+                // S.2: Map<Str, Str> static props via `k=v,k=v` convention.
+                // Only supported for Map<Str, Str> because the raw HTML attr
+                // is a string — non-Str keys/values would need per-piece
+                // parsing beyond simple split (Int/Float/Bool from strings
+                // hit ambiguity). Users needing richer maps should use
+                // interpolation `<Child meta="{someMap}" />` (K-3 remainder).
+                //
+                // Empty string → `vec![]` (empty Vec<(K, V)>). Whitespace
+                // around commas AND around `=` is trimmed. No comma or `=`
+                // escaping today (MVP — same trade-off as List<primitive>).
+                let is_str = |t: &crate::ast::TypeExpr| {
+                    matches!(
+                        t,
+                        crate::ast::TypeExpr::Named(n) if n == "Str"
+                    )
+                };
+                if !(is_str(&args[0]) && is_str(&args[1])) {
+                    return Err(format!(
+                        "prop coercion to `Map<{}, {}>` — static props for `Map` are \
+                         only supported for `Map<Str, Str>` today (the raw attribute \
+                         value is a string, so `k=v` pieces can't disambiguate \
+                         Int/Float/Bool). Use interpolation `<Child meta=\"{{someMap}}\" />` \
+                         (K-3 remainder) for richer Map shapes.",
+                        args[0].head_name(),
+                        args[1].head_name()
+                    ));
+                }
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Ok("vec![]".to_string());
+                }
+                let mut lits: Vec<String> = Vec::new();
+                for pair in trimmed.split(',') {
+                    let (k, v) = pair.split_once('=').ok_or_else(|| {
+                        format!(
+                            "Map<Str, Str> pair `{}` is not in `key=value` form. Use \
+                             comma-separated `k=v,k2=v2` pairs.",
+                            pair.trim()
+                        )
+                    })?;
+                    let key_str = rust_str_literal(k.trim());
+                    let val_str = rust_str_literal(v.trim());
+                    lits.push(format!("({key_str}, {val_str})"));
+                }
+                Ok(format!("vec![{}]", lits.join(", ")))
             } else {
                 Err(format!(
-                    "prop coercion to `{name}<...>` — static props for `Map` and other \
-                     compound types are not supported today. Only `Str`, `Int`, `Float`, \
-                     `Bool`, their `Nullable<T>` wrappers, and `List<primitive>` \
-                     (comma-separated) coerce; richer compound types land alongside \
-                     Phase 11.6+."
+                    "prop coercion to `{name}<...>` — static props for this compound \
+                     type are not supported today. Only `Str`, `Int`, `Float`, `Bool`, \
+                     their `Nullable<T>` wrappers, `List<primitive>` (comma-separated), \
+                     and `Map<Str, Str>` (comma-separated `k=v,k=v`) coerce; richer \
+                     compound types land alongside Phase 11.7+."
                 ))
             }
         }
@@ -3184,23 +3325,167 @@ component Card {
     }
 
     #[test]
-    fn k3_check_map_prop_still_rejects_citing_11_6_or_later() {
-        // Map<K, V> still deferred — the K-3 error message widens
-        // the block from "compound types" to "`Map` and other
-        // compound types" so the lint keeps pointing at the
-        // roadmap while List<primitive> works.
+    fn s2_check_map_str_str_prop_end_to_end_accepts_k_equals_v() {
+        // Was `k3_check_map_prop_still_rejects_citing_11_6_or_later`
+        // pre-S.2. S.2 (2026-07-17) lifted the Map<Str,Str> block —
+        // `<Card meta="k=v" />` with `meta: Map<Str, Str>` now
+        // coerces via the k=v,k=v convention.
         let src = r#"component Parent {
   state {}
-  <template><Card meta="k=v" /></template>
+  <template><Card meta="role=admin,scope=full" /></template>
 }
 component Card {
   state { meta: Map<Str, Str> = {} }
   <template><span>hi</span></template>
 }"#;
         let errs = check_str(src);
-        assert!(!errs.is_empty(), "expected coercion rejection");
+        assert!(
+            errs.is_empty(),
+            "expected zero errors post-S.2; got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn s2_check_map_str_int_prop_still_rejects_end_to_end() {
+        // Map<Str, Int> still deferred (raw HTML attr can't
+        // disambiguate). Users should interpolate instead.
+        let src = r#"component Parent {
+  state {}
+  <template><Card scores="a=1" /></template>
+}
+component Card {
+  state { scores: Map<Str, Int> = {} }
+  <template><span>hi</span></template>
+}"#;
+        let errs = check_str(src);
+        assert!(!errs.is_empty(), "expected rejection for Map<Str, Int>");
+        assert!(
+            errs[0].message.contains("Map<Str, Int>"),
+            "msg: {}",
+            errs[0].message
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // S.3 — Light type-check for interpolated props (bare Ident vs parent
+    //        state field)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn s3_check_interpolated_ident_matching_parent_state_type_is_ok() {
+        // Bare Ident refers to a parent state field whose type
+        // matches the child's declared field — should type-check
+        // clean.
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{title}" /></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><span>{label}</span></template>
+}"#;
+        let errs = check_str(src);
+        assert!(errs.is_empty(), "expected no errors; got: {:?}", errs);
+    }
+
+    #[test]
+    fn s3_check_interpolated_ident_mismatched_parent_state_type_is_error() {
+        // Bare Ident refers to a parent state field whose type does
+        // NOT match the child's declared field. S.3 catches this at
+        // check time (was silently accepted pre-S.3).
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card num="{title}" /></template>
+}
+component Card {
+  state { num: Int = 0 }
+  <template><span>{num}</span></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            !errs.is_empty(),
+            "expected error for parent Str vs child Int mismatch"
+        );
         let msg = &errs[0].message;
-        assert!(msg.contains("Map"), "msg: {msg}");
+        assert!(msg.contains("title"), "msg must cite the ident: {msg}");
+        assert!(msg.contains("Str"), "msg must cite parent type Str: {msg}");
+        assert!(msg.contains("Int"), "msg must cite child type Int: {msg}");
+    }
+
+    #[test]
+    fn s3_check_interpolated_ident_str_promotes_to_nullable_str_ok() {
+        // Str is compatible with Str? (assignment promotes to
+        // Some(value)). S.3's `type_expr_compatible` handles this.
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{title}" /></template>
+}
+component Card {
+  state { label: Str? = null }
+  <template><span>hi</span></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.is_empty(),
+            "Str → Str? should be compatible; got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn s3_check_interpolated_non_ident_expr_still_skips_type_check() {
+        // BinOp `{n + 1}` and other richer exprs skip the light
+        // check — the classic checker running on the emitted module
+        // catches deeper mismatches at emit time. Regression: don't
+        // false-positive on shapes we can't reason about.
+        let src = r#"component Parent {
+  state { n: Int = 0 }
+  <template><Card label="{n + 1}" /></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><span>hi</span></template>
+}"#;
+        let errs = check_str(src);
+        // We don't check BinOp result vs field type here — so no
+        // error even though `n + 1: Int` clashes with `label: Str`.
+        // The emitted classic module surfaces it at classic-check
+        // time. Regression test: S.3 must NOT trip on non-Ident.
+        assert!(
+            errs.is_empty(),
+            "S.3 should skip non-Ident exprs; got: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn s3_check_interpolated_unknown_ident_skips_type_check() {
+        // Ident that doesn't match any parent state field skips
+        // silently — could be an imported name (K-4) or a closure
+        // param (`{#for x in xs}`). S.3 only checks the known-safe
+        // case; unknown idents surface as errors on the K-4 path
+        // instead (or from the classic checker downstream).
+        let src = r#"from helpers import someHelper
+
+component Parent {
+  state { count: Int = 0 }
+  <template><Card label="{someHelper}" /></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><span>hi</span></template>
+}"#;
+        let errs = check_str(src);
+        // K-4's `imported_names` puts `someHelper` in scope for the
+        // template; S.3 has no way to know its type, so it skips.
+        // Emitted-module classic check may or may not catch the
+        // mismatch depending on the helper's signature.
+        assert!(
+            errs.is_empty(),
+            "S.3 should skip unknown idents; got: {:?}",
+            errs
+        );
     }
 
     #[test]
@@ -3347,14 +3632,83 @@ component Card {
     }
 
     #[test]
-    fn k3_check_coerce_helper_map_still_rejected() {
+    fn k3_check_coerce_helper_map_str_int_rejected_only_str_str() {
+        // Post S.2 (2026-07-17): `Map<Str, Str>` static props are
+        // accepted via `k=v,k=v`, but `Map<Str, Int>` still rejects
+        // because the raw HTML attr can't disambiguate Int from Str
+        // for the value side without per-piece parsing.
         use crate::ast::TypeExpr;
         let ty = TypeExpr::Generic {
             name: "Map".into(),
             args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
         };
-        let err = coerce_child_prop_raw_value("k=v", &ty).expect_err("Map not supported yet");
-        assert!(err.contains("Map"), "got: {err}");
+        let err =
+            coerce_child_prop_raw_value("k=v", &ty).expect_err("Map<Str, Int> not supported yet");
+        assert!(err.contains("Map<Str, Int>"), "got: {err}");
+        assert!(
+            err.contains("interpolation"),
+            "err must cite workaround: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // S.2 — Map<Str, Str> static props via `k=v,k=v` convention
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn s2_check_coerce_helper_map_str_str_produces_vec_of_pairs() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        let lit = coerce_child_prop_raw_value("k1=v1,k2=v2", &ty).unwrap();
+        // vec![("k1".to_string(), "v1".to_string()), ("k2".to_string(), "v2".to_string())]
+        assert!(lit.starts_with("vec!["), "got: {lit}");
+        assert!(lit.contains("(\"k1\""), "got: {lit}");
+        assert!(lit.contains("\"v1\""), "got: {lit}");
+        assert!(lit.contains("(\"k2\""), "got: {lit}");
+        assert!(lit.contains(".to_string()"), "got: {lit}");
+    }
+
+    #[test]
+    fn s2_check_coerce_helper_map_str_str_empty_produces_empty_vec() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        assert_eq!(coerce_child_prop_raw_value("", &ty).unwrap(), "vec![]");
+        assert_eq!(coerce_child_prop_raw_value("   ", &ty).unwrap(), "vec![]");
+    }
+
+    #[test]
+    fn s2_check_coerce_helper_map_str_str_trims_whitespace_around_pairs() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        // Whitespace around `,` AND around `=` both trimmed.
+        let lit = coerce_child_prop_raw_value(" k1 = v1 , k2 = v2 ", &ty).unwrap();
+        assert!(lit.contains("(\"k1\""), "got: {lit}");
+        assert!(lit.contains("\"v2\""), "got: {lit}");
+    }
+
+    #[test]
+    fn s2_check_coerce_helper_map_pair_without_equals_reports_error() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        let err = coerce_child_prop_raw_value("k1=v1,noequals", &ty)
+            .expect_err("pair without `=` should fail");
+        assert!(err.contains("noequals"), "err must cite bad pair: {err}");
+        assert!(
+            err.contains("key=value"),
+            "err must cite expected shape: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------

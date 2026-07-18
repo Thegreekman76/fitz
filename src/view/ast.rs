@@ -42,10 +42,14 @@ pub struct ViewImport {
     /// `from Counter import ...`; `["utils", "shared"]` for
     /// `from utils.shared import ...`.
     pub path: Vec<String>,
-    /// Names imported from the module. Aliases (`import X as Y`)
-    /// deferred — the parser rejects `as` for now with a targeted
-    /// pointer to Phase 11.7+.
-    pub names: Vec<String>,
+    /// Names imported from the module. Each entry is `(original,
+    /// Option<alias>)` mirroring the classic Fitz `Stmt::FromImport`
+    /// shape (PreF8.4). Aliases (`from X import Y as Z`) put `Z`
+    /// in the SFC's scope; the emitted classic Fitz module keeps
+    /// the alias verbatim so the loader validates the call against
+    /// `X`'s exports. Post S.1 (2026-07-17) — was `Vec<String>`
+    /// before with the parser rejecting `as`.
+    pub names: Vec<(String, Option<String>)>,
     /// Position of the `from` keyword. 1-based (line, column).
     pub loc: Loc,
 }

@@ -222,15 +222,23 @@ impl ViewParser {
             });
         }
         self.advance(); // consume `import`
-                        // Read comma-separated identifiers.
-        let mut names = Vec::new();
+                        // Read comma-separated identifiers. Each ident
+                        // may be followed by `as <alias-ident>` (S.1,
+                        // post-v0.21.1) — the original identifier
+                        // survives for the emitted classic Fitz `from
+                        // X import Y as Z`, but the alias is what the
+                        // SFC's template + event bodies reference (so
+                        // `imported_names` in the SSR emitter derives
+                        // from the alias when present, from the
+                        // original when not).
+        let mut names: Vec<(String, Option<String>)> = Vec::new();
         loop {
             self.skip_newlines_soft();
             let cur = self.peek().clone();
-            match &cur.token {
+            let original = match &cur.token {
                 Token::Ident(s) => {
-                    names.push(s.clone());
                     self.advance();
+                    s.clone()
                 }
                 _ => {
                     return Err(ViewParseError {
@@ -242,7 +250,33 @@ impl ViewParser {
                         column: cur.column,
                     });
                 }
-            }
+            };
+            // Optional `as <alias>`.
+            self.skip_newlines_soft();
+            let alias = if matches!(self.peek().token, Token::As) {
+                self.advance(); // consume `as`
+                self.skip_newlines_soft();
+                let alias_tok = self.peek().clone();
+                match &alias_tok.token {
+                    Token::Ident(a) => {
+                        self.advance();
+                        Some(a.clone())
+                    }
+                    _ => {
+                        return Err(ViewParseError {
+                            message: format!(
+                                "expected identifier after `as` in `import ... as`, got {}",
+                                alias_tok.token
+                            ),
+                            line: alias_tok.line,
+                            column: alias_tok.column,
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            names.push((original, alias));
             self.skip_newlines_soft();
             match self.peek().token {
                 Token::Comma => {
@@ -541,6 +575,7 @@ fn append_token_source(out: &mut String, tok: &Token) {
         Token::Event => out.push_str("event"),
         Token::From => out.push_str("from"),
         Token::Import => out.push_str("import"),
+        Token::As => out.push_str("as"),
         Token::Ident(s) => out.push_str(s),
         Token::Str(s) => {
             out.push('"');
@@ -2923,7 +2958,7 @@ component X {
         let file = parse(src).expect("V-3: from-import should parse clean");
         assert_eq!(file.imports.len(), 1);
         assert_eq!(file.imports[0].path, vec!["message"]);
-        assert_eq!(file.imports[0].names, vec!["Message"]);
+        assert_eq!(file.imports[0].names, vec![("Message".to_string(), None)]);
         assert_eq!(file.components.len(), 1);
     }
 
@@ -2936,7 +2971,14 @@ component X {
 }"#;
         let file = parse(src).expect("multi-name from-import should parse");
         assert_eq!(file.imports.len(), 1);
-        assert_eq!(file.imports[0].names, vec!["User", "Post", "Comment"]);
+        assert_eq!(
+            file.imports[0].names,
+            vec![
+                ("User".to_string(), None),
+                ("Post".to_string(), None),
+                ("Comment".to_string(), None),
+            ]
+        );
     }
 
     #[test]
@@ -2949,7 +2991,7 @@ component X {
         let file = parse(src).expect("dotted-path from-import should parse");
         assert_eq!(file.imports.len(), 1);
         assert_eq!(file.imports[0].path, vec!["foo", "bar", "baz"]);
-        assert_eq!(file.imports[0].names, vec!["Widget"]);
+        assert_eq!(file.imports[0].names, vec![("Widget".to_string(), None)]);
     }
 
     #[test]
@@ -2962,8 +3004,64 @@ component X {
 }"#;
         let file = parse(src).expect("multiple from-imports should parse");
         assert_eq!(file.imports.len(), 2);
-        assert_eq!(file.imports[0].names, vec!["Message"]);
-        assert_eq!(file.imports[1].names, vec!["User"]);
+        assert_eq!(file.imports[0].names, vec![("Message".to_string(), None)]);
+        assert_eq!(file.imports[1].names, vec![("User".to_string(), None)]);
+    }
+
+    // S.1 (2026-07-17) — `from X import Y as Z` alias support.
+
+    #[test]
+    fn s1_from_import_with_single_alias_parses() {
+        // `Message` is the original name (validated against the
+        // source module's exports); `Msg` is the local binding
+        // that the SFC's template + event bodies reference.
+        let src = r#"from message import Message as Msg
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let file = parse(src).expect("from-import with alias should parse");
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(
+            file.imports[0].names,
+            vec![("Message".to_string(), Some("Msg".to_string()))]
+        );
+    }
+
+    #[test]
+    fn s1_from_import_mixed_aliased_and_bare_names_parse() {
+        // Mixed — some aliased, some not — must all round-trip
+        // through the tuple shape.
+        let src = r#"from utils import User as U, Post, Comment as C
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let file = parse(src).expect("mixed aliased + bare should parse");
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(
+            file.imports[0].names,
+            vec![
+                ("User".to_string(), Some("U".to_string())),
+                ("Post".to_string(), None),
+                ("Comment".to_string(), Some("C".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn s1_from_import_as_without_alias_ident_errors() {
+        let src = r#"from message import Message as
+
+component X {
+  state { count: Int = 0 }
+}"#;
+        let err = parse(src).expect_err("bare `as` should be a parse error");
+        assert!(
+            err.message.contains("expected identifier after `as`"),
+            "err: {}",
+            err.message
+        );
     }
 
     #[test]

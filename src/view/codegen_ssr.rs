@@ -241,10 +241,18 @@ pub fn emit_module_ssr(file: &ExpandedViewFile) -> SsrEmitResult<String> {
     // that match any name here emit verbatim (not `state.X`, not an
     // error); the classic checker running over the emitted module
     // then validates the reference against its import table.
+    // Post S.1 (2026-07-17): each name is `(original, Option<alias>)`.
+    // The name in scope inside the SFC is the alias when present, the
+    // original otherwise — matching classic Fitz's `from X import Y as
+    // Z` semantics (`Z` is the local binding).
     let imported_names: Vec<&str> = file
         .imports
         .iter()
-        .flat_map(|imp| imp.names.iter().map(String::as_str))
+        .flat_map(|imp| {
+            imp.names
+                .iter()
+                .map(|(orig, alias)| alias.as_deref().unwrap_or(orig.as_str()))
+        })
         .collect();
 
     for component in &file.components {
@@ -286,15 +294,27 @@ pub fn emit_component_ssr(component: &ExpandedComponent) -> SsrEmitResult<String
 /// take precedence via classic Fitz's normal name resolution.
 ///
 /// Each `ExpandedViewImport` emits one classic Fitz stmt of the
-/// shape `from <path.join(".")> import <names.join(", ")>` on its
-/// own line, followed by a blank line for readability.
+/// shape `from <path.join(".")> import <names>` on its own line,
+/// followed by a blank line for readability. Post S.1 (2026-07-17):
+/// each name is `(original, Option<alias>)` — when the alias is
+/// present, emit `<original> as <alias>` so the loader validates
+/// the reference against `<original>` in the imported module while
+/// binding `<alias>` in local scope.
 fn emit_user_imports(imports: &[ExpandedViewImport], out: &mut String) {
     if imports.is_empty() {
         return;
     }
     for imp in imports {
         let path_str = imp.path.join(".");
-        let names_str = imp.names.join(", ");
+        let names_str = imp
+            .names
+            .iter()
+            .map(|(orig, alias)| match alias {
+                Some(a) => format!("{orig} as {a}"),
+                None => orig.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push_str(&format!("from {} import {}\n", path_str, names_str));
     }
     out.push('\n');
@@ -1608,13 +1628,74 @@ pub(crate) fn coerce_child_prop_raw_value_to_fitz_literal(
                     lits.push(lit);
                 }
                 Ok(format!("[{}]", lits.join(", ")))
+            } else if name == "Map" && args.len() == 2 {
+                // S.2 (2026-07-17): Map<Str, Str> static props via
+                // `k=v,k=v` convention — Fitz literal form. Only Str,Str
+                // supported (see check.rs::coerce_child_prop_raw_value
+                // for the rationale). Empty raw → `{}`. No escaping
+                // today; users needing richer maps use interpolation.
+                let is_str = |t: &crate::ast::TypeExpr| {
+                    matches!(
+                        t,
+                        crate::ast::TypeExpr::Named(n) if n == "Str"
+                    )
+                };
+                if !(is_str(&args[0]) && is_str(&args[1])) {
+                    return Err(SsrEmitError {
+                        message: format!(
+                            "prop coercion to `Map<{}, {}>` on `<{child_name} />` — \
+                             static props for `Map` are only supported for \
+                             `Map<Str, Str>` today. Use interpolation \
+                             `<{child_name} {field_name}=\"{{someMap}}\" />` for richer \
+                             Map shapes.",
+                            args[0].head_name(),
+                            args[1].head_name()
+                        ),
+                        context: format!("child composition `<{child_name} />`"),
+                    });
+                }
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Ok("{}".to_string());
+                }
+                let mut lits: Vec<String> = Vec::new();
+                for pair in trimmed.split(',') {
+                    let (k, v) = pair.split_once('=').ok_or_else(|| SsrEmitError {
+                        message: format!(
+                            "Map<Str, Str> pair `{}` on `<{child_name} />` prop \
+                             `{field_name}` is not in `key=value` form. Use \
+                             comma-separated `k=v,k2=v2` pairs.",
+                            pair.trim()
+                        ),
+                        context: format!("child composition `<{child_name} />`"),
+                    })?;
+                    // Both key and value are Str literals in the Fitz
+                    // source — quote + escape `"` and `\` inline.
+                    let quote_str = |s: &str| {
+                        let mut out = String::from("\"");
+                        for ch in s.chars() {
+                            match ch {
+                                '"' => out.push_str("\\\""),
+                                '\\' => out.push_str("\\\\"),
+                                '\n' => out.push_str("\\n"),
+                                '\r' => out.push_str("\\r"),
+                                c => out.push(c),
+                            }
+                        }
+                        out.push('"');
+                        out
+                    };
+                    lits.push(format!("{}: {}", quote_str(k.trim()), quote_str(v.trim())));
+                }
+                Ok(format!("{{{}}}", lits.join(", ")))
             } else {
                 Err(SsrEmitError {
                     message: format!(
                         "prop coercion to `{name}<...>` on `<{child_name} />` — static props \
-                         for `Map` and other compound types are deferred to Phase 11.7+. \
-                         Today's MVP accepts primitives, their `Nullable<T>` wrappers, and \
-                         `List<primitive>` (comma-separated)."
+                         for this compound type are deferred to Phase 11.7+. Today's MVP \
+                         accepts primitives, their `Nullable<T>` wrappers, \
+                         `List<primitive>` (comma-separated), and `Map<Str, Str>` \
+                         (comma-separated `k=v,k=v`)."
                     ),
                     context: format!("child composition `<{child_name} />`"),
                 })
@@ -4050,15 +4131,79 @@ component ChatRoom {
     }
 
     #[test]
-    fn k3_ssr_coerce_helper_map_still_rejected() {
+    fn k3_ssr_coerce_helper_map_str_int_rejected_only_str_str() {
+        // Post S.2 (2026-07-17): `Map<Str, Str>` is accepted, but
+        // `Map<Str, Int>` (and other non-Str,Str shapes) still reject.
         use crate::ast::TypeExpr;
         let ty = TypeExpr::Generic {
             name: "Map".into(),
             args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
         };
         let err = coerce_child_prop_raw_value_to_fitz_literal("k=v", &ty, "Child", "meta")
-            .expect_err("Map not supported yet");
-        assert!(err.message.contains("Map"), "got: {}", err.message);
+            .expect_err("Map<Str, Int> not supported");
+        assert!(
+            err.message.contains("Map<Str, Int>"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("interpolation"),
+            "err must cite workaround: {}",
+            err.message
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // S.2 — SSR Map<Str, Str> static props via `k=v,k=v` convention
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn s2_ssr_coerce_helper_map_str_str_produces_fitz_map_literal() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        let lit = coerce_child_prop_raw_value_to_fitz_literal(
+            "role=admin,scope=full",
+            &ty,
+            "Card",
+            "meta",
+        )
+        .expect("Map<Str, Str> coerces");
+        // {"role": "admin", "scope": "full"}
+        assert!(lit.starts_with('{'), "got: {lit}");
+        assert!(lit.ends_with('}'), "got: {lit}");
+        assert!(lit.contains("\"role\""), "got: {lit}");
+        assert!(lit.contains("\"admin\""), "got: {lit}");
+        assert!(lit.contains("\"scope\""), "got: {lit}");
+    }
+
+    #[test]
+    fn s2_ssr_coerce_helper_map_str_str_empty_produces_empty_map() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        assert_eq!(
+            coerce_child_prop_raw_value_to_fitz_literal("", &ty, "Card", "meta").unwrap(),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn s2_ssr_coerce_helper_map_pair_without_equals_reports_error() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        let err =
+            coerce_child_prop_raw_value_to_fitz_literal("role=admin,noequals", &ty, "Card", "meta")
+                .expect_err("pair without `=` should fail");
+        assert!(err.message.contains("noequals"), "err: {}", err.message);
+        assert!(err.message.contains("key=value"), "err: {}", err.message);
     }
 
     // ---------------------------------------------------------------------
@@ -4275,5 +4420,71 @@ component X {
         // the imported name (which would surprise the reader).
         // The emitter serialises `.map(fn(x) => ...)`.
         assert!(out.contains("fn(x) =>"), "expected closure over x:\n{out}");
+    }
+
+    // ---------------------------------------------------------------------
+    // S.1 — Alias en imports SFC (`from X import Y as Z`)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn s1_ssr_import_with_alias_emits_from_x_import_y_as_z() {
+        // `Message as Msg` in the SFC must round-trip verbatim in
+        // the emitted classic Fitz module so the loader binds `Msg`
+        // in local scope but validates against `message.Message`.
+        let src = r#"from message import Message as Msg
+
+component X {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let raw = crate::view::parse(src).expect("parse");
+        let file = crate::view::expand::expand(&raw).expect("expand");
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("from message import Message as Msg"),
+            "expected alias round-trip in emitted classic:\n{out}"
+        );
+    }
+
+    #[test]
+    fn s1_ssr_alias_is_the_name_in_scope_not_the_original() {
+        // Bare `Msg` in the template must emit verbatim (the SFC
+        // sees `Msg`, not `Message` — the alias is what's bound in
+        // local scope). Regression: if `imported_names` used the
+        // original (`Message`), then `Msg` in the template would
+        // error as "unknown identifier".
+        let src = r#"from message import Message as Msg
+
+component X {
+  state { count: Int = 0 }
+  <template><div>{Msg}</div></template>
+}"#;
+        let raw = crate::view::parse(src).expect("parse");
+        let file = crate::view::expand::expand(&raw).expect("expand");
+        let out = emit_module_ssr(&file).expect("emit — Msg must be in scope");
+        assert!(
+            out.contains("{Msg}"),
+            "expected alias emitted verbatim in template:\n{out}"
+        );
+    }
+
+    #[test]
+    fn s1_ssr_mixed_aliased_and_bare_names_both_work() {
+        // Mixed shape: some names aliased, some bare. The emitter
+        // must render each entry per its (original, Option<alias>)
+        // shape.
+        let src = r#"from utils import User as U, Post, Comment as C
+
+component X {
+  state { count: Int = 0 }
+  <template><div>{count}</div></template>
+}"#;
+        let raw = crate::view::parse(src).expect("parse");
+        let file = crate::view::expand::expand(&raw).expect("expand");
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("from utils import User as U, Post, Comment as C"),
+            "expected mixed aliased + bare in emitted classic:\n{out}"
+        );
     }
 }

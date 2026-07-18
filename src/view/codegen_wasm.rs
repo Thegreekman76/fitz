@@ -1052,11 +1052,20 @@ fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
                 // symmetrically with the SSR + check helpers.
                 let inner_rust = type_expr_to_rust(&args[0])?;
                 Ok(format!("Vec<{inner_rust}>"))
+            } else if name == "Map" && args.len() == 2 {
+                // S.2 (2026-07-17): Map<K, V> for WASM state fields
+                // emitted as `Vec<(K_rust, V_rust)>` — mirrors Fitz's
+                // Rc<RefCell<Vec<(K, V)>>> representation. Static prop
+                // coercion (check.rs) is restricted to Map<Str, Str>;
+                // richer maps land via interpolation (K-3 remainder).
+                let k_rust = type_expr_to_rust(&args[0])?;
+                let v_rust = type_expr_to_rust(&args[1])?;
+                Ok(format!("Vec<({k_rust}, {v_rust})>"))
             } else {
                 Err(EmitError {
                     message: format!(
-                        "state field type `{name}<...>` — `Map` and other compound \
-                         types deferred to Phase 11.6+"
+                        "state field type `{name}<...>` — other compound types \
+                         deferred to Phase 11.7+"
                     ),
                     context: "type".to_string(),
                 })
@@ -1127,6 +1136,25 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
             let mut lits: Vec<String> = Vec::with_capacity(items.len());
             for item in items {
                 lits.push(default_expr_to_rust(item, inner_ty)?);
+            }
+            Ok(format!("vec![{}]", lits.join(", ")))
+        }
+        // S.2 (2026-07-17): Map<K, V> defaults. Accepts `Expr::Map(entries, _)`
+        // against `Map<K, V>` where K + V are supported primitives.
+        // Empty map emits `Vec::new()` (matches the `Vec<(K, V)>` state
+        // shape); non-empty recurses per-pair.
+        (Expr::Map(entries, _), TypeExpr::Generic { name, args })
+            if name == "Map" && args.len() == 2 =>
+        {
+            if entries.is_empty() {
+                return Ok("Vec::new()".to_string());
+            }
+            let (k_ty, v_ty) = (&args[0], &args[1]);
+            let mut lits: Vec<String> = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let k_lit = default_expr_to_rust(k, k_ty)?;
+                let v_lit = default_expr_to_rust(v, v_ty)?;
+                lits.push(format!("({k_lit}, {v_lit})"));
             }
             Ok(format!("vec![{}]", lits.join(", ")))
         }
@@ -1991,14 +2019,70 @@ component Card {
     }
 
     #[test]
-    fn k3_wasm_type_expr_to_rust_map_still_rejected() {
+    fn s2_wasm_type_expr_to_rust_map_str_int_maps_to_vec_of_tuples() {
+        // Was `k3_wasm_type_expr_to_rust_map_still_rejected` pre-S.2.
+        // S.2 (2026-07-17) extended `type_expr_to_rust` to accept
+        // `Map<K, V>` where K + V are supported primitives — emits
+        // `Vec<(K_rust, V_rust)>` matching Fitz's underlying shape.
+        // The STATIC PROP COERCION (`check::coerce_child_prop_raw_value`)
+        // still restricts to `Map<Str, Str>` because a raw HTML attr
+        // can't disambiguate Int vs Str for the value side, but
+        // WASM state fields (declared explicitly with a type
+        // annotation) work for any primitive-parameterised Map.
         use crate::ast::TypeExpr;
         let ty = TypeExpr::Generic {
             name: "Map".into(),
             args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
         };
-        let err = type_expr_to_rust(&ty).expect_err("Map still deferred");
-        assert!(err.message.contains("Map"), "got: {}", err.message);
+        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<(String, i64)>");
+    }
+
+    #[test]
+    fn s2_wasm_type_expr_to_rust_map_str_str_maps_to_vec_of_string_pairs() {
+        use crate::ast::TypeExpr;
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<(String, String)>");
+    }
+
+    #[test]
+    fn s2_wasm_default_expr_to_rust_empty_map_produces_vec_new() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+        };
+        let default = Expr::Map(Vec::new(), Span::new(1, 1));
+        assert_eq!(default_expr_to_rust(&default, &ty).unwrap(), "Vec::new()");
+    }
+
+    #[test]
+    fn s2_wasm_default_expr_to_rust_non_empty_map_produces_vec_of_tuples() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        let ty = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
+        };
+        // Map { "a": 1, "b": 2 } → vec![(..., 1i64), (..., 2i64)]
+        let default = Expr::Map(
+            vec![
+                (
+                    Expr::Str("a".to_string(), Span::new(1, 1)),
+                    Expr::Int(1, Span::new(1, 1)),
+                ),
+                (
+                    Expr::Str("b".to_string(), Span::new(1, 1)),
+                    Expr::Int(2, Span::new(1, 1)),
+                ),
+            ],
+            Span::new(1, 1),
+        );
+        let lit = default_expr_to_rust(&default, &ty).unwrap();
+        assert!(lit.starts_with("vec!["), "got: {lit}");
+        assert!(lit.contains("\"a\".to_string()"), "got: {lit}");
+        assert!(lit.contains("1i64"), "got: {lit}");
     }
 
     #[test]

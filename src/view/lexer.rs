@@ -53,6 +53,12 @@ pub enum Token {
     From,
     /// §9.dd — `import` keyword paired with `From`.
     Import,
+    /// S.1 (post-v0.21.1, 2026-07-17) — `as` keyword used inside
+    /// `from X import Y as Z`. Only recognised at the top level of
+    /// a `.fitzv` file, adjacent to import statements; anywhere
+    /// else it's still a bare `Ident("as")` (the parser only checks
+    /// for this token in `parse_view_import`).
+    As,
 
     // Identifiers + literals
     Ident(String),
@@ -129,6 +135,7 @@ impl fmt::Display for Token {
             Token::Event => write!(f, "`event`"),
             Token::From => write!(f, "`from`"),
             Token::Import => write!(f, "`import`"),
+            Token::As => write!(f, "`as`"),
             Token::Ident(s) => write!(f, "identifier `{s}`"),
             Token::Str(_) => write!(f, "string literal"),
             Token::LBrace => write!(f, "`{{`"),
@@ -522,6 +529,7 @@ impl ViewLexer {
                         "event" => Token::Event,
                         "from" => Token::From,
                         "import" => Token::Import,
+                        "as" => Token::As,
                         _ => Token::Ident(s),
                     };
                     self.tokens.push(TokenWithLoc {

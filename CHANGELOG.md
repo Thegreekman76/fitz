@@ -229,6 +229,94 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 *(vacía — próximas entradas van acá antes del siguiente bump)*
 
+## [v0.21.2] — 2026-07-17 — Phase 11 Session A: Small residual debts (S.1 alias imports + S.2 Map<Str,Str> static props + S.3 type-check interpolated)
+
+**Patch release aditivo** que cierra 3 de las 6 deudas residuales
+menores de Phase 11 (memoria `feedback_post_changes_smoke_examples_
+boilerplates` verificada — sin ejemplos existentes rotos, sin cursos
+afectados). Sin cambios breaking. Descubiertas + fixed en secuencia
+en una sola sesión.
+
+### S.1 — Alias en imports SFC (`from X import Y as Z`)
+
+El view lexer aprende `Token::As`; el parser view acepta `<original>
+as <alias>` post-ident en las listas de nombres de `from ... import
+...`. `ViewImport.names` cambia de `Vec<String>` a `Vec<(String,
+Option<String>)>` mirroring el classic Fitz `Stmt::FromImport`
+(PreF8.4). El SSR emitter aplana los aliases a `imported_names`
+(K-4) usando el ALIAS cuando existe (el binding local en el SFC) y
+emite `from X import Y as Z` verbatim en el classic Fitz module
+transformado (el loader valida contra `Y` en el módulo origen y
+bindea `Z` en local scope). Sin cambio breaking — programas con
+`from X import Y` (sin alias) siguen igual. **~120 LoC + 6 tests
+nuevos** (3 parser + 3 SSR emitter).
+
+### S.2 — `Map<Str, Str>` static props via `k=v,k=v` convention
+
+`<Child meta="role=admin,scope=full" />` con `meta: Map<Str, Str>`
+coerciona a `vec![("role".to_string(), "admin".to_string()), ...]`
+(checker + WASM) y a `{"role": "admin", "scope": "full"}` (SSR).
+Empty string → `vec![]` / `{}`. Whitespace around `,` AND around
+`=` trimmed. Restrict to `Map<Str, Str>` only — richer key/value
+types (Int, Bool, etc.) rejected with clear pointer al workaround
+(interpolación `<Child meta="{someMap}" />` from K-3 remainder,
+que soporta cualquier shape). WASM `type_expr_to_rust` extendido
+para aceptar cualquier `Map<K, V>` (emite `Vec<(K, V)>`) — la
+restriction Str,Str vive solo en el coerce path del static prop.
+`default_expr_to_rust` extendido para `Expr::Map` contra
+`Map<K, V>`. **~180 LoC + 7 tests nuevos** (4 check + 3 SSR + 4
+WASM; 2 stale rejection tests updated to positive).
+
+### S.3 — Type-check estático del expr interpolado vs field type
+
+`<Child prop="{expr}" />` ya no bypassea silenciosamente el check
+cuando `expr` es un bare `Ident` que refiere a un parent state
+field. Nueva fn `light_check_interpolated_prop` en `view/check.rs`
+que hace type comparison estructural (`type_expr_compatible`) entre
+el parent state field type y el child field type. Regla: `T` es
+compatible con `T?` (assignment lifts to Some), otherwise
+structural equality. Richer expr shapes (BinOp, Call, Field access,
+etc.) siguen skipping — full expr type inference is out of scope
+para un chico fix. La classic-checker downstream sigue catcheando
+mismatches profundos. Con esto un typo como `<Card num="{title}"
+/>` con `title: Str` y `num: Int` en el child surface en check
+time en vez de propagarse hasta el emitted module. **~85 LoC + 5
+tests nuevos** (5 check E2E via check_str).
+
+### S.6 — Cross-file `<Child />` composition — **DIFERIDO**
+
+Design decision needed: convention-based (trust classic checker
+para mismatched fields, leaks abstraction) vs proper loader
+integration (plumbing bigger). Ninguno de los 4 ejemplos de
+`fitz-liveviews` lo usa, Board.fitzv tampoco. **Se ataca cuando
+llegue el ejemplo grid + forms del companion UI library como
+driver concreto** (memoria `project_liveviews_roadmap_options`
+menciona kanban showcase + grid/forms). No bloquea uso real.
+
+### Verificación pre-bump
+
+- 3741/3741 lib tests verde (baseline 3719 + 22 tests nuevos —
+  22 additions netos, cuenta:
+  6 S.1 + 7 S.2 (4 check + 3 SSR) + 5 S.3 + 4 S.2 WASM = 22).
+- 115/115 cli_e2e verde.
+- 3/3 openapi_e2e verde.
+- `cargo fmt --all --check` limpio.
+- `cargo clippy --lib --tests --release -- -D warnings` limpio.
+- Verificación docs/curso/boilerplates/examples: `.fitzv` examples
+  no usan alias imports ni Map<Str,Str> static props (nothing to
+  update); classic Fitz `from X import Y as Z` ya existía
+  (documented in curso M3.C1 desde v0.9.x, sin cambios).
+- Extensión VSCode grammar TextMate — `as` keyword ya listado
+  desde versiones anteriores (classic Fitz feature). Sin cambios
+  al grammar, sin snippets afectados.
+
+### Bump
+
+- `Cargo.toml` 0.21.1 → 0.21.2.
+- `editors/vscode/package.json` 0.21.1 → 0.21.2.
+- `.vsix` regenerado bundleando `fitz-lsp.exe` fresh v0.21.2.
+- `fitz.exe` global reinstalado en `~/.fitz/bin` + `~/.cargo/bin`.
+
 ## [v0.21.1] — 2026-07-17 — Phase 11 refinements: K-3 (compound + interpolated props) + K-4 (imported fn refs) para SSR
 
 **Patch release** que agrupa tres refinements post-v0.21.0 al SFC

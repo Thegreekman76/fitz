@@ -269,21 +269,38 @@ SPA port + client-side dynamic capabilities siguen para Phase 11.7+
 (WASM path para interpolated props + reactivity plumbing entre
 parent state y mounted children).
 
-**Remaining gaps para Phase 11.7+**:
+**Remaining gaps para Phase 11.7+** (post-Session A v0.21.2 refresh):
+
+- **🟢 `Map<Str, Str>` static props** — **CERRADO S.2 (2026-07-17)**
+  vía `k=v,k=v` convention. `Map<Str, Int>` y richer key/value
+  shapes siguen deferidos; workaround interpolación cubre esos
+  casos.
+- **🟢 Checker type-check del expr interpolado vs field type** —
+  **CERRADO S.3 (2026-07-17)** vía `light_check_interpolated_prop`
+  para el caso safest (bare Ident matching parent state field type).
+  Richer expr shapes (BinOp, Call, Field access) siguen skipping;
+  classic checker downstream catch mismatches profundos.
+- **🟢 Alias en imports SFC** (`from X import Y as Z`) — **CERRADO
+  S.1 (2026-07-17)** vía Token::As + parser + tuple `(String,
+  Option<String>)` mirror de PreF8.4.
 - **WASM interpolated props** — reactive prop propagation from
   parent state to mounted child requires child-lifecycle hooks
   + prop watchers. SSR path funciona porque re-renders enteros;
-  cliente-side necesita reactivity plumbing.
-- **`Map<K, V>` static props** — workaround: interpolación cubre.
+  cliente-side necesita reactivity plumbing. (Phase 11.7 core.)
 - **Nominal-type STATIC props** — workaround: interpolación cubre.
-- **Checker type-check del expr interpolado vs field type** —
-  hoy trust runtime; refinable si false negatives aparecen.
+- **Cross-file `<Child />` composition (S.6)** — deferido hasta
+  el ejemplo grid + forms del companion UI library como driver
+  concreto (evaluado 2026-07-17 — design decision needed entre
+  convention-based leaky vs proper loader integration; no bloquea
+  uso real, ningún ejemplo actual lo necesita).
 - **Cross-component event flows más ergonómicos** — K-1 shipped
   explicit `dispatch_to()`; implicit bubbling / `@parent.event`
   decorator queda para futuro.
 
 **No hay urgencia sobre estos remaining gaps** — el SSR target
-cubre el 100% del caso Board + el 90% del caso general.
+cubre el 100% del caso Board + el 95% del caso general
+post-Session A (Session A cerró 3 de 6 debts menores, 4th
+diferida por buenas razones).
 
 ## 🟢 View pipeline gaps — surface durante fitz-liveviews chat migration (Phase 8.4) — **CERRADAS ENTERAS 2026-07-16** (§9.cc + §9.dd + §9.ee)
 

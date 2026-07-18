@@ -65,7 +65,10 @@ pub struct ExpandedViewFile {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpandedViewImport {
     pub path: Vec<String>,
-    pub names: Vec<String>,
+    /// Each entry is `(original, Option<alias>)` mirroring the classic
+    /// Fitz `Stmt::FromImport` shape. Post S.1 (2026-07-17) — was
+    /// `Vec<String>` before with the parser rejecting `as`.
+    pub names: Vec<(String, Option<String>)>,
     pub loc: Loc,
 }
 
