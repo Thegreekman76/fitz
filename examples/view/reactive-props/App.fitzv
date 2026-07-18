@@ -1,0 +1,73 @@
+// Phase 11.7.a — reactive interpolated child props (`.fitzv` → WASM).
+//
+// The first client-WASM slice of Phase 11.7 (client-side dynamic
+// capabilities). A parent `App` passes two of its OWN state fields
+// down to a `<Badge />` child as INTERPOLATED props:
+//
+//   <Badge heading="{title}" count="{clicks + 1}" />
+//
+// Under the dirty-flag reactivity model, clicking the parent's
+// "bump" button mutates `clicks`, which re-renders `App`, which
+// recomputes the child's props and re-mounts it — so `count`
+// tracks the parent's state live. Reactive propagation falls out
+// of the naive re-render for free; no signals, no VDOM.
+//
+// Contract of shape (Phase 11.7.a subset):
+//   - Interpolated props target a PRIMITIVE child field
+//     (`Int`/`Float`/`Str`/`Bool`).
+//   - The prop expression is a bare parent state field (`{title}`)
+//     or numeric arithmetic over parent state (`{clicks + 1}`).
+//   - Event bodies stay numeric (assigning a `Str` to state is a
+//     separate 11.4.c debt), so `title` is constant here — it
+//     still exercises the interpolated Str-prop emit path.
+//
+// KNOWN R1 LIMITATION — the child is RECREATED on every parent
+// re-render (no keyed instance cache yet). A child with its own
+// local state would see that state reset when the parent bumps.
+// Persistent child state across parent re-render is the R2 work
+// (Phase 11.7.e); that's why `Badge` below is a pure display
+// component with no local state of its own.
+
+component App {
+  state {
+    title: Str = "Fitz reactive props"
+    clicks: Int = 0
+  }
+
+  event bump() { clicks = clicks + 1 }
+
+  <template>
+    <div class="app">
+      <h1>{title}</h1>
+      <p class="hint">Click below — the parent's <code>clicks</code> flows into the child's <code>count</code> prop.</p>
+      <button class="bump" @click="bump">bump the parent</button>
+      <Badge heading="{title}" count="{clicks + 1}" />
+    </div>
+  </template>
+
+  <style scoped>
+    .app { font-family: system-ui, sans-serif; }
+    .hint { color: #666; font-size: 0.9em; }
+    .bump { padding: 8px 16px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+  </style>
+}
+
+component Badge {
+  state {
+    heading: Str = ""
+    count: Int = 0
+  }
+
+  <template>
+    <div class="badge">
+      <div class="heading">{heading}</div>
+      <div class="count">parent bumps + 1 = {count}</div>
+    </div>
+  </template>
+
+  <style scoped>
+    .badge { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-top: 16px; background: #fafafa; }
+    .heading { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
+    .count { font-size: 1.6em; font-weight: bold; margin: 8px 0 0; }
+  </style>
+}

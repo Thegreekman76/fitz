@@ -283,10 +283,32 @@ parent state y mounted children).
 - **🟢 Alias en imports SFC** (`from X import Y as Z`) — **CERRADO
   S.1 (2026-07-17)** vía Token::As + parser + tuple `(String,
   Option<String>)` mirror de PreF8.4.
-- **WASM interpolated props** — reactive prop propagation from
-  parent state to mounted child requires child-lifecycle hooks
-  + prop watchers. SSR path funciona porque re-renders enteros;
-  cliente-side necesita reactivity plumbing. (Phase 11.7 core.)
+- **🟢 WASM interpolated props (caso simple)** — **CERRADO
+  Phase 11.7.a (v0.21.5)**. El WASM emitter (`codegen_wasm.rs`
+  `emit_child_component` + `lower_child_prop_value` +
+  `is_wasm_prop_simple_target`) ya acepta `<Child prop="{expr}" />`
+  cuando el prop es un bare parent state field (`{title}`) o
+  aritmética sobre state numérico (`{n + 1}`) hacia un field
+  PRIMITIVO del child. Propagación reactiva vía el modelo
+  dirty-flag: el parent re-renderiza en cada state change →
+  recomputa el prop → re-mount del child con el valor fresco.
+  5 unit tests `phase_11_7_a_wasm_*` + ejemplo runnable
+  `examples/view/reactive-props/` (parent `App` → child
+  `Badge`, compila a WASM 32.2 KB, smoke
+  `tests/view_reactive_props_wasm_smoke.rs`). **Deuda residual
+  derivada** (para slices posteriores de 11.7):
+  - **Targets no-primitivos** (nullable / nominal / list) +
+    shapes ricos (method calls, Str concat, field access,
+    imported names) rechazan con pointer a un slice posterior /
+    el SSR target. Requieren `__FitzValue`-style marshaling +
+    coerción tipo-consciente.
+  - **Persistent child state** (R2, Phase 11.7.e) — hoy el
+    child se recrea en cada re-render del parent (sin keyed
+    instance cache), así que su state local se resetearía. El
+    ejemplo `reactive-props` documenta esto como el límite
+    R1→R2 (su child es puro display, sin state propio).
+  - **`{#for}` composition** (R2, Phase 11.7.b) — dynamic
+    children en loops del template todavía rechazan.
 - **Nominal-type STATIC props** — workaround: interpolación cubre.
 - **Cross-file `<Child />` composition (S.6)** — deferido hasta
   el ejemplo grid + forms del companion UI library como driver

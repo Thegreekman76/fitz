@@ -229,6 +229,73 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 *(vacía — próximas entradas van acá antes del siguiente bump)*
 
+## [v0.21.5] — 2026-07-18 — Phase 11.7.a (R1): reactive interpolated child props en el target WASM
+
+**Patch release aditivo** — primer slice de **Phase 11.7**
+(client-side dynamic capabilities), la última sub-fase abierta de
+Fase 11. El target **client-WASM** de `.fitzv` ya acepta props
+**interpolados** en la composición de componentes:
+
+```fitzv
+<Badge heading="{title}" count="{clicks + 1}" />
+```
+
+Antes de 11.7.a el WASM emitter rechazaba `<Child prop="{expr}" />`
+con un pointer a "Phase 11.7+" (sólo props estáticos string, ver
+`examples/view/showcase/`). Ahora acepta el **caso simple**: el
+prop es un state field del parent (`{title}`) o aritmética sobre
+state numérico (`{n + 1}`), hacia un field **primitivo**
+(`Int`/`Float`/`Str`/`Bool`) del child.
+
+**Reactividad — decisión de diseño: dirty-flag + reconciliation**
+(vs signals SolidJS-style). El modelo de re-render actual (naive
+full re-render por componente) ya provee la propagación reactiva
+gratis: el parent muta state → re-renderiza → recomputa el prop
+del child → lo re-monta con el valor fresco. Sin signals, sin
+VDOM. El upgrade a signals fine-grained queda para si aparece
+evidencia de performance real.
+
+**Cambios técnicos** (`src/view/codegen_wasm.rs`, ~110 LoC + 5
+tests):
+- `emit_child_component` — la rama que rechazaba props
+  interpolados en el WASM path ahora computa el valor y lo asigna
+  al `RefCell<T>` del child (paralelo al path estático que
+  coerciona un literal).
+- `lower_child_prop_value(expr, field, target_type, state_names)`
+  — lowerea el `Expr` del prop a Rust: bare parent state field →
+  `(*self.<name>.borrow()).clone()` (uniforme para todo
+  primitivo); aritmética numérica → reusa el event-body lowerer.
+- `is_wasm_prop_simple_target` — guard que restringe a targets
+  primitivos (nullable / nominal / list defieren con pointer
+  claro a un slice posterior / el SSR target).
+- 5 unit tests `phase_11_7_a_wasm_*` (bare Str field, aritmética
+  Int, target nullable rechaza, ident no-state rechaza, path
+  estático intacto). El test stale `k3_interp_wasm_..._rejects`
+  reemplazado por el shape de aceptación.
+
+**Ejemplo runnable nuevo**: `examples/view/reactive-props/`
+(parent `App` con `title`/`clicks` → child `Badge` con props
+`heading`/`count`; botón "bump" incrementa `clicks` → el `count`
+del child se actualiza reactivamente). Compila a WASM real (32.2
+KB) con `wasm-pack build`. Smoke
+`tests/view_reactive_props_wasm_smoke.rs` (regenera `lib.rs` +
+`Cargo.toml` en cada `cargo test`, más un build `#[ignore]`).
+
+**Límite R1 → R2 documentado honestamente**: el child se
+**recrea** en cada re-render del parent (sin keyed instance cache
+todavía), así que un child con state local lo perdería. Por eso el
+`Badge` del ejemplo es puro display. Persistent child state +
+`{#for}` composition + event bubbling + slots son el trabajo de
+**R2 (v0.21.6, Phase 11.7.b/c/d/e)**; drag-drop + kanban SPA port
+son **R3 (v0.22.0, Phase 11.7.f/g)**.
+
+**Verificación pre-bump**: 3745 lib (default) + 3901 lib
+(`--features lsp`) verde; cli_e2e + openapi_e2e verde; `cargo fmt
+--all --check` + `cargo clippy --all-targets -- -D warnings`
+limpios; smokes de `counter` + `showcase` regeneran sin cambios
+(static path intacto); el ejemplo `reactive-props` compila a WASM
+end-to-end.
+
 ## [v0.21.4] — 2026-07-18 — Phase 11 Session C: Pedagogic docs (Phase 11.9 CERRADO)
 
 **Docs-only release** que cierra **Phase 11.9 entera** — la

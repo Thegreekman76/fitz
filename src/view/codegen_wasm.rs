@@ -664,43 +664,45 @@ fn emit_child_component(
                 ),
                 context: format!("template of component `{}`", ctx.component_name),
             })?;
-        // K-3 remainder: interpolated props (`prop={expr}`) are
-        // accepted by the checker + SSR emitter but reject here in
-        // the WASM path. Reactive prop propagation from parent
-        // state to a mounted child needs the reactivity plumbing
-        // that arrives with Phase 11.7 (client-side dynamic
-        // capabilities + child-lifecycle hooks). Workaround today
-        // for the client-WASM target: pass the value as a static
-        // string / list literal.
-        if prop.is_interpolated() {
-            return Err(EmitError {
+        // Phase 11.7.a — interpolated props (`prop={expr}`) into the
+        // client-WASM target. Under the dirty-flag reactivity model the
+        // parent re-renders (and recreates children) on every state
+        // change, so the child receives a freshly-computed prop value
+        // each render — reactive propagation falls out of the naive
+        // re-render for free. Persistent child state (keyed instance
+        // cache, so the child is NOT recreated) is the R2 work (11.7.e).
+        // Static props keep the K-3 coerce-to-literal path.
+        let value_rust = if prop.is_interpolated() {
+            let expr = prop.expr.as_ref().ok_or_else(|| EmitError {
                 message: format!(
-                    "interpolated prop `{name}={{...}}` on `<{child_name} />` — \
-                     dynamic props from the client-WASM target need reactive \
-                     propagation from parent to mounted child, deferred to Phase \
-                     11.7+. For the SSR target (fitz-liveviews), interpolated \
-                     props work today. For client-WASM: use a static value \
-                     (`{name}=\"...\"`) or compose via top-level scaffolding \
-                     until 11.7 lands.",
-                    name = prop.field_name
-                ),
-                context: format!("template of component `{}`", ctx.component_name),
-            });
-        }
-        let literal = super::check::coerce_child_prop_raw_value(&prop.raw_value, &field.type_expr)
-            .map_err(|msg| EmitError {
-                message: format!(
-                    "internal error: prop `{}=\"{}\"` on `<{child_name} />` — \
-                 coerce_child_prop_raw_value: {msg}. The checker should have \
-                 caught this.",
-                    prop.field_name, prop.raw_value
+                    "internal error: interpolated prop `{}` on `<{child_name} />` \
+                     has no parsed expression — expand should have populated it.",
+                    prop.field_name
                 ),
                 context: format!("template of component `{}`", ctx.component_name),
             })?;
+            lower_child_prop_value(expr, &prop.field_name, &field.type_expr, ctx.state_names)
+                .map_err(|mut e| {
+                    e.context = format!("template of component `{}`", ctx.component_name);
+                    e
+                })?
+        } else {
+            super::check::coerce_child_prop_raw_value(&prop.raw_value, &field.type_expr).map_err(
+                |msg| EmitError {
+                    message: format!(
+                        "internal error: prop `{}=\"{}\"` on `<{child_name} />` — \
+                 coerce_child_prop_raw_value: {msg}. The checker should have \
+                 caught this.",
+                        prop.field_name, prop.raw_value
+                    ),
+                    context: format!("template of component `{}`", ctx.component_name),
+                },
+            )?
+        };
         writeln!(
             out,
             "        *{}.{}.borrow_mut() = {};",
-            child_var, prop.field_name, literal
+            child_var, prop.field_name, value_rust
         )
         .unwrap();
     }
@@ -958,6 +960,98 @@ fn lower_binop(op: &BinOpKind) -> EmitResult<&'static str> {
         _ => Err(EmitError {
             message: "unsupported binary op — deferred to Phase 11.4.c".to_string(),
             context: "expression".to_string(),
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interpolated child prop lowering (Phase 11.7.a)
+// ---------------------------------------------------------------------------
+
+/// True when `ty` is a bare primitive (`Int`/`Float`/`Str`/`Bool`).
+///
+/// Phase 11.7.a restricts interpolated props on the client-WASM target
+/// to primitive child fields so the emitted read is a plain `.clone()`
+/// with no risk of a Rust type mismatch. Nullable / list / map /
+/// nominal targets propagate via the SSR backend today; their WASM
+/// path (which needs richer reactive-propagation plumbing) lands in a
+/// later 11.7 slice.
+fn is_wasm_prop_simple_target(ty: &TypeExpr) -> bool {
+    matches!(ty, TypeExpr::Named(n) if matches!(n.as_str(), "Int" | "Float" | "Str" | "Bool"))
+}
+
+/// Lower an interpolated child prop (`<Child field={expr} />`) into a
+/// Rust expression assignable to the child's `RefCell<T>` state field,
+/// reading the PARENT's state where the expression references it.
+///
+/// **Phase 11.7.a scope (R1 — the "simple case")**: the prop
+/// expression is either a bare parent state-field reference (`{title}`)
+/// or numeric arithmetic over parent state fields (`{n + 1}`), and the
+/// child field's declared type is a bare primitive. Under the
+/// dirty-flag reactivity model the parent re-renders (and recreates
+/// children) on every state change, so the child receives a
+/// freshly-computed prop value each render — reactive propagation
+/// falls out of the naive re-render for free. Persistent child state
+/// (keyed instance cache, so the child is NOT recreated) is the R2
+/// work (11.7.e).
+///
+/// Richer shapes (nullable / nominal / list targets, method calls, Str
+/// concat, field access, imported names) reject with a clear pointer
+/// to a later 11.7 slice / the SSR target.
+fn lower_child_prop_value(
+    expr: &Expr,
+    field_name: &str,
+    target_type: &TypeExpr,
+    state_names: &[String],
+) -> EmitResult<String> {
+    if !is_wasm_prop_simple_target(target_type) {
+        return Err(EmitError {
+            message: format!(
+                "interpolated prop `{field_name}={{...}}` targets a \
+                 non-primitive / nullable field — the client-WASM target \
+                 supports interpolated props into bare `Int`/`Float`/`Str`/`Bool` \
+                 fields in Phase 11.7.a; nominal / list / map / nullable prop \
+                 propagation lands in a later 11.7 slice. For the SSR target \
+                 (fitz-liveviews) these work today. Workaround: a static value \
+                 or the SSR backend."
+            ),
+            context: "interpolated child prop".to_string(),
+        });
+    }
+    match expr {
+        // Bare parent state-field ref — the dominant case (`{title}`,
+        // `{count}`). `(*self.<name>.borrow()).clone()` works uniformly
+        // for every primitive (i64/f64/String/bool all impl Clone). The
+        // checker (S.3 `light_check_interpolated_prop`) already verified
+        // the parent field's type matches the child field's type.
+        Expr::Ident(name, _) if state_names.iter().any(|s| s == name) => {
+            Ok(format!("(*self.{name}.borrow()).clone()"))
+        }
+        // Numeric literals + arithmetic over parent state fields
+        // (`{n + 1}`). Only for numeric child targets — reusing the
+        // event-body lowerer produces Copy values (no clone needed).
+        Expr::Int(..) | Expr::Float(..) | Expr::BinOp { .. } if matches!(target_type, TypeExpr::Named(n) if n == "Int" || n == "Float") => {
+            lower_expr(expr, state_names).map_err(|_| EmitError {
+                message: format!(
+                    "interpolated prop `{field_name}={{...}}` — only bare parent \
+                     state fields and numeric arithmetic over them are supported \
+                     on the client-WASM target in Phase 11.7.a; richer expressions \
+                     (Str concat, method calls, field access, imported names) land \
+                     in a later 11.7 slice or the SSR target."
+                ),
+                context: "interpolated child prop".to_string(),
+            })
+        }
+        _ => Err(EmitError {
+            message: format!(
+                "interpolated prop `{field_name}={{...}}` — expression kind `{}` \
+                 is not supported on the client-WASM target in Phase 11.7.a (bare \
+                 parent state field or numeric arithmetic into a numeric field \
+                 only). Richer shapes land in a later 11.7 slice or the SSR \
+                 target.",
+                expr_kind_name(expr)
+            ),
+            context: "interpolated child prop".to_string(),
         }),
     }
 }
@@ -2159,18 +2253,20 @@ component Card {
     }
 
     // ---------------------------------------------------------------------
-    // K-3 remainder — WASM rejects interpolated props with 11.7+ pointer
+    // Phase 11.7.a — WASM accepts interpolated child props (simple case)
     // ---------------------------------------------------------------------
     //
-    // The SSR path accepts `<Child prop={expr} />` (parent state
-    // rewrite via scoping helper). The client-WASM path today
-    // needs richer reactive-propagation plumbing (child state
-    // reads a live reference to the parent's state field), so
-    // interpolated props reject with a clear pointer to Phase
-    // 11.7+ and cite the static workaround.
+    // The SSR path already accepts `<Child prop={expr} />` (K-3, parent
+    // state rewrite via scoping helper). Phase 11.7.a brings the "simple
+    // case" to the client-WASM target: a bare parent state field or
+    // numeric arithmetic over parent state, into a primitive child
+    // field. Under the dirty-flag reactivity model the value is
+    // recomputed on every parent re-render, so propagation is reactive
+    // for free. Richer targets (nullable / nominal / list) and richer
+    // shapes (Str concat, method calls, imports) still defer.
 
     #[test]
-    fn k3_interp_wasm_child_component_interpolated_prop_rejects_citing_11_7() {
+    fn phase_11_7_a_wasm_interpolated_prop_bare_state_field_str() {
         let src = r#"component Parent {
   state { title: Str = "hi" }
   <template><Card label="{title}" /></template>
@@ -2180,19 +2276,84 @@ component Card {
   <template><span>hi</span></template>
 }"#;
         let file = parse_expand(src);
-        let err = emit_module(&file)
-            .expect_err("WASM path must reject interpolated props today (Phase 11.7+ work)");
+        let out = emit_module(&file).expect("simple interpolated Str prop must emit");
         assert!(
-            err.message.contains("interpolated"),
-            "message must call out `interpolated`: {}",
+            out.contains("(*self.title.borrow()).clone()"),
+            "interpolated bare state field must read the parent's RefCell + clone:\n{out}"
+        );
+        assert!(
+            out.contains(".label.borrow_mut() = (*self.title.borrow()).clone();"),
+            "the computed value must be assigned into the child's `label` field:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_a_wasm_interpolated_prop_arithmetic_over_state_int() {
+        // Uses the arithmetic-lexer-enabled counter helper shape so the
+        // view lexer tokenises `+`. `parse_expand` handles it because
+        // the arithmetic tokens are enabled since §9.m.
+        let src = r#"component Parent {
+  state { n: Int = 0 }
+  <template><Card count="{n + 1}" /></template>
+}
+component Card {
+  state { count: Int = 0 }
+  <template><span>hi</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).expect("arithmetic interpolated Int prop must emit");
+        assert!(
+            out.contains(".count.borrow_mut() = ((*self.n.borrow()) + 1i64);"),
+            "arithmetic prop must lower to the parent state read + literal:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_a_wasm_interpolated_prop_nullable_target_rejects() {
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{title}" /></template>
+}
+component Card {
+  state { label: Str? = null }
+  <template><span>hi</span></template>
+}"#;
+        let file = parse_expand(src);
+        let err = emit_module(&file)
+            .expect_err("nullable child target must defer on the WASM path in 11.7.a");
+        assert!(
+            err.message.contains("non-primitive / nullable") && err.message.contains("11.7"),
+            "message must cite the nullable/non-primitive deferral + 11.7: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn phase_11_7_a_wasm_interpolated_prop_non_state_ident_rejects() {
+        // `mystery` is neither a parent state field nor an imported
+        // name — free-var resolution is not part of 11.7.a on the WASM
+        // path.
+        let src = r#"component Parent {
+  state { title: Str = "hi" }
+  <template><Card label="{mystery}" /></template>
+}
+component Card {
+  state { label: Str = "" }
+  <template><span>hi</span></template>
+}"#;
+        let file = parse_expand(src);
+        let err =
+            emit_module(&file).expect_err("non-state ident prop must reject on the WASM path");
         assert!(
             err.message.contains("11.7"),
-            "message must point at Phase 11.7+: {}",
+            "message must point at a later 11.7 slice / SSR: {}",
             err.message
         );
-        // Static prop path still works — regression check.
+    }
+
+    #[test]
+    fn phase_11_7_a_wasm_static_prop_path_unchanged() {
+        // Regression: the static coerce-to-literal path is untouched.
         let src_static = r#"component Parent {
   state {}
   <template><Card label="hi" /></template>
@@ -2202,9 +2363,10 @@ component Card {
   <template><span>hi</span></template>
 }"#;
         let file_static = parse_expand(src_static);
+        let out = emit_module(&file_static).expect("static path must still work");
         assert!(
-            emit_module(&file_static).is_ok(),
-            "static path must still work"
+            out.contains(r#".label.borrow_mut() = "hi".to_string();"#),
+            "static prop must still coerce to a Rust literal:\n{out}"
         );
     }
 }

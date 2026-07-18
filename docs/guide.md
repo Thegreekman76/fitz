@@ -14919,19 +14919,28 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   XML-like hoy. Workaround: runtime API `component("Name",
   "id")` del `fitz-liveviews`. Refinable cuando entre el
   ejemplo grid + forms del companion UI library como driver.
-- **WASM interpolated props** — el target WASM rechaza
-  `<Child prop="{expr}" />` porque necesita reactive prop
-  propagation (parent state → mounted child) con child-
-  lifecycle hooks + prop watchers. Phase 11.7+ scope.
-  Workaround: static values (`prop="hi"`) o composición
-  top-level.
+- **WASM interpolated props** — **caso simple CERRADO en
+  Phase 11.7.a (v0.21.5)**: el target WASM ya acepta
+  `<Child prop="{expr}" />` cuando el prop es un state field
+  del parent (`{title}`) o aritmética sobre state numérico
+  (`{n + 1}`), hacia un field **primitivo** del child. La
+  propagación es reactiva por el modelo dirty-flag (el parent
+  re-renderiza → recomputa el prop). Ejemplo runnable:
+  `examples/view/reactive-props/`. Targets no-primitivos
+  (nullable / nominal / list) + shapes ricos (method calls,
+  concat de Str) siguen para un slice posterior de 11.7 / el
+  target SSR.
+- **Persistent child state** across parent re-render — hoy
+  el child se **recrea** en cada re-render del parent (sin
+  keyed instance cache), así que un child con state local lo
+  perdería. Phase 11.7.e (R2).
+- **`<Child />` composition dentro de `{#for}`** — dynamic
+  children en loops del template. Phase 11.7.b (R2).
 - **Cross-component event bubbling** — la K-1 shipped en
   `fitz-liveviews` v0.5.0 con `dispatch_to(...)` explicit
   event API; implicit bubbling (`@parent.event` decorator)
-  queda para futuro si aparece demanda.
-- **`<slot />` fallback** — Phase 11.7+.
-- **Persistent child state** across mount/unmount — Phase
-  11.7+.
+  queda para Phase 11.7.c (R2).
+- **`<slot />` fallback** — Phase 11.7.d (R2).
 - **Signature help / rename / references** dentro de `.fitzv`
   — no implementados por el LSP MVP.
 

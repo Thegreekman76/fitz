@@ -365,7 +365,7 @@ componente, extractá el global a un componente dedicado.
 | `identifier 'X' is not a state field nor an imported name` | Ident bajo `{...}` no matchea ningún scope válido | Verificá que sea state field, closure param del `{#for}`, o imported con `from` |
 | Error del expander sobre `{#for}` malformado | Falta cerrar con `{/for}` (o closing wrong: `{end}`) | Cerrás con `{/for}` — el `/` es requerido |
 | Element interpolation `name="{expr}"` no funciona pero `name="hi"` sí | Estás en versión pre-K-3 remainder (< v0.21.1) | Actualizá a fitz ≥ v0.21.1 |
-| Component composition `<Child prop="{expr}" />` da error en WASM | WASM path no soporta interpolated props todavía (Phase 11.7+) | Usá static values, o usá SSR target |
+| Component composition `<Child prop="{expr}" />` da error en WASM con target no-primitivo | Desde Phase 11.7.a (v0.21.5) el WASM path acepta interpolated props hacia fields **primitivos** (`{title}` o `{n + 1}`); nullable/nominal/list + shapes ricos (method calls, concat) todavía defieren | Usá un field primitivo del child (ver `examples/view/reactive-props/`), o el SSR target para shapes ricos |
 
 ## Qué sigue
 

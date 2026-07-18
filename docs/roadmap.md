@@ -9818,9 +9818,27 @@ ejemplos lo necesita), `fitz check` inject-time errors (checker
 no corre inject; UX visible solo vía `run`/`build`), migration
 commits en `fitz-liveviews` (counter draft uncommitted; dashboard/
 chat/kanban migrations land post-v0.21.0). See §9.z, §9.aa, §9.bb.
-Próximo norte: **11.7** (client-side dynamic capabilities +
-kanban SPA port) + **11.8** (LSP dentro de `.fitzv`) + **11.9**
-(pedagogic docs) — deferred hasta demanda real.
+**Estado actualizado (post-v0.21.4)**: **11.8** (LSP dentro de
+`.fitzv`) shipped v0.21.3; **11.9** (pedagogic docs) shipped
+v0.21.4. Queda **11.7** (client-side dynamic capabilities +
+kanban SPA port) — arrancada 2026-07-18 con cadence incremental
+de 3 releases:
+
+- ✅ **11.7.a (R1, v0.21.5)** — reactive interpolated child props
+  en el target WASM. `<Child prop="{expr}" />` con `{expr}` = bare
+  parent state field o aritmética numérica, hacia un field
+  primitivo del child. Decisión de reactividad: **dirty-flag +
+  reconciliation** (vs signals). El naive re-render actual provee
+  la propagación gratis (parent re-renderiza → recomputa prop →
+  re-mount child). `src/view/codegen_wasm.rs`
+  (`lower_child_prop_value` + `is_wasm_prop_simple_target`), 5
+  unit tests + ejemplo runnable `examples/view/reactive-props/`
+  (compila a WASM 32.2 KB). Ver CHANGELOG v0.21.5.
+- ⏳ **11.7.b/c/d/e (R2, v0.21.6)** — `{#for}` composition +
+  event bubbling + `<slot />` + persistent child state (keyed
+  instance cache).
+- ⏳ **11.7.f/g (R3, v0.22.0)** — drag-drop primitives + kanban
+  SPA port (acceptance criterion).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
