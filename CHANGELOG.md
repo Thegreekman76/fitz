@@ -9,6 +9,44 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.24.0] — 2026-07-19 — Named slots: `<slot name="X" />` on the WASM target
+
+**Minor release** — rounds out `<Child />` composition: v0.22.0 shipped
+the single default `<slot />`; this adds **multiple named slots** per
+child. Entirely additive to the `.fitzv` → WASM emitter (WASM-only — the
+SSR target still rejects all slots). Components that only use the default
+slot emit byte-for-byte identical; the other view examples regenerate
+unchanged.
+
+### What changed
+
+- A child declares several holes — `<slot name="title" />`, a default
+  `<slot />`, `<slot name="actions" />` — each with its own fallback.
+- The parent fills a named slot by tagging a top-level element inside
+  `<Child>...</Child>` with `slot="<name>"` (the native Web Components
+  convention). Content **without** a `slot=` attribute fills the default
+  slot; a slot the parent doesn't fill renders the child's own fallback.
+- Under the hood: the child gains one callback field per slot — `__slot`
+  for the default (unchanged since 11.7.d) and `__slot_<name>` per named
+  slot (hyphens fold to `_`). The parent partitions its slot content by
+  `slot=`, synthesises one `__render_slot_<n>` per bucket (rendered in
+  the **parent's** scope → reactive), and wires the matching field. The
+  routing `slot` attribute is stripped from the emitted DOM.
+- Compile-time validation with clear pointers: a `slot="X"` that targets
+  no `<slot name="X" />` in the child, unslotted content when the child
+  has no default `<slot />`, or two names colliding on the same backing
+  field (`side-bar` vs `side_bar`).
+- **No new syntax** — `<slot name="X" />` already parsed; the parent-side
+  `slot="X"` is a plain HTML attribute.
+
+### Scope
+
+- **WASM-only.** The change is contained in `src/view/codegen_wasm.rs`;
+  classic Fitz and the classic `fitz build` path are untouched. The SSR
+  target keeps rejecting slots entirely.
+- New example `examples/view/named-slots/` (a `Card` with title/body/
+  actions slots + fallbacks) compiles to real WASM (35.2 KB raw).
+
 ## [v0.23.0] — 2026-07-19 — Payload bubbling: `<Child @event />` carries data up to the parent
 
 **Minor release** — rounds out the event-bubbling MVP shipped in v0.22.0

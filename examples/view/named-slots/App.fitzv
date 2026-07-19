@@ -1,0 +1,82 @@
+// v0.24.0 — named slots (`<slot name="X" />`) on the client-WASM target.
+//
+// This rounds out `<Child />` composition: v0.22.0 shipped the default
+// `<slot />`; this adds MULTIPLE named holes per child. A child lays out
+// a shell with `<slot name="title" />`, `<slot />` (default), and
+// `<slot name="actions" />`; the parent fills each region by tagging a
+// top-level element with `slot="<name>"` (the native Web Components
+// convention). Content without a `slot=` attribute fills the default
+// slot; a slot the parent doesn't fill renders the child's own fallback.
+//
+// Everything is rendered in the PARENT's scope — so slotted content can
+// read parent state (`{name}`, `{likes}`) and wire parent event handlers
+// (`@click="like"`), and it re-renders reactively when parent state
+// changes (watch the like counter update inside the card's footer slot).
+//
+// Cross-cutting notes:
+//   - `slot="X"` routes the WHOLE tagged element into that named slot;
+//     the `slot` attribute itself is stripped from the rendered DOM.
+//   - Slot names fold hyphens to `_` for the backing field; two names
+//     that collide (`side-bar` vs `side_bar`) are rejected at compile.
+//
+// MVP LIMIT (unchanged from 11.7.d): slot content can't itself contain a
+// `<Child />`, and the SSR target still rejects slots entirely (this is a
+// client-WASM capability).
+
+component App {
+  state {
+    name: Str = "Ada"
+    likes: Int = 0
+  }
+
+  event like() {
+    likes = likes + 1
+  }
+
+  <template>
+    <div class="app">
+      <h1>Named slots on WASM</h1>
+
+      <Card>
+        <span slot="title">Profile — {name}</span>
+        <p class="bio">This paragraph fills the DEFAULT slot. Parent state and handlers work here.</p>
+        <button slot="actions" class="btn" @click="like">like ({likes})</button>
+      </Card>
+
+      <Card>
+        <span slot="title">A card that only fills the title</span>
+      </Card>
+    </div>
+  </template>
+
+  <style scoped>
+    .app { font-family: system-ui, sans-serif; max-width: 560px; }
+    .bio { margin: 0; }
+    .btn { padding: 6px 12px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+  </style>
+}
+
+component Card {
+  state {}
+
+  <template>
+    <article class="card">
+      <header class="card-head">
+        <slot name="title"><em>untitled</em></slot>
+      </header>
+      <div class="card-body">
+        <slot><em>no body provided</em></slot>
+      </div>
+      <footer class="card-foot">
+        <slot name="actions"><small>no actions</small></slot>
+      </footer>
+    </article>
+  </template>
+
+  <style scoped>
+    .card { border: 1px solid #ddd; border-radius: 8px; margin: 12px 0; overflow: hidden; }
+    .card-head { background: #f4f4f4; padding: 8px 12px; font-weight: 600; }
+    .card-body { padding: 12px; }
+    .card-foot { padding: 8px 12px; border-top: 1px solid #eee; }
+  </style>
+}

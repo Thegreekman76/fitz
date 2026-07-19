@@ -15025,8 +15025,15 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   el parent llena con `<Child>content</Child>`, o se muestra el
   fallback del child. El contenido se renderiza en scope del PARENT
   (state + event handlers del parent), reactivo. Ejemplo:
-  `examples/view/slots/`. MVP: slot default solo (named rechaza), sin
-  `<Child />` anidado en slot content.
+  `examples/view/slots/`. Sin `<Child />` anidado en slot content.
+- **Named slots (`<slot name="X" />`)** — **CERRADO en v0.24.0**:
+  un child declara varios huecos (`<slot name="title" />`, un `<slot />`
+  default, `<slot name="actions" />`) y el parent llena cada uno tagueando
+  un elemento top-level de `<Child>...</Child>` con `slot="<name>"` (la
+  convención nativa de Web Components); el contenido sin `slot=` va al
+  slot default, y un slot que el parent no llena muestra su propio
+  fallback. Ejemplo: `examples/view/named-slots/` (un `Card` con
+  title/body/actions). WASM-only (el SSR rechaza todos los slots).
 - **Signature help / rename / references** dentro de `.fitzv`
   — no implementados por el LSP MVP.
 

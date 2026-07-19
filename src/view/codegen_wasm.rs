@@ -570,17 +570,19 @@ fn emit_component_impl(
     // an index names here matches the one the render reads.
     let child_sites = collect_child_site_types(component);
 
-    // Phase 11.7.d — does this component's template contain a `<slot />`?
-    // If so it gets a `__slot` callback field (set by a parent that fills
-    // it via `<ThisComponent>content</ThisComponent>`).
-    let has_slot = component_has_slot(component);
+    // Phase 11.7.d + named slots — the `<slot />` holes this component
+    // declares. A default `<slot />` gives it a `__slot` field; each
+    // `<slot name="X" />` a `__slot_<X>` field, set by a parent that
+    // fills it via `<ThisComponent>...<el slot="X">...</el></ThisComponent>`.
+    let slot_set = component_slot_set(component);
+    validate_slot_set(&component.name, &slot_set)?;
 
     emit_struct_and_new(
         component,
         &child_sites,
         nominals,
         this_bubbled,
-        has_slot,
+        &slot_set,
         out,
     )?;
     emit_event_handlers(component, &state_names, this_bubbled, out)?;
@@ -666,7 +668,7 @@ fn emit_struct_and_new(
     child_sites: &[ChildSite],
     nominals: &NominalRegistry,
     this_bubbled: &std::collections::BTreeSet<String>,
-    has_slot: bool,
+    slot_set: &SlotSet,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
@@ -724,13 +726,22 @@ fn emit_struct_and_new(
         )
         .unwrap();
     }
-    // Phase 11.7.d — the parent-provided slot-content renderer. `None`
-    // when the parent didn't fill the slot (the `<slot />` renders its
-    // fallback instead).
-    if has_slot {
+    // Phase 11.7.d + named slots — parent-provided slot-content
+    // renderers. `__slot` backs the default `<slot />`; `__slot_<name>`
+    // backs each `<slot name="X" />`. `None` when the parent didn't fill
+    // that slot (the `<slot />` renders its own fallback instead).
+    if slot_set.has_default {
         writeln!(
             out,
             "    __slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,"
+        )
+        .unwrap();
+    }
+    for slot_name in &slot_set.named {
+        writeln!(
+            out,
+            "    {}: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,",
+            slot_field_name(Some(slot_name))
         )
         .unwrap();
     }
@@ -780,8 +791,16 @@ fn emit_struct_and_new(
     for ev in this_bubbled {
         writeln!(out, "            __on_{}: RefCell::new(None),", ev).unwrap();
     }
-    if has_slot {
+    if slot_set.has_default {
         writeln!(out, "            __slot: RefCell::new(None),").unwrap();
+    }
+    for slot_name in &slot_set.named {
+        writeln!(
+            out,
+            "            {}: RefCell::new(None),",
+            slot_field_name(Some(slot_name))
+        )
+        .unwrap();
     }
     writeln!(out, "            root: RefCell::new(None),").unwrap();
     writeln!(out, "        }})").unwrap();
@@ -1226,10 +1245,10 @@ fn emit_template_node(
     }
 }
 
-/// Emit a `<slot />` (Phase 11.7.d). If the parent filled the slot
-/// (`self.__slot` is `Some`), invoke the parent-provided renderer with
-/// the current element as the target; otherwise render the slot's own
-/// fallback content. Named slots are not supported on the WASM target yet.
+/// Emit a `<slot />` or `<slot name="X" />`. If the parent filled the
+/// slot (the backing `__slot` / `__slot_<name>` field is `Some`), invoke
+/// the parent-provided renderer with the current element as the target;
+/// otherwise render the slot's own fallback content.
 fn emit_slot(
     name: Option<&str>,
     fallback: &[ExpandedTemplateNode],
@@ -1237,17 +1256,11 @@ fn emit_slot(
     ctx: &mut RenderCtx,
     out: &mut String,
 ) -> EmitResult<()> {
-    if name.is_some() {
-        return Err(EmitError {
-            message: "named slots (`<slot name=\"X\" />`) are not supported on the \
-                      client-WASM target yet (Phase 11.7.d covers the default slot)"
-                .to_string(),
-            context: format!("template of component `{}`", ctx.component_name),
-        });
-    }
+    let field = slot_field_name(name);
     writeln!(
         out,
-        "        if let Some(__cb) = self.__slot.borrow().as_ref() {{"
+        "        if let Some(__cb) = self.{}.borrow().as_ref() {{",
+        field
     )
     .unwrap();
     writeln!(
@@ -1962,11 +1975,11 @@ fn emit_child_component(
         writeln!(out, "        }}").unwrap();
     }
 
-    // Phase 11.7.d — if the parent provided slot content
+    // Phase 11.7.d + named slots — if the parent provided slot content
     // (`<Child>content</Child>`), register a renderer on the child that
-    // fills its `<slot />` with that content (rendered in PARENT scope).
-    // `<Child />` nested inside slot content is rejected (the parent has
-    // no child-cache field for it).
+    // fills its `<slot />` (or `<slot name="X" />`) with that content
+    // (rendered in PARENT scope). `<Child />` nested inside slot content
+    // is rejected (the parent has no child-cache field for it).
     if !slot_content.is_empty() {
         if let Some(bad) = slot_content.iter().find_map(first_nested_child_name) {
             return Err(EmitError {
@@ -1979,17 +1992,95 @@ fn emit_child_component(
                 context: format!("template of component `{}`", ctx.component_name),
             });
         }
-        let slot_idx = ctx.slot_methods.len();
-        ctx.slot_methods.push(slot_content.to_vec());
-        writeln!(out, "        {{").unwrap();
-        writeln!(out, "            let __parent = self.clone();").unwrap();
-        writeln!(
-            out,
-            "            *{}.__slot.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_{}(__t)));",
-            child_var, slot_idx
-        )
-        .unwrap();
-        writeln!(out, "        }}").unwrap();
+
+        // Named slots: route each top-level element carrying a
+        // `slot="X"` attribute to the child's `<slot name="X" />`; every
+        // other node (text, interpolation, `{#if}`/`{#for}`, or an
+        // element without `slot=`) fills the default `<slot />`. When no
+        // node uses `slot=`, take the byte-for-byte default-slot path
+        // (11.7.d).
+        let child_slots = component_slot_set(child);
+        let has_named_routing = slot_content.iter().any(|n| element_slot_attr(n).is_some());
+
+        // Each entry: (backing field, content nodes) → one
+        // `__render_slot_<n>` method wired to that field.
+        let mut wirings: Vec<(String, Vec<ExpandedTemplateNode>)> = Vec::new();
+        if has_named_routing {
+            let mut default_bucket: Vec<ExpandedTemplateNode> = Vec::new();
+            let mut named_buckets: Vec<(String, Vec<ExpandedTemplateNode>)> = Vec::new();
+            for node in slot_content {
+                if let Some(slot_name) = element_slot_attr(node) {
+                    let slot_name = slot_name.to_string();
+                    if !child_slots.named.contains(&slot_name) {
+                        return Err(EmitError {
+                            message: format!(
+                                "`slot=\"{slot_name}\"` inside `<{child_name}>...\
+                                 </{child_name}>` targets no `<slot name=\"{slot_name}\" />` \
+                                 declared in `{child_name}`. Declared named slots: {}.",
+                                describe_named_slots(&child_slots)
+                            ),
+                            context: format!("template of component `{}`", ctx.component_name),
+                        });
+                    }
+                    let stripped = strip_slot_attr(node);
+                    match named_buckets.iter_mut().find(|(n, _)| *n == slot_name) {
+                        Some((_, bucket)) => bucket.push(stripped),
+                        None => named_buckets.push((slot_name, vec![stripped])),
+                    }
+                } else {
+                    default_bucket.push(node.clone());
+                }
+            }
+            // Unslotted content only fills the default slot when it has
+            // real (non-whitespace) nodes — incidental formatting between
+            // slotted elements shouldn't force a `<slot />`.
+            if default_bucket.iter().any(|n| !is_whitespace_text(n)) {
+                if !child_slots.has_default {
+                    return Err(EmitError {
+                        message: format!(
+                            "`<{child_name}>...</{child_name}>` provides default (unslotted) \
+                             content but `{child_name}` declares no default `<slot />`. Wrap \
+                             the content in an element with `slot=\"<name>\"` targeting one of \
+                             its named slots, or add a `<slot />` to `{child_name}`."
+                        ),
+                        context: format!("template of component `{}`", ctx.component_name),
+                    });
+                }
+                wirings.push(("__slot".to_string(), default_bucket));
+            }
+            for (slot_name, bucket) in named_buckets {
+                wirings.push((slot_field_name(Some(&slot_name)), bucket));
+            }
+        } else {
+            // Byte-for-byte default-slot path (11.7.d): the whole content
+            // fills the child's `<slot />`.
+            if !child_slots.has_default {
+                return Err(EmitError {
+                    message: format!(
+                        "`<{child_name}>...</{child_name}>` provides slot content but \
+                         `{child_name}` declares no `<slot />` to fill. Add a `<slot />` \
+                         to `{child_name}`, or route the content with `slot=\"<name>\"` to \
+                         one of its named slots."
+                    ),
+                    context: format!("template of component `{}`", ctx.component_name),
+                });
+            }
+            wirings.push(("__slot".to_string(), slot_content.to_vec()));
+        }
+
+        for (field, content) in wirings {
+            let slot_idx = ctx.slot_methods.len();
+            ctx.slot_methods.push(content);
+            writeln!(out, "        {{").unwrap();
+            writeln!(out, "            let __parent = self.clone();").unwrap();
+            writeln!(
+                out,
+                "            *{}.{}.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_{}(__t)));",
+                child_var, field, slot_idx
+            )
+            .unwrap();
+            writeln!(out, "        }}").unwrap();
+        }
     }
 
     writeln!(
@@ -2388,31 +2479,155 @@ fn first_nested_child_name(node: &ExpandedTemplateNode) -> Option<String> {
     }
 }
 
-/// True when a component's template contains a `<slot />` (Phase
-/// 11.7.d) — it then carries a `__slot` callback field.
-fn component_has_slot(component: &ExpandedComponent) -> bool {
-    fn node_has_slot(node: &ExpandedTemplateNode) -> bool {
+/// The set of `<slot />` holes a component's template declares (Phase
+/// 11.7.d default slot + named slots). `has_default` is true when a
+/// bare `<slot />` appears; `named` lists every distinct
+/// `<slot name="X" />` name in first-seen order.
+#[derive(Default)]
+struct SlotSet {
+    has_default: bool,
+    named: Vec<String>,
+}
+
+/// Collect the `<slot />` holes in `component`'s template, descending
+/// into Element / `{#if}` / `{#for}` the same way the render walk does.
+fn component_slot_set(component: &ExpandedComponent) -> SlotSet {
+    fn walk(node: &ExpandedTemplateNode, set: &mut SlotSet) {
         match node {
-            ExpandedTemplateNode::Slot { .. } => true,
-            ExpandedTemplateNode::Element { children, .. } => children.iter().any(node_has_slot),
+            ExpandedTemplateNode::Slot { name, .. } => match name {
+                None => set.has_default = true,
+                Some(n) => {
+                    if !set.named.contains(n) {
+                        set.named.push(n.clone());
+                    }
+                }
+            },
+            ExpandedTemplateNode::Element { children, .. } => {
+                children.iter().for_each(|c| walk(c, set))
+            }
             ExpandedTemplateNode::If {
                 children,
                 else_children,
                 ..
             } => {
-                children.iter().any(node_has_slot)
-                    || else_children
-                        .as_ref()
-                        .is_some_and(|els| els.iter().any(node_has_slot))
+                children.iter().for_each(|c| walk(c, set));
+                if let Some(els) = else_children {
+                    els.iter().for_each(|c| walk(c, set));
+                }
             }
-            ExpandedTemplateNode::For { children, .. } => children.iter().any(node_has_slot),
-            _ => false,
+            ExpandedTemplateNode::For { children, .. } => {
+                children.iter().for_each(|c| walk(c, set))
+            }
+            _ => {}
         }
     }
-    component
-        .template
-        .as_ref()
-        .is_some_and(|t| t.roots.iter().any(node_has_slot))
+    let mut set = SlotSet::default();
+    if let Some(t) = &component.template {
+        t.roots.iter().for_each(|n| walk(n, &mut set));
+    }
+    set
+}
+
+/// The Rust struct-field name backing a slot. The default slot keeps
+/// the bare `__slot` field (unchanged since 11.7.d — byte-for-byte for
+/// default-only components); a named slot `X` gets `__slot_<X>` with
+/// hyphens folded to underscores.
+fn slot_field_name(name: Option<&str>) -> String {
+    match name {
+        None => "__slot".to_string(),
+        Some(n) => format!("__slot_{}", sanitize_slot_ident(n)),
+    }
+}
+
+/// Fold a slot name into a Rust-identifier-safe fragment (`-` → `_`).
+fn sanitize_slot_ident(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// Human-readable list of a child's declared named slots, for error
+/// messages.
+fn describe_named_slots(set: &SlotSet) -> String {
+    if set.named.is_empty() {
+        "none".to_string()
+    } else {
+        set.named
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Validate a component's named slots: each name must be a legal Rust
+/// identifier fragment (after folding `-` → `_`) and no two names may
+/// collide on the same backing field. Errors surface at WASM emit time
+/// with a clear pointer.
+fn validate_slot_set(component_name: &str, slot_set: &SlotSet) -> EmitResult<()> {
+    let mut seen_fields: Vec<(String, String)> = Vec::new();
+    for name in &slot_set.named {
+        let sane = sanitize_slot_ident(name);
+        let mut chars = sane.chars();
+        let ok = match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(EmitError {
+                message: format!(
+                    "slot name `{name}` is not a valid identifier on the client-WASM \
+                     target. Use letters, digits, `_` or `-` (hyphens fold to `_`), \
+                     starting with a letter or `_` (e.g. `<slot name=\"header\" />`)."
+                ),
+                context: format!("template of component `{component_name}`"),
+            });
+        }
+        let field = format!("__slot_{sane}");
+        if let Some((other, _)) = seen_fields.iter().find(|(_, f)| f == &field) {
+            return Err(EmitError {
+                message: format!(
+                    "slot names `{other}` and `{name}` both map to the same backing \
+                     field `{field}` on the client-WASM target — rename one so the \
+                     two named slots stay distinct."
+                ),
+                context: format!("template of component `{component_name}`"),
+            });
+        }
+        seen_fields.push((name.clone(), field));
+    }
+    Ok(())
+}
+
+/// The value of an element's `slot="X"` static attribute (a named-slot
+/// routing directive on parent-provided slot content), if present.
+fn element_slot_attr(node: &ExpandedTemplateNode) -> Option<&str> {
+    if let ExpandedTemplateNode::Element { attrs, .. } = node {
+        for a in attrs {
+            if let ExpandedAttr::Static { name, value, .. } = a {
+                if name == "slot" {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Clone an element node with its `slot="..."` routing attribute
+/// removed — the attribute directs placement, it isn't real content.
+fn strip_slot_attr(node: &ExpandedTemplateNode) -> ExpandedTemplateNode {
+    let mut cloned = node.clone();
+    if let ExpandedTemplateNode::Element { attrs, .. } = &mut cloned {
+        attrs.retain(|a| !matches!(a, ExpandedAttr::Static { name, .. } if name == "slot"));
+    }
+    cloned
+}
+
+/// True for a whitespace-only text node (incidental formatting between
+/// slotted elements), which shouldn't force a default `<slot />`.
+fn is_whitespace_text(node: &ExpandedTemplateNode) -> bool {
+    matches!(node, ExpandedTemplateNode::Text(t) if t.trim().is_empty())
 }
 
 fn component_uses_form_submit(component: &ExpandedComponent) -> bool {
@@ -4218,15 +4433,23 @@ component Row {
     }
 
     #[test]
-    fn phase_11_7_d_emit_named_slot_rejects() {
+    fn named_slots_emit_named_field_and_render_branch() {
         let src = r#"component Foo {
   state { x: Int = 0 }
   <template><div><slot name="header" /></div></template>
 }"#;
-        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
         assert!(
-            err.message.contains("named slots"),
-            "a named slot must reject on the WASM target:\n{err}"
+            out.contains("__slot_header: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,"),
+            "a named slot gets a __slot_<name> field:\n{out}"
+        );
+        assert!(
+            !out.contains("    __slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,"),
+            "a named-only component has no default __slot field:\n{out}"
+        );
+        assert!(
+            out.contains("if let Some(__cb) = self.__slot_header.borrow().as_ref() {"),
+            "the named slot renders from its own backing field:\n{out}"
         );
     }
 
@@ -5748,6 +5971,191 @@ component Inner {
         assert!(
             err.message.contains("nested inside") && err.message.contains("Inner"),
             "a nested <Child /> in slot content must reject:\n{err}"
+        );
+    }
+
+    // ---- v0.24.0 — named slots -------------------------------------
+
+    #[test]
+    fn named_slots_parent_routes_content_to_named_and_default_fields() {
+        let src = r#"component App {
+  state { title: Str = "hi" }
+  <template>
+    <div>
+      <Panel>
+        <h2 slot="header">Header {title}</h2>
+        <p>default body</p>
+        <div slot="footer">footer bits</div>
+      </Panel>
+    </div>
+  </template>
+}
+component Panel {
+  state {}
+  <template>
+    <section>
+      <header><slot name="header" /></header>
+      <div class="body"><slot /></div>
+      <footer><slot name="footer" /></footer>
+    </section>
+  </template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        // Child gains a distinct field per slot.
+        assert!(
+            out.contains("__slot_header: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,")
+                && out.contains("__slot_footer: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,")
+                && out.contains("    __slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,"),
+            "Panel gets __slot_header, __slot_footer, and __slot fields:\n{out}"
+        );
+        // Parent wires each field to its own renderer method.
+        assert!(
+            out.contains(".__slot.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_0(__t)));")
+                && out.contains(".__slot_header.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_1(__t)));")
+                && out.contains(".__slot_footer.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_2(__t)));"),
+            "the parent wires default + both named fields to distinct renderers:\n{out}"
+        );
+        // Three synthesised renderer methods.
+        assert!(
+            out.contains("fn __render_slot_0(self: &Rc<Self>, __target: &web_sys::Node) {")
+                && out.contains("fn __render_slot_1(self: &Rc<Self>, __target: &web_sys::Node) {")
+                && out.contains("fn __render_slot_2(self: &Rc<Self>, __target: &web_sys::Node) {"),
+            "three slot renderers are emitted:\n{out}"
+        );
+        // The `slot="..."` routing attribute is stripped from the
+        // rendered element (not emitted as a literal DOM attribute).
+        assert!(
+            !out.contains("set_attribute(\"slot\""),
+            "the routing `slot` attribute must be stripped from output:\n{out}"
+        );
+    }
+
+    #[test]
+    fn named_slot_unknown_target_rejects() {
+        let src = r#"component App {
+  state {}
+  <template><div><Panel><span slot="footer">x</span></Panel></div></template>
+}
+component Panel {
+  state {}
+  <template><section><slot name="header" /></section></template>
+}"#;
+        let err = emit_module(&parse_expand(src)).unwrap_err();
+        assert!(
+            err.message.contains("slot=\"footer\"")
+                && err.message.contains("no `<slot name=\"footer\" />`")
+                && err.message.contains("`header`"),
+            "targeting an undeclared named slot must reject and list the declared ones:\n{err}"
+        );
+    }
+
+    #[test]
+    fn named_slot_default_content_without_default_slot_rejects() {
+        // Parent gives unslotted (default) real content but the child
+        // only declares a named slot — no default `<slot />`.
+        let src = r#"component App {
+  state {}
+  <template><div><Panel><h2 slot="header">ok</h2><p>orphan body</p></Panel></div></template>
+}
+component Panel {
+  state {}
+  <template><section><slot name="header" /></section></template>
+}"#;
+        let err = emit_module(&parse_expand(src)).unwrap_err();
+        assert!(
+            err.message.contains("default (unslotted) content")
+                && err.message.contains("no default `<slot />`"),
+            "unslotted content with no default slot must reject:\n{err}"
+        );
+    }
+
+    #[test]
+    fn slot_content_without_any_slot_rejects() {
+        // The byte-for-byte default path: content but no `<slot />` at
+        // all in the child.
+        let src = r#"component App {
+  state {}
+  <template><div><Panel>content</Panel></div></template>
+}
+component Panel {
+  state {}
+  <template><section>no slot here</section></template>
+}"#;
+        let err = emit_module(&parse_expand(src)).unwrap_err();
+        assert!(
+            err.message.contains("no `<slot />` to fill"),
+            "filling a slotless child must reject:\n{err}"
+        );
+    }
+
+    #[test]
+    fn named_slot_hyphen_folds_to_underscore() {
+        let src = r#"component Foo {
+  state {}
+  <template><div><slot name="side-bar" /></div></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("__slot_side_bar: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,")
+                && out.contains("if let Some(__cb) = self.__slot_side_bar.borrow().as_ref() {"),
+            "a hyphenated slot name folds to `__slot_side_bar`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn named_slot_field_collision_rejects() {
+        // `side-bar` and `side_bar` both fold to `__slot_side_bar`.
+        let src = r#"component Foo {
+  state {}
+  <template><div><slot name="side-bar" /><slot name="side_bar" /></div></template>
+}"#;
+        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        assert!(
+            err.message.contains("same backing field") && err.message.contains("__slot_side_bar"),
+            "colliding named slots must reject:\n{err}"
+        );
+    }
+
+    #[test]
+    fn default_only_component_keeps_bare_slot_field() {
+        // Regression guard: a default-only component must emit exactly
+        // `__slot` (no `__slot_` prefix) — byte-for-byte with 11.7.d.
+        let src = r#"component Panel {
+  state {}
+  <template><section><slot /></section></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        // Exactly one slot-callback field (`__slot`) — no `__slot_<name>`.
+        let field_count = out
+            .matches("RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,")
+            .count();
+        assert!(
+            out.contains("    __slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,")
+                && field_count == 1,
+            "a default-only component keeps exactly the bare __slot field (found {field_count}):\n{out}"
+        );
+    }
+
+    #[test]
+    fn named_slot_self_closing_child_no_wiring() {
+        // `<Panel />` self-closing fills nothing → the named slot renders
+        // its fallback, no renderer method is synthesised.
+        let src = r#"component App {
+  state {}
+  <template><div><Panel /></div></template>
+}
+component Panel {
+  state {}
+  <template><section><slot name="header"><em>fallback</em></slot></section></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        assert!(
+            !out.contains("__render_slot_0"),
+            "a self-closing child must not add a slot renderer:\n{out}"
+        );
+        assert!(
+            out.contains("if let Some(__cb) = self.__slot_header.borrow().as_ref() {"),
+            "the named slot still emits its callback-or-fallback branch:\n{out}"
         );
     }
 }

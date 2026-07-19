@@ -36,9 +36,25 @@ para slices posteriores según demanda):
   derivada**: el payload es `Map<Str, Str>` (los números/bools llegan
   como strings, se parsean del lado del parent); un payload tipado o el
   state completo del child sería un slice posterior si aparece demanda.
-- **Named slots** — `<slot name="X" />` rechaza en el target WASM
-  (11.7.d cubre el slot default). Slot routing por nombre + múltiples
-  slots por child es un slice posterior.
+- **Named slots** — 🟢 **CERRADO 2026-07-19 (v0.24.0)**. `<slot
+  name="X" />` + múltiples slots por child en el target WASM. El child
+  gana un field `__slot_<name>` por cada `<slot name="X" />` (el `__slot`
+  default queda idéntico → byte-a-byte para componentes default-only); el
+  parent llena cada región tagueando un elemento top-level de `<Child>...
+  </Child>` con `slot="<name>"` (convención nativa de Web Components), y
+  el contenido sin `slot=` va al slot default. El emitter particiona el
+  slot-content por atributo `slot=`, sintetiza un `__render_slot_<n>` por
+  bucket (renderizado en scope del PARENT → reactivo) y cablea el field
+  correspondiente; el atributo `slot=` se strippea del DOM emitido.
+  Validación en emit: `slot="X"` sin `<slot name="X" />` en el child, o
+  contenido unslotted sin slot default, o colisión de field (`side-bar` vs
+  `side_bar` → ambos `__slot_side_bar`) → error con puntero claro.
+  Cambio contenido en `src/view/codegen_wasm.rs` (WASM-only; el SSR sigue
+  rechazando TODOS los slots). Ejemplo `examples/view/named-slots`
+  (child `Card` con title/default/actions + fallbacks; compila a WASM real
+  35.2 KB). **Deuda residual derivada**: `<Child />` anidado en slot
+  content (misma que 11.7.d abajo); named slots dinámicos dentro de un
+  `{#for}` no se contemplan (los slots son sitios estáticos).
 - **`<Child />` anidado en slot content** — el método `__render_slot_<n>`
   del parent no tiene child-instance cache para un componente anidado;
   rechaza con mensaje claro. Requiere threading de child-site indices
