@@ -379,8 +379,20 @@ fn copy_file_with_subs(src: &Path, dst: &Path, project_name: &str) -> Result<(),
 mod tests {
     use super::*;
 
+    /// Serializes the tests that mutate the process-global
+    /// `FITZ_TEMPLATE_*` env vars. Without this, `cargo test`'s
+    /// multi-threaded runner lets them race — one test clears a var
+    /// another just set, so an override read races the default — which
+    /// flakes CI intermittently (seen on ubuntu-latest, exit 101).
+    /// Zero-dep alternative to the `serial_test` crate. `Mutex::new`
+    /// is `const` since Rust 1.63, so it works in a `static`.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_template_liveviews_default_matches_registry() {
+        // Recover from a poisoned lock (a prior test panicked while
+        // holding it) so one failure doesn't cascade to the others.
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Guard: ensure no test env var interferes. Save + clear + restore.
         let key = env_key_for("liveviews");
         let vars = [
@@ -425,6 +437,7 @@ mod tests {
 
     #[test]
     fn resolve_template_env_var_url_override_replaces_registry_url() {
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let key = env_key_for("liveviews");
         let var = format!("{TEMPLATE_ENV_PREFIX}{key}_URL");
         let prev = std::env::var(&var).ok();
@@ -442,6 +455,7 @@ mod tests {
 
     #[test]
     fn resolve_template_env_var_subpath_override_can_be_empty_string() {
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Empty override is meaningful: means "use the repo root".
         let key = env_key_for("liveviews");
         let var = format!("{TEMPLATE_ENV_PREFIX}{key}_SUBPATH");
