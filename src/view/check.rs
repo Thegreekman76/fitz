@@ -1081,13 +1081,29 @@ fn walk_child_components(
 ) {
     match node {
         ExpandedTemplateNode::ChildComponent {
-            name, props, loc, ..
+            name,
+            props,
+            events,
+            slot_content,
+            loc,
+            ..
         } => {
             // Phase 11.7.b R2b — the `key="{expr}"` attribute is
             // validated at emit time (required for a `<Child />` inside
-            // a `{#for}`, ignored for static sites). The checker only
-            // needs to validate the child exists and its props coerce.
-            validate_child_site(name, props, *loc, component_map, parent_name, errors);
+            // a `{#for}`, ignored for static sites). The checker
+            // validates the child exists, its props coerce, (11.7.c)
+            // each `@event` binding names a real child event + parent
+            // handler, and (11.7.d) slot content pairs with a `<slot />`.
+            validate_child_site(
+                name,
+                props,
+                events,
+                slot_content,
+                *loc,
+                component_map,
+                parent_name,
+                errors,
+            );
         }
         ExpandedTemplateNode::Element { children, .. } => {
             for child in children {
@@ -1119,9 +1135,39 @@ fn walk_child_components(
     }
 }
 
+/// True when a component's template contains a `<slot />` (Phase
+/// 11.7.d). Used to validate that slot content has somewhere to go.
+fn component_has_slot(component: &ExpandedComponent) -> bool {
+    fn node_has_slot(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::Slot { .. } => true,
+            ExpandedTemplateNode::Element { children, .. } => children.iter().any(node_has_slot),
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().any(node_has_slot)
+                    || else_children
+                        .as_ref()
+                        .is_some_and(|els| els.iter().any(node_has_slot))
+            }
+            ExpandedTemplateNode::For { children, .. } => children.iter().any(node_has_slot),
+            _ => false,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().any(node_has_slot))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_child_site(
     child_name: &str,
     props: &[ChildComponentProp],
+    events: &[super::expand::ChildEventBinding],
+    slot_content: &[ExpandedTemplateNode],
     loc: Loc,
     component_map: &std::collections::HashMap<&str, &ExpandedComponent>,
     parent_name: &str,
@@ -1165,6 +1211,53 @@ fn validate_child_site(
             return;
         }
     };
+
+    // Phase 11.7.d — if the parent provides slot content
+    // (`<Child>content</Child>`), the child must have a `<slot />` to put
+    // it in; otherwise the content would be silently dropped.
+    if !slot_content.is_empty() && !component_has_slot(child) {
+        errors.push(CheckError {
+            message: format!(
+                "`<{child_name}>...</{child_name}>` provides slot content, but \
+                 component `{child_name}` has no `<slot />` in its template — the \
+                 content would be dropped. Add `<slot />` to `{child_name}`, or use \
+                 `<{child_name} />` (self-closing)."
+            ),
+            loc,
+            context: format!("component '{parent_name}': template `<{child_name} />`"),
+        });
+    }
+
+    // Phase 11.7.c — validate each `@event="handler"` binding: the child
+    // must declare `event <event_name>`, and the parent must declare
+    // `event <handler_name>` (the handler that runs when it bubbles).
+    for binding in events {
+        if !child.events.iter().any(|e| e.name == binding.event_name) {
+            errors.push(CheckError {
+                message: format!(
+                    "`<{child_name} @{}=\"...\" />` binds an event the child does not \
+                     declare. Add `event {}() {{ ... }}` to component `{child_name}`, or \
+                     fix the event name.",
+                    binding.event_name, binding.event_name
+                ),
+                loc: binding.loc,
+                context: format!("component '{parent_name}': template `<{child_name} />`"),
+            });
+        }
+        if let Some(parent) = component_map.get(parent_name) {
+            if !parent.events.iter().any(|e| e.name == binding.handler_name) {
+                errors.push(CheckError {
+                    message: format!(
+                        "`<{child_name} @{}=\"{}\" />` refers to `{}`, which is not an \
+                         `event` of the parent component `{parent_name}`.",
+                        binding.event_name, binding.handler_name, binding.handler_name
+                    ),
+                    loc: binding.loc,
+                    context: format!("component '{parent_name}': template `<{child_name} />`"),
+                });
+            }
+        }
+    }
 
     // Guard against duplicate props (accidental double-assign).
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -3145,6 +3238,92 @@ component Card {
         assert!(
             msg.contains("did you mean"),
             "expected typo hint in msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_c_check_child_event_binding_ok() {
+        let src = r#"component App {
+  state { hits: Int = 0 }
+  event on_hit() { hits = hits + 1 }
+  <template><div><Kid @ping="on_hit" /></div></template>
+}
+component Kid {
+  state { n: Int = 0 }
+  event ping() {}
+  <template><button @click="ping">{n}</button></template>
+}"#;
+        let errs = check_str(src);
+        assert!(errs.is_empty(), "expected no errors, got: {errs:#?}");
+    }
+
+    #[test]
+    fn phase_11_7_c_check_unknown_child_event_errors() {
+        let src = r#"component App {
+  state { hits: Int = 0 }
+  event on_hit() { hits = hits + 1 }
+  <template><div><Kid @nope="on_hit" /></div></template>
+}
+component Kid {
+  state { n: Int = 0 }
+  event ping() {}
+  <template><button @click="ping">{n}</button></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("does not declare")),
+            "binding an event the child doesn't declare must error: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_c_check_unknown_parent_handler_errors() {
+        let src = r#"component App {
+  state { hits: Int = 0 }
+  event on_hit() { hits = hits + 1 }
+  <template><div><Kid @ping="not_a_handler" /></div></template>
+}
+component Kid {
+  state { n: Int = 0 }
+  event ping() {}
+  <template><button @click="ping">{n}</button></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("not an `event` of the parent")),
+            "binding to a non-existent parent handler must error: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_d_check_slot_content_ok_when_child_has_slot() {
+        let src = r#"component App {
+  state {}
+  <template><Panel><span>hi</span></Panel></template>
+}
+component Panel {
+  state {}
+  <template><section><slot /></section></template>
+}"#;
+        let errs = check_str(src);
+        assert!(errs.is_empty(), "expected no errors, got: {errs:#?}");
+    }
+
+    #[test]
+    fn phase_11_7_d_check_slot_content_without_child_slot_errors() {
+        let src = r#"component App {
+  state {}
+  <template><Panel><span>hi</span></Panel></template>
+}
+component Panel {
+  state {}
+  <template><section>no slot here</section></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("has no `<slot />`")),
+            "slot content with no child <slot /> must error: {errs:#?}"
         );
     }
 

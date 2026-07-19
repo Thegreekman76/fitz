@@ -1291,7 +1291,7 @@ impl<'a> HtmlParser<'a> {
                     // no interpolations. Reject anything else with a
                     // targeted message that points at 11.5.
                     if tag == "slot" {
-                        return build_slot(attrs, start_line, start_col);
+                        return build_slot(attrs, Vec::new(), start_line, start_col);
                     }
                     return Ok(TemplateNode::Element {
                         tag,
@@ -1303,16 +1303,12 @@ impl<'a> HtmlParser<'a> {
                 }
                 Some('>') => {
                     self.advance();
-                    // `<slot>...</slot>` (with fallback children) is
-                    // deferred — today `<slot>` must be self-closing.
-                    // Emit a clear message so the user doesn't try to
-                    // debug a mismatched-tag error further down.
+                    // Phase 11.7.d — `<slot>...</slot>` captures its children
+                    // as fallback content, rendered when the parent provides
+                    // nothing for the slot.
                     if tag == "slot" {
-                        return Err(ViewParseError {
-                            message: "`<slot>...</slot>` with fallback children is not supported yet — use `<slot />` or `<slot name=\"X\" />`. Fallback children land alongside 11.5 (composition wiring)".into(),
-                            line: start_line,
-                            column: start_col,
-                        });
+                        let (fallback, _) = self.parse_nodes(Some(&tag), None, false)?;
+                        return build_slot(attrs, fallback, start_line, start_col);
                     }
                     let (children, _) = self.parse_nodes(Some(&tag), None, false)?;
                     return Ok(TemplateNode::Element {
@@ -1489,7 +1485,12 @@ impl<'a> HtmlParser<'a> {
 /// attribute (`Static`), rejects everything else with a targeted
 /// message that points at 11.5 (composition wiring) as the sub-phase
 /// that will add richer slot APIs.
-fn build_slot(attrs: Vec<Attr>, line: usize, column: usize) -> ViewParseResult<TemplateNode> {
+fn build_slot(
+    attrs: Vec<Attr>,
+    fallback: Vec<TemplateNode>,
+    line: usize,
+    column: usize,
+) -> ViewParseResult<TemplateNode> {
     let mut name: Option<String> = None;
     for attr in attrs {
         match attr {
@@ -1542,6 +1543,7 @@ fn build_slot(attrs: Vec<Attr>, line: usize, column: usize) -> ViewParseResult<T
     }
     Ok(TemplateNode::Slot {
         name,
+        fallback,
         loc: Loc::new(line, column),
     })
 }
@@ -2378,23 +2380,21 @@ mod tests {
     }
 
     #[test]
-    fn template_slot_open_close_form_is_rejected_with_a_clear_message() {
-        // `<slot></slot>` — fallback-children form is not supported
-        // yet; the error must point at 11.5 (composition wiring).
+    fn phase_11_7_d_template_slot_open_close_captures_fallback() {
+        // Phase 11.7.d — `<slot>...</slot>` now captures its children as
+        // fallback content instead of rejecting.
         let src = r#"component X {
-  <template><slot></slot></template>
+  <template><slot><em>fallback</em></slot></template>
 }"#;
-        let err = parse(src).unwrap_err();
-        assert!(
-            err.message.contains("<slot>") && err.message.contains("fallback children"),
-            "unexpected error message: {}",
-            err.message
-        );
-        assert!(
-            err.message.contains("11.5") || err.message.contains("composition"),
-            "unexpected error message: {}",
-            err.message
-        );
+        let file = parse(src).expect("slot with fallback should parse");
+        let tpl = file.components[0].template.as_ref().unwrap();
+        match &tpl.roots[0] {
+            TemplateNode::Slot { name, fallback, .. } => {
+                assert!(name.is_none());
+                assert_eq!(fallback.len(), 1, "fallback child captured");
+            }
+            other => panic!("expected Slot, got {other:?}"),
+        }
     }
 
     #[test]

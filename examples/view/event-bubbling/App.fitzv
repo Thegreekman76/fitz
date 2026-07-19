@@ -1,0 +1,67 @@
+// Phase 11.7.c — child→parent event bubbling on the client-WASM target.
+//
+// A `<Child @event="handler" />` binding lets a child component notify
+// its parent: when the child's `event` fires, the parent's bound handler
+// runs. This rounds out `<Child />` composition (props go down; events
+// bubble up).
+//
+// Here three `<Item @choose="on_pick" />` children each render a button.
+// Clicking a button fires the Item's `choose` event, which bubbles to
+// the parent App's `on_pick` handler:
+//
+//   - Parent binds `<Item label="Apple" @choose="on_pick" />`.
+//   - Child `Item` declares `event choose()` (fired by its own
+//     `@click="choose"`).
+//   - When `choose` runs, the WASM emitter fires the registered parent
+//     callback → `App::on_pick` runs + App re-renders.
+//
+// MVP LIMIT (no-payload bubble): the bubble carries no data, so `on_pick`
+// can't tell WHICH item was clicked — it just counts. Passing the child's
+// state up as a payload is a later slice.
+
+component App {
+  state {
+    clicks: Int = 0
+    status: Str = "click an item"
+  }
+
+  event on_pick() {
+    clicks = clicks + 1
+    status = "an item bubbled its choose event"
+  }
+
+  <template>
+    <div class="picker">
+      <h1>Event bubbling on WASM</h1>
+      <p class="status">{status} — clicks: {clicks}</p>
+      <div class="items">
+        <Item label="Apple" @choose="on_pick" />
+        <Item label="Banana" @choose="on_pick" />
+        <Item label="Cherry" @choose="on_pick" />
+      </div>
+    </div>
+  </template>
+
+  <style scoped>
+    .picker { font-family: system-ui, sans-serif; max-width: 460px; }
+    .status { font-weight: 600; }
+    .items { display: flex; gap: 8px; flex-wrap: wrap; }
+  </style>
+}
+
+component Item {
+  state {
+    label: Str = ""
+  }
+
+  event choose() {}
+
+  <template>
+    <button class="item" @click="choose">{label}</button>
+  </template>
+
+  <style scoped>
+    .item { padding: 10px 16px; cursor: pointer; border: 1px solid #999; border-radius: 8px; background: white; font-size: 1rem; }
+    .item:hover { background: #f0f0f0; }
+  </style>
+}

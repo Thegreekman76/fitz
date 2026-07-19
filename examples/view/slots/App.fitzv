@@ -1,0 +1,67 @@
+// Phase 11.7.d — `<slot />` with fallback content on the client-WASM
+// target. This is the other half of `<Child />` composition: a child
+// defines a layout with a `<slot />` hole, and the parent fills it with
+// content — or the child's fallback shows when the parent provides none.
+//
+//   - Child `Panel` renders a header + a `<slot>fallback</slot>`.
+//   - `<Panel>...content...</Panel>` (non-self-closing) fills the slot.
+//     The content is rendered in the PARENT's scope, so it can use parent
+//     state (`{name}`) and parent event handlers (`@click="greet"`).
+//   - `<Panel />` (self-closing) leaves the slot empty → the child's
+//     fallback (`<em>...</em>`) renders instead.
+//
+// Under the hood: the child gains a `__slot` callback field; the parent
+// synthesises a `__render_slot_<n>` method that renders the content into
+// a target node the child hands over at its `<slot />`. Re-rendered each
+// time, so parent-state slot content stays reactive.
+//
+// MVP LIMIT: default slot only (no named slots), and slot content can't
+// itself contain a `<Child />`.
+
+component App {
+  state {
+    name: Str = "world"
+  }
+
+  event greet() {
+    name = "Fitz"
+  }
+
+  <template>
+    <div class="app">
+      <h1>Slots on WASM</h1>
+      <Panel>
+        <p class="filled">Hello, {name}! (parent-provided slot content)</p>
+        <button class="btn" @click="greet">set name to Fitz</button>
+      </Panel>
+      <Panel />
+    </div>
+  </template>
+
+  <style scoped>
+    .app { font-family: system-ui, sans-serif; max-width: 520px; }
+    .filled { margin: 0 0 8px 0; }
+    .btn { padding: 6px 12px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+  </style>
+}
+
+component Panel {
+  state {}
+
+  <template>
+    <section class="panel">
+      <header class="panel-head">Panel header (from the child)</header>
+      <div class="panel-body">
+        <slot>
+          <em>default fallback content — this panel wasn't filled</em>
+        </slot>
+      </div>
+    </section>
+  </template>
+
+  <style scoped>
+    .panel { border: 1px solid #ddd; border-radius: 8px; margin: 12px 0; overflow: hidden; }
+    .panel-head { background: #f4f4f4; padding: 8px 12px; font-weight: 600; font-size: 0.9rem; }
+    .panel-body { padding: 12px; }
+  </style>
+}

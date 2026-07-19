@@ -1292,7 +1292,41 @@ fn emit_template_node_to_pieces(
         // expand/check pipeline to see the sibling — deferred
         // until 11.6.e wires the loader's expanded-file cache
         // through the checker.
-        ExpandedTemplateNode::ChildComponent { name, props, .. } => {
+        ExpandedTemplateNode::ChildComponent {
+            name,
+            props,
+            events,
+            slot_content,
+            ..
+        } => {
+            // Phase 11.7.c — event bubbling (`<Child @event="..." />`) is a
+            // client-WASM capability today. The SSR target re-renders the
+            // whole tree per event over the wire, so child→parent callbacks
+            // don't apply the same way; reject rather than silently drop.
+            if let Some(binding) = events.first() {
+                return Err(SsrEmitError {
+                    message: format!(
+                        "event binding `@{}=\"...\"` on `<{name} />` — child→parent event \
+                         bubbling is a client-WASM (`target = \"wasm-client\"`) capability \
+                         (Phase 11.7.c); it is not supported on the SSR target.",
+                        binding.event_name
+                    ),
+                    context: format!("component `{}` template", component.name),
+                });
+            }
+            // Phase 11.7.d — `<Child>content</Child>` slot fill is a
+            // client-WASM capability (it pairs with `<slot />`, which the
+            // SSR target also defers).
+            if !slot_content.is_empty() {
+                return Err(SsrEmitError {
+                    message: format!(
+                        "slot content `<{name}>...</{name}>` — filling a child's `<slot />` \
+                         is a client-WASM (`target = \"wasm-client\"`) capability (Phase \
+                         11.7.d); it is not supported on the SSR target."
+                    ),
+                    context: format!("component `{}` template", component.name),
+                });
+            }
             let child = siblings
                 .iter()
                 .find(|c| &c.name == name)

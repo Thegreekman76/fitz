@@ -184,15 +184,14 @@ pub enum TemplateNode {
         loc: Loc,
     },
     /// `<slot />` (default) or `<slot name="X" />` (named) —
-    /// parent/child composition marker. Only self-closing today;
-    /// fallback children (`<slot>...</slot>`) are rejected with a
-    /// clear message. `name` is `None` for the default slot,
-    /// `Some("X")` for a named slot. This is an opaque marker in
-    /// the tree — the composition wiring (cross-checking parent
-    /// slots against child components' declared slots) lands in
-    /// Phase 11.5.
+    /// parent/child composition marker. `name` is `None` for the
+    /// default slot, `Some("X")` for a named slot. `fallback` holds
+    /// the children of a `<slot>...</slot>` block (Phase 11.7.d),
+    /// rendered when the parent provides no content for the slot;
+    /// empty for a self-closing `<slot />`.
     Slot {
         name: Option<String>,
+        fallback: Vec<TemplateNode>,
         loc: Loc,
     },
 }

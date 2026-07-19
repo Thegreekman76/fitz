@@ -281,8 +281,68 @@ pub fn emit_component(component: &ExpandedComponent) -> EmitResult<String> {
     };
     let mut out = String::new();
     let nominals = NominalRegistry::new();
-    emit_component_impl(component, &synthetic_file, &nominals, &mut out)?;
+    let bubbled = collect_bubbled_events(&synthetic_file);
+    emit_component_impl(component, &synthetic_file, &nominals, &bubbled, &mut out)?;
     Ok(out)
+}
+
+/// Map each component name → the set of its event names that some
+/// `<Child @event="..." />` site binds (Phase 11.7.c event bubbling). A
+/// child gains a callback slot + a bubble call in its handler ONLY for
+/// events in this set, so components with no bubbled events emit
+/// byte-for-byte unchanged. `BTreeMap`/`BTreeSet` keep the output stable.
+fn collect_bubbled_events(
+    file: &ExpandedViewFile,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    fn walk(
+        node: &ExpandedTemplateNode,
+        map: &mut std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) {
+        match node {
+            ExpandedTemplateNode::ChildComponent { name, events, .. } => {
+                for ev in events {
+                    map.entry(name.clone())
+                        .or_default()
+                        .insert(ev.event_name.clone());
+                }
+            }
+            ExpandedTemplateNode::Element { children, .. } => {
+                for c in children {
+                    walk(c, map);
+                }
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                for c in children {
+                    walk(c, map);
+                }
+                if let Some(els) = else_children {
+                    for c in els {
+                        walk(c, map);
+                    }
+                }
+            }
+            ExpandedTemplateNode::For { children, .. } => {
+                for c in children {
+                    walk(c, map);
+                }
+            }
+            _ => {}
+        }
+    }
+    for component in &file.components {
+        if let Some(t) = &component.template {
+            for node in &t.roots {
+                walk(node, &mut map);
+            }
+        }
+    }
+    map
 }
 
 /// Emit un módulo Rust entero ready to build con `wasm-pack build`:
@@ -335,8 +395,9 @@ pub fn emit_module_with_imports(
     emit_module_header(&mut out);
     emit_nominal_structs(nominals, &mut out)?;
     emit_imported_fns(fns, nominals, &mut out)?;
+    let bubbled = collect_bubbled_events(file);
     for component in &file.components {
-        emit_component_impl(component, file, nominals, &mut out)?;
+        emit_component_impl(component, file, nominals, &bubbled, &mut out)?;
     }
     Ok(out)
 }
@@ -487,9 +548,16 @@ fn emit_component_impl(
     component: &ExpandedComponent,
     file: &ExpandedViewFile,
     nominals: &NominalRegistry,
+    bubbled: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     out: &mut String,
 ) -> EmitResult<()> {
     let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
+
+    // Phase 11.7.c — this component's event names that some parent binds
+    // via `<ThisComponent @event="..." />`. Each gets a callback slot +
+    // a bubble call in its handler. Empty for non-bubbled components.
+    let empty = std::collections::BTreeSet::new();
+    let this_bubbled = bubbled.get(&component.name).unwrap_or(&empty);
 
     // Phase 11.7.e / R2b — collect every `<Child />` composition site
     // (in DFS order) so the struct can carry a typed instance-cache
@@ -502,8 +570,20 @@ fn emit_component_impl(
     // an index names here matches the one the render reads.
     let child_sites = collect_child_site_types(component);
 
-    emit_struct_and_new(component, &child_sites, nominals, out)?;
-    emit_event_handlers(component, &state_names, out)?;
+    // Phase 11.7.d — does this component's template contain a `<slot />`?
+    // If so it gets a `__slot` callback field (set by a parent that fills
+    // it via `<ThisComponent>content</ThisComponent>`).
+    let has_slot = component_has_slot(component);
+
+    emit_struct_and_new(
+        component,
+        &child_sites,
+        nominals,
+        this_bubbled,
+        has_slot,
+        out,
+    )?;
+    emit_event_handlers(component, &state_names, this_bubbled, out)?;
     emit_mount_and_render(component, &state_names, file, nominals, out)?;
     if let Some(style) = &component.style {
         emit_style_helper(&component.name, style, out);
@@ -585,6 +665,8 @@ fn emit_struct_and_new(
     component: &ExpandedComponent,
     child_sites: &[ChildSite],
     nominals: &NominalRegistry,
+    this_bubbled: &std::collections::BTreeSet<String>,
+    has_slot: bool,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
@@ -627,6 +709,22 @@ fn emit_struct_and_new(
             .unwrap();
             static_idx += 1;
         }
+    }
+    // Phase 11.7.c — one callback slot per bubbled event, set by the
+    // parent that binds `<ThisComponent @event="..." />` and invoked by
+    // this component's own `event` handler when it fires.
+    for ev in this_bubbled {
+        writeln!(out, "    __on_{}: RefCell<Option<Box<dyn Fn()>>>,", ev).unwrap();
+    }
+    // Phase 11.7.d — the parent-provided slot-content renderer. `None`
+    // when the parent didn't fill the slot (the `<slot />` renders its
+    // fallback instead).
+    if has_slot {
+        writeln!(
+            out,
+            "    __slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,"
+        )
+        .unwrap();
     }
     writeln!(out, "    root: RefCell<Option<HtmlElement>>,").unwrap();
     writeln!(out, "}}\n").unwrap();
@@ -671,6 +769,12 @@ fn emit_struct_and_new(
             static_idx += 1;
         }
     }
+    for ev in this_bubbled {
+        writeln!(out, "            __on_{}: RefCell::new(None),", ev).unwrap();
+    }
+    if has_slot {
+        writeln!(out, "            __slot: RefCell::new(None),").unwrap();
+    }
     writeln!(out, "            root: RefCell::new(None),").unwrap();
     writeln!(out, "        }})").unwrap();
     writeln!(out, "    }}\n").unwrap();
@@ -685,10 +789,11 @@ fn emit_struct_and_new(
 fn emit_event_handlers(
     component: &ExpandedComponent,
     state_names: &[String],
+    this_bubbled: &std::collections::BTreeSet<String>,
     out: &mut String,
 ) -> EmitResult<()> {
     for handler in &component.events {
-        emit_event_handler(&component.name, handler, state_names, out)?;
+        emit_event_handler(&component.name, handler, state_names, this_bubbled, out)?;
     }
     Ok(())
 }
@@ -697,6 +802,7 @@ fn emit_event_handler(
     component_name: &str,
     handler: &ExpandedEventHandler,
     state_names: &[String],
+    this_bubbled: &std::collections::BTreeSet<String>,
     out: &mut String,
 ) -> EmitResult<()> {
     if !handler.params.is_empty() {
@@ -739,6 +845,16 @@ fn emit_event_handler(
         })?;
     }
     writeln!(out, "        self.render();").unwrap();
+    // Phase 11.7.c — if a parent bound `@<name>` on this component, fire
+    // the registered bubble callback after the handler ran + re-rendered.
+    if this_bubbled.contains(&handler.name) {
+        writeln!(
+            out,
+            "        if let Some(__cb) = self.__on_{}.borrow().as_ref() {{ __cb(); }}",
+            handler.name
+        )
+        .unwrap();
+    }
     writeln!(out, "    }}\n").unwrap();
     Ok(())
 }
@@ -870,6 +986,7 @@ fn emit_mount_and_render(
     )
     .unwrap();
 
+    let mut slot_methods: Vec<Vec<ExpandedTemplateNode>> = Vec::new();
     if let Some(template) = &component.template {
         let mut ctx = RenderCtx::new(
             name,
@@ -882,9 +999,41 @@ fn emit_mount_and_render(
         for root_node in &template.roots {
             emit_template_node(root_node, "root", &mut ctx, out)?;
         }
+        slot_methods = ctx.slot_methods;
     }
 
     writeln!(out, "    }}").unwrap();
+
+    // Phase 11.7.d — one `__render_slot_<n>` method per `<Child>content
+    // </Child>` site, rendering the parent-provided content (in PARENT
+    // scope: parent state + events) into a target node handed by the
+    // child at its `<slot />`.
+    for (i, content) in slot_methods.iter().enumerate() {
+        writeln!(
+            out,
+            "    fn __render_slot_{}(self: &Rc<Self>, __target: &web_sys::Node) {{",
+            i
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        let document = web_sys::window().unwrap().document().unwrap();"
+        )
+        .unwrap();
+        let mut ctx = RenderCtx::new(
+            name,
+            state_names,
+            &component.state,
+            file,
+            nominals,
+            &component.events,
+        );
+        for node in content {
+            emit_template_node(node, "__target", &mut ctx, out)?;
+        }
+        writeln!(out, "    }}\n").unwrap();
+    }
+
     writeln!(out, "}}\n").unwrap();
     Ok(())
 }
@@ -933,6 +1082,12 @@ struct RenderCtx<'a> {
     /// `data-flv-click="handler"` binding can resolve the target and
     /// know whether it takes a `payload` argument.
     events: &'a [ExpandedEventHandler],
+    /// Phase 11.7.d — slot-content node lists accumulated from
+    /// `<Child>content</Child>` sites during the render walk. Each entry
+    /// becomes a `__render_slot_<idx>` method; the index is the position
+    /// in this vec, matched by `emit_child_component` when it wires the
+    /// child's `__slot` callback.
+    slot_methods: Vec<Vec<ExpandedTemplateNode>>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -956,6 +1111,7 @@ impl<'a> RenderCtx<'a> {
             locals: Vec::new(),
             nominals,
             events,
+            slot_methods: Vec::new(),
         }
     }
 
@@ -1021,14 +1177,66 @@ fn emit_template_node(
             children,
             ..
         } => emit_for(var, iter, children, parent_var, ctx, out),
-        ExpandedTemplateNode::Slot { .. } => Err(EmitError {
-            message: "`<slot />` composition — deferred to Phase 11.5".to_string(),
-            context: format!("template of component `{}`", ctx.component_name),
-        }),
+        ExpandedTemplateNode::Slot { name, fallback, .. } => {
+            emit_slot(name.as_deref(), fallback, parent_var, ctx, out)
+        }
         ExpandedTemplateNode::ChildComponent {
-            name, props, key, ..
-        } => emit_child_component(name, props, key.as_ref(), parent_var, ctx, out),
+            name,
+            props,
+            key,
+            events,
+            slot_content,
+            ..
+        } => emit_child_component(
+            name,
+            props,
+            key.as_ref(),
+            events,
+            slot_content,
+            parent_var,
+            ctx,
+            out,
+        ),
     }
+}
+
+/// Emit a `<slot />` (Phase 11.7.d). If the parent filled the slot
+/// (`self.__slot` is `Some`), invoke the parent-provided renderer with
+/// the current element as the target; otherwise render the slot's own
+/// fallback content. Named slots are not supported on the WASM target yet.
+fn emit_slot(
+    name: Option<&str>,
+    fallback: &[ExpandedTemplateNode],
+    parent_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    if name.is_some() {
+        return Err(EmitError {
+            message: "named slots (`<slot name=\"X\" />`) are not supported on the \
+                      client-WASM target yet (Phase 11.7.d covers the default slot)"
+                .to_string(),
+            context: format!("template of component `{}`", ctx.component_name),
+        });
+    }
+    writeln!(
+        out,
+        "        if let Some(__cb) = self.__slot.borrow().as_ref() {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            let __slot_target: &web_sys::Node = {}.as_ref();",
+        parent_var
+    )
+    .unwrap();
+    writeln!(out, "            __cb(__slot_target);").unwrap();
+    writeln!(out, "        }} else {{").unwrap();
+    for node in fallback {
+        emit_template_node(node, parent_var, ctx, out)?;
+    }
+    writeln!(out, "        }}").unwrap();
+    Ok(())
 }
 
 fn emit_text(text: &str, parent_var: &str, ctx: &mut RenderCtx, out: &mut String) {
@@ -1503,10 +1711,13 @@ fn emit_static_attr(name: &str, value: &str, el_var: &str, out: &mut String) {
 /// wiring inherits. Persistent child state across parent renders
 /// is a Phase 11.6+ concern that would need a component-instance
 /// cache keyed by position in the render tree.
+#[allow(clippy::too_many_arguments)]
 fn emit_child_component(
     child_name: &str,
     props: &[super::expand::ChildComponentProp],
     key: Option<&Expr>,
+    events: &[super::expand::ChildEventBinding],
+    slot_content: &[ExpandedTemplateNode],
     parent_var: &str,
     ctx: &mut RenderCtx,
     out: &mut String,
@@ -1678,6 +1889,74 @@ fn emit_child_component(
             child_var, prop.field_name, value_rust
         )
         .unwrap();
+    }
+
+    // Phase 11.7.c — wire each `@event="handler"` binding: register a
+    // callback on the child that calls the PARENT's handler when the
+    // child's event fires. The parent handler is validated to exist
+    // (and its payload arity resolved) via `handler_takes_payload`.
+    for binding in events {
+        let takes_payload = handler_takes_payload(ctx, &binding.handler_name)?;
+        writeln!(out, "        {{").unwrap();
+        writeln!(out, "            let __parent = self.clone();").unwrap();
+        writeln!(
+            out,
+            "            *{}.__on_{}.borrow_mut() = Some(Box::new(move || {{",
+            child_var, binding.event_name
+        )
+        .unwrap();
+        if takes_payload {
+            writeln!(
+                out,
+                "                let __pl = std::collections::HashMap::<String, String>::new();"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                {}::{}(&__parent, &__pl);",
+                ctx.component_name, binding.handler_name
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "                {}::{}(&__parent);",
+                ctx.component_name, binding.handler_name
+            )
+            .unwrap();
+        }
+        writeln!(out, "            }}));").unwrap();
+        writeln!(out, "        }}").unwrap();
+    }
+
+    // Phase 11.7.d — if the parent provided slot content
+    // (`<Child>content</Child>`), register a renderer on the child that
+    // fills its `<slot />` with that content (rendered in PARENT scope).
+    // `<Child />` nested inside slot content is rejected (the parent has
+    // no child-cache field for it).
+    if !slot_content.is_empty() {
+        if let Some(bad) = slot_content.iter().find_map(first_nested_child_name) {
+            return Err(EmitError {
+                message: format!(
+                    "`<{bad} />` nested inside `<{child_name}>...</{child_name}>` slot \
+                     content is not supported on the client-WASM target yet. Slot \
+                     content may contain elements, text, interpolation, `{{#if}}`/\
+                     `{{#for}}`, and event handlers, but not another component."
+                ),
+                context: format!("template of component `{}`", ctx.component_name),
+            });
+        }
+        let slot_idx = ctx.slot_methods.len();
+        ctx.slot_methods.push(slot_content.to_vec());
+        writeln!(out, "        {{").unwrap();
+        writeln!(out, "            let __parent = self.clone();").unwrap();
+        writeln!(
+            out,
+            "            *{}.__slot.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_{}(__t)));",
+            child_var, slot_idx
+        )
+        .unwrap();
+        writeln!(out, "        }}").unwrap();
     }
 
     writeln!(
@@ -2040,6 +2319,62 @@ pub fn wasm_extra_web_sys_features(file: &ExpandedViewFile) -> Vec<&'static str>
     } else {
         Vec::new()
     }
+}
+
+/// Find a nested `<Child />` inside slot content (Phase 11.7.d) — such
+/// composition is rejected because the parent's slot-render method has no
+/// child-instance cache field for it. Returns the offending component
+/// name if found.
+fn first_nested_child_name(node: &ExpandedTemplateNode) -> Option<String> {
+    match node {
+        ExpandedTemplateNode::ChildComponent { name, .. } => Some(name.clone()),
+        ExpandedTemplateNode::Element { children, .. } => {
+            children.iter().find_map(first_nested_child_name)
+        }
+        ExpandedTemplateNode::If {
+            children,
+            else_children,
+            ..
+        } => children
+            .iter()
+            .find_map(first_nested_child_name)
+            .or_else(|| {
+                else_children
+                    .as_ref()
+                    .and_then(|els| els.iter().find_map(first_nested_child_name))
+            }),
+        ExpandedTemplateNode::For { children, .. } => {
+            children.iter().find_map(first_nested_child_name)
+        }
+        _ => None,
+    }
+}
+
+/// True when a component's template contains a `<slot />` (Phase
+/// 11.7.d) — it then carries a `__slot` callback field.
+fn component_has_slot(component: &ExpandedComponent) -> bool {
+    fn node_has_slot(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::Slot { .. } => true,
+            ExpandedTemplateNode::Element { children, .. } => children.iter().any(node_has_slot),
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().any(node_has_slot)
+                    || else_children
+                        .as_ref()
+                        .is_some_and(|els| els.iter().any(node_has_slot))
+            }
+            ExpandedTemplateNode::For { children, .. } => children.iter().any(node_has_slot),
+            _ => false,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().any(node_has_slot))
 }
 
 fn component_uses_form_submit(component: &ExpandedComponent) -> bool {
@@ -3822,18 +4157,39 @@ component Row {
     }
 
     #[test]
-    fn emit_rejects_slot() {
+    fn phase_11_7_d_emit_slot_renders_callback_or_fallback() {
+        // Phase 11.7.d — `<slot />` now emits the parent-content callback
+        // with a fallback branch (it no longer rejects).
         let src = r#"component Foo {
   state { x: Int = 0 }
 
   <template>
-    <div><slot /></div>
+    <div><slot><span>fallback</span></slot></div>
   </template>
 }"#;
-        let expanded = parse_expand(src);
-        let err = emit_component(&expanded.components[0]).unwrap_err();
-        assert!(err.message.contains("<slot"), "slot error:\n{}", err);
-        assert!(err.message.contains("11.5"), "deferred citation:\n{}", err);
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("__slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,"),
+            "a component with a <slot /> gets a __slot field:\n{out}"
+        );
+        assert!(
+            out.contains("if let Some(__cb) = self.__slot.borrow().as_ref() {")
+                && out.contains("} else {"),
+            "the slot emits a callback-or-fallback branch:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_d_emit_named_slot_rejects() {
+        let src = r#"component Foo {
+  state { x: Int = 0 }
+  <template><div><slot name="header" /></div></template>
+}"#;
+        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        assert!(
+            err.message.contains("named slots"),
+            "a named slot must reject on the WASM target:\n{err}"
+        );
     }
 
     #[test]
@@ -5161,6 +5517,124 @@ component Card {
         assert!(
             out.contains("format!(\"{}\", (*self.next_id.borrow()))"),
             "a single-expr interpolation must lower to `format!(\"{{}}\", ...)`:\n{out}"
+        );
+    }
+
+    // ---- Phase 11.7.c — event bubbling -----------------------------
+
+    #[test]
+    fn phase_11_7_c_child_event_bubbles_to_parent() {
+        let src = r#"component App {
+  state { hits: Int = 0 }
+  event on_hit() { hits = hits + 1 }
+  <template><div><Kid @ping="on_hit" /></div></template>
+}
+component Kid {
+  state { n: Int = 0 }
+  event ping() {}
+  <template><button @click="ping">{n}</button></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        assert!(
+            out.contains("__on_ping: RefCell<Option<Box<dyn Fn()>>>,"),
+            "the child gets a callback slot for the bubbled event:\n{out}"
+        );
+        assert!(
+            out.contains("if let Some(__cb) = self.__on_ping.borrow().as_ref() { __cb(); }"),
+            "the child's ping handler fires the callback:\n{out}"
+        );
+        assert!(
+            out.contains(".__on_ping.borrow_mut() = Some(Box::new(move || {")
+                && out.contains("App::on_hit(&__parent);"),
+            "the parent wires the callback to its handler:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_c_unbound_child_event_gets_no_slot() {
+        // Kid's `ping` event is NOT bound by any parent — no callback slot.
+        let src = r#"component App {
+  state { x: Int = 0 }
+  event noop() { x = 0 }
+  <template><div><Kid /></div></template>
+}
+component Kid {
+  state { n: Int = 0 }
+  event ping() { n = n + 1 }
+  <template><button @click="ping">{n}</button></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        assert!(
+            !out.contains("__on_ping"),
+            "an unbound child event must not gain a callback slot:\n{out}"
+        );
+    }
+
+    // ---- Phase 11.7.d — slots ---------------------------------------
+
+    #[test]
+    fn phase_11_7_d_slot_fill_emits_render_method_and_wiring() {
+        let src = r#"component App {
+  state { title: Str = "hi" }
+  <template><div><Panel>{title}</Panel></div></template>
+}
+component Panel {
+  state {}
+  <template><section><slot /></section></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        assert!(
+            out.contains("fn __render_slot_0(self: &Rc<Self>, __target: &web_sys::Node) {"),
+            "the parent emits a slot-content renderer:\n{out}"
+        );
+        assert!(
+            out.contains(
+                ".__slot.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_0(__t)));"
+            ),
+            "the parent wires the child's __slot to the renderer:\n{out}"
+        );
+        assert!(
+            out.contains("__slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,"),
+            "Panel gets a __slot field:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_d_self_closing_child_no_slot_wiring() {
+        // A self-closing `<Panel />` provides no content → no renderer.
+        let src = r#"component App {
+  state {}
+  <template><div><Panel /></div></template>
+}
+component Panel {
+  state {}
+  <template><section><slot /></section></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        assert!(
+            !out.contains("__render_slot_0"),
+            "a self-closing child must not add a slot renderer:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_d_nested_child_in_slot_content_rejects() {
+        let src = r#"component App {
+  state {}
+  <template><div><Panel><Inner /></Panel></div></template>
+}
+component Panel {
+  state {}
+  <template><section><slot /></section></template>
+}
+component Inner {
+  state {}
+  <template><span>x</span></template>
+}"#;
+        let err = emit_module(&parse_expand(src)).unwrap_err();
+        assert!(
+            err.message.contains("nested inside") && err.message.contains("Inner"),
+            "a nested <Child /> in slot content must reject:\n{err}"
         );
     }
 }

@@ -179,13 +179,13 @@ pub enum ExpandedTemplateNode {
         children: Vec<ExpandedTemplateNode>,
         loc: Loc,
     },
-    /// `<slot />` (default) or `<slot name="X" />` (named) — opaque
-    /// parent/child composition marker copied from the raw AST as
-    /// is; there's nothing to re-parse here. The composition wiring
-    /// (cross-check against the child component's declared slots)
-    /// lands in Phase 11.5. Since 11.2.c mini-commit 3.
+    /// `<slot />` (default) or `<slot name="X" />` (named) —
+    /// parent/child composition marker. `fallback` (Phase 11.7.d) holds
+    /// the expanded children of a `<slot>...</slot>` block, rendered when
+    /// the parent provides no content for the slot; empty otherwise.
     Slot {
         name: Option<String>,
+        fallback: Vec<ExpandedTemplateNode>,
         loc: Loc,
     },
     /// `<Child prop="v" />` — mount a nested component with static
@@ -219,8 +219,30 @@ pub enum ExpandedTemplateNode {
         /// instance cache + reconciliation. The `key` is NOT a prop —
         /// it is stripped from `props` at expand time.
         key: Option<fast::Expr>,
+        /// Phase 11.7.c — event bindings on the child
+        /// (`<Card @select="on_select" />`). Each maps a child event name
+        /// to a handler declared by the PARENT component. When the child's
+        /// event fires, the bound parent handler runs (event bubbling).
+        /// Empty for children with no `@event` bindings.
+        events: Vec<ChildEventBinding>,
+        /// Phase 11.7.d — the parent-provided content of a non-self-closing
+        /// `<Child>...</Child>`, which fills the child's `<slot />`. Empty
+        /// for a self-closing `<Child />` (the child renders its `<slot />`
+        /// fallback, if any). Rendered by the PARENT (parent state + events)
+        /// via a synthesised `__render_slot_<n>` method on the WASM target.
+        slot_content: Vec<ExpandedTemplateNode>,
         loc: Loc,
     },
+}
+
+/// An `@event="handler"` binding on a `<Child />` composition site
+/// (Phase 11.7.c event bubbling). `event_name` is the child's event;
+/// `handler_name` is the parent component's handler to run when it fires.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChildEventBinding {
+    pub event_name: String,
+    pub handler_name: String,
+    pub loc: Loc,
 }
 
 /// A prop passed to a `<Child prop="v" />` or `<Child prop={expr} />`
@@ -658,7 +680,14 @@ fn expand_template_node(
             // expander that enforces the composition rules
             // (self-closing only, static props only, no events).
             if starts_with_ascii_uppercase(tag) {
-                return expand_child_component(tag, attrs, children, *self_closing, *loc);
+                return expand_child_component(
+                    tag,
+                    attrs,
+                    children,
+                    *self_closing,
+                    *loc,
+                    component_name,
+                );
             }
             let attrs = attrs
                 .iter()
@@ -724,10 +753,21 @@ fn expand_template_node(
                 loc: *loc,
             })
         }
-        RawTemplateNode::Slot { name, loc } => Ok(ExpandedTemplateNode::Slot {
-            name: name.clone(),
-            loc: *loc,
-        }),
+        RawTemplateNode::Slot {
+            name,
+            fallback,
+            loc,
+        } => {
+            let fallback = fallback
+                .iter()
+                .map(|n| expand_template_node(n, component_name))
+                .collect::<ExpandResult<Vec<_>>>()?;
+            Ok(ExpandedTemplateNode::Slot {
+                name: name.clone(),
+                fallback,
+                loc: *loc,
+            })
+        }
     }
 }
 
@@ -762,23 +802,21 @@ fn expand_child_component(
     tag: &str,
     attrs: &[RawAttr],
     children: &[RawTemplateNode],
-    self_closing: bool,
+    _self_closing: bool,
     loc: Loc,
+    component_name: &str,
 ) -> ExpandResult<ExpandedTemplateNode> {
-    if !self_closing || !children.is_empty() {
-        return Err(ExpandError {
-            message: format!(
-                "component composition `<{tag}>...</{tag}>` with fallback \
-                 children — not supported yet. Use `<{tag} />` (self-closing) \
-                 today; fallback children via `<slot>` land alongside Phase 11.6+."
-            ),
-            loc,
-            context: "template (child component composition)".to_string(),
-        });
-    }
+    // Phase 11.7.d — a non-self-closing `<Child>...</Child>` carries slot
+    // content that fills the child's `<slot />`. Expand it in the PARENT's
+    // context so parent-state interpolation + events resolve normally.
+    let slot_content = children
+        .iter()
+        .map(|n| expand_template_node(n, component_name))
+        .collect::<ExpandResult<Vec<_>>>()?;
 
     let mut props = Vec::with_capacity(attrs.len());
     let mut key: Option<fast::Expr> = None;
+    let mut events: Vec<ChildEventBinding> = Vec::new();
     for a in attrs {
         match a {
             // Phase 11.7.b R2b — `key="{expr}"` is a reserved
@@ -843,21 +881,19 @@ fn expand_child_component(
                     loc: *aloc,
                 });
             }
+            // Phase 11.7.c — `@event="handler"` on a child component wires
+            // event bubbling: when the child's `event_name` fires, the
+            // parent's `handler_raw` runs. The child event's existence and
+            // the parent handler's existence are validated in check.rs.
             RawAttr::Event {
                 event_name,
+                handler_raw,
                 loc: aloc,
-                ..
             } => {
-                return Err(ExpandError {
-                    message: format!(
-                        "event `@{event_name}=\"...\"` on child component `<{tag} />` \
-                         — not supported yet. Parent-defined handlers on children \
-                         require event bubbling wiring which lands with Phase 11.6+. \
-                         Move the handler into `<{tag}>`'s own `event ...` block \
-                         instead."
-                    ),
+                events.push(ChildEventBinding {
+                    event_name: event_name.clone(),
+                    handler_name: handler_raw.clone(),
                     loc: *aloc,
-                    context: "template (child component composition)".to_string(),
                 });
             }
         }
@@ -867,6 +903,8 @@ fn expand_child_component(
         name: tag.to_string(),
         props,
         key,
+        events,
+        slot_content,
         loc,
     })
 }
@@ -2174,11 +2212,6 @@ component B {
         super::expand(&raw).expect("view::expand")
     }
 
-    fn expand_err_test(src: &str) -> ExpandError {
-        let raw = super::super::parse(src).expect("view::parse");
-        super::expand(&raw).unwrap_err()
-    }
-
     fn find_child(node: &ExpandedTemplateNode) -> Option<(&str, &[ChildComponentProp])> {
         match node {
             ExpandedTemplateNode::ChildComponent { name, props, .. } => Some((name, props)),
@@ -2239,16 +2272,29 @@ component Card {
     }
 
     #[test]
-    fn phase_11_5_d_expand_child_component_non_self_closing_rejects_citing_11_6() {
+    fn phase_11_7_d_expand_child_component_non_self_closing_captures_slot_content() {
+        // Phase 11.7.d — a non-self-closing `<Card>...</Card>` now captures
+        // its children as slot content instead of rejecting.
         let src = r#"component Parent {
   state {}
-  <template><Card>fallback</Card></template>
+  <template><Card>hello</Card></template>
 }
 "#;
-        let err = expand_err_test(src);
-        let msg = err.message;
-        assert!(msg.contains("fallback children"), "msg: {msg}");
-        assert!(msg.contains("11.6"), "msg: {msg}");
+        let file = expand_ok_test(src);
+        let tpl = file.components[0].template.as_ref().unwrap();
+        match &tpl.roots[0] {
+            ExpandedTemplateNode::ChildComponent {
+                name, slot_content, ..
+            } => {
+                assert_eq!(name, "Card");
+                assert_eq!(slot_content.len(), 1);
+                assert!(matches!(
+                    &slot_content[0],
+                    ExpandedTemplateNode::Text(t) if t.contains("hello")
+                ));
+            }
+            other => panic!("expected ChildComponent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2284,16 +2330,26 @@ component Card {
     }
 
     #[test]
-    fn phase_11_5_d_expand_child_component_event_attr_rejects_citing_11_6() {
+    fn phase_11_7_c_expand_child_component_event_attr_becomes_event_binding() {
+        // Phase 11.7.c — `@event="handler"` on a child now expands into a
+        // `ChildComponent.events` binding (event bubbling) instead of
+        // rejecting.
         let src = r#"component Parent {
   state {}
-  <template><Card @click="foo" /></template>
+  <template><Card @select="foo" /></template>
 }
 "#;
-        let err = expand_err_test(src);
-        let msg = err.message;
-        assert!(msg.contains("@click"), "msg: {msg}");
-        assert!(msg.contains("11.6"), "msg: {msg}");
+        let file = expand_ok_test(src);
+        let tpl = file.components[0].template.as_ref().unwrap();
+        match &tpl.roots[0] {
+            ExpandedTemplateNode::ChildComponent { name, events, .. } => {
+                assert_eq!(name, "Card");
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].event_name, "select");
+                assert_eq!(events[0].handler_name, "foo");
+            }
+            other => panic!("expected ChildComponent, got {other:?}"),
+        }
     }
 
     #[test]
