@@ -1,0 +1,57 @@
+// Phase 11.7 R3.5b.2 — form-submit payload on the client-WASM target.
+//
+// R3.5b.1 wired click payloads (`data-flv-click` + `data-flv-value-*`).
+// R3.5b.2 closes `payload` by wiring FORM submits: a `<form
+// data-flv-submit="handler">` reads its named inputs into the payload at
+// submit time, and `data-flv-clear` resets an input afterwards — the same
+// `data-flv-*` convention the SSR runtime uses.
+//
+// This demo (a tiny todo list, pure `List<Str>` + payload):
+//
+//   - `<form data-flv-submit="add">` — the submit binding.
+//   - `<input name="text" ... data-flv-clear />` — a named field; its
+//     value goes into `payload["text"]`, and it is cleared after submit.
+//   - `event add() { if (payload.has("text")) { items.push(payload["text"]) } }`
+//     — the handler reads the form payload and appends the item.
+//
+// With R3.5b.1 (click) + R3.5b.2 (submit), `payload` is complete, and the
+// full kanban (per-card move/delete via click value attrs + card creation
+// via a form) compiles to a WASM SPA (R3.5c).
+
+component TodoForm {
+  state {
+    items: List<Str> = []
+  }
+
+  event add() {
+    if (payload.has("text")) {
+      items.push(payload["text"])
+    }
+  }
+
+  <template>
+    <div class="todo">
+      <h1>Form payload on WASM</h1>
+      <p class="hint">Type an item and press Add — the submit handler reads the form field from the payload, appends it, and the input clears.</p>
+      <form data-flv-submit="add">
+        <input name="text" placeholder="New item" autocomplete="off" data-flv-clear />
+        <button type="submit">Add</button>
+      </form>
+      <ul>
+        {#for it in items}
+          <li>{it}</li>
+        {/for}
+      </ul>
+    </div>
+  </template>
+
+  <style scoped>
+    .todo { font-family: system-ui, sans-serif; max-width: 420px; }
+    .hint { color: #666; font-size: 0.9em; }
+    form { display: flex; gap: 8px; margin-bottom: 16px; }
+    input { flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
+    button { padding: 8px 16px; cursor: pointer; border: none; border-radius: 6px; background: #CE412B; color: white; font-weight: 600; }
+    ul { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+    li { padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; }
+  </style>
+}

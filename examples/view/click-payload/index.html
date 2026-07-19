@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — click payload (Phase 11.7 R3.5b.1)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz click payload — Phase 11.7 R3.5b.1 smoke</h1>
+    <p>
+      An <code>App.fitzv</code> component compiled to WebAssembly that
+      carries per-item data on a click via a
+      <code>data-flv-value-*</code> attribute and reads it back through
+      <code>payload</code> in the handler — the same
+      <code>data-flv-*</code> convention the SSR runtime uses, so one
+      <code>.fitzv</code> targets both.
+    </p>
+    <p>
+      Each button is
+      <code>&lt;button data-flv-click="pick" data-flv-value-val="{n}"&gt;</code>;
+      the handler is
+      <code>if (payload.has("val")) { last = payload["val"] }</code>.
+      Click a number and watch "last picked" update.
+    </p>
+    <div id="app"><!-- Picker mounts here --></div>
+    <p>
+      If you see this text but no widget above, the WASM bundle failed
+      to load (check the DevTools console) or the page was opened over
+      <code>file://</code>. ES modules require an HTTP origin — serve
+      with <code>python -m http.server 8000</code>.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/click_payload.js';
+      init().catch((err) => {
+        console.error('Failed to load click-payload WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

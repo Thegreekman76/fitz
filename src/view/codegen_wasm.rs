@@ -67,7 +67,7 @@
 //! `expand::ExpandedComponent` ya carga como fields públicos. Cero
 //! coupling nuevo con el resto del compilador.
 
-use crate::ast::{AssignTarget, BinOpKind, Expr, Stmt, TypeExpr};
+use crate::ast::{AssignTarget, BinOpKind, Expr, Stmt, StrPart, TypeExpr};
 use crate::view::{
     ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedStateField, ExpandedStyle,
     ExpandedTemplateNode, ExpandedViewFile,
@@ -709,7 +709,23 @@ fn emit_event_handler(
         });
     }
 
-    writeln!(out, "    fn {}(self: &Rc<Self>) {{", handler.name).unwrap();
+    // Phase 11.7 R3.5b.1 — a handler that reads `payload` (`payload["k"]`
+    // / `payload.has("k")`) takes a `payload: &HashMap<String, String>`
+    // param. A handler that does NOT reference payload keeps its
+    // zero-arg signature, so the pre-R3.5b examples emit byte-for-byte
+    // unchanged. The `data-flv-click` / `data-flv-submit` wiring builds
+    // the payload and calls with the matching arity.
+    let uses_payload = handler_uses_payload(handler);
+    if uses_payload {
+        writeln!(
+            out,
+            "    fn {}(self: &Rc<Self>, payload: &std::collections::HashMap<String, String>) {{",
+            handler.name
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "    fn {}(self: &Rc<Self>) {{", handler.name).unwrap();
+    }
     // Locals introduced by `let`-style statements accumulate across the
     // body so later statements (and closures) can reference them.
     let mut locals: Vec<String> = Vec::new();
@@ -725,6 +741,56 @@ fn emit_event_handler(
     writeln!(out, "        self.render();").unwrap();
     writeln!(out, "    }}\n").unwrap();
     Ok(())
+}
+
+/// True when an event handler references `payload` anywhere in its body
+/// (Phase 11.7 R3.5b.1). Both `payload["k"]` and `payload.has("k")`
+/// contain `Expr::Ident("payload")` as a sub-expression, so a walk for
+/// that identifier catches every use.
+fn handler_uses_payload(handler: &ExpandedEventHandler) -> bool {
+    handler.body.iter().any(stmt_uses_payload)
+}
+
+fn stmt_uses_payload(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Assign { value, .. } => expr_uses_payload(value),
+        Stmt::Return(e, _) => expr_uses_payload(e),
+        Stmt::Expr(e, _) => expr_uses_payload(e),
+        _ => false,
+    }
+}
+
+fn expr_uses_payload(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(name, _) => name == "payload",
+        Expr::BinOp { left, right, .. } => expr_uses_payload(left) || expr_uses_payload(right),
+        Expr::UnaryOp { operand, .. } => expr_uses_payload(operand),
+        Expr::Call { callee, args, .. } => {
+            expr_uses_payload(callee) || args.iter().any(expr_uses_payload)
+        }
+        Expr::Field { object, .. } => expr_uses_payload(object),
+        Expr::Index { object, index, .. } => expr_uses_payload(object) || expr_uses_payload(index),
+        Expr::List(items, _) => items.iter().any(expr_uses_payload),
+        Expr::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_uses_payload(e)),
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            expr_uses_payload(condition)
+                || then.iter().any(stmt_uses_payload)
+                || else_
+                    .as_ref()
+                    .is_some_and(|els| els.iter().any(stmt_uses_payload))
+        }
+        Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_payload),
+        Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+            StrPart::Expr(e, _) => expr_uses_payload(e),
+            StrPart::Lit(_) => false,
+        }),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -805,7 +871,14 @@ fn emit_mount_and_render(
     .unwrap();
 
     if let Some(template) = &component.template {
-        let mut ctx = RenderCtx::new(name, state_names, &component.state, file, nominals);
+        let mut ctx = RenderCtx::new(
+            name,
+            state_names,
+            &component.state,
+            file,
+            nominals,
+            &component.events,
+        );
         for root_node in &template.roots {
             emit_template_node(root_node, "root", &mut ctx, out)?;
         }
@@ -856,6 +929,10 @@ struct RenderCtx<'a> {
     /// cards}` can accept a `List<Card>` element type and reject an
     /// unknown nominal with a clear message.
     nominals: &'a NominalRegistry,
+    /// Phase 11.7 R3.5b.1 — the component's event handlers, so a
+    /// `data-flv-click="handler"` binding can resolve the target and
+    /// know whether it takes a `payload` argument.
+    events: &'a [ExpandedEventHandler],
 }
 
 impl<'a> RenderCtx<'a> {
@@ -865,6 +942,7 @@ impl<'a> RenderCtx<'a> {
         state_fields: &'a [ExpandedStateField],
         file: &'a ExpandedViewFile,
         nominals: &'a NominalRegistry,
+        events: &'a [ExpandedEventHandler],
     ) -> Self {
         RenderCtx {
             component_name,
@@ -877,6 +955,7 @@ impl<'a> RenderCtx<'a> {
             in_for: false,
             locals: Vec::new(),
             nominals,
+            events,
         }
     }
 
@@ -1230,6 +1309,20 @@ fn lower_cond_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> Em
         // A bool state field / loop var used directly as a condition.
         // The checker guarantees it's Bool-typed.
         Expr::Ident(..) => lower_expr(expr, state_names, locals),
+        // Phase 11.7 R3.5b.1 — `payload.has("key")` as a guard condition
+        // (`if (payload.has("title")) { ... }`). Delegates to `lower_expr`,
+        // which routes the call to the `payload.has` special case
+        // (`payload.contains_key(...)`, a `bool`).
+        Expr::Call { callee, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::Field { object, field, .. }
+                    if field == "has"
+                        && matches!(object.as_ref(), Expr::Ident(n, _) if n == "payload")
+            ) =>
+        {
+            lower_expr(expr, state_names, locals)
+        }
         Expr::UnaryOp {
             op: crate::ast::UnaryOpKind::Not,
             operand,
@@ -1304,31 +1397,67 @@ fn emit_element(
     )
     .unwrap();
 
+    // Phase 11.7 R3.5b.1 — collect the `data-flv-*` event wiring while
+    // emitting the real DOM attributes. `data-flv-click` / `data-flv-submit`
+    // are directives (not set as attrs); `data-flv-value-*` ARE set (the
+    // click listener reads them back to build the payload).
+    let mut data_flv_click: Option<String> = None;
+    let mut data_flv_submit: Option<String> = None;
+    let mut value_keys: Vec<String> = Vec::new();
+
     for attr in attrs {
         match attr {
             ExpandedAttr::Static { name, value, .. } => {
-                emit_static_attr(name, value, &var, out);
+                if name == "data-flv-click" {
+                    data_flv_click = Some(value.clone());
+                } else if name == "data-flv-submit" {
+                    data_flv_submit = Some(value.clone());
+                } else {
+                    if let Some(key) = name.strip_prefix("data-flv-value-") {
+                        value_keys.push(key.to_string());
+                    }
+                    emit_static_attr(name, value, &var, out);
+                }
             }
             ExpandedAttr::Event {
                 event_name,
                 handler_name,
                 ..
             } => {
-                emit_event_attr(event_name, handler_name, &var, ctx.component_name, out)?;
+                emit_event_attr(event_name, handler_name, &var, ctx, out)?;
             }
-            ExpandedAttr::Interpolation { name, .. } => {
-                return Err(EmitError {
-                    message: format!(
-                        "interpolated attribute `{}=\"{{...}}\"` — deferred to Phase 11.4.c",
-                        name
-                    ),
-                    context: format!(
-                        "element `<{}>` in template of component `{}`",
-                        tag, ctx.component_name
-                    ),
-                });
+            // Phase 11.7 R3.5b.1 — an interpolated attribute
+            // (`data-flv-value-card_id="{c.id}"`, `class="{cls}"`).
+            ExpandedAttr::Interpolation { name, expr, .. } => {
+                if let Some(key) = name.strip_prefix("data-flv-value-") {
+                    value_keys.push(key.to_string());
+                }
+                let value_rust =
+                    lower_expr(expr, ctx.state_names, &ctx.locals).map_err(|mut e| {
+                        e.context = format!(
+                            "interpolated attribute `{}` of element `<{}>` in component `{}`",
+                            name, tag, ctx.component_name
+                        );
+                        e
+                    })?;
+                writeln!(
+                    out,
+                    "        {}.set_attribute({}, &format!(\"{{}}\", {})).unwrap();",
+                    var,
+                    rust_string_literal(name),
+                    value_rust
+                )
+                .unwrap();
             }
         }
+    }
+
+    if let Some(handler) = data_flv_submit {
+        let fields = collect_form_fields(children);
+        emit_data_flv_submit(&handler, &fields, &var, ctx, out)?;
+    }
+    if let Some(handler) = data_flv_click {
+        emit_data_flv_click(&handler, &value_keys, &var, ctx, out)?;
     }
 
     for child in children {
@@ -1574,9 +1703,10 @@ fn emit_event_attr(
     event_name: &str,
     handler_name: &str,
     el_var: &str,
-    component_name: &str,
+    ctx: &RenderCtx,
     out: &mut String,
 ) -> EmitResult<()> {
+    let component_name = ctx.component_name;
     // POC only maps `@click` — other event names deferred to 11.4.c.
     let dom_event = match event_name {
         "click" => "click",
@@ -1594,6 +1724,12 @@ fn emit_event_attr(
         }
     };
 
+    // Phase 11.7 R3.5b.1 — a `@click` handler that reads `payload` still
+    // takes the param; with no `data-flv-value-*` attrs it receives an
+    // empty map. Handlers that don't use payload keep the exact zero-arg
+    // call, so the pre-R3.5b examples emit byte-for-byte unchanged.
+    let takes_payload = handler_takes_payload(ctx, handler_name)?;
+
     writeln!(out, "        {{").unwrap();
     writeln!(out, "            let __self_clone = self.clone();").unwrap();
     writeln!(
@@ -1601,12 +1737,26 @@ fn emit_event_attr(
         "            let __closure = Closure::wrap(Box::new(move |_evt: Event| {{"
     )
     .unwrap();
-    writeln!(
-        out,
-        "                {}::{}(&__self_clone);",
-        component_name, handler_name
-    )
-    .unwrap();
+    if takes_payload {
+        writeln!(
+            out,
+            "                let __payload = std::collections::HashMap::<String, String>::new();"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                {}::{}(&__self_clone, &__payload);",
+            component_name, handler_name
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "                {}::{}(&__self_clone);",
+            component_name, handler_name
+        )
+        .unwrap();
+    }
     writeln!(out, "            }}) as Box<dyn FnMut(Event)>);").unwrap();
     writeln!(
         out,
@@ -1618,6 +1768,308 @@ fn emit_event_attr(
     writeln!(out, "            __closure.forget();").unwrap();
     writeln!(out, "        }}").unwrap();
     Ok(())
+}
+
+/// Resolve `handler_name` to a declared event of the current component
+/// and report whether it takes a `payload` argument (Phase 11.7
+/// R3.5b.1). Errors if the name is not a declared `event` — catching a
+/// typo in a `@click` / `data-flv-click` binding at emit time.
+fn handler_takes_payload(ctx: &RenderCtx, handler_name: &str) -> EmitResult<bool> {
+    let handler = ctx
+        .events
+        .iter()
+        .find(|h| h.name == handler_name)
+        .ok_or_else(|| EmitError {
+            message: format!(
+                "event binding references `{handler_name}`, which is not an `event` \
+                 declared by component `{}`",
+                ctx.component_name
+            ),
+            context: format!("template of component `{}`", ctx.component_name),
+        })?;
+    Ok(handler_uses_payload(handler))
+}
+
+/// Emit a `data-flv-click="handler"` click listener (Phase 11.7
+/// R3.5b.1). Builds a `payload: HashMap<String, String>` by reading the
+/// element's `data-flv-value-*` attributes back from the DOM (the same
+/// element the SSR client runtime reads), then calls the target handler.
+/// A handler that doesn't read `payload` is called with no argument (and
+/// the payload build is skipped).
+fn emit_data_flv_click(
+    handler_name: &str,
+    value_keys: &[String],
+    el_var: &str,
+    ctx: &RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let takes_payload = handler_takes_payload(ctx, handler_name)?;
+    let component_name = ctx.component_name;
+
+    writeln!(out, "        {{").unwrap();
+    writeln!(out, "            let __self_clone = self.clone();").unwrap();
+    if takes_payload {
+        // Capture a handle to the element so the listener can read its
+        // `data-flv-value-*` attributes when the click fires.
+        writeln!(out, "            let __evt_el = {}.clone();", el_var).unwrap();
+    }
+    writeln!(
+        out,
+        "            let __closure = Closure::wrap(Box::new(move |_evt: Event| {{"
+    )
+    .unwrap();
+    if takes_payload {
+        writeln!(
+            out,
+            "                let mut __payload = std::collections::HashMap::<String, String>::new();"
+        )
+        .unwrap();
+        for key in value_keys {
+            let attr = format!("data-flv-value-{key}");
+            writeln!(
+                out,
+                "                __payload.insert({}.to_string(), __evt_el.get_attribute({}).unwrap_or_default());",
+                rust_string_literal(key),
+                rust_string_literal(&attr)
+            )
+            .unwrap();
+        }
+        writeln!(
+            out,
+            "                {}::{}(&__self_clone, &__payload);",
+            component_name, handler_name
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "                {}::{}(&__self_clone);",
+            component_name, handler_name
+        )
+        .unwrap();
+    }
+    writeln!(out, "            }}) as Box<dyn FnMut(Event)>);").unwrap();
+    writeln!(
+        out,
+        "            {}.add_event_listener_with_callback(\"click\", __closure.as_ref().unchecked_ref()).unwrap();",
+        el_var
+    )
+    .unwrap();
+    writeln!(out, "            __closure.forget();").unwrap();
+    writeln!(out, "        }}").unwrap();
+    Ok(())
+}
+
+/// A named form field discovered inside a `data-flv-submit` form (Phase
+/// 11.7 R3.5b.2). `clear` is `true` when the input carries
+/// `data-flv-clear` (reset to "" after submit).
+struct FormField {
+    name: String,
+    clear: bool,
+}
+
+/// Collect the named `<input>` / `<textarea>` / `<select>` fields inside
+/// a `data-flv-submit` form, in document order (Phase 11.7 R3.5b.2).
+/// Descends through nested elements + `{#if}` / `{#for}` so a field
+/// wrapped in a `<div>` or a directive is still found.
+fn collect_form_fields(children: &[ExpandedTemplateNode]) -> Vec<FormField> {
+    let mut fields = Vec::new();
+    for node in children {
+        collect_fields_in_node(node, &mut fields);
+    }
+    fields
+}
+
+fn collect_fields_in_node(node: &ExpandedTemplateNode, fields: &mut Vec<FormField>) {
+    match node {
+        ExpandedTemplateNode::Element {
+            tag,
+            attrs,
+            children,
+            ..
+        } => {
+            if matches!(tag.as_str(), "input" | "textarea" | "select") {
+                let mut name: Option<String> = None;
+                let mut clear = false;
+                for attr in attrs {
+                    if let ExpandedAttr::Static { name: n, value, .. } = attr {
+                        if n == "name" {
+                            name = Some(value.clone());
+                        } else if n == "data-flv-clear" {
+                            clear = true;
+                        }
+                    }
+                }
+                if let Some(nm) = name {
+                    fields.push(FormField { name: nm, clear });
+                }
+            }
+            for c in children {
+                collect_fields_in_node(c, fields);
+            }
+        }
+        ExpandedTemplateNode::If {
+            children,
+            else_children,
+            ..
+        } => {
+            for c in children {
+                collect_fields_in_node(c, fields);
+            }
+            if let Some(els) = else_children {
+                for c in els {
+                    collect_fields_in_node(c, fields);
+                }
+            }
+        }
+        ExpandedTemplateNode::For { children, .. } => {
+            for c in children {
+                collect_fields_in_node(c, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Emit a `data-flv-submit="handler"` submit listener (Phase 11.7
+/// R3.5b.2). Prevents the default navigation, reads each named field's
+/// value into a `payload: HashMap<String, String>`, calls the target
+/// handler, then clears every field marked `data-flv-clear`.
+///
+/// Fields are read + cleared via `form.query_selector("[name=\"x\"]")`
+/// cast to `HtmlInputElement` — so this path needs the `HtmlInputElement`
+/// web-sys feature, added to the emitted `Cargo.toml` only when a form is
+/// present (see `wasm_extra_web_sys_features`).
+fn emit_data_flv_submit(
+    handler_name: &str,
+    fields: &[FormField],
+    el_var: &str,
+    ctx: &RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let takes_payload = handler_takes_payload(ctx, handler_name)?;
+    let component_name = ctx.component_name;
+
+    writeln!(out, "        {{").unwrap();
+    writeln!(out, "            let __self_clone = self.clone();").unwrap();
+    writeln!(out, "            let __form_el = {}.clone();", el_var).unwrap();
+    writeln!(
+        out,
+        "            let __closure = Closure::wrap(Box::new(move |__evt: Event| {{"
+    )
+    .unwrap();
+    writeln!(out, "                __evt.prevent_default();").unwrap();
+    if takes_payload {
+        writeln!(
+            out,
+            "                let mut __payload = std::collections::HashMap::<String, String>::new();"
+        )
+        .unwrap();
+        for f in fields {
+            let sel = format!("[name=\"{}\"]", f.name);
+            writeln!(
+                out,
+                "                if let Some(__f) = __form_el.query_selector({}).ok().flatten() {{",
+                rust_string_literal(&sel)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                    if let Ok(__inp) = __f.dyn_into::<web_sys::HtmlInputElement>() {{"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                        __payload.insert({}.to_string(), __inp.value());",
+                rust_string_literal(&f.name)
+            )
+            .unwrap();
+            writeln!(out, "                    }}").unwrap();
+            writeln!(out, "                }}").unwrap();
+        }
+        writeln!(
+            out,
+            "                {}::{}(&__self_clone, &__payload);",
+            component_name, handler_name
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "                {}::{}(&__self_clone);",
+            component_name, handler_name
+        )
+        .unwrap();
+    }
+    // Clear inputs marked `data-flv-clear` (after the handler ran).
+    for f in fields.iter().filter(|f| f.clear) {
+        let sel = format!("[name=\"{}\"]", f.name);
+        writeln!(
+            out,
+            "                if let Some(__f) = __form_el.query_selector({}).ok().flatten() {{",
+            rust_string_literal(&sel)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                    if let Ok(__inp) = __f.dyn_into::<web_sys::HtmlInputElement>() {{ __inp.set_value(\"\"); }}"
+        )
+        .unwrap();
+        writeln!(out, "                }}").unwrap();
+    }
+    writeln!(out, "            }}) as Box<dyn FnMut(Event)>);").unwrap();
+    writeln!(
+        out,
+        "            {}.add_event_listener_with_callback(\"submit\", __closure.as_ref().unchecked_ref()).unwrap();",
+        el_var
+    )
+    .unwrap();
+    writeln!(out, "            __closure.forget();").unwrap();
+    writeln!(out, "        }}").unwrap();
+    Ok(())
+}
+
+/// The extra `web-sys` features the emitted crate needs beyond the base
+/// set, derived from the `.fitzv`'s template shapes (Phase 11.7 R3.5b.2).
+/// A `data-flv-submit` form reads inputs via `HtmlInputElement`. Returns
+/// an empty slice for form-free components, so the pre-R3.5b.2 examples'
+/// `Cargo.toml` is unchanged.
+pub fn wasm_extra_web_sys_features(file: &ExpandedViewFile) -> Vec<&'static str> {
+    if file.components.iter().any(component_uses_form_submit) {
+        vec!["HtmlInputElement"]
+    } else {
+        Vec::new()
+    }
+}
+
+fn component_uses_form_submit(component: &ExpandedComponent) -> bool {
+    fn node_has_submit(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                attrs.iter().any(
+                    |a| matches!(a, ExpandedAttr::Static { name, .. } if name == "data-flv-submit"),
+                ) || children.iter().any(node_has_submit)
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().any(node_has_submit)
+                    || else_children
+                        .as_ref()
+                        .is_some_and(|els| els.iter().any(node_has_submit))
+            }
+            ExpandedTemplateNode::For { children, .. } => children.iter().any(node_has_submit),
+            _ => false,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().any(node_has_submit))
 }
 
 // ---------------------------------------------------------------------------
@@ -1809,13 +2261,67 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
         // R3.5a.2, when imported classic helpers are transpiled into the
         // bundle.
         Expr::Call { callee, args, .. } => lower_call(callee, args, state_names, locals),
-        Expr::StrInterp(_, _)
-        | Expr::Null(_)
+        // Phase 11.7 R3.5b.1 — `payload["key"]`. `payload` is the
+        // `&HashMap<String, String>` param on a payload-using event
+        // handler; a missing key yields "" (Map<Str,Str> lookup
+        // semantics). Other indexing (`xs[i]` on a list/map) is still
+        // deferred.
+        Expr::Index { object, index, .. } => {
+            if let Expr::Ident(name, _) = object.as_ref() {
+                if name == "payload" {
+                    let key = lower_expr(index, state_names, locals)?;
+                    return Ok(format!(
+                        "payload.get(&({key})).cloned().unwrap_or_default()"
+                    ));
+                }
+            }
+            Err(EmitError {
+                message: "indexing `xs[i]` — only `payload[\"key\"]` is supported on the \
+                          client-WASM target (Phase 11.7 R3.5b.1); list/map indexing \
+                          defers to a later slice"
+                    .to_string(),
+                context: "expression".to_string(),
+            })
+        }
+        // Phase 11.7 R3.5c — string interpolation (`"{next_id}"`,
+        // `"card-{id}"`) → a Rust `format!`. Literal parts are copied
+        // (braces doubled for `format!`); each interpolated expression
+        // becomes a `{}` placeholder with the lowered expr as the arg.
+        // Format specs are ignored on the WASM target (plain `{}`).
+        Expr::StrInterp(parts, _) => {
+            let mut fmt = String::new();
+            let mut args: Vec<String> = Vec::new();
+            for part in parts {
+                match part {
+                    StrPart::Lit(s) => {
+                        for ch in s.chars() {
+                            if ch == '{' || ch == '}' {
+                                fmt.push(ch);
+                            }
+                            fmt.push(ch);
+                        }
+                    }
+                    StrPart::Expr(e, _spec) => {
+                        fmt.push_str("{}");
+                        args.push(lower_expr(e, state_names, locals)?);
+                    }
+                }
+            }
+            if args.is_empty() {
+                Ok(format!("format!({})", rust_string_literal(&fmt)))
+            } else {
+                Ok(format!(
+                    "format!({}, {})",
+                    rust_string_literal(&fmt),
+                    args.join(", ")
+                ))
+            }
+        }
+        Expr::Null(_)
         | Expr::Bytes(_, _)
         | Expr::UnaryOp { .. }
         | Expr::NamedArg { .. }
-        | Expr::FnExpr { .. }
-        | Expr::Index { .. } => Err(EmitError {
+        | Expr::FnExpr { .. } => Err(EmitError {
             message: format!(
                 "expression kind `{}` — deferred to a later 11.7 slice / the SSR target",
                 expr_kind_name(expr)
@@ -1909,6 +2415,18 @@ fn lower_call(
     locals: &[String],
 ) -> EmitResult<String> {
     match callee {
+        // Phase 11.7 R3.5b.1 — `payload.has("key")` on the event
+        // handler's `&HashMap<String, String>` param. Special-cased ahead
+        // of the list-method dispatch (a bare `payload` ident is not a
+        // state field / local, so the generic path would reject it).
+        Expr::Field { object, field, .. }
+            if field == "has"
+                && args.len() == 1
+                && matches!(object.as_ref(), Expr::Ident(n, _) if n == "payload") =>
+        {
+            let key = lower_expr(&args[0], state_names, locals)?;
+            Ok(format!("payload.contains_key(&({key}))"))
+        }
         Expr::Field { object, field, .. } => {
             let obj = lower_expr(object, state_names, locals)?;
             match (field.as_str(), args.len()) {
@@ -4408,6 +4926,241 @@ component Card {
         assert_eq!(
             with_empty, with_nominals,
             "an empty fn registry must match the nominals-only path byte-for-byte"
+        );
+    }
+
+    // ---- Phase 11.7 R3.5b.1 — click payload ------------------------
+
+    #[test]
+    fn phase_11_7_r3_5_b1_payload_handler_gets_param() {
+        let src = r#"component App {
+  state { last: Str = "none" }
+  event pick() { last = payload["val"] }
+  <template><span>{last}</span></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(
+                "fn pick(self: &Rc<Self>, payload: &std::collections::HashMap<String, String>) {"
+            ),
+            "a payload-using handler must take a payload param:\n{out}"
+        );
+        assert!(
+            out.contains("payload.get(&(\"val\".to_string())).cloned().unwrap_or_default()"),
+            "payload[key] must lower to a safe get:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_b1_non_payload_handler_keeps_zero_arg() {
+        let src = r#"component App {
+  state { n: Int = 0 }
+  event bump() { n = n + 1 }
+  <template><button @click="bump">{n}</button></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("fn bump(self: &Rc<Self>) {"),
+            "a handler that doesn't read payload keeps the zero-arg signature:\n{out}"
+        );
+        assert!(
+            !out.contains("fn bump(self: &Rc<Self>, payload:"),
+            "no payload param should be added:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_b1_payload_has_lowers_in_guard() {
+        let src = r#"component App {
+  state { last: Str = "none" }
+  event pick() {
+    if (payload.has("val")) {
+      last = payload["val"]
+    }
+  }
+  <template><span>{last}</span></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("if payload.contains_key(&(\"val\".to_string())) {"),
+            "payload.has must lower to contains_key in the guard condition:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_b1_interpolated_attr_is_set() {
+        let src = r#"component App {
+  state { nums: List<Int> = [1, 2] }
+  event noop() { nums = nums }
+  <template><ul>{#for n in nums}<li data-x="{n}">{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(".set_attribute(\"data-x\", &format!(\"{}\", n)).unwrap();"),
+            "an interpolated attr must be set from the lowered expr:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_b1_data_flv_click_wires_listener_and_reads_value() {
+        let src = r#"component App {
+  state {
+    nums: List<Int> = [1, 2]
+    last: Str = "none"
+  }
+  event pick() { last = payload["val"] }
+  <template><ul>{#for n in nums}<li><button data-flv-click="pick" data-flv-value-val="{n}">{n}</button></li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("let __evt_el =") && out.contains(
+                "__payload.insert(\"val\".to_string(), __evt_el.get_attribute(\"data-flv-value-val\").unwrap_or_default());"
+            ),
+            "the click listener must read the value attr into the payload:\n{out}"
+        );
+        assert!(
+            out.contains("App::pick(&__self_clone, &__payload);"),
+            "the listener must call the handler with the payload:\n{out}"
+        );
+        // The `data-flv-click` directive itself is NOT set as a DOM attr.
+        assert!(
+            !out.contains(".set_attribute(\"data-flv-click\""),
+            "data-flv-click is a directive, not a DOM attribute:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_b1_data_flv_click_unknown_handler_rejects() {
+        let src = r#"component App {
+  state { x: Int = 0 }
+  event real() { x = 1 }
+  <template><button data-flv-click="typo">go</button></template>
+}"#;
+        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        assert!(
+            err.message.contains("typo") && err.message.contains("not an `event`"),
+            "a data-flv-click to an unknown handler must reject:\n{err}"
+        );
+    }
+
+    // ---- Phase 11.7 R3.5b.2 — form-submit payload ------------------
+
+    #[test]
+    fn phase_11_7_r3_5_b2_form_submit_wires_listener_reads_field_and_clears() {
+        let src = r#"component App {
+  state { items: List<Str> = [] }
+  event add() { items.push(payload["text"]) }
+  <template>
+    <form data-flv-submit="add">
+      <input name="text" data-flv-clear />
+      <button>Add</button>
+    </form>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("let __form_el =") && out.contains("__evt.prevent_default();"),
+            "the submit listener must capture the form and preventDefault:\n{out}"
+        );
+        assert!(
+            out.contains("__form_el.query_selector(\"[name=\\\"text\\\"]\").ok().flatten()")
+                && out.contains("__payload.insert(\"text\".to_string(), __inp.value());"),
+            "the field value must be read into the payload:\n{out}"
+        );
+        assert!(
+            out.contains("App::add(&__self_clone, &__payload);"),
+            "the handler must be called with the payload:\n{out}"
+        );
+        assert!(
+            out.contains("__inp.set_value(\"\");"),
+            "a data-flv-clear input must be reset after submit:\n{out}"
+        );
+        assert!(
+            out.contains("add_event_listener_with_callback(\"submit\""),
+            "the listener must attach to the submit event:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_b2_form_without_clear_does_not_reset() {
+        let src = r#"component App {
+  state { items: List<Str> = [] }
+  event add() { items.push(payload["text"]) }
+  <template>
+    <form data-flv-submit="add">
+      <input name="text" />
+      <button>Add</button>
+    </form>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            !out.contains("set_value(\"\")"),
+            "an input without data-flv-clear must not be reset:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_b2_extra_web_sys_feature_only_when_form_present() {
+        let form = parse_expand(
+            r#"component App {
+  state { items: List<Str> = [] }
+  event add() { items.push(payload["text"]) }
+  <template><form data-flv-submit="add"><input name="text" /></form></template>
+}"#,
+        );
+        assert_eq!(
+            wasm_extra_web_sys_features(&form),
+            vec!["HtmlInputElement"],
+            "a form component needs the HtmlInputElement feature"
+        );
+
+        let no_form = parse_expand(
+            r#"component App {
+  state { n: Int = 0 }
+  <template><span>{n}</span></template>
+}"#,
+        );
+        assert!(
+            wasm_extra_web_sys_features(&no_form).is_empty(),
+            "a form-free component needs no extra features"
+        );
+    }
+
+    // ---- Phase 11.7 R3.5c — string interpolation -------------------
+
+    #[test]
+    fn phase_11_7_r3_5_c_str_interp_lowers_to_format() {
+        let src = r#"component App {
+  state {
+    n: Int = 0
+    label: Str = ""
+  }
+  event set_label() { label = "n is {n}" }
+  <template><span>{label}</span></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("format!(\"n is {}\", (*self.n.borrow()))"),
+            "string interpolation must lower to a format!:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_c_str_interp_single_expr() {
+        // The kanban's `let id_str = "{next_id}"` shape.
+        let src = r#"component App {
+  state {
+    next_id: Int = 1
+    last: Str = ""
+  }
+  event stamp() { last = "{next_id}" }
+  <template><span>{last}</span></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("format!(\"{}\", (*self.next_id.borrow()))"),
+            "a single-expr interpolation must lower to `format!(\"{{}}\", ...)`:\n{out}"
         );
     }
 }

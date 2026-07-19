@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — form payload (Phase 11.7 R3.5b.2)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz form payload — Phase 11.7 R3.5b.2 smoke</h1>
+    <p>
+      An <code>App.fitzv</code> component compiled to WebAssembly that
+      reads a <code>&lt;form&gt;</code>'s named inputs into
+      <code>payload</code> on submit — the same <code>data-flv-*</code>
+      convention the SSR runtime uses, so one <code>.fitzv</code> targets
+      both.
+    </p>
+    <p>
+      The form is
+      <code>&lt;form data-flv-submit="add"&gt;</code> with
+      <code>&lt;input name="text" data-flv-clear&gt;</code>; the handler
+      is
+      <code>if (payload.has("text")) { items.push(payload["text"]) }</code>.
+      Type an item, press Add, and the input clears.
+    </p>
+    <div id="app"><!-- TodoForm mounts here --></div>
+    <p>
+      If you see this text but no widget above, the WASM bundle failed
+      to load (check the DevTools console) or the page was opened over
+      <code>file://</code>. ES modules require an HTTP origin — serve
+      with <code>python -m http.server 8000</code>.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/form_input.js';
+      init().catch((err) => {
+        console.error('Failed to load form-input WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

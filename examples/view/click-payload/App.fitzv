@@ -1,0 +1,59 @@
+// Phase 11.7 R3.5b.1 — click payload on the client-WASM target.
+//
+// R3.5a brought nominal types + list transforms + imported helper fns.
+// R3.5b brings the last piece the kanban needs: `payload`. An event
+// element carries per-item data in `data-flv-value-*` attributes, and
+// the handler reads them back from the payload — exactly the SSR
+// `data-flv-*` convention, so the SAME `.fitzv` compiles to both SSR and
+// WASM.
+//
+// This demo (no nominals, no imported fns — pure `List<Int>` + `Str`):
+//
+//   - `<button data-flv-click="pick" data-flv-value-val="{n}">` — a
+//     click binding + an INTERPOLATED value attribute carrying the loop
+//     item. The emitter sets the attr on the DOM and wires a click
+//     listener that reads it back into the payload.
+//   - `event pick() { if (payload.has("val")) { last = payload["val"] } }`
+//     — the handler reads the payload: `payload.has("key")` guards,
+//     `payload["key"]` looks up (a `Map<Str, Str>`; a missing key → "").
+//
+// STILL DEFERRED: `data-flv-submit` (form-field payload) is R3.5b.2 —
+// creating an item from a `<form>`'s named inputs. Here every payload
+// comes from a clicked element's value attributes.
+
+component Picker {
+  state {
+    nums: List<Int> = [10, 20, 30]
+    last: Str = "none"
+  }
+
+  event pick() {
+    if (payload.has("val")) {
+      last = payload["val"]
+    }
+  }
+
+  <template>
+    <div class="picker">
+      <h1>Click payload on WASM</h1>
+      <p class="hint">Each button carries its number in a data-flv-value attribute; the pick handler reads it from the payload.</p>
+      <p class="last">last picked: {last}</p>
+      <ul>
+        {#for n in nums}
+          <li>
+            <button data-flv-click="pick" data-flv-value-val="{n}">pick {n}</button>
+          </li>
+        {/for}
+      </ul>
+    </div>
+  </template>
+
+  <style scoped>
+    .picker { font-family: system-ui, sans-serif; max-width: 420px; }
+    .hint { color: #666; font-size: 0.9em; }
+    .last { font-weight: 600; font-variant-numeric: tabular-nums; }
+    ul { list-style: none; padding: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+    button { padding: 8px 14px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+    button:hover { background: #f0f0f0; }
+  </style>
+}

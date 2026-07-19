@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — kanban SPA (Phase 11.7 R3.5c)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 1040px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      #app { margin: 24px 0; }
+      .note { color: #666; font-size: 0.9rem; }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"><!-- Board mounts here --></div>
+    <p class="note">
+      The full collaborative-kanban Board compiled from ONE
+      <code>App.fitzv</code> (+ sibling <code>card.fitz</code> /
+      <code>board_helpers.fitz</code>) to a client-side WebAssembly SPA —
+      add cards, move them between columns, delete them, all in the
+      browser with no server round-trip. This is the headline of Phase
+      11.7. If you see no board above, the WASM bundle failed to load
+      (check the DevTools console) or the page was opened over
+      <code>file://</code> — ES modules need an HTTP origin
+      (<code>python -m http.server 8000</code>).
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/kanban.js';
+      init().catch((err) => {
+        console.error('Failed to load kanban WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

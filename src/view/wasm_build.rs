@@ -350,6 +350,35 @@ fn compose_entry_wrapper(root_component: &str, mount_selector: &str) -> String {
 /// bulk-memory ops modern rustc emits (see `docs/fase-11-plan.md`
 /// §9.o Debt residual).
 pub fn compose_cargo_toml(package_name: &str) -> String {
+    compose_cargo_toml_with_features(package_name, &[])
+}
+
+/// Like [`compose_cargo_toml`], but appends `extra_features` to the
+/// `web-sys` feature list (Phase 11.7 R3.5b.2). A `data-flv-submit` form
+/// reads inputs via `HtmlInputElement`, which needs the matching feature.
+/// With `extra_features` empty this is byte-for-byte identical to
+/// [`compose_cargo_toml`], so form-free examples' `Cargo.toml` is
+/// unchanged. Callers derive the extra set via
+/// [`super::codegen_wasm::wasm_extra_web_sys_features`].
+pub fn compose_cargo_toml_with_features(package_name: &str, extra_features: &[&str]) -> String {
+    // Base subset the emitter always uses (see codegen_wasm). Kept in the
+    // same order as the committed baselines so the empty-extra case stays
+    // byte-identical.
+    const BASE_FEATURES: &[&str] = &[
+        "Document",
+        "Element",
+        "Event",
+        "EventTarget",
+        "HtmlElement",
+        "HtmlHeadElement",
+        "Node",
+        "Text",
+        "Window",
+    ];
+    let mut feature_lines = String::new();
+    for f in BASE_FEATURES.iter().chain(extra_features.iter()) {
+        feature_lines.push_str(&format!("    \"{f}\",\n"));
+    }
     format!(
         r##"[package]
 name = "{name}"
@@ -389,18 +418,10 @@ console_error_panic_hook = "0.1"
 [dependencies.web-sys]
 version = "0.3"
 features = [
-    "Document",
-    "Element",
-    "Event",
-    "EventTarget",
-    "HtmlElement",
-    "HtmlHeadElement",
-    "Node",
-    "Text",
-    "Window",
-]
+{feature_lines}]
 "##,
         name = package_name,
+        feature_lines = feature_lines,
     )
 }
 
@@ -517,7 +538,11 @@ pub fn write_wasm_crate_scaffold(
     mount_selector: &str,
     source_label: Option<&str>,
 ) -> Result<ScaffoldResult, ScaffoldError> {
-    let cargo_toml_text = compose_cargo_toml(bin_name);
+    // Phase 11.7 R3.5b.2 — a `data-flv-submit` form needs the
+    // `HtmlInputElement` web-sys feature; form-free crates keep the base
+    // feature set (byte-identical Cargo.toml).
+    let extra_features = super::codegen_wasm::wasm_extra_web_sys_features(expanded);
+    let cargo_toml_text = compose_cargo_toml_with_features(bin_name, &extra_features);
     let lib_rs_text =
         compose_lib_rs_with_imports(expanded, nominals, fns, mount_selector, source_label)?;
 

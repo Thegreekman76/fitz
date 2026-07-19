@@ -1,0 +1,150 @@
+// Phase 11.7 R3.5c — the full kanban as a client-WASM SPA.
+//
+// This is the headline of Phase 11.7: the collaborative-kanban Board —
+// previously an SSR-only SFC in fitz-liveviews — now compiles to a
+// standalone WebAssembly single-page app. Every piece the earlier R3.5
+// slices added converges here, entirely client-side (no server, no WS):
+//
+//   - `from card import Card` — nominal type synthesised inline (R3).
+//   - `from board_helpers import ...` — pure helpers transpiled into the
+//     bundle (R3.5a.2): `cards_in`, `move_one`, `keep_if_not`, `make_card`
+//     (and internal `next_column`/`prev_column`, reachable through them).
+//   - `cards = cards.map(fn(c) => move_one(target_id, "right", c))` and
+//     `cards = cards.filter(fn(c) => keep_if_not(target_id, c))` —
+//     `.map`/`.filter` closures calling imported helpers (R3.5a.1/.2).
+//   - `{#for c in cards_in(cards, "todo")}` — `{#for}` over an imported-fn
+//     result; `{cards_in(cards, "done").len()}` — `.len()` on one.
+//   - `data-flv-click="move_right" data-flv-value-card_id="{c.id}"` —
+//     per-card click payload from an interpolated value attr (R3.5b.1).
+//   - `<form data-flv-submit="create_card">` with named inputs — card
+//     creation from a form payload, `data-flv-clear` resets the title
+//     (R3.5b.2). `let id_str = "{next_id}"` — string interpolation.
+//
+// The SAME `data-flv-*` conventions the SSR runtime reads drive the WASM
+// listeners, so this exact `.fitzv` targets both backends. Every button
+// acts on a specific card by id — the payload carries the target.
+
+from card import Card
+from board_helpers import cards_in, keep_if_not, move_one, make_card
+
+component Board {
+  state {
+    cards: List<Card> = []
+    next_id: Int = 1
+  }
+
+  event create_card() {
+    if (payload.has("title")) {
+      if (payload.has("author")) {
+        let id_str = "{next_id}"
+        let title = payload["title"]
+        let author = payload["author"]
+        cards.push(make_card(id_str, title, author))
+        next_id = next_id + 1
+      }
+    }
+  }
+
+  event move_right() {
+    if (payload.has("card_id")) {
+      let target_id = payload["card_id"]
+      cards = cards.map(fn(c) => move_one(target_id, "right", c))
+    }
+  }
+
+  event move_left() {
+    if (payload.has("card_id")) {
+      let target_id = payload["card_id"]
+      cards = cards.map(fn(c) => move_one(target_id, "left", c))
+    }
+  }
+
+  event delete_card() {
+    if (payload.has("card_id")) {
+      let target_id = payload["card_id"]
+      cards = cards.filter(fn(c) => keep_if_not(target_id, c))
+    }
+  }
+
+  <template>
+    <div id="kanban-app">
+      <h1>Fitz Kanban (WASM)</h1>
+      <p class="sub">A client-side SPA compiled from one .fitzv — add cards, move them between columns, delete them. No server round-trip.</p>
+      <form data-flv-submit="create_card">
+        <input name="title" placeholder="Card title" required autocomplete="off" data-flv-clear />
+        <input name="author" placeholder="Your name" required autocomplete="off" data-flv-clear />
+        <button type="submit">Add Card</button>
+      </form>
+      <div class="board">
+        <section class="column">
+          <h2>To Do <span class="count">({cards_in(cards, "todo").len()})</span></h2>
+          <ul class="card-list">
+            {#for c in cards_in(cards, "todo")}
+              <li class="card">
+                <div class="card-title">{c.title}</div>
+                <div class="card-author">- {c.author}</div>
+                <div class="card-actions">
+                  <button class="btn" data-flv-click="move_right" data-flv-value-card_id="{c.id}" aria-label="Move right">right</button>
+                  <button class="btn btn-del" data-flv-click="delete_card" data-flv-value-card_id="{c.id}" aria-label="Delete card">x</button>
+                </div>
+              </li>
+            {/for}
+          </ul>
+        </section>
+        <section class="column">
+          <h2>In Progress <span class="count">({cards_in(cards, "in_progress").len()})</span></h2>
+          <ul class="card-list">
+            {#for c in cards_in(cards, "in_progress")}
+              <li class="card">
+                <div class="card-title">{c.title}</div>
+                <div class="card-author">- {c.author}</div>
+                <div class="card-actions">
+                  <button class="btn" data-flv-click="move_left" data-flv-value-card_id="{c.id}" aria-label="Move left">left</button>
+                  <button class="btn" data-flv-click="move_right" data-flv-value-card_id="{c.id}" aria-label="Move right">right</button>
+                  <button class="btn btn-del" data-flv-click="delete_card" data-flv-value-card_id="{c.id}" aria-label="Delete card">x</button>
+                </div>
+              </li>
+            {/for}
+          </ul>
+        </section>
+        <section class="column">
+          <h2>Done <span class="count">({cards_in(cards, "done").len()})</span></h2>
+          <ul class="card-list">
+            {#for c in cards_in(cards, "done")}
+              <li class="card">
+                <div class="card-title">{c.title}</div>
+                <div class="card-author">- {c.author}</div>
+                <div class="card-actions">
+                  <button class="btn" data-flv-click="move_left" data-flv-value-card_id="{c.id}" aria-label="Move left">left</button>
+                  <button class="btn btn-del" data-flv-click="delete_card" data-flv-value-card_id="{c.id}" aria-label="Delete card">x</button>
+                </div>
+              </li>
+            {/for}
+          </ul>
+        </section>
+      </div>
+    </div>
+  </template>
+
+  <style scoped>
+    #kanban-app { max-width: 1000px; margin: 0 auto; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #222; }
+    #kanban-app h1 { margin: 0 0 0.5rem 0; font-size: 1.5rem; color: #CE412B; }
+    .sub { color: #666; font-size: 0.9rem; margin-bottom: 1rem; }
+    form { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    form input { flex: 1 1 180px; min-width: 0; padding: 0.5rem 0.75rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+    form input:focus { outline: none; border-color: #CE412B; }
+    form button { padding: 0.5rem 1rem; font-size: 1rem; font-weight: 600; border: none; border-radius: 4px; background: #CE412B; color: white; cursor: pointer; }
+    .board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .column { background: #f4f4f4; border-radius: 8px; padding: 1rem; min-height: 160px; }
+    .column h2 { margin: 0 0 1rem 0; font-size: 1rem; color: #333; text-transform: uppercase; letter-spacing: 0.05em; }
+    .count { color: #888; font-weight: normal; }
+    .card-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+    .card { background: white; border-radius: 6px; padding: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 0.4rem; }
+    .card-title { font-weight: 600; word-wrap: break-word; line-height: 1.3; }
+    .card-author { font-size: 0.85rem; color: #666; }
+    .card-actions { display: flex; gap: 0.25rem; justify-content: flex-end; margin-top: 0.25rem; }
+    .btn { border: none; padding: 0.35rem 0.6rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem; background: #e0e0e0; color: #333; }
+    .btn-del { background: #f5c6cb; color: #a94442; }
+    @media (max-width: 768px) { .board { grid-template-columns: 1fr; } }
+  </style>
+}

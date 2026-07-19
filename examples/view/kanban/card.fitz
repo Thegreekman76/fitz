@@ -1,0 +1,14 @@
+// Fitz view — kanban shared type (Phase 11.7 R3.5c).
+//
+// `.fitzv` files can't declare `type`s, so the shared nominal lives in a
+// sibling classic module. The WASM emitter synthesises its Rust struct
+// inline in the bundle (R3). The id is a `Str` because the payload
+// `card_id` (from a `data-flv-value-*` attribute) is a string, and the
+// move/delete helpers compare against it.
+
+type Card {
+  id: Str
+  title: Str
+  author: Str
+  column: Str
+}

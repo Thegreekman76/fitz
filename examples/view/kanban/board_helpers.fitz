@@ -1,0 +1,47 @@
+// Fitz view — kanban pure helpers (Phase 11.7 R3.5c).
+//
+// The `.fitzv` SFC can't declare top-level `fn`s, so the board's pure
+// logic lives here in a sibling classic module. R3.5a.2 transpiles each
+// into a Rust `fn` in the WASM bundle, so the SFC's template + event
+// bodies can call them. Equality (`c.column == col`, `c.id != target_id`)
+// lives here, in the classic parser (the `.fitzv` event-body parser
+// doesn't accept inline `==`/`!=`).
+
+from card import Card
+
+// Per-column filter — used by the template to render each column.
+fn cards_in(all: List<Card>, col: Str) -> List<Card> {
+  return all.filter(fn(c) => c.column == col)
+}
+
+// Delete predicate — keep every card whose id is NOT the target.
+fn keep_if_not(target_id: Str, c: Card) -> Bool {
+  return c.id != target_id
+}
+
+// Column progression state machine.
+fn next_column(current: Str) -> Str {
+  if (current == "todo") { return "in_progress" }
+  if (current == "in_progress") { return "done" }
+  return current
+}
+
+fn prev_column(current: Str) -> Str {
+  if (current == "done") { return "in_progress" }
+  if (current == "in_progress") { return "todo" }
+  return current
+}
+
+// Move ONE card (the one matching `target_id`) left or right; every
+// other card passes through unchanged. Invoked from
+// `cards.map(fn(c) => move_one(target_id, "right", c))`.
+fn move_one(target_id: Str, direction: Str, c: Card) -> Card {
+  if (c.id != target_id) { return c }
+  let new_col = if (direction == "right") { next_column(c.column) } else { prev_column(c.column) }
+  return Card { id: c.id, title: c.title, author: c.author, column: new_col }
+}
+
+// Row factory used by `create_card` to build a fresh Card in "todo".
+fn make_card(id: Str, title: Str, author: Str) -> Card {
+  return Card { id: id, title: title, author: author, column: "todo" }
+}
