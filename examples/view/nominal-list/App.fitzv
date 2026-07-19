@@ -1,0 +1,96 @@
+// Phase 11.7 R3 — nominal types on the client-WASM target.
+//
+// The R2b slice (v0.21.7) closed keyed `<Child />` composition inside
+// `{#for}` over a `List<primitive>`. R3 unlocks the same machinery
+// over a `List<Nominal>` — the foundational gap that blocked the
+// kanban SPA port. This demo exercises the WHOLE nominal path in the
+// WASM target:
+//
+//   - `from card import Card` — an imported classic `type` whose Rust
+//     `struct` the emitter synthesises inline (loaded from the sibling
+//     `card.fitz`).
+//   - `state { cards: List<Card> = [] }` — a nominal-element list.
+//   - `event add() { cards.push(Card { ... }) }` — nominal
+//     construction + LIVE list mutation. Keys appear at runtime, so
+//     reconciliation actually runs (the keyed-composition demo had a
+//     constant list — reconciliation ran but never evicted).
+//   - `{#for c in cards}` — iterate the `List<Card>`.
+//   - `{c.title}` / `{c.id}` — field access on the loop var.
+//   - `<CardRow key="{c.id}" n="{c.id}" title="{c.title}" />` — a
+//     keyed child whose PRIMITIVE props are fanned out from the
+//     nominal item's fields.
+//
+// WHY IT MATTERS (try it in the browser):
+//   1. Click "Add task" a few times — each new card appears with its
+//      own id.
+//   2. Tap a card's "taps" button — its own counter goes up. Each
+//      `<CardRow />` holds its OWN `taps` state.
+//   3. Click "Add task" again — the existing cards' taps SURVIVE,
+//      because each key (the card id) maps to the same cached
+//      `CardRow` instance. The new card gets a fresh keyed instance.
+//
+// STILL DEFERRED toward the full kanban (clear pointers in the
+// emitter): `{#for}` over the RESULT of a fn call (e.g.
+// `{#for c in cards_in(cards, "todo")}`), `.map`/`.filter` + closures
+// in event bodies, and imported classic helper fns transpiled into
+// the WASM crate. Those are the next slice (imported-fn support) — the
+// kanban needs them on top of R3.
+
+from card import Card
+
+component App {
+  state {
+    cards: List<Card> = []
+    next_id: Int = 1
+  }
+
+  event add() {
+    cards.push(Card { id: next_id, title: "Task", done: false })
+    next_id = next_id + 1
+  }
+
+  <template>
+    <div class="board">
+      <h1>Nominal list on WASM</h1>
+      <p class="hint">Each row keeps its own tap counter. Tap a few, then add another task — the counters survive because each card id maps to a cached instance.</p>
+      <button class="add" @click="add">Add task ({next_id})</button>
+      <ul class="rows">
+        {#for c in cards}
+          <CardRow key="{c.id}" n="{c.id}" title="{c.title}" />
+        {/for}
+      </ul>
+    </div>
+  </template>
+
+  <style scoped>
+    .board { font-family: system-ui, sans-serif; max-width: 480px; }
+    .hint { color: #666; font-size: 0.9em; }
+    .add { padding: 8px 16px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; margin-bottom: 16px; }
+    .rows { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  </style>
+}
+
+component CardRow {
+  state {
+    n: Int = 0
+    title: Str = ""
+    taps: Int = 0
+  }
+
+  event tap() { taps = taps + 1 }
+
+  <template>
+    <li class="row">
+      <span class="id">{n}</span>
+      <span class="label">{title}</span>
+      <button class="tap" @click="tap">taps: {taps}</button>
+    </li>
+  </template>
+
+  <style scoped>
+    .row { display: flex; align-items: center; gap: 12px; border: 1px solid #ddd; border-radius: 8px; padding: 10px 14px; background: #fafafa; }
+    .id { font-variant-numeric: tabular-nums; color: #999; font-size: 0.85em; }
+    .label { flex: 1; }
+    .tap { padding: 6px 12px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+  </style>
+}

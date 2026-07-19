@@ -9867,10 +9867,31 @@ de 3 releases:
   que mutan la lista son 11.4.c debt), así que la reconciliation
   corre pero nunca evicta live; `List<nominal>` sigue bloqueado por
   R3 (nominales en WASM).
+- ✅ **11.7 nominales (R3, v0.21.8)** — tipos nominales en el target
+  WASM (el gap foundational + prereq del kanban). `List<Card>` state,
+  `{#for c in cards}`, field access `{c.title}`, construcción `Card
+  { ... }` + `<state_list>.push(...)` (mutación live → la
+  reconciliation de R2b corre de verdad), y keyed `<Child />` cuyos
+  props primitivos salen de campos nominales. El SSR difiere toda
+  resolución nominal al loader classic en un 2do pass; el target WASM
+  no tiene 2do pass, así que R3 **carga el `type Card` del `.fitz`
+  sibling** (lexer + parser → `Stmt::TypeDef`) y sintetiza el struct
+  Rust inline. `NominalRegistry` + `emit_module_with_nominals` +
+  `emit_nominal_structs` + `load_imported_nominals`; `type_expr_to_
+  rust`/`emit_for`/`lower_expr` (arms `Str`/`Field`/`StructLit`)/
+  `lower_stmt` (`push`/`clear`) extendidos. 13 unit tests (8
+  `phase_11_7_r3_*` + 5 `load_imported_nominals_*`) + ejemplo runnable
+  `examples/view/nominal-list/` (compila a WASM real end-to-end, cero
+  warnings). Ver CHANGELOG v0.21.8. **Deuda residual hacia el
+  kanban**: `{#for}` sobre resultado de fn call, `.map`/`.filter` +
+  closures en event bodies, imported classic helper fns transpiladas
+  al WASM crate — próximo slice (imported-fn support).
 - ⏳ **11.7.c/d (R2b+)** — event bubbling + `<slot />` fallback.
-- ⏳ **11.7 nominales + f/g (R3, v0.22.0)** — soporte de tipos
-  nominales en WASM (prereq del kanban) + drag-drop primitives +
-  kanban SPA port (acceptance criterion).
+- ⏳ **11.7 imported-fn + f/g (R3.5 → v0.22.0)** — transpilación de
+  fns classic importadas al crate WASM + `{#for}` sobre call results +
+  `.map`/`.filter`/closures en event bodies (lo que el kanban necesita
+  sobre R3) + drag-drop primitives + kanban SPA port (acceptance
+  criterion).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

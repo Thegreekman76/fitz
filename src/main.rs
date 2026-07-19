@@ -1183,6 +1183,27 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         std::process::exit(1);
     }
 
+    // Phase 11.7 R3 — load the classic `type` defs imported by the
+    // `.fitzv` (e.g. `from card import Card`) from their sibling
+    // `.fitz` files so the emitter can synthesise a Rust `struct` for
+    // each. Resolved against the entry `.fitzv`'s directory. Empty when
+    // the file imports no nominals (the pre-R3 examples).
+    let base_dir = resolved
+        .entry
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let nominals = match view::load_imported_nominals(&expanded.imports, &base_dir) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!(
+                "✗ loading imported nominals for `{}`: {e}",
+                resolved.entry.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
     // Materialise the scaffold. Path is Cargo-style —
     // `target/wasm-build/<bin>/` for the temporary crate,
     // `target/wasm/<bin>/` for the final `pkg/` copy that the
@@ -1203,6 +1224,7 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
     let scaffold = match view::write_wasm_crate_scaffold(
         &scaffold_dir,
         &expanded,
+        &nominals,
         &sanitised_pkg,
         mount,
         Some(&source_label),

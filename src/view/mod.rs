@@ -36,7 +36,9 @@ pub mod wasm_build;
 
 pub use check::{check, CheckError};
 pub use codegen_ssr::{emit_component_ssr, emit_module_ssr, SsrEmitError, SsrEmitResult};
-pub use codegen_wasm::{emit_component, emit_module, EmitError, EmitResult};
+pub use codegen_wasm::{
+    emit_component, emit_module, emit_module_with_nominals, EmitError, EmitResult, NominalRegistry,
+};
 pub use css_parser::{apply_scope, CssParseError};
 pub use expand::{
     expand, ExpandError, ExpandResult, ExpandedAttr, ExpandedComponent, ExpandedEventHandler,
@@ -44,8 +46,8 @@ pub use expand::{
 };
 pub use parser::{parse, ViewParseError, ViewParseResult};
 pub use wasm_build::{
-    compose_cargo_toml, compose_lib_rs, sanitise_wasm_pkg_name, write_wasm_crate_scaffold,
-    ScaffoldError, ScaffoldResult,
+    compose_cargo_toml, compose_lib_rs, compose_lib_rs_with_nominals, load_imported_nominals,
+    sanitise_wasm_pkg_name, write_wasm_crate_scaffold, ScaffoldError, ScaffoldResult,
 };
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — nominal list (Phase 11.7 R3)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz nominal list — Phase 11.7 R3 smoke</h1>
+    <p>
+      An <code>App.fitzv</code> component compiled to WebAssembly that
+      iterates a <code>List&lt;Card&gt;</code> state field with
+      <code>{#for c in cards}</code> and fans each nominal item's
+      fields out into a keyed
+      <code>&lt;CardRow key="{c.id}" title="{c.title}" /&gt;</code>.
+      <code>Card</code> is an imported classic
+      <code>type</code> (from the sibling <code>card.fitz</code>) whose
+      Rust <code>struct</code> the emitter synthesises inline.
+    </p>
+    <p>
+      Click <em>Add task</em> to push a fresh <code>Card</code> onto
+      the list (live list mutation → reconciliation). Tap a row's
+      counter, add another task, and watch the existing rows' counters
+      survive — each card id keys a cached <code>CardRow</code>
+      instance.
+    </p>
+    <div id="app"><!-- App mounts here --></div>
+    <p>
+      If you see this text but no widget above, the WASM bundle failed
+      to load (check the DevTools console) or the page was opened over
+      <code>file://</code>. ES modules require an HTTP origin — serve
+      with <code>python -m http.server 8000</code>.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/nominal_list.js';
+      init().catch((err) => {
+        console.error('Failed to load nominal-list WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

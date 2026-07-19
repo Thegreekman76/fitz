@@ -341,10 +341,32 @@ parent state y mounted children).
     set per-render + `retain` post-loop (evicta keys huérfanas). El
     `key` lowerea vía `format!("{}", <expr>)`, típicamente la loop
     var. Ejemplo `examples/view/keyed-composition/` (WASM 40 KB).
-    **Residual**: la lista es constante (event bodies que mutan la
-    lista siguen siendo 11.4.c debt), así que la reconciliation
-    corre pero nunca evicta live; `List<nominal>` sigue bloqueado
-    por R3.
+    **Residual**: `List<nominal>` cerrado por R3 (abajo); la
+    mutación live de la lista también entra con R3 (`.push`/`.clear`).
+  - **🟢 Tipos nominales en WASM (`List<nominal>`, field access,
+    struct literals, mutación live)** — **CERRADO R3 (v0.21.8)**. El
+    target client-WASM ya trata un `type` classic importado como
+    ciudadano de primera clase: `List<Card>` state, `{#for c in
+    cards}`, `{c.title}` field access, `Card { ... }` construcción,
+    `<state_list>.push(...)`/`.clear()` (mutación live → la
+    reconciliation de R2b corre de verdad), y keyed `<Child />` con
+    props primitivos desde campos nominales. El SSR difiere toda
+    resolución nominal al loader classic en un 2do pass; el WASM no
+    tiene 2do pass, así que R3 **carga el `type Card` del `.fitz`
+    sibling** (`load_imported_nominals`: lexer + parser →
+    `Stmt::TypeDef`) y sintetiza el struct Rust inline
+    (`emit_nominal_structs`). `NominalRegistry` +
+    `emit_module_with_nominals` + `type_expr_to_rust`/`emit_for`/
+    `lower_expr` (arms `Str`/`Field`/`StructLit`)/`lower_stmt`
+    (`push`/`clear`) extendidos. 13 unit tests + ejemplo runnable
+    `examples/view/nominal-list/` (WASM real end-to-end, cero
+    warnings). **Residual hacia el kanban completo** (próximo slice —
+    imported-fn support en WASM): (a) `{#for}` sobre el resultado de
+    un fn call (`{#for c in cards_in(cards, "todo")}`); (b)
+    `.map`/`.filter` + closures en event bodies (los eventos
+    move/delete del kanban reasignan la lista); (c) imported classic
+    helper fns (`cards_in`, `move_one`, `keep_if_not`, `make_card`)
+    transpiladas al crate WASM. El SSR target ya soporta los tres.
   - **Event bubbling** (11.7.c) + **`<slot />` fallback** (11.7.d)
     — R2b+/posterior.
 - **Nominal-type STATIC props** — workaround: interpolación cubre.

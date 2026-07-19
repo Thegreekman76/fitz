@@ -1,0 +1,21 @@
+// Phase 11.7 R3 — shared classic `type` for the nominal-list demo.
+//
+// This is a plain `.fitz` module (NOT a `.fitzv`). `.fitzv` single-
+// file components can only declare `component { ... }` blocks and
+// `from ... import ...` statements at the top level, so any nominal
+// `type` a component needs lives in a sibling classic module — the
+// canonical cross-file-types pattern (same as the kanban's
+// `card.fitz`).
+//
+// The WASM emitter loads THIS file's `type Card` field list
+// (`view::load_imported_nominals`) and synthesises a Rust
+// `struct Card { id: i64, title: String, done: bool }` inline in the
+// generated crate, so `List<Card>` state, `{#for c in cards}`,
+// `{c.title}` field access, and `Card { ... }` construction all
+// lower to real Rust.
+
+type Card {
+  id: Int
+  title: Str
+  done: Bool
+}

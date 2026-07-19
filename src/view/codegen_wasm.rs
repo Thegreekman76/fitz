@@ -101,6 +101,70 @@ impl std::error::Error for EmitError {}
 pub type EmitResult<T> = Result<T, EmitError>;
 
 // ---------------------------------------------------------------------------
+// Nominal registry (Phase 11.7 R3)
+// ---------------------------------------------------------------------------
+
+/// The classic `type Foo { ... }` definitions imported into a
+/// `.fitzv` (via `from foo import Foo`), loaded so the WASM emitter
+/// can emit a real Rust `struct Foo { ... }` inline in the bundle.
+///
+/// The SSR emitter never needs this — it re-emits the user's `from
+/// foo import Foo` verbatim and defers all nominal resolution to the
+/// classic loader in a second compilation pass (see
+/// `codegen_ssr.rs`). The WASM emitter has NO downstream classic
+/// pass: it produces a standalone `wasm32` crate, so every nominal
+/// touchpoint (`List<Foo>` state, `{#for c in cards}`, `{c.title}`,
+/// `Foo { ... }` construction) must lower to real Rust here. That
+/// requires the field list, which the view pipeline does not carry —
+/// hence this registry, populated by
+/// [`super::wasm_build::load_imported_nominals`] which reads + parses
+/// the sibling `.fitz` before emit.
+///
+/// Keyed by the LOCAL binding name (the alias when `from foo import
+/// Foo as Bar` is used, else the original), because that is the name
+/// that appears in the `.fitzv` state annotations + struct literals.
+/// Fields are stored in declaration order so the emitted struct
+/// mirrors the source `type`.
+#[derive(Debug, Clone, Default)]
+pub struct NominalRegistry {
+    defs: std::collections::BTreeMap<String, Vec<(String, TypeExpr)>>,
+}
+
+impl NominalRegistry {
+    /// An empty registry — the common case (no imported nominals) and
+    /// what [`emit_module`] / [`emit_component`] pass so the legacy
+    /// primitive-only path is byte-for-byte unchanged.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a nominal under its local binding name with its
+    /// ordered `(field_name, field_type)` list.
+    pub fn insert(&mut self, name: String, fields: Vec<(String, TypeExpr)>) {
+        self.defs.insert(name, fields);
+    }
+
+    /// True when `name` names a registered nominal — the gate that
+    /// lets `type_expr_to_rust` accept it and `emit_for` iterate it.
+    pub fn contains(&self, name: &str) -> bool {
+        self.defs.contains_key(name)
+    }
+
+    /// True when nothing is registered. When empty, no `struct` is
+    /// emitted and nominal types still reject, preserving the
+    /// pre-R3 output bit-for-bit.
+    pub fn is_empty(&self) -> bool {
+        self.defs.is_empty()
+    }
+
+    /// Iterate registered nominals in deterministic (sorted-by-name)
+    /// order so the emitted structs are stable across runs.
+    fn iter(&self) -> impl Iterator<Item = (&String, &Vec<(String, TypeExpr)>)> {
+        self.defs.iter()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -134,7 +198,8 @@ pub fn emit_component(component: &ExpandedComponent) -> EmitResult<String> {
         components: vec![component.clone()],
     };
     let mut out = String::new();
-    emit_component_impl(component, &synthetic_file, &mut out)?;
+    let nominals = NominalRegistry::new();
+    emit_component_impl(component, &synthetic_file, &nominals, &mut out)?;
     Ok(out)
 }
 
@@ -151,12 +216,64 @@ pub fn emit_component(component: &ExpandedComponent) -> EmitResult<String> {
 /// composición multi-componente); esta fn queda como default
 /// razonable para tests + POCs.
 pub fn emit_module(file: &ExpandedViewFile) -> EmitResult<String> {
+    emit_module_with_nominals(file, &NominalRegistry::new())
+}
+
+/// Like [`emit_module`], but with a [`NominalRegistry`] of imported
+/// classic `type` definitions loaded from the sibling `.fitz` files
+/// (Phase 11.7 R3). When the registry is non-empty, a Rust `struct`
+/// is emitted for each nominal right after the module header, so
+/// `List<Card>` state fields, `{#for c in cards}` loops, `{c.title}`
+/// field access, and `Card { ... }` construction lower to real Rust.
+///
+/// When the registry is empty this is byte-for-byte identical to
+/// [`emit_module`] — no struct is emitted and nominal types still
+/// reject, so the four pre-R3 examples regenerate unchanged.
+pub fn emit_module_with_nominals(
+    file: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+) -> EmitResult<String> {
     let mut out = String::new();
     emit_module_header(&mut out);
+    emit_nominal_structs(nominals, &mut out)?;
     for component in &file.components {
-        emit_component_impl(component, file, &mut out)?;
+        emit_component_impl(component, file, nominals, &mut out)?;
     }
     Ok(out)
+}
+
+/// Emit a `#[derive(Clone)] pub struct <Name> { ... }` for every
+/// registered nominal (Phase 11.7 R3). `Clone` is required because
+/// `emit_for` snapshots the state `Vec` (`.iter().cloned()`) and
+/// keyed composition clones field values into child `RefCell`s.
+/// Fields are non-`pub` — all emitted code lives in one module, so
+/// intra-module access (`c.title`, cross-instance prop writes) works
+/// without exposing the fields on the crate surface.
+///
+/// `#[allow(dead_code)]` is emitted per struct because a `type` may
+/// declare fields the template never reads (e.g. a `done` flag kept
+/// for logic that lands later) — a structural consequence of nominals,
+/// not a bug. The allow is item-level (not crate-level) so the four
+/// primitive-only pre-R3 examples' output stays byte-for-byte
+/// unchanged (no nominal struct → no allow emitted).
+fn emit_nominal_structs(nominals: &NominalRegistry, out: &mut String) -> EmitResult<()> {
+    if nominals.is_empty() {
+        return Ok(());
+    }
+    for (name, fields) in nominals.iter() {
+        writeln!(out, "#[allow(dead_code)]").unwrap();
+        writeln!(out, "#[derive(Clone)]").unwrap();
+        writeln!(out, "pub struct {} {{", name).unwrap();
+        for (fname, fty) in fields {
+            let rust_ty = type_expr_to_rust(fty, nominals).map_err(|mut e| {
+                e.context = format!("imported nominal `{name}` field `{fname}`");
+                e
+            })?;
+            writeln!(out, "    {}: {},", fname, rust_ty).unwrap();
+        }
+        writeln!(out, "}}\n").unwrap();
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +314,7 @@ fn emit_module_header(out: &mut String) {
 fn emit_component_impl(
     component: &ExpandedComponent,
     file: &ExpandedViewFile,
+    nominals: &NominalRegistry,
     out: &mut String,
 ) -> EmitResult<()> {
     let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
@@ -212,9 +330,9 @@ fn emit_component_impl(
     // an index names here matches the one the render reads.
     let child_sites = collect_child_site_types(component);
 
-    emit_struct_and_new(component, &child_sites, out)?;
+    emit_struct_and_new(component, &child_sites, nominals, out)?;
     emit_event_handlers(component, &state_names, out)?;
-    emit_mount_and_render(component, &state_names, file, out)?;
+    emit_mount_and_render(component, &state_names, file, nominals, out)?;
     if let Some(style) = &component.style {
         emit_style_helper(&component.name, style, out);
     }
@@ -294,13 +412,14 @@ fn collect_sites_in_node(node: &ExpandedTemplateNode, in_for: bool, sites: &mut 
 fn emit_struct_and_new(
     component: &ExpandedComponent,
     child_sites: &[ChildSite],
+    nominals: &NominalRegistry,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
 
     writeln!(out, "pub struct {} {{", name).unwrap();
     for field in &component.state {
-        let rust_ty = type_expr_to_rust(&field.type_expr).map_err(|mut e| {
+        let rust_ty = type_expr_to_rust(&field.type_expr, nominals).map_err(|mut e| {
             e.context = format!(
                 "state field `{}` of component `{}` (type)",
                 field.name, name
@@ -441,6 +560,7 @@ fn emit_mount_and_render(
     component: &ExpandedComponent,
     state_names: &[String],
     file: &ExpandedViewFile,
+    nominals: &NominalRegistry,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
@@ -510,7 +630,7 @@ fn emit_mount_and_render(
     .unwrap();
 
     if let Some(template) = &component.template {
-        let mut ctx = RenderCtx::new(name, state_names, &component.state, file);
+        let mut ctx = RenderCtx::new(name, state_names, &component.state, file, nominals);
         for root_node in &template.roots {
             emit_template_node(root_node, "root", &mut ctx, out)?;
         }
@@ -557,6 +677,10 @@ struct RenderCtx<'a> {
     /// enclosing `{#for x in ...}`). An `Expr::Ident` that names a
     /// local resolves to the Rust loop var directly, shadowing state.
     locals: Vec<String>,
+    /// Phase 11.7 R3 — imported classic nominals, so `{#for c in
+    /// cards}` can accept a `List<Card>` element type and reject an
+    /// unknown nominal with a clear message.
+    nominals: &'a NominalRegistry,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -565,6 +689,7 @@ impl<'a> RenderCtx<'a> {
         state_names: &'a [String],
         state_fields: &'a [ExpandedStateField],
         file: &'a ExpandedViewFile,
+        nominals: &'a NominalRegistry,
     ) -> Self {
         RenderCtx {
             component_name,
@@ -576,6 +701,7 @@ impl<'a> RenderCtx<'a> {
             dyn_site_counter: 0,
             in_for: false,
             locals: Vec::new(),
+            nominals,
         }
     }
 
@@ -790,14 +916,20 @@ fn emit_for(
             })
         }
     };
-    if !is_wasm_prop_simple_target(elem_ty) {
+    // Phase 11.7 R3 — the element type may be a primitive OR an
+    // imported nominal (e.g. `List<Card>`). A nominal loop var binds as
+    // the emitted struct (owned, from `.iter().cloned()`), so its
+    // fields are reachable via `{c.title}` field access. Reject only
+    // types the emitter can't lower (unknown nominal, nested compound).
+    let elem_is_nominal = matches!(elem_ty, TypeExpr::Named(n) if ctx.nominals.contains(n));
+    if !is_wasm_prop_simple_target(elem_ty) && !elem_is_nominal {
         return Err(EmitError {
             message: format!(
-                "`{{#for}}` over `{field_name}`: the client-WASM target only iterates \
-                 `List<Int|Float|Str|Bool>` today — nominal-element lists (e.g. \
-                 `List<Card>`) need nominal-type support in the WASM target (Phase \
-                 11.7 R3 / kanban prereq). Use a primitive-element list or the SSR \
-                 target."
+                "`{{#for}}` over `{field_name}`: the client-WASM target iterates \
+                 `List<Int|Float|Str|Bool>` and `List<Nominal>` where the nominal is \
+                 imported from a sibling `.fitz` (Phase 11.7 R3). This element type is \
+                 neither — use a primitive-element list, import the nominal, or the \
+                 SSR target."
             ),
             context: ctx_label,
         });
@@ -1410,24 +1542,52 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
             let r = lower_expr(right, state_names, locals)?;
             Ok(format!("({} {} {})", l, op_str, r))
         }
-        Expr::Str(_, _)
-        | Expr::StrInterp(_, _)
+        // Phase 11.7 R3 — a Str literal, needed for nominal struct
+        // construction (`Card { title: "New", .. }`) and interpolation.
+        // Emits an owned `String` so it drops into a struct field or a
+        // `RefCell<String>` uniformly.
+        Expr::Str(s, _) => Ok(format!("{s:?}.to_string()")),
+        // Phase 11.7 R3 — field access on a nominal (`c.title`, where
+        // `c` is a `{#for}` loop var of nominal type, or a nominal
+        // state field). Clones the field so the result is owned
+        // (`String`/`i64`/`f64`/`bool` all impl `Clone`), which drops
+        // into `format!("{}", ...)`, a keyed `key`, or a struct field.
+        Expr::Field { object, field, .. } => {
+            let obj = lower_expr(object, state_names, locals)?;
+            Ok(format!("{obj}.{field}.clone()"))
+        }
+        // Phase 11.7 R3 — nominal construction (`Card { id: next_id,
+        // title: "New", done: false }`) inside event bodies + defaults.
+        // Each field value lowers recursively. All declared fields must
+        // be supplied (the emitter does not fill defaults) — the classic
+        // check pass validates the type name; missing fields surface as
+        // a rustc error in the generated crate (documented R3 limit).
+        Expr::StructLit {
+            type_name, fields, ..
+        } => {
+            let mut parts: Vec<String> = Vec::with_capacity(fields.len());
+            for (fname, fexpr) in fields {
+                let val = lower_expr(fexpr, state_names, locals)?;
+                parts.push(format!("{fname}: {val}"));
+            }
+            Ok(format!("{type_name} {{ {} }}", parts.join(", ")))
+        }
+        Expr::StrInterp(_, _)
         | Expr::Null(_)
         | Expr::Bytes(_, _)
         | Expr::UnaryOp { .. }
         | Expr::Call { .. }
         | Expr::NamedArg { .. }
         | Expr::FnExpr { .. }
-        | Expr::Field { .. }
         | Expr::Index { .. } => Err(EmitError {
             message: format!(
-                "expression kind `{}` — deferred to Phase 11.4.c",
+                "expression kind `{}` — deferred to a later 11.7 slice / the SSR target",
                 expr_kind_name(expr)
             ),
             context: "expression".to_string(),
         }),
         _ => Err(EmitError {
-            message: "unsupported expression kind — deferred to Phase 11.4.c".to_string(),
+            message: "unsupported expression kind — deferred to a later 11.7 slice".to_string(),
             context: "expression".to_string(),
         }),
     }
@@ -1561,12 +1721,22 @@ fn lower_child_prop_value(
                     "interpolated prop `{field_name}={{...}}` — only bare parent \
                      state fields and numeric arithmetic over them are supported \
                      on the client-WASM target in Phase 11.7.a; richer expressions \
-                     (Str concat, method calls, field access, imported names) land \
+                     (Str concat, method calls, imported names) land \
                      in a later 11.7 slice or the SSR target."
                 ),
                 context: "interpolated child prop".to_string(),
             })
         }
+        // Phase 11.7 R3 — field access on a `{#for c in cards}` loop
+        // var of nominal type (`<Card title="{c.title}" n="{c.id}" />`).
+        // The target is a primitive (top gate) and the nominal field is
+        // a matching primitive, so `c.title.clone()` drops straight into
+        // the child's `RefCell<T>`. This is how a nominal list item
+        // fans its fields out into a keyed child's primitive props.
+        Expr::Field { .. } => lower_expr(expr, state_names, locals).map_err(|mut e| {
+            e.context = "interpolated child prop".to_string();
+            e
+        }),
         _ => Err(EmitError {
             message: format!(
                 "interpolated prop `{field_name}={{...}}` — expression kind `{}` \
@@ -1620,10 +1790,48 @@ fn lower_stmt(
                 context: "statement".to_string(),
             }),
         },
-        _ => Err(EmitError {
-            message:
-                "statement kind — only `Stmt::Assign` to a state field supported in Phase 11.4.b"
+        // Phase 11.7 R3 — list mutation on a state `List<...>` field:
+        // `cards.push(Card { ... })` / `cards.clear()`. This is what
+        // makes keys appear / vanish at runtime, so reconciliation runs
+        // live (unlike the constant list of the keyed-composition demo).
+        // Shape: `Stmt::Expr(Call { callee: Field { object: Ident,
+        // field: method }, args })`.
+        Stmt::Expr(Expr::Call { callee, args, .. }, _) => {
+            if let Expr::Field { object, field, .. } = callee.as_ref() {
+                if let Expr::Ident(list_name, _) = object.as_ref() {
+                    if state_names.iter().any(|s| s == list_name) {
+                        match (field.as_str(), args.len()) {
+                            ("push", 1) => {
+                                // Event bodies run outside any `{#for}`,
+                                // so no loop locals are in scope.
+                                let arg = lower_expr(&args[0], state_names, &[])?;
+                                writeln!(out, "{indent}self.{list_name}.borrow_mut().push({arg});")
+                                    .unwrap();
+                                return Ok(());
+                            }
+                            ("clear", 0) => {
+                                writeln!(out, "{indent}self.{list_name}.borrow_mut().clear();")
+                                    .unwrap();
+                                return Ok(());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Err(EmitError {
+                message: "method-call statement — only `<state_list>.push(<expr>)` and \
+                          `<state_list>.clear()` are supported on the client-WASM target \
+                          (Phase 11.7 R3). `.map`/`.filter`/closures + imported helpers \
+                          defer to a later 11.7 slice or the SSR target."
                     .to_string(),
+                context: "statement".to_string(),
+            })
+        }
+        _ => Err(EmitError {
+            message: "statement kind — only state-field reassignment + `<state_list>.push/clear` \
+                 supported on the client-WASM target"
+                .to_string(),
             context: "statement".to_string(),
         }),
     }
@@ -1646,32 +1854,40 @@ fn lower_stmt(
 /// `Map<K, V>` and nominal types still deferred — they need cell
 /// layout decisions that overlap with the reflow story (Phase
 /// 11.6+).
-fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
+fn type_expr_to_rust(ty: &TypeExpr, nominals: &NominalRegistry) -> EmitResult<String> {
     match ty {
         TypeExpr::Named(name) => match name.as_str() {
             "Int" => Ok("i64".to_string()),
             "Float" => Ok("f64".to_string()),
             "Bool" => Ok("bool".to_string()),
             "Str" => Ok("String".to_string()),
+            // Phase 11.7 R3 — an imported classic nominal maps to the
+            // Rust struct the emitter synthesises for it (same name).
+            // Requires the `from foo import Foo` sibling to have been
+            // loaded into the registry (`load_imported_nominals`).
+            other if nominals.contains(other) => Ok(other.to_string()),
             other => Err(EmitError {
                 message: format!(
                     "state field type `{other}` — only `Int`/`Float`/`Bool`/`Str` \
-                     (and their `Nullable<T>` wrappers) supported today; nominal \
-                     types deferred to Phase 11.6+"
+                     (and their `Nullable<T>` / `List<...>` / `Map<...>` wrappers) \
+                     supported for primitives; nominal types must be imported from a \
+                     sibling `.fitz` (e.g. `from card import {other}`) so the WASM \
+                     emitter can load their fields (Phase 11.7 R3)"
                 ),
                 context: "type".to_string(),
             }),
         },
         TypeExpr::Nullable(inner) => {
-            let inner_rust = type_expr_to_rust(inner)?;
+            let inner_rust = type_expr_to_rust(inner, nominals)?;
             Ok(format!("Option<{inner_rust}>"))
         }
         TypeExpr::Generic { name, args } => {
             if name == "List" && args.len() == 1 {
                 // K-3: List<primitive> for WASM state fields, emitted as
                 // `Vec<Rust>`. Recurses so `List<Nullable<Int>>` works
-                // symmetrically with the SSR + check helpers.
-                let inner_rust = type_expr_to_rust(&args[0])?;
+                // symmetrically with the SSR + check helpers. R3:
+                // `List<Card>` resolves via the nominal registry.
+                let inner_rust = type_expr_to_rust(&args[0], nominals)?;
                 Ok(format!("Vec<{inner_rust}>"))
             } else if name == "Map" && args.len() == 2 {
                 // S.2 (2026-07-17): Map<K, V> for WASM state fields
@@ -1679,8 +1895,8 @@ fn type_expr_to_rust(ty: &TypeExpr) -> EmitResult<String> {
                 // Rc<RefCell<Vec<(K, V)>>> representation. Static prop
                 // coercion (check.rs) is restricted to Map<Str, Str>;
                 // richer maps land via interpolation (K-3 remainder).
-                let k_rust = type_expr_to_rust(&args[0])?;
-                let v_rust = type_expr_to_rust(&args[1])?;
+                let k_rust = type_expr_to_rust(&args[0], nominals)?;
+                let v_rust = type_expr_to_rust(&args[1], nominals)?;
                 Ok(format!("Vec<({k_rust}, {v_rust})>"))
             } else {
                 Err(EmitError {
@@ -2314,11 +2530,11 @@ mod tests {
     }
 
     #[test]
-    fn emit_rejects_nominal_state_field_citing_11_6() {
-        // The rejection surface still catches nominal / user-defined
-        // types on state fields — those need type dispatch that
-        // overlaps with the "compose typed props through nominal
-        // types" story (11.6+).
+    fn emit_rejects_unregistered_nominal_state_field_citing_r3_import() {
+        // A nominal state field with NO entry in the registry (the
+        // `emit_component` path uses an empty registry) still rejects,
+        // now pointing the user at importing the type from a sibling
+        // `.fitz` so R3 can load its fields.
         let src = r#"component Foo {
   state { user: User? = null }
 
@@ -2329,8 +2545,180 @@ mod tests {
         let expanded = parse_expand(src);
         let err = emit_component(&expanded.components[0]).unwrap_err();
         assert!(
-            err.message.contains("User") && err.message.contains("11.6"),
-            "nominal type rejection should cite 11.6+:\n{err}"
+            err.message.contains("User") && err.message.contains("from card import"),
+            "unregistered nominal rejection should suggest importing it (R3):\n{err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 11.7 R3 — nominal types on the client-WASM target
+    // ---------------------------------------------------------------------
+
+    /// A `Card` nominal registry mirroring the `card.fitz` sibling of
+    /// the `examples/view/nominal-list/` demo, for the R3 unit tests.
+    fn card_registry() -> NominalRegistry {
+        let mut r = NominalRegistry::new();
+        r.insert(
+            "Card".to_string(),
+            vec![
+                ("id".to_string(), TypeExpr::Named("Int".to_string())),
+                ("title".to_string(), TypeExpr::Named("Str".to_string())),
+                ("done".to_string(), TypeExpr::Named("Bool".to_string())),
+            ],
+        );
+        r
+    }
+
+    /// A compact `.fitzv` exercising the whole R3 nominal path: a
+    /// `List<Card>` state field, a `.push(Card { ... })` event body, a
+    /// `{#for c in cards}` loop with `{c.*}` field access, and a keyed
+    /// `<Row />` whose primitive props come from nominal fields.
+    fn nominal_list_src() -> &'static str {
+        r#"from card import Card
+
+component Board {
+  state {
+    cards: List<Card> = []
+    next_id: Int = 1
+  }
+
+  event add() {
+    cards.push(Card { id: next_id, title: "x", done: false })
+    next_id = next_id + 1
+  }
+
+  <template>
+    <ul>
+      {#for c in cards}
+        <Row key="{c.id}" n="{c.id}" label="{c.title}" />
+      {/for}
+    </ul>
+  </template>
+}
+
+component Row {
+  state {
+    n: Int = 0
+    label: Str = ""
+  }
+  <template><li>{label}</li></template>
+}"#
+    }
+
+    #[test]
+    fn phase_11_7_r3_nominal_struct_emitted_from_registry() {
+        let expanded = parse_expand(nominal_list_src());
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains("#[derive(Clone)]\npub struct Card {"),
+            "imported nominal must be emitted as a Clone struct:\n{out}"
+        );
+        assert!(out.contains("    id: i64,"), "Card.id -> i64:\n{out}");
+        assert!(
+            out.contains("    title: String,"),
+            "Card.title -> String:\n{out}"
+        );
+        assert!(out.contains("    done: bool,"), "Card.done -> bool:\n{out}");
+    }
+
+    #[test]
+    fn phase_11_7_r3_list_nominal_state_maps_to_vec_of_struct() {
+        let expanded = parse_expand(nominal_list_src());
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains("cards: RefCell<Vec<Card>>,"),
+            "List<Card> state must map to Vec<Card>:\n{out}"
+        );
+        assert!(
+            out.contains("cards: RefCell::new(Vec::new()),"),
+            "empty List<Card> default must be Vec::new():\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_for_over_list_nominal_snapshots_and_binds_loop_var() {
+        let expanded = parse_expand(nominal_list_src());
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains("(*self.cards.borrow()).clone();"),
+            "the {{#for}} must snapshot the nominal Vec:\n{out}"
+        );
+        assert!(
+            out.contains("for c in __for") && out.contains(".iter().cloned() {"),
+            "the loop var must bind the nominal by value:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_field_access_interpolation_lowers_to_clone() {
+        let expanded = parse_expand(nominal_list_src());
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        // Key from field access on the loop var.
+        assert!(
+            out.contains("let __key = format!(\"{}\", c.id.clone());"),
+            "keyed child key must lower from `c.id` field access:\n{out}"
+        );
+        // Primitive props fanned out from nominal fields.
+        assert!(
+            out.contains(".n.borrow_mut() = c.id.clone();"),
+            "int prop must come from `c.id`:\n{out}"
+        );
+        assert!(
+            out.contains(".label.borrow_mut() = c.title.clone();"),
+            "str prop must come from `c.title`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_struct_literal_and_push_in_event_body() {
+        let expanded = parse_expand(nominal_list_src());
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains(
+                "self.cards.borrow_mut().push(Card { id: (*self.next_id.borrow()), \
+                 title: \"x\".to_string(), done: false });"
+            ),
+            "event body must construct + push a Card:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_keyed_dynamic_child_over_nominal_list() {
+        let expanded = parse_expand(nominal_list_src());
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains("__child_map_0: RefCell<std::collections::HashMap<String, Rc<Row>>>,"),
+            "dynamic child over a nominal list still gets a keyed cache:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "self.__child_map_0.borrow_mut().retain(|__k, _| __seen_0.contains(__k));"
+            ),
+            "reconciliation retain must still be emitted:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_unregistered_nominal_list_rejects_citing_import() {
+        // Empty registry — `Card` is unknown, so the `List<Card>` state
+        // field rejects at struct emission with the R3 import pointer.
+        let expanded = parse_expand(nominal_list_src());
+        let err = emit_module_with_nominals(&expanded, &NominalRegistry::new()).unwrap_err();
+        assert!(
+            err.message.contains("Card") && err.message.contains("from card import"),
+            "unregistered nominal list must point at importing the type:\n{err}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_empty_registry_emits_no_struct() {
+        // A primitive-only component with an empty registry must not
+        // emit any nominal struct — preserving the pre-R3 output.
+        let expanded = parse_expand(counter_shape_src());
+        let out = emit_module_with_nominals(&expanded, &NominalRegistry::new()).unwrap();
+        assert!(
+            !out.contains("#[derive(Clone)]"),
+            "no nominal struct should be emitted for a primitive-only module:\n{out}"
         );
     }
 
@@ -2673,7 +3061,10 @@ component Card {
             name: "List".into(),
             args: vec![TypeExpr::Named("Str".into())],
         };
-        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<String>");
+        assert_eq!(
+            type_expr_to_rust(&ty, &NominalRegistry::new()).unwrap(),
+            "Vec<String>"
+        );
     }
 
     #[test]
@@ -2683,7 +3074,10 @@ component Card {
             name: "List".into(),
             args: vec![TypeExpr::Named("Int".into())],
         };
-        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<i64>");
+        assert_eq!(
+            type_expr_to_rust(&ty, &NominalRegistry::new()).unwrap(),
+            "Vec<i64>"
+        );
     }
 
     #[test]
@@ -2693,7 +3087,10 @@ component Card {
             name: "List".into(),
             args: vec![TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into())))],
         };
-        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<Option<i64>>");
+        assert_eq!(
+            type_expr_to_rust(&ty, &NominalRegistry::new()).unwrap(),
+            "Vec<Option<i64>>"
+        );
     }
 
     #[test]
@@ -2712,7 +3109,10 @@ component Card {
             name: "Map".into(),
             args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
         };
-        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<(String, i64)>");
+        assert_eq!(
+            type_expr_to_rust(&ty, &NominalRegistry::new()).unwrap(),
+            "Vec<(String, i64)>"
+        );
     }
 
     #[test]
@@ -2722,7 +3122,10 @@ component Card {
             name: "Map".into(),
             args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
         };
-        assert_eq!(type_expr_to_rust(&ty).unwrap(), "Vec<(String, String)>");
+        assert_eq!(
+            type_expr_to_rust(&ty, &NominalRegistry::new()).unwrap(),
+            "Vec<(String, String)>"
+        );
     }
 
     #[test]

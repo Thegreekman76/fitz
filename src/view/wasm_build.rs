@@ -44,8 +44,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::codegen_wasm::{emit_module, EmitError, EmitResult};
-use super::expand::ExpandedViewFile;
+use super::codegen_wasm::{emit_module_with_nominals, EmitError, EmitResult, NominalRegistry};
+use super::expand::{ExpandedViewFile, ExpandedViewImport};
 
 /// A `.fitzv` file has no components declared, so there is no
 /// root to mount. Returned by [`compose_lib_rs`] before it even
@@ -80,6 +80,30 @@ pub fn compose_lib_rs(
     mount_selector: &str,
     header_source_label: Option<&str>,
 ) -> EmitResult<String> {
+    compose_lib_rs_with_nominals(
+        expanded,
+        &NominalRegistry::new(),
+        mount_selector,
+        header_source_label,
+    )
+}
+
+/// Like [`compose_lib_rs`], but with a [`NominalRegistry`] of imported
+/// classic `type` definitions (Phase 11.7 R3) so the emitted `lib.rs`
+/// carries a real Rust `struct` for each nominal used in `List<Card>`
+/// state, `{#for c in cards}` loops, `{c.title}` field access, and
+/// `Card { ... }` construction. Populate the registry with
+/// [`load_imported_nominals`] before calling.
+///
+/// When the registry is empty this delegates to the same emit path as
+/// [`compose_lib_rs`] — byte-for-byte identical output, so the four
+/// pre-R3 examples regenerate unchanged.
+pub fn compose_lib_rs_with_nominals(
+    expanded: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+    mount_selector: &str,
+    header_source_label: Option<&str>,
+) -> EmitResult<String> {
     let root = match expanded.components.first() {
         Some(c) => c,
         None => {
@@ -90,7 +114,7 @@ pub fn compose_lib_rs(
         }
     };
 
-    let emitted = emit_module(expanded)?;
+    let emitted = emit_module_with_nominals(expanded, nominals)?;
 
     let source_label = header_source_label.unwrap_or("(unknown source)");
     let mut out = String::new();
@@ -107,6 +131,80 @@ pub fn compose_lib_rs(
     out.push_str(&emitted);
     out.push_str(&compose_entry_wrapper(&root.name, mount_selector));
     Ok(out)
+}
+
+/// Load the classic `type Foo { ... }` definitions that a `.fitzv`
+/// imports (`from foo import Foo`) into a [`NominalRegistry`], so the
+/// WASM emitter can synthesise a Rust `struct` for each (Phase 11.7
+/// R3).
+///
+/// Unlike the SSR path — which re-emits the `from foo import Foo` line
+/// verbatim and lets the classic loader resolve `Foo` in a second
+/// pass — the `wasm-client` target produces a standalone crate with no
+/// downstream classic pass, so the nominal's field list must be loaded
+/// here and lowered to real Rust.
+///
+/// **Best-effort + MVP scope**:
+/// - Only single-segment import paths (`from card import Card`);
+///   dotted paths (`from a.b import X`) are skipped (the nominal use
+///   then rejects at emit with a clear pointer).
+/// - Only sibling `.fitz` files are read (nominal `type` decls live in
+///   classic Fitz). If the sibling is a `.fitzv`, missing, or fails to
+///   read/parse, that import is skipped silently — it may be a
+///   function-only helper module, and a genuinely-needed nominal that
+///   ends up unregistered rejects at emit with an actionable message.
+/// - Aliases are honoured: `from card import Card as Row` registers
+///   the type's fields under `Row` (the name the `.fitzv` uses).
+/// - Imported names that don't match a `type` in the sibling (e.g.
+///   imported functions) are simply not registered.
+pub fn load_imported_nominals(
+    imports: &[ExpandedViewImport],
+    base_dir: &Path,
+) -> EmitResult<NominalRegistry> {
+    use crate::ast::Stmt;
+
+    let mut registry = NominalRegistry::new();
+    for imp in imports {
+        // MVP: single-segment sibling modules only.
+        if imp.path.len() != 1 {
+            continue;
+        }
+        let stem = &imp.path[0];
+        let sibling = base_dir.join(format!("{stem}.fitz"));
+        if !sibling.is_file() {
+            continue;
+        }
+        let source = match fs::read_to_string(&sibling) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let tokens = match crate::lexer::tokenize(&source) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let program = match crate::parser::parse(tokens) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // Index the sibling's `type` decls by name.
+        for stmt in &program {
+            if let Stmt::TypeDef { name, fields, .. } = stmt {
+                // Register only the names this import actually brings in,
+                // under their local binding (alias when present).
+                for (orig, alias) in &imp.names {
+                    if orig == name {
+                        let binding = alias.clone().unwrap_or_else(|| orig.clone());
+                        let field_list: Vec<(String, crate::ast::TypeExpr)> = fields
+                            .iter()
+                            .map(|f| (f.name.clone(), f.type_.clone()))
+                            .collect();
+                        registry.insert(binding, field_list);
+                    }
+                }
+            }
+        }
+    }
+    Ok(registry)
 }
 
 /// The `#[wasm_bindgen(start)]` wrapper appended to the emitter
@@ -297,6 +395,9 @@ impl From<EmitError> for ScaffoldError {
 ///   `main.rs` CLI uses `<manifest_dir>/target/wasm-build/<bin>/`.
 /// - `expanded` — the checked view file (result of `view::expand`
 ///   + `view::check`).
+/// - `nominals` — imported classic `type` defs loaded via
+///   [`load_imported_nominals`] (Phase 11.7 R3). Pass
+///   `&NominalRegistry::new()` when the `.fitzv` imports no nominals.
 /// - `bin_name` — the sanitised crate name. Used as
 ///   `package.name` in the emitted `Cargo.toml`.
 /// - `mount_selector` — the CSS selector for the composed
@@ -308,12 +409,14 @@ impl From<EmitError> for ScaffoldError {
 pub fn write_wasm_crate_scaffold(
     crate_dir: &Path,
     expanded: &ExpandedViewFile,
+    nominals: &NominalRegistry,
     bin_name: &str,
     mount_selector: &str,
     source_label: Option<&str>,
 ) -> Result<ScaffoldResult, ScaffoldError> {
     let cargo_toml_text = compose_cargo_toml(bin_name);
-    let lib_rs_text = compose_lib_rs(expanded, mount_selector, source_label)?;
+    let lib_rs_text =
+        compose_lib_rs_with_nominals(expanded, nominals, mount_selector, source_label)?;
 
     let src_dir = crate_dir.join("src");
     fs::create_dir_all(&src_dir).map_err(|e| ScaffoldError::Io(e, src_dir.clone()))?;
@@ -554,7 +657,15 @@ component Beta {
         let tmp = tempfile::tempdir().unwrap();
         let crate_dir = tmp.path().join("web");
 
-        let result = write_wasm_crate_scaffold(&crate_dir, &expanded, "web", "#app", None).unwrap();
+        let result = write_wasm_crate_scaffold(
+            &crate_dir,
+            &expanded,
+            &NominalRegistry::new(),
+            "web",
+            "#app",
+            None,
+        )
+        .unwrap();
         assert!(result.cargo_toml.is_file(), "Cargo.toml not written");
         assert!(result.lib_rs.is_file(), "src/lib.rs not written");
         assert_eq!(result.crate_dir, crate_dir);
@@ -579,9 +690,25 @@ component Beta {
         let crate_dir = tmp.path().join("web");
 
         // First write.
-        write_wasm_crate_scaffold(&crate_dir, &expanded, "web", "#app", None).unwrap();
+        write_wasm_crate_scaffold(
+            &crate_dir,
+            &expanded,
+            &NominalRegistry::new(),
+            "web",
+            "#app",
+            None,
+        )
+        .unwrap();
         // Second write with identical inputs — must not error.
-        let result = write_wasm_crate_scaffold(&crate_dir, &expanded, "web", "#app", None).unwrap();
+        let result = write_wasm_crate_scaffold(
+            &crate_dir,
+            &expanded,
+            &NominalRegistry::new(),
+            "web",
+            "#app",
+            None,
+        )
+        .unwrap();
         assert!(result.cargo_toml.is_file());
         assert!(result.lib_rs.is_file());
     }
@@ -662,6 +789,99 @@ component Card {
                 .count(),
             2,
             "both components must have mount_into(root)"
+        );
+    }
+
+    // ---- Phase 11.7 R3 — load_imported_nominals -------------------
+
+    use crate::view::ast::Loc;
+
+    fn imp(path: &str, names: &[(&str, Option<&str>)]) -> ExpandedViewImport {
+        ExpandedViewImport {
+            path: vec![path.to_string()],
+            names: names
+                .iter()
+                .map(|(o, a)| (o.to_string(), a.map(|s| s.to_string())))
+                .collect(),
+            loc: Loc { line: 1, column: 1 },
+        }
+    }
+
+    #[test]
+    fn load_imported_nominals_reads_sibling_type_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("card.fitz"),
+            "type Card {\n  id: Int\n  title: Str\n}\n",
+        )
+        .unwrap();
+        let imports = vec![imp("card", &[("Card", None)])];
+        let reg = load_imported_nominals(&imports, tmp.path()).unwrap();
+        assert!(reg.contains("Card"), "Card must be registered");
+        assert!(!reg.is_empty());
+    }
+
+    #[test]
+    fn load_imported_nominals_honours_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("card.fitz"), "type Card {\n  id: Int\n}\n").unwrap();
+        let imports = vec![imp("card", &[("Card", Some("Row"))])];
+        let reg = load_imported_nominals(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.contains("Row"),
+            "aliased import must register under the alias"
+        );
+        assert!(
+            !reg.contains("Card"),
+            "the original name is not the local binding under an alias"
+        );
+    }
+
+    #[test]
+    fn load_imported_nominals_skips_missing_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No card.fitz on disk.
+        let imports = vec![imp("card", &[("Card", None)])];
+        let reg = load_imported_nominals(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.is_empty(),
+            "missing sibling must yield an empty registry"
+        );
+    }
+
+    #[test]
+    fn load_imported_nominals_skips_fn_only_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A helper module with no `type` decls — the imported name is a
+        // function, so it must NOT be registered as a nominal.
+        fs::write(
+            tmp.path().join("helpers.fitz"),
+            "fn double(n: Int) -> Int {\n  return n * 2\n}\n",
+        )
+        .unwrap();
+        let imports = vec![imp("helpers", &[("double", None)])];
+        let reg = load_imported_nominals(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.is_empty(),
+            "a function import must not register a nominal"
+        );
+    }
+
+    #[test]
+    fn load_imported_nominals_registers_only_imported_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Sibling declares two types; only Card is imported.
+        fs::write(
+            tmp.path().join("card.fitz"),
+            "type Card {\n  id: Int\n}\ntype Board {\n  next_id: Int\n}\n",
+        )
+        .unwrap();
+        let imports = vec![imp("card", &[("Card", None)])];
+        let reg = load_imported_nominals(&imports, tmp.path()).unwrap();
+        assert!(reg.contains("Card"));
+        assert!(
+            !reg.contains("Board"),
+            "only the imported name is registered, not every type in the sibling"
         );
     }
 }

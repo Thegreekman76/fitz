@@ -229,6 +229,88 @@ completo en `docs/deudas-post-5b.md`. Ver también:
 
 *(vacía — próximas entradas van acá antes del siguiente bump)*
 
+## [v0.21.8] — 2026-07-19 — Phase 11.7 (R3): tipos nominales en el target WASM
+
+**Patch release aditivo** — cierra el gap foundational de **nominales
+en WASM** (R3 prereq del kanban SPA port). El target **client-WASM**
+de `.fitzv` ya acepta un `type` classic importado como ciudadano de
+primera clase: `List<Card>` como state, `{#for c in cards}`, field
+access `{c.title}`, construcción `Card { ... }` + mutación live de la
+lista, y keyed `<Child />` cuyos props primitivos salen de los campos
+del nominal. Antes `type_expr_to_rust` rechazaba todo nominal citando
+"Phase 11.6+/11.7+".
+
+```fitzv
+from card import Card
+
+component App {
+  state { cards: List<Card> = [] next_id: Int = 1 }
+  event add() { cards.push(Card { id: next_id, title: "Task", done: false }) }
+  <template>
+    {#for c in cards}
+      <CardRow key="{c.id}" n="{c.id}" title="{c.title}" />
+    {/for}
+  </template>
+}
+```
+
+**Por qué era el linchpin**: el SSR emitter "hace trampa" — reemite el
+`from card import Card` verbatim y difiere toda resolución nominal al
+loader classic en un segundo pass. El target WASM produce un crate
+`wasm32` standalone sin segundo pass classic, así que **cada
+touchpoint nominal tiene que bajar a Rust real inline**: un `struct`
+de verdad, field access de verdad, struct literal de verdad. El
+pipeline view no carga los bodies de los `.fitz` siblings (los imports
+son name-only, el checker registra nominales como stubs opacos), así
+que R3 **carga el `type Card` del sibling** (lexer + parser → `Stmt::
+TypeDef`) y sintetiza el struct Rust en el bundle.
+
+**Cambios técnicos**:
+- **`src/view/codegen_wasm.rs`** (~180 LoC netas): tipo público
+  `NominalRegistry` (`BTreeMap<nombre_local, Vec<(campo, TypeExpr)>>`,
+  keyed por el binding local para respetar alias); `emit_module_with_
+  nominals` (delega desde `emit_module` con registro vacío → los 4
+  ejemplos pre-R3 quedan byte-a-byte idénticos); `emit_nominal_structs`
+  emite `#[allow(dead_code)] #[derive(Clone)] pub struct Card { ... }`
+  (dead_code item-level porque un `type` puede tener campos que el
+  template no lee; Clone porque `emit_for` snapshotea con `.iter().
+  cloned()`); `type_expr_to_rust` acepta nominales registrados;
+  `emit_for` itera `List<nominal>`; `lower_expr` gana arms `Str` /
+  `Field` (`obj.field.clone()`) / `StructLit` (`Card { f: v, ... }`);
+  `lower_child_prop_value` acepta field access; `lower_stmt` soporta
+  `<state_list>.push(<expr>)` + `.clear()` (mutación live → la
+  reconciliation de R2b corre de verdad, no sobre una lista constante);
+  `RenderCtx` thread-ea el registry.
+- **`src/view/wasm_build.rs`** (~90 LoC): `load_imported_nominals`
+  (resuelve el `.fitz` sibling single-segment relativo al `.fitzv`,
+  lexea + parsea, extrae `Stmt::TypeDef` de los nombres importados,
+  respeta alias; best-effort: sibling faltante / fn-only / dotted-path
+  se saltean); `compose_lib_rs_with_nominals` (delega desde
+  `compose_lib_rs`); `write_wasm_crate_scaffold` gana un param
+  `&NominalRegistry`.
+- **`src/main.rs`**: `build_wasm_client_cmd` carga los nominales del
+  dir del `.fitzv` de entrada antes de scaffoldear.
+- **`src/view/mod.rs`**: re-exporta `NominalRegistry`,
+  `emit_module_with_nominals`, `load_imported_nominals`,
+  `compose_lib_rs_with_nominals`.
+
+**Tests** (+18): 8 unit `phase_11_7_r3_*` (struct emission, `Vec<Card>`
+state, `{#for}` snapshot + loop var, field-access interpolación + key,
+struct-lit + push, keyed dynamic child, unregistered-nominal reject,
+empty-registry no-struct) + 5 unit `load_imported_nominals_*` (lee
+fields, alias, sibling faltante, fn-only, solo nombres importados) + 1
+test viejo repunteado a R3. **Ejemplo runnable nuevo**
+`examples/view/nominal-list/` (`card.fitz` + `App.fitzv` con `App` +
+`CardRow`, compila a WASM real end-to-end con cero warnings) + smoke
+`tests/view_nominal_list_wasm_smoke.rs`.
+
+**Deuda residual derivada (hacia el kanban completo)**: R3 trae los
+*tipos* nominales. El kanban además necesita `{#for}` sobre el
+resultado de un fn call (`{#for c in cards_in(cards, "todo")}`),
+`.map`/`.filter` + closures en event bodies, e imported classic helper
+fns transpiladas al crate WASM (`cards_in`, `move_one`, ...). Ese es el
+próximo slice (imported-fn support). El target SSR ya los soporta.
+
 ## [v0.21.7] — 2026-07-18 — Phase 11.7 (R2b): keyed `<Child />` composition dentro de `{#for}` en el target WASM
 
 **Patch release aditivo** — el último slice del "rendering core" de

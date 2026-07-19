@@ -14731,9 +14731,11 @@ instancia (su state local sobrevive el re-render del parent),
 una key nueva la crea, y las keys que desaparecen de la lista se
 evictan (reconciliation). Así cada child en el loop conserva su
 propio state — igual que la persistencia de sites estáticos, pero
-por-key. Hoy aplica a `List<primitive>`; `List<nominal>` (lo que
-el kanban necesita) espera soporte de nominales en WASM (R3).
-Ejemplo runnable: `examples/view/keyed-composition/`.
+por-key. Aplica a `List<primitive>` y — desde R3 (v0.21.8) — a
+`List<nominal>` (un `type` classic importado): `{#for c in cards}`
++ field access `{c.title}` + keyed `<Child key="{c.id}" />`.
+Ejemplos runnable: `examples/view/keyed-composition/` (primitivos)
+y `examples/view/nominal-list/` (nominales).
 
 ### Estilos scoped
 
@@ -14968,9 +14970,9 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
 - **`{#if}` / `{#for}` en el target WASM** — **CERRADO en Phase
   11.7.b (v0.21.6)**: `{#if}` (comparaciones + `&&`/`||`/`!` +
   `{#else}`) y `{#for}` sobre `List<primitive>` ya compilan a WASM.
-  Ejemplo: `examples/view/control-flow/`. **Deferido**: `{#for}`
-  sobre `List<nominal>` (ej `List<Card>`, lo que el kanban
-  necesita) espera soporte de tipos nominales en WASM (R3 prereq).
+  Ejemplo: `examples/view/control-flow/`. `{#for}` sobre
+  `List<nominal>` (ej `List<Card>`) cerró en R3 (v0.21.8) — ver más
+  abajo.
 - **`<Child />` composition dentro de `{#for}`** (keyed dynamic
   children) — **CERRADO en Phase 11.7.b R2b (v0.21.7)**: un
   `<Child key="{x}" ... />` dentro de un `{#for x in items}` sobre
@@ -14980,9 +14982,22 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   (`HashMap<String, Rc<Child>>`) — la instancia (y su state local)
   se reusa entre re-renders, y un sweep de reconciliation evicta
   las keys que desaparecen. Ejemplo runnable:
-  `examples/view/keyed-composition/`. **Deferido**: `{#for}` sobre
-  `List<nominal>` (kanban, R3); event bodies que mutan la lista
-  (11.4.c debt — la lista del ejemplo es constante).
+  `examples/view/keyed-composition/`.
+- **Tipos nominales en el target WASM** — **CERRADO en Phase 11.7
+  R3 (v0.21.8)**: un `type` classic importado ya es ciudadano de
+  primera clase en WASM — `List<Card>` como state, `{#for c in
+  cards}`, field access `{c.title}`, construcción `Card { ... }` +
+  `<state_list>.push(...)` (mutación live de la lista → la
+  reconciliation corre de verdad), y keyed `<Child key="{c.id}"
+  title="{c.title}" />` con props primitivos desde campos del
+  nominal. El emitter carga el `type` del `.fitz` sibling y sintetiza
+  el struct Rust inline. Ejemplo runnable:
+  `examples/view/nominal-list/`. **Deferido hacia el kanban
+  completo** (próximo slice — imported-fn support): `{#for}` sobre el
+  resultado de un fn call (`{#for c in cards_in(cards, "todo")}`),
+  `.map`/`.filter` + closures en event bodies, e imported classic
+  helper fns transpiladas al crate WASM. El target SSR ya los
+  soporta.
 - **Cross-component event bubbling** — la K-1 shipped en
   `fitz-liveviews` v0.5.0 con `dispatch_to(...)` explicit
   event API; implicit bubbling (`@parent.event` decorator)
