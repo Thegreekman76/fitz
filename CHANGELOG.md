@@ -9,6 +9,38 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.23.0] — 2026-07-19 — Payload bubbling: `<Child @event />` carries data up to the parent
+
+**Minor release** — rounds out the event-bubbling MVP shipped in v0.22.0
+(Phase 11.7.c). A `<Child @event="handler" />` bubble now **carries a
+payload**, so the parent can tell which child fired and read its
+per-item data. Entirely additive to the `.fitzv` → WASM emitter
+(WASM-only — the SSR target already rejects `@event` on a child).
+Non-bubbled components emit byte-for-byte identical; the nine other view
+examples regenerate unchanged.
+
+### What changed
+
+- The child's bubble callback slot goes from `Box<dyn Fn()>` to
+  `Box<dyn Fn(&HashMap<String, String>)>`.
+- A bubbled event **forwards the payload it received** up to the parent
+  — the same `data-flv-value-*` machinery R3.5b uses for plain
+  click/form handlers. A bubbled handler always takes a `payload` param
+  (so it can forward it), even when its own body never reads it.
+- The parent handler receives the payload when it consumes one
+  (`payload["k"]` / `payload.has("k")`); a parent handler that ignores
+  the payload still works (the closure drops it).
+- **No new syntax**: the child chooses what to expose via which
+  `data-flv-value-*` attributes it sets on the clickable element.
+
+The `examples/view/event-bubbling` demo is updated: three
+`<Item @choose="on_pick" />` children each bubble their own `label`, and
+`on_pick` reads `payload["label"]` to know which item was picked.
+
+Change contained to `src/view/codegen_wasm.rs`. Residual (per demand):
+the payload is a `Map<Str, Str>` (numbers/bools arrive as strings), and
+a typed payload / whole-child-state bubble would be a later slice.
+
 ## [v0.22.0] — 2026-07-19 — Phase 11.7 R3.5 + Frente 2: the kanban as a WASM SPA + full `<Child />` composition
 
 **Major release** — closes **Phase 11.7** (client-side dynamic

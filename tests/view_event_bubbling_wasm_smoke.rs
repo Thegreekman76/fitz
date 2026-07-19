@@ -72,24 +72,24 @@ fn regenerate_event_bubbling_lib_rs() {
 
     let checks: &[(&str, &str)] = &[
         (
-            "__on_choose: RefCell<Option<Box<dyn Fn()>>>,",
-            "the child gets a callback slot for the bubbled event",
+            "__on_choose: RefCell<Option<Box<dyn Fn(&std::collections::HashMap<String, String>)>>>,",
+            "the child's bubble callback slot carries a payload",
         ),
         (
             "__on_choose: RefCell::new(None),",
             "the child inits the callback slot to None",
         ),
         (
-            "if let Some(__cb) = self.__on_choose.borrow().as_ref() { __cb(); }",
-            "the child's choose handler fires the bubble callback",
+            "if let Some(__cb) = self.__on_choose.borrow().as_ref() { __cb(payload); }",
+            "the child's choose handler forwards its payload to the bubble callback",
         ),
         (
-            ".__on_choose.borrow_mut() = Some(Box::new(move || {",
-            "the parent registers the callback on the child instance",
+            ".__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {",
+            "the parent registers a payload-carrying callback on the child instance",
         ),
         (
-            "App::on_pick(&__parent);",
-            "the callback calls the parent handler",
+            "App::on_pick(&__parent, __pl);",
+            "the callback passes the bubbled payload to the parent handler",
         ),
     ];
     for (needle, why) in checks {

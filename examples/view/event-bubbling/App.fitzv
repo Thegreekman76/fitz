@@ -1,39 +1,48 @@
-// Phase 11.7.c — child→parent event bubbling on the client-WASM target.
+// Phase 11.7.c — child→parent event bubbling on the client-WASM target,
+// now WITH a payload (Phase 11.7 payload bubbling).
 //
 // A `<Child @event="handler" />` binding lets a child component notify
 // its parent: when the child's `event` fires, the parent's bound handler
 // runs. This rounds out `<Child />` composition (props go down; events
-// bubble up).
+// bubble up). And the bubble now CARRIES the child's event payload, so
+// the parent can tell WHICH child fired + read its per-item data.
 //
-// Here three `<Item @choose="on_pick" />` children each render a button.
-// Clicking a button fires the Item's `choose` event, which bubbles to
-// the parent App's `on_pick` handler:
+// Here three `<Item label="Apple" @choose="on_pick" />` children each
+// render a button that carries its own `label` in a `data-flv-value-*`
+// attribute. Clicking a button fires the Item's `choose` event, which
+// bubbles to the parent App's `on_pick` handler WITH the payload:
 //
 //   - Parent binds `<Item label="Apple" @choose="on_pick" />`.
-//   - Child `Item` declares `event choose()` (fired by its own
-//     `@click="choose"`).
-//   - When `choose` runs, the WASM emitter fires the registered parent
-//     callback → `App::on_pick` runs + App re-renders.
+//   - Child `Item` fires `choose` via `data-flv-click="choose"` +
+//     `data-flv-value-label="{label}"` — the click builds a payload
+//     `{ "label": "Apple" }`.
+//   - `choose` bubbles that payload up: the WASM emitter fires the
+//     registered parent callback → `App::on_pick(&parent, payload)`.
+//   - `on_pick` reads `payload["label"]`, so it knows which item was
+//     picked (not just that SOMETHING was).
 //
-// MVP LIMIT (no-payload bubble): the bubble carries no data, so `on_pick`
-// can't tell WHICH item was clicked — it just counts. Passing the child's
-// state up as a payload is a later slice.
+// The payload is the SAME `data-flv-value-*` machinery R3.5b uses for
+// plain click handlers — a bubbled event just forwards the payload it
+// received up to its parent. No new syntax: the child chooses what to
+// expose by which `data-flv-value-*` attributes it sets.
 
 component App {
   state {
     clicks: Int = 0
-    status: Str = "click an item"
+    last: Str = "none"
   }
 
   event on_pick() {
     clicks = clicks + 1
-    status = "an item bubbled its choose event"
+    if (payload.has("label")) {
+      last = payload["label"]
+    }
   }
 
   <template>
     <div class="picker">
-      <h1>Event bubbling on WASM</h1>
-      <p class="status">{status} — clicks: {clicks}</p>
+      <h1>Event bubbling with payload on WASM</h1>
+      <p class="status">last picked: {last} — clicks: {clicks}</p>
       <div class="items">
         <Item label="Apple" @choose="on_pick" />
         <Item label="Banana" @choose="on_pick" />
@@ -57,7 +66,7 @@ component Item {
   event choose() {}
 
   <template>
-    <button class="item" @click="choose">{label}</button>
+    <button class="item" data-flv-click="choose" data-flv-value-label="{label}">{label}</button>
   </template>
 
   <style scoped>

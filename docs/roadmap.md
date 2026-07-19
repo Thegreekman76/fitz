@@ -9899,12 +9899,22 @@ de 3 releases:
 - ✅ **11.7.c (v0.22.0)** — event bubbling `<Child @event="handler" />`
   (callback slot por event bindeado, whole-file analysis, checker;
   MVP sin payload). Ejemplo `examples/view/event-bubbling`.
+- ✅ **payload bubbling (v0.23.0, 2026-07-19)** — el bubble de 11.7.c
+  ahora lleva payload: el callback slot pasa a `Box<dyn Fn(&HashMap<
+  String, String>)>`, un event que burbujea reenvía hacia arriba el
+  payload que recibió (mismo mecanismo `data-flv-value-*` de los
+  click/form handlers), y el handler del parent lo lee con
+  `payload["k"]` / `payload.has("k")`. Cambio contenido en
+  `src/view/codegen_wasm.rs` (WASM-only; SSR ya rechaza `@event` en
+  child). Ejemplo `examples/view/event-bubbling` actualizado
+  (tres `<Item @choose="on_pick" />` que burbujean su `label`).
+  Componentes no-bubbled emiten byte-a-byte idéntico.
 - ✅ **11.7.d (v0.22.0)** — `<slot>fallback</slot>` + `<Child>content
   </Child>` (child `__slot` callback + método parent `__render_slot_<n>`
   en scope del parent; MVP default slot, sin `<Child />` anidado).
   Ejemplo `examples/view/slots`. **Cierra Phase 11.7 entera** para el
   target client-WASM. Deuda residual en `docs/deudas-post-5b.md`
-  (payload bubbling, named slots, `<Child />` en slot content).
+  (named slots, `<Child />` en slot content, cross-file `<Child />`).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

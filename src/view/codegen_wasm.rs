@@ -584,7 +584,7 @@ fn emit_component_impl(
         out,
     )?;
     emit_event_handlers(component, &state_names, this_bubbled, out)?;
-    emit_mount_and_render(component, &state_names, file, nominals, out)?;
+    emit_mount_and_render(component, &state_names, file, nominals, this_bubbled, out)?;
     if let Some(style) = &component.style {
         emit_style_helper(&component.name, style, out);
     }
@@ -712,9 +712,17 @@ fn emit_struct_and_new(
     }
     // Phase 11.7.c — one callback slot per bubbled event, set by the
     // parent that binds `<ThisComponent @event="..." />` and invoked by
-    // this component's own `event` handler when it fires.
+    // this component's own `event` handler when it fires. Phase 11.7
+    // payload bubbling — the callback carries the child's event payload
+    // (`&HashMap<String, String>`), so the parent handler can tell which
+    // child fired + read its `data-flv-value-*` data.
     for ev in this_bubbled {
-        writeln!(out, "    __on_{}: RefCell<Option<Box<dyn Fn()>>>,", ev).unwrap();
+        writeln!(
+            out,
+            "    __on_{}: RefCell<Option<Box<dyn Fn(&std::collections::HashMap<String, String>)>>>,",
+            ev
+        )
+        .unwrap();
     }
     // Phase 11.7.d — the parent-provided slot-content renderer. `None`
     // when the parent didn't fill the slot (the `<slot />` renders its
@@ -821,7 +829,11 @@ fn emit_event_handler(
     // zero-arg signature, so the pre-R3.5b examples emit byte-for-byte
     // unchanged. The `data-flv-click` / `data-flv-submit` wiring builds
     // the payload and calls with the matching arity.
-    let uses_payload = handler_uses_payload(handler);
+    //
+    // Phase 11.7 payload bubbling — a bubbled handler ALSO takes the
+    // `payload` param (even with a body that never reads it), so it can
+    // forward the payload it received up to the parent via `__cb(payload)`.
+    let uses_payload = handler_uses_payload(handler) || this_bubbled.contains(&handler.name);
     if uses_payload {
         writeln!(
             out,
@@ -847,10 +859,12 @@ fn emit_event_handler(
     writeln!(out, "        self.render();").unwrap();
     // Phase 11.7.c — if a parent bound `@<name>` on this component, fire
     // the registered bubble callback after the handler ran + re-rendered.
+    // Phase 11.7 payload bubbling — forward this handler's `payload` (the
+    // param the bubbled signature always carries) up to the parent.
     if this_bubbled.contains(&handler.name) {
         writeln!(
             out,
-            "        if let Some(__cb) = self.__on_{}.borrow().as_ref() {{ __cb(); }}",
+            "        if let Some(__cb) = self.__on_{}.borrow().as_ref() {{ __cb(payload); }}",
             handler.name
         )
         .unwrap();
@@ -918,6 +932,7 @@ fn emit_mount_and_render(
     state_names: &[String],
     file: &ExpandedViewFile,
     nominals: &NominalRegistry,
+    this_bubbled: &std::collections::BTreeSet<String>,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
@@ -995,6 +1010,7 @@ fn emit_mount_and_render(
             file,
             nominals,
             &component.events,
+            this_bubbled,
         );
         for root_node in &template.roots {
             emit_template_node(root_node, "root", &mut ctx, out)?;
@@ -1027,6 +1043,7 @@ fn emit_mount_and_render(
             file,
             nominals,
             &component.events,
+            this_bubbled,
         );
         for node in content {
             emit_template_node(node, "__target", &mut ctx, out)?;
@@ -1082,6 +1099,13 @@ struct RenderCtx<'a> {
     /// `data-flv-click="handler"` binding can resolve the target and
     /// know whether it takes a `payload` argument.
     events: &'a [ExpandedEventHandler],
+    /// Phase 11.7 payload bubbling — this component's event names that
+    /// some parent binds via `<ThisComponent @event="..." />`. A bubbled
+    /// handler always carries a `payload` param (so it can forward the
+    /// payload it received up to the parent), even when its own body
+    /// doesn't read `payload`. `event_takes_payload` consults this so
+    /// every call site emits the matching arity.
+    this_bubbled: &'a std::collections::BTreeSet<String>,
     /// Phase 11.7.d — slot-content node lists accumulated from
     /// `<Child>content</Child>` sites during the render walk. Each entry
     /// becomes a `__render_slot_<idx>` method; the index is the position
@@ -1098,6 +1122,7 @@ impl<'a> RenderCtx<'a> {
         file: &'a ExpandedViewFile,
         nominals: &'a NominalRegistry,
         events: &'a [ExpandedEventHandler],
+        this_bubbled: &'a std::collections::BTreeSet<String>,
     ) -> Self {
         RenderCtx {
             component_name,
@@ -1111,6 +1136,7 @@ impl<'a> RenderCtx<'a> {
             locals: Vec::new(),
             nominals,
             events,
+            this_bubbled,
             slot_methods: Vec::new(),
         }
     }
@@ -1895,29 +1921,36 @@ fn emit_child_component(
     // callback on the child that calls the PARENT's handler when the
     // child's event fires. The parent handler is validated to exist
     // (and its payload arity resolved) via `handler_takes_payload`.
+    //
+    // Phase 11.7 payload bubbling — the callback carries the child's
+    // event payload (`__pl: &HashMap<String, String>`). It's passed on
+    // to the parent handler when the parent handler consumes a payload;
+    // otherwise the closure ignores it (`|_|`) to avoid an unused-var
+    // warning while keeping the uniform slot type.
     for binding in events {
         let takes_payload = handler_takes_payload(ctx, &binding.handler_name)?;
         writeln!(out, "        {{").unwrap();
         writeln!(out, "            let __parent = self.clone();").unwrap();
-        writeln!(
-            out,
-            "            *{}.__on_{}.borrow_mut() = Some(Box::new(move || {{",
-            child_var, binding.event_name
-        )
-        .unwrap();
         if takes_payload {
             writeln!(
                 out,
-                "                let __pl = std::collections::HashMap::<String, String>::new();"
+                "            *{}.__on_{}.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {{",
+                child_var, binding.event_name
             )
             .unwrap();
             writeln!(
                 out,
-                "                {}::{}(&__parent, &__pl);",
+                "                {}::{}(&__parent, __pl);",
                 ctx.component_name, binding.handler_name
             )
             .unwrap();
         } else {
+            writeln!(
+                out,
+                "            *{}.__on_{}.borrow_mut() = Some(Box::new(move |_: &std::collections::HashMap<String, String>| {{",
+                child_var, binding.event_name
+            )
+            .unwrap();
             writeln!(
                 out,
                 "                {}::{}(&__parent);",
@@ -2050,9 +2083,14 @@ fn emit_event_attr(
 }
 
 /// Resolve `handler_name` to a declared event of the current component
-/// and report whether it takes a `payload` argument (Phase 11.7
-/// R3.5b.1). Errors if the name is not a declared `event` — catching a
-/// typo in a `@click` / `data-flv-click` binding at emit time.
+/// and report whether its emitted signature takes a `payload` param.
+/// True when the body reads `payload` (Phase 11.7 R3.5b.1) OR the event
+/// is bubbled to a parent (Phase 11.7 payload bubbling — a bubbled
+/// handler always carries a payload so it can forward it up). Every call
+/// site that emits a call to this handler consults this so the arity
+/// matches its actual signature. Errors if the name is not a declared
+/// `event` — catching a typo in a `@click` / `data-flv-click` binding at
+/// emit time.
 fn handler_takes_payload(ctx: &RenderCtx, handler_name: &str) -> EmitResult<bool> {
     let handler = ctx
         .events
@@ -2066,7 +2104,7 @@ fn handler_takes_payload(ctx: &RenderCtx, handler_name: &str) -> EmitResult<bool
             ),
             context: format!("template of component `{}`", ctx.component_name),
         })?;
-    Ok(handler_uses_payload(handler))
+    Ok(handler_uses_payload(handler) || ctx.this_bubbled.contains(handler_name))
 }
 
 /// Emit a `data-flv-click="handler"` click listener (Phase 11.7
@@ -5524,6 +5562,10 @@ component Card {
 
     #[test]
     fn phase_11_7_c_child_event_bubbles_to_parent() {
+        // Parent handler `on_hit` does NOT read `payload`, so the bubble
+        // closure drops the payload (`|_|`) and calls the parent with the
+        // zero-payload arity — but the slot still carries a payload type,
+        // and the child (whose event IS bubbled) forwards `payload`.
         let src = r#"component App {
   state { hits: Int = 0 }
   event on_hit() { hits = hits + 1 }
@@ -5536,17 +5578,88 @@ component Kid {
 }"#;
         let out = emit_module(&parse_expand(src)).unwrap();
         assert!(
-            out.contains("__on_ping: RefCell<Option<Box<dyn Fn()>>>,"),
-            "the child gets a callback slot for the bubbled event:\n{out}"
+            out.contains(
+                "__on_ping: RefCell<Option<Box<dyn Fn(&std::collections::HashMap<String, String>)>>>,"
+            ),
+            "the child's bubble callback slot carries a payload:\n{out}"
+        );
+        // Kid's `ping` is bubbled → its signature takes a payload param
+        // even though its body never reads it, so it can forward it.
+        assert!(
+            out.contains(
+                "fn ping(self: &Rc<Self>, payload: &std::collections::HashMap<String, String>) {"
+            ),
+            "a bubbled handler takes a payload param to forward:\n{out}"
         );
         assert!(
-            out.contains("if let Some(__cb) = self.__on_ping.borrow().as_ref() { __cb(); }"),
-            "the child's ping handler fires the callback:\n{out}"
+            out.contains("if let Some(__cb) = self.__on_ping.borrow().as_ref() { __cb(payload); }"),
+            "the child's ping handler forwards its payload to the callback:\n{out}"
         );
         assert!(
-            out.contains(".__on_ping.borrow_mut() = Some(Box::new(move || {")
-                && out.contains("App::on_hit(&__parent);"),
-            "the parent wires the callback to its handler:\n{out}"
+            out.contains(
+                ".__on_ping.borrow_mut() = Some(Box::new(move |_: &std::collections::HashMap<String, String>| {"
+            ) && out.contains("App::on_hit(&__parent);"),
+            "a payload-ignoring parent handler drops the bubbled payload:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_payload_bubbles_to_parent_handler() {
+        // Parent `on_pick` READS the payload, and the child sources it
+        // from a `data-flv-value-*` attribute. The bubbled payload reaches
+        // the parent handler intact.
+        let src = r#"component App {
+  state { last: Str = "none" }
+  event on_pick() { if (payload.has("id")) { last = payload["id"] } }
+  <template><div><Kid @choose="on_pick" /></div></template>
+}
+component Kid {
+  state { id: Str = "" }
+  event choose() {}
+  <template><button data-flv-click="choose" data-flv-value-id="{id}">{id}</button></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        // The child's click listener builds the payload from the DOM attr.
+        assert!(
+            out.contains("__payload.insert(\"id\".to_string(), __evt_el.get_attribute(")
+                && out.contains("Kid::choose(&__self_clone, &__payload);"),
+            "the child sources its payload from data-flv-value-id:\n{out}"
+        );
+        // The child forwards that payload up.
+        assert!(
+            out.contains(
+                "if let Some(__cb) = self.__on_choose.borrow().as_ref() { __cb(payload); }"
+            ),
+            "the child forwards the payload to the bubble callback:\n{out}"
+        );
+        // The parent's payload-reading handler receives it.
+        assert!(
+            out.contains(
+                ".__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {"
+            ) && out.contains("App::on_pick(&__parent, __pl);"),
+            "the parent handler receives the bubbled payload:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_non_bubbled_component_has_no_payload_slot() {
+        // No parent binds `@choose`, so Kid gains no callback slot and its
+        // handler keeps its zero-arg (no-payload) signature.
+        let src = r#"component App {
+  state { x: Int = 0 }
+  event noop() { x = 0 }
+  <template><div><Kid /></div></template>
+}
+component Kid {
+  state { n: Int = 0 }
+  event choose() { n = n + 1 }
+  <template><button @click="choose">{n}</button></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
+        assert!(!out.contains("__on_choose"), "no callback slot:\n{out}");
+        assert!(
+            out.contains("fn choose(self: &Rc<Self>) {"),
+            "a non-bubbled handler that ignores payload stays zero-arg:\n{out}"
         );
     }
 

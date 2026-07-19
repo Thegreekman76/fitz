@@ -15008,11 +15008,18 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   (`"{next_id}"`). El resultado end-to-end vive en
   `examples/view/kanban/` (~57 KB raw / ~21.5 KB gzipped) — los mismos
   convenios `data-flv-*` sirven a los targets SSR y WASM.
-- **Event bubbling child→parent** — **CERRADO en Phase 11.7.c
-  (v0.22.0)**: `<Child @event="handler" />` dispara un handler del
-  parent cuando el event del child se emite. Ejemplo:
-  `examples/view/event-bubbling/`. MVP: el bubble no lleva payload
-  (el parent no distingue qué child lo disparó).
+- **Event bubbling child→parent con payload** — **CERRADO en
+  Phase 11.7.c (v0.22.0) + payload bubbling (v0.23.0)**:
+  `<Child @event="handler" />` dispara un handler del parent cuando
+  el event del child se emite, **llevando un payload** (`Map<Str,
+  Str>`) para que el parent sepa qué child lo disparó. El payload es
+  el mismo mecanismo `data-flv-value-*` de los click/form handlers:
+  un event que burbujea simplemente reenvía hacia arriba el payload
+  que recibió. El child elige qué exponer con sus atributos
+  `data-flv-value-*`; el handler del parent lo lee con
+  `payload["k"]` / `payload.has("k")` (un handler que lo ignora
+  también funciona). Ejemplo: `examples/view/event-bubbling/`
+  (tres `<Item @choose="on_pick" />` que burbujean su `label`).
 - **`<slot />` con fallback** — **CERRADO en Phase 11.7.d
   (v0.22.0)**: un child expone un hueco `<slot>fallback</slot>` que
   el parent llena con `<Child>content</Child>`, o se muestra el
@@ -15279,12 +15286,14 @@ con todo el stack del lenguaje + ecosistema:
 
 **Lo que sigue** (post-Fase 11 nortes):
 
-- **Phase 11.7 — Client-side dynamic capabilities + kanban SPA
-  port** — reactive prop propagation from parent state to
-  mounted child, `<Child />` composition inside `{#for}` bodies,
-  event bubbling framework-level, `<slot />` fallback,
-  persistent child state, drag-drop primitives. Sub-fase
-  siguiente al Phase 11.9 pedagogic docs.
+- **Phase 11.7 — Client-side dynamic capabilities** — **CERRADA
+  entera** (v0.21.5 → v0.23.0): reactive props, `{#if}`/`{#for}`,
+  nominales en WASM, imported fns, click/form payload, event
+  bubbling **con payload** (v0.23.0), `<slot />` con fallback, y el
+  kanban como SPA WASM. La superficie de composición WASM está
+  completa. Refinamientos abiertos (según demanda): named slots
+  (`<slot name="X" />`), `<Child />` cross-file, drag-drop
+  primitives.
 - **Companion UI library de components reusables** (grid,
   forms, table, modal, ...) sobre `fitz-liveviews` — anotada
   como candidato en `docs/deudas-post-5b.md`. Driver concreto:

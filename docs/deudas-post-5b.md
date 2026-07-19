@@ -19,10 +19,23 @@ target WASM (el SSR ya las tenía o las rechaza con puntero claro).
 **Deuda residual nueva derivada** (NO bloquea uso real; abre items
 para slices posteriores según demanda):
 
-- **Payload bubbling** — el bubble de 11.7.c (MVP) no lleva data, así
-  que el parent no distingue QUÉ child lo disparó (los N `<Item
-  @choose="on_pick" />` llaman al mismo `on_pick`). El próximo slice
-  pasaría el state del child (o un payload explícito) al handler.
+- **Payload bubbling** — 🟢 **CERRADO 2026-07-19 (v0.23.0)**. El bubble
+  de 11.7.c ahora lleva payload. El callback slot pasó de `Box<dyn
+  Fn()>` a `Box<dyn Fn(&HashMap<String, String>)>`; un event que
+  burbujea reenvía hacia arriba el payload que recibió (el mismo
+  `data-flv-value-*` de los click/form handlers de R3.5b), y el handler
+  del parent lo lee con `payload["k"]` / `payload.has("k")`. Diseño: sin
+  sintaxis nueva — el child elige qué exponer con sus atributos
+  `data-flv-value-*`; un handler bubbleado siempre toma el param
+  `payload` (para poder reenviarlo) aunque su body no lo lea; el parent
+  recibe el payload solo si su handler lo consume. Cambio contenido en
+  `src/view/codegen_wasm.rs` (WASM-only; el SSR ya rechaza `@event` en
+  child). Componentes no-bubbled emiten byte-a-byte idéntico.
+  Ejemplo `examples/view/event-bubbling` actualizado (tres `<Item
+  @choose="on_pick" />` que burbujean su `label`). **Deuda residual
+  derivada**: el payload es `Map<Str, Str>` (los números/bools llegan
+  como strings, se parsean del lado del parent); un payload tipado o el
+  state completo del child sería un slice posterior si aparece demanda.
 - **Named slots** — `<slot name="X" />` rechaza en el target WASM
   (11.7.d cubre el slot default). Slot routing por nombre + múltiples
   slots por child es un slice posterior.

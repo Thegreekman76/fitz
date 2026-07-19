@@ -33,7 +33,7 @@ use web_sys::{Event, HtmlElement};
 
 pub struct App {
     clicks: RefCell<i64>,
-    status: RefCell<String>,
+    last: RefCell<String>,
     __child_slot_0: RefCell<Option<Rc<Item>>>,
     __child_slot_1: RefCell<Option<Rc<Item>>>,
     __child_slot_2: RefCell<Option<Rc<Item>>>,
@@ -44,7 +44,7 @@ impl App {
     pub fn new() -> Rc<Self> {
         Rc::new(App {
             clicks: RefCell::new(0i64),
-            status: RefCell::new("click an item".to_string()),
+            last: RefCell::new("none".to_string()),
             __child_slot_0: RefCell::new(None),
             __child_slot_1: RefCell::new(None),
             __child_slot_2: RefCell::new(None),
@@ -52,11 +52,13 @@ impl App {
         })
     }
 
-    fn on_pick(self: &Rc<Self>) {
+    fn on_pick(self: &Rc<Self>, payload: &std::collections::HashMap<String, String>) {
         let __rhs = ((*self.clicks.borrow()) + 1i64);
         *self.clicks.borrow_mut() = __rhs;
-        let __rhs = "an item bubbled its choose event".to_string();
-        *self.status.borrow_mut() = __rhs;
+        if payload.contains_key(&("label".to_string())) {
+            let __rhs = payload.get(&("label".to_string())).cloned().unwrap_or_default();
+            *self.last.borrow_mut() = __rhs;
+        }
         self.render();
     }
 
@@ -89,74 +91,76 @@ impl App {
         let __el0 = document.create_element("div").unwrap();
         __el0.set_attribute("class", "picker picker-app-c-2358986f").unwrap();
         let __el1 = document.create_element("h1").unwrap();
-        let __t2 = document.create_text_node("Event bubbling on WASM");
+        let __t2 = document.create_text_node("Event bubbling with payload on WASM");
         __el1.append_child(&__t2).unwrap();
         __el0.append_child(&__el1).unwrap();
         let __el3 = document.create_element("p").unwrap();
         __el3.set_attribute("class", "status status-app-c-2358986f").unwrap();
-        let __interp4 = format!("{}", (*self.status.borrow()));
-        let __t5 = document.create_text_node(&__interp4);
-        __el3.append_child(&__t5).unwrap();
-        let __t6 = document.create_text_node(" — clicks: ");
+        let __t4 = document.create_text_node("last picked: ");
+        __el3.append_child(&__t4).unwrap();
+        let __interp5 = format!("{}", (*self.last.borrow()));
+        let __t6 = document.create_text_node(&__interp5);
         __el3.append_child(&__t6).unwrap();
-        let __interp7 = format!("{}", (*self.clicks.borrow()));
-        let __t8 = document.create_text_node(&__interp7);
-        __el3.append_child(&__t8).unwrap();
+        let __t7 = document.create_text_node(" — clicks: ");
+        __el3.append_child(&__t7).unwrap();
+        let __interp8 = format!("{}", (*self.clicks.borrow()));
+        let __t9 = document.create_text_node(&__interp8);
+        __el3.append_child(&__t9).unwrap();
         __el0.append_child(&__el3).unwrap();
-        let __el9 = document.create_element("div").unwrap();
-        __el9.set_attribute("class", "items items-app-c-2358986f").unwrap();
         let __el10 = document.create_element("div").unwrap();
-        __el10.set_attribute("class", "__fitz-child-Item").unwrap();
-        __el9.append_child(&__el10).unwrap();
-        let __child11 = {
+        __el10.set_attribute("class", "items items-app-c-2358986f").unwrap();
+        let __el11 = document.create_element("div").unwrap();
+        __el11.set_attribute("class", "__fitz-child-Item").unwrap();
+        __el10.append_child(&__el11).unwrap();
+        let __child12 = {
             let mut __slot = self.__child_slot_0.borrow_mut();
             if __slot.is_none() { *__slot = Some(Item::new()); }
             __slot.as_ref().unwrap().clone()
         };
-        *__child11.label.borrow_mut() = "Apple".to_string();
+        *__child12.label.borrow_mut() = "Apple".to_string();
         {
             let __parent = self.clone();
-            *__child11.__on_choose.borrow_mut() = Some(Box::new(move || {
-                App::on_pick(&__parent);
+            *__child12.__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {
+                App::on_pick(&__parent, __pl);
             }));
         }
-        let __el10_html = __el10.clone().dyn_into::<HtmlElement>().unwrap();
-        __child11.mount_into(__el10_html).unwrap();
-        let __el12 = document.create_element("div").unwrap();
-        __el12.set_attribute("class", "__fitz-child-Item").unwrap();
-        __el9.append_child(&__el12).unwrap();
-        let __child13 = {
+        let __el11_html = __el11.clone().dyn_into::<HtmlElement>().unwrap();
+        __child12.mount_into(__el11_html).unwrap();
+        let __el13 = document.create_element("div").unwrap();
+        __el13.set_attribute("class", "__fitz-child-Item").unwrap();
+        __el10.append_child(&__el13).unwrap();
+        let __child14 = {
             let mut __slot = self.__child_slot_1.borrow_mut();
             if __slot.is_none() { *__slot = Some(Item::new()); }
             __slot.as_ref().unwrap().clone()
         };
-        *__child13.label.borrow_mut() = "Banana".to_string();
+        *__child14.label.borrow_mut() = "Banana".to_string();
         {
             let __parent = self.clone();
-            *__child13.__on_choose.borrow_mut() = Some(Box::new(move || {
-                App::on_pick(&__parent);
+            *__child14.__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {
+                App::on_pick(&__parent, __pl);
             }));
         }
-        let __el12_html = __el12.clone().dyn_into::<HtmlElement>().unwrap();
-        __child13.mount_into(__el12_html).unwrap();
-        let __el14 = document.create_element("div").unwrap();
-        __el14.set_attribute("class", "__fitz-child-Item").unwrap();
-        __el9.append_child(&__el14).unwrap();
-        let __child15 = {
+        let __el13_html = __el13.clone().dyn_into::<HtmlElement>().unwrap();
+        __child14.mount_into(__el13_html).unwrap();
+        let __el15 = document.create_element("div").unwrap();
+        __el15.set_attribute("class", "__fitz-child-Item").unwrap();
+        __el10.append_child(&__el15).unwrap();
+        let __child16 = {
             let mut __slot = self.__child_slot_2.borrow_mut();
             if __slot.is_none() { *__slot = Some(Item::new()); }
             __slot.as_ref().unwrap().clone()
         };
-        *__child15.label.borrow_mut() = "Cherry".to_string();
+        *__child16.label.borrow_mut() = "Cherry".to_string();
         {
             let __parent = self.clone();
-            *__child15.__on_choose.borrow_mut() = Some(Box::new(move || {
-                App::on_pick(&__parent);
+            *__child16.__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {
+                App::on_pick(&__parent, __pl);
             }));
         }
-        let __el14_html = __el14.clone().dyn_into::<HtmlElement>().unwrap();
-        __child15.mount_into(__el14_html).unwrap();
-        __el0.append_child(&__el9).unwrap();
+        let __el15_html = __el15.clone().dyn_into::<HtmlElement>().unwrap();
+        __child16.mount_into(__el15_html).unwrap();
+        __el0.append_child(&__el10).unwrap();
         root.append_child(&__el0).unwrap();
     }
 }
@@ -173,7 +177,7 @@ fn __inject_style_App_app_c_2358986f() {
 
 pub struct Item {
     label: RefCell<String>,
-    __on_choose: RefCell<Option<Box<dyn Fn()>>>,
+    __on_choose: RefCell<Option<Box<dyn Fn(&std::collections::HashMap<String, String>)>>>,
     root: RefCell<Option<HtmlElement>>,
 }
 
@@ -186,9 +190,9 @@ impl Item {
         })
     }
 
-    fn choose(self: &Rc<Self>) {
+    fn choose(self: &Rc<Self>, payload: &std::collections::HashMap<String, String>) {
         self.render();
-        if let Some(__cb) = self.__on_choose.borrow().as_ref() { __cb(); }
+        if let Some(__cb) = self.__on_choose.borrow().as_ref() { __cb(payload); }
     }
 
     pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(), JsValue> {
@@ -219,10 +223,14 @@ impl Item {
         let document = web_sys::window().unwrap().document().unwrap();
         let __el0 = document.create_element("button").unwrap();
         __el0.set_attribute("class", "item item-item-c-db46fce0").unwrap();
+        __el0.set_attribute("data-flv-value-label", &format!("{}", (*self.label.borrow()))).unwrap();
         {
             let __self_clone = self.clone();
+            let __evt_el = __el0.clone();
             let __closure = Closure::wrap(Box::new(move |_evt: Event| {
-                Item::choose(&__self_clone);
+                let mut __payload = std::collections::HashMap::<String, String>::new();
+                __payload.insert("label".to_string(), __evt_el.get_attribute("data-flv-value-label").unwrap_or_default());
+                Item::choose(&__self_clone, &__payload);
             }) as Box<dyn FnMut(Event)>);
             __el0.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
             __closure.forget();
