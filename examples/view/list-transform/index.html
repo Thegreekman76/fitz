@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — list transform (Phase 11.7 R3.5a.1)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz list transform — Phase 11.7 R3.5a.1 smoke</h1>
+    <p>
+      An <code>App.fitzv</code> component compiled to WebAssembly that
+      transforms a <code>List&lt;Int&gt;</code> entirely client-side.
+      <em>double all</em> runs
+      <code>nums = nums.map(fn(n) =&gt; n * 2)</code>, <em>keep over 5</em>
+      runs <code>nums = nums.filter(fn(n) =&gt; n &gt; 5)</code>, and the
+      "big ones" list is recomputed in the template with
+      <code>{#for m in nums.filter(...)}</code> — a <code>{#for}</code>
+      over the RESULT of a call, not just a bare state field.
+    </p>
+    <p>
+      No server round-trip: every button rewrites the list in the
+      browser and re-renders. This is the expression machinery
+      (closures, <code>.map</code>/<code>.filter</code>/<code>.len</code>,
+      list reassignment) that the kanban SPA port needs on top of the
+      nominal types from R3.
+    </p>
+    <div id="app"><!-- App mounts here --></div>
+    <p>
+      If you see this text but no widget above, the WASM bundle failed
+      to load (check the DevTools console) or the page was opened over
+      <code>file://</code>. ES modules require an HTTP origin — serve
+      with <code>python -m http.server 8000</code>.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/list_transform.js';
+      init().catch((err) => {
+        console.error('Failed to load list-transform WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

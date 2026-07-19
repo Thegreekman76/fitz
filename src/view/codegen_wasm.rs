@@ -538,8 +538,11 @@ fn emit_event_handler(
     }
 
     writeln!(out, "    fn {}(self: &Rc<Self>) {{", handler.name).unwrap();
+    // Locals introduced by `let`-style statements accumulate across the
+    // body so later statements (and closures) can reference them.
+    let mut locals: Vec<String> = Vec::new();
     for stmt in &handler.body {
-        lower_stmt(stmt, state_names, "        ", out).map_err(|mut e| {
+        lower_stmt(stmt, state_names, &mut locals, "        ", out).map_err(|mut e| {
             e.context = format!(
                 "event handler `{}` of component `{}` (body)",
                 handler.name, component_name
@@ -884,56 +887,69 @@ fn emit_for(
     out: &mut String,
 ) -> EmitResult<()> {
     let ctx_label = format!("template of component `{}`", ctx.component_name);
-    let field_name = match iter {
-        Expr::Ident(n, _) => n,
-        _ => {
-            return Err(EmitError {
-                message: "`{#for}` iterable must be a state-field identifier on the \
-                          client-WASM target (Phase 11.7.b); method calls / imported \
-                          fns defer to a later slice or the SSR target"
-                    .to_string(),
-                context: ctx_label,
-            })
-        }
-    };
-    let field = ctx
-        .state_fields
-        .iter()
-        .find(|f| &f.name == field_name)
-        .ok_or_else(|| EmitError {
-            message: format!("`{{#for}}` iterates `{field_name}`, which is not a state field"),
-            context: ctx_label.clone(),
-        })?;
-    let elem_ty = match &field.type_expr {
-        TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => &args[0],
-        _ => {
-            return Err(EmitError {
-                message: format!(
-                    "`{{#for x in {field_name}}}` requires `{field_name}` to be a \
-                     `List<...>` state field"
-                ),
-                context: ctx_label,
-            })
-        }
-    };
-    // Phase 11.7 R3 — the element type may be a primitive OR an
-    // imported nominal (e.g. `List<Card>`). A nominal loop var binds as
-    // the emitted struct (owned, from `.iter().cloned()`), so its
-    // fields are reachable via `{c.title}` field access. Reject only
-    // types the emitter can't lower (unknown nominal, nested compound).
-    let elem_is_nominal = matches!(elem_ty, TypeExpr::Named(n) if ctx.nominals.contains(n));
-    if !is_wasm_prop_simple_target(elem_ty) && !elem_is_nominal {
-        return Err(EmitError {
-            message: format!(
-                "`{{#for}}` over `{field_name}`: the client-WASM target iterates \
-                 `List<Int|Float|Str|Bool>` and `List<Nominal>` where the nominal is \
-                 imported from a sibling `.fitz` (Phase 11.7 R3). This element type is \
-                 neither — use a primitive-element list, import the nominal, or the \
-                 SSR target."
-            ),
-            context: ctx_label,
-        });
+
+    // Decide where the loop draws its elements from.
+    //
+    // - A bare state-field ident (`{#for c in cards}`) keeps the
+    //   snapshot-and-`.iter().cloned()` path with its element-type gate
+    //   (nice errors + byte-identical output for the pre-R3.5 examples).
+    // - Any OTHER expression (`{#for c in cards_in(cards, "todo")}`,
+    //   `{#for n in nums.filter(...)}`) is a general iterable (Phase 11.7
+    //   R3.5a.1): lower it to an owned `Vec`-producing expression and
+    //   iterate with `.into_iter()`. The loop var's element type is left
+    //   to rustc inference — field access on it (`{c.title}`) validates
+    //   against the produced `Vec`'s element type.
+    enum ForSrc {
+        StateField(String),
+        General(String),
     }
+    let src = match iter {
+        Expr::Ident(n, _) if ctx.state_fields.iter().any(|f| &f.name == n) => {
+            let field = ctx
+                .state_fields
+                .iter()
+                .find(|f| &f.name == n)
+                .expect("state field presence just checked");
+            let elem_ty = match &field.type_expr {
+                TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => &args[0],
+                _ => {
+                    return Err(EmitError {
+                        message: format!(
+                            "`{{#for x in {n}}}` requires `{n}` to be a `List<...>` \
+                             state field"
+                        ),
+                        context: ctx_label,
+                    })
+                }
+            };
+            // Phase 11.7 R3 — the element type may be a primitive OR an
+            // imported nominal (e.g. `List<Card>`). A nominal loop var
+            // binds as the emitted struct (owned, from `.iter().cloned()`),
+            // so its fields are reachable via `{c.title}` field access.
+            // Reject only types the emitter can't lower.
+            let elem_is_nominal = matches!(elem_ty, TypeExpr::Named(t) if ctx.nominals.contains(t));
+            if !is_wasm_prop_simple_target(elem_ty) && !elem_is_nominal {
+                return Err(EmitError {
+                    message: format!(
+                        "`{{#for}}` over `{n}`: the client-WASM target iterates \
+                         `List<Int|Float|Str|Bool>` and `List<Nominal>` where the \
+                         nominal is imported from a sibling `.fitz` (Phase 11.7 R3). \
+                         This element type is neither — use a primitive-element list, \
+                         import the nominal, or the SSR target."
+                    ),
+                    context: ctx_label,
+                });
+            }
+            ForSrc::StateField(n.clone())
+        }
+        _ => {
+            let iter_rust = lower_expr(iter, ctx.state_names, &ctx.locals).map_err(|mut e| {
+                e.context = ctx_label.clone();
+                e
+            })?;
+            ForSrc::General(iter_rust)
+        }
+    };
 
     // Phase 11.7.b R2b — keyed `<Child />` composition inside `{#for}`.
     // Pre-scan the body for the DYNAMIC child sites it contains (the
@@ -956,13 +972,21 @@ fn emit_for(
     }
 
     let snap = ctx.fresh("for");
-    writeln!(
-        out,
-        "        let {} = (*self.{}.borrow()).clone();",
-        snap, field_name
-    )
-    .unwrap();
-    writeln!(out, "        for {} in {}.iter().cloned() {{", var, snap).unwrap();
+    match &src {
+        ForSrc::StateField(field_name) => {
+            writeln!(
+                out,
+                "        let {} = (*self.{}.borrow()).clone();",
+                snap, field_name
+            )
+            .unwrap();
+            writeln!(out, "        for {} in {}.iter().cloned() {{", var, snap).unwrap();
+        }
+        ForSrc::General(iter_rust) => {
+            writeln!(out, "        let {} = {};", snap, iter_rust).unwrap();
+            writeln!(out, "        for {} in {}.into_iter() {{", var, snap).unwrap();
+        }
+    }
     ctx.locals.push(var.to_string());
     let prev_in_for = ctx.in_for;
     ctx.in_for = true;
@@ -1572,11 +1596,51 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
             }
             Ok(format!("{type_name} {{ {} }}", parts.join(", ")))
         }
+        // Phase 11.7 R3.5a.1 — list literal, so a list state field can be
+        // re-seeded (`nums = [1, 2, 3]`) and small literals appear in
+        // event bodies. Emits `vec![...]`; the element expressions lower
+        // recursively (primitive literals in the common case).
+        Expr::List(items, _) => {
+            let mut parts: Vec<String> = Vec::with_capacity(items.len());
+            for it in items {
+                parts.push(lower_expr(it, state_names, locals)?);
+            }
+            Ok(format!("vec![{}]", parts.join(", ")))
+        }
+        // Phase 11.7 R3.5a.1 — `if` used as a VALUE
+        // (`let col = if (dir == "right") { next(c) } else { prev(c) }`).
+        // Both branches must be single-expression blocks; the condition
+        // lowers via `lower_cond_expr`. Statement-position `if` (a guard
+        // with side effects) is handled in `lower_stmt`, not here.
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            let cond = lower_cond_expr(condition, state_names, locals)?;
+            let then_rust = lower_single_expr_block(then, state_names, locals)?;
+            let else_stmts = else_.as_ref().ok_or_else(|| EmitError {
+                message: "`if` used as a value needs an `else` branch on the \
+                          client-WASM target (Phase 11.7 R3.5a.1)"
+                    .to_string(),
+                context: "expression".to_string(),
+            })?;
+            let else_rust = lower_single_expr_block(else_stmts, state_names, locals)?;
+            Ok(format!(
+                "(if {cond} {{ {then_rust} }} else {{ {else_rust} }})"
+            ))
+        }
+        // Phase 11.7 R3.5a.1 — calls. Method calls on lists
+        // (`.map`/`.filter`/`.len`) lower to Rust iterator chains here;
+        // free-function calls (`cards_in(cards, "todo")`) are deferred to
+        // R3.5a.2, when imported classic helpers are transpiled into the
+        // bundle.
+        Expr::Call { callee, args, .. } => lower_call(callee, args, state_names, locals),
         Expr::StrInterp(_, _)
         | Expr::Null(_)
         | Expr::Bytes(_, _)
         | Expr::UnaryOp { .. }
-        | Expr::Call { .. }
         | Expr::NamedArg { .. }
         | Expr::FnExpr { .. }
         | Expr::Index { .. } => Err(EmitError {
@@ -1621,27 +1685,187 @@ fn lower_binop(op: &BinOpKind) -> EmitResult<&'static str> {
         BinOpKind::Mul => Ok("*"),
         BinOpKind::Div => Ok("/"),
         BinOpKind::Mod => Ok("%"),
-        BinOpKind::Eq
-        | BinOpKind::NotEq
-        | BinOpKind::Lt
-        | BinOpKind::LtEq
-        | BinOpKind::Gt
-        | BinOpKind::GtEq
-        | BinOpKind::And
+        // Phase 11.7 R3.5a.1 — comparison operators, so closure bodies
+        // (`fn(n) => n % 2 == 0`), `if`-as-expression conditions, and
+        // `{#if}` guards can lower to a Rust `bool`. String equality
+        // (`c.column == col`) falls out because `Expr::Field` lowering
+        // clones to an owned `String` and Rust's `String: PartialEq`
+        // does the compare. Logical (`&&`/`||`/`!`) + bitwise stay
+        // deferred — `lower_cond_expr` already covers `&&`/`||`/`!` in
+        // condition position, which is where the kanban needs them.
+        BinOpKind::Eq => Ok("=="),
+        BinOpKind::NotEq => Ok("!="),
+        BinOpKind::Lt => Ok("<"),
+        BinOpKind::LtEq => Ok("<="),
+        BinOpKind::Gt => Ok(">"),
+        BinOpKind::GtEq => Ok(">="),
+        BinOpKind::And
         | BinOpKind::Or
         | BinOpKind::Xor
         | BinOpKind::BitAnd
         | BinOpKind::BitOr
         | BinOpKind::BitXor
         | BinOpKind::Shl => Err(EmitError {
-            message: "binary op — only arithmetic ops (+/-/*//%) supported in Phase 11.4.b, comparisons/logical/bitwise deferred to 11.4.c".to_string(),
+            message: "binary op — arithmetic (+/-/*//%) and comparisons \
+                      (==/!=/</<=/>/>=) supported on the client-WASM target; \
+                      logical (&&/||) belong in condition position (`{#if}` / \
+                      `if`-expr) and bitwise ops are deferred"
+                .to_string(),
             context: "expression".to_string(),
         }),
         _ => Err(EmitError {
-            message: "unsupported binary op — deferred to Phase 11.4.c".to_string(),
+            message: "unsupported binary op — deferred to a later 11.7 slice".to_string(),
             context: "expression".to_string(),
         }),
     }
+}
+
+/// Lower a call expression (Phase 11.7 R3.5a.1).
+///
+/// - **Method calls** on a list receiver — `xs.map(fn(x) => ...)`,
+///   `xs.filter(fn(x) => ...)`, `xs.len()` — lower to Rust iterator
+///   chains. The receiver is snapshotted with `.clone().into_iter()`
+///   (every value in the WASM target is `Clone`), so mutating the
+///   original state field later in the same body is safe.
+/// - **Free-function calls** (`cards_in(cards, "todo")`) are deferred
+///   to R3.5a.2, where imported classic helpers get transpiled into the
+///   bundle — until then there is nothing to call.
+fn lower_call(
+    callee: &Expr,
+    args: &[Expr],
+    state_names: &[String],
+    locals: &[String],
+) -> EmitResult<String> {
+    match callee {
+        Expr::Field { object, field, .. } => {
+            let obj = lower_expr(object, state_names, locals)?;
+            match (field.as_str(), args.len()) {
+                ("len", 0) => Ok(format!("(({obj}).len() as i64)")),
+                ("map", 1) => {
+                    let (param, body) = extract_unary_closure(&args[0])?;
+                    let mut inner = locals.to_vec();
+                    inner.push(param.clone());
+                    let body_rust = lower_expr(body, state_names, &inner)?;
+                    // `.map` receives each element BY VALUE from
+                    // `into_iter()`, matching the closure's owned param.
+                    Ok(format!(
+                        "({obj}).clone().into_iter().map(|{param}| {body_rust}).collect::<Vec<_>>()"
+                    ))
+                }
+                ("filter", 1) => {
+                    let (param, body) = extract_unary_closure(&args[0])?;
+                    let mut inner = locals.to_vec();
+                    inner.push(param.clone());
+                    let body_rust = lower_expr(body, state_names, &inner)?;
+                    // `.filter` hands the closure a `&T`; clone into an
+                    // owned binding so the lowered body (which expects an
+                    // owned param, e.g. `c.column == col`) type-checks.
+                    Ok(format!(
+                        "({obj}).clone().into_iter().filter(|__it| {{ let {param} = __it.clone(); {body_rust} }}).collect::<Vec<_>>()"
+                    ))
+                }
+                (other, n) => Err(EmitError {
+                    message: format!(
+                        "method `.{other}()` ({n} arg(s)) — the client-WASM target \
+                         supports `.map`/`.filter`/`.len` on lists (Phase 11.7 \
+                         R3.5a.1); other methods defer to a later 11.7 slice or the \
+                         SSR target"
+                    ),
+                    context: "expression".to_string(),
+                }),
+            }
+        }
+        Expr::Ident(name, _) => Err(EmitError {
+            message: format!(
+                "free-function call `{name}(...)` — calling an imported classic \
+                 helper is deferred to Phase 11.7 R3.5a.2, when sibling `.fitz` \
+                 functions are transpiled into the WASM bundle"
+            ),
+            context: "expression".to_string(),
+        }),
+        _ => Err(EmitError {
+            message: "unsupported call target on the client-WASM target — only method \
+                      calls (`recv.method(...)`) and free-function calls are recognised"
+                .to_string(),
+            context: "expression".to_string(),
+        }),
+    }
+}
+
+/// Extract the single parameter name + body expression of an inline
+/// unary closure `fn(x) => <expr>` (Phase 11.7 R3.5a.1). Used by
+/// `.map`/`.filter` lowering. Only the arrow / single-expression form
+/// is supported; multi-statement closure bodies and async closures
+/// defer to a later 11.7 slice.
+fn extract_unary_closure(arg: &Expr) -> EmitResult<(String, &Expr)> {
+    let Expr::FnExpr {
+        params,
+        body,
+        is_async,
+        ..
+    } = arg
+    else {
+        return Err(EmitError {
+            message: "`.map`/`.filter` on the client-WASM target take an inline \
+                      closure `fn(x) => <expr>`; a function reference or other \
+                      argument is not yet supported (Phase 11.7 R3.5a.1)"
+                .to_string(),
+            context: "expression".to_string(),
+        });
+    };
+    if *is_async {
+        return Err(EmitError {
+            message: "async closures are not supported inside `.map`/`.filter` on the \
+                      client-WASM target"
+                .to_string(),
+            context: "expression".to_string(),
+        });
+    }
+    if params.len() != 1 {
+        return Err(EmitError {
+            message: format!(
+                "`.map`/`.filter` closures take exactly one parameter on the \
+                 client-WASM target; got {}",
+                params.len()
+            ),
+            context: "expression".to_string(),
+        });
+    }
+    if body.len() == 1 {
+        match &body[0] {
+            Stmt::Return(e, _) | Stmt::Expr(e, _) => return Ok((params[0].name.clone(), e)),
+            _ => {}
+        }
+    }
+    Err(EmitError {
+        message: "`.map`/`.filter` closures must be single-expression \
+                  (`fn(x) => <expr>`) on the client-WASM target; multi-statement \
+                  closure bodies defer to a later 11.7 slice"
+            .to_string(),
+        context: "expression".to_string(),
+    })
+}
+
+/// Lower a single-expression block (the `then`/`else` arm of an
+/// `if`-as-expression) to a Rust expression string (Phase 11.7
+/// R3.5a.1). The arm must be exactly one `Stmt::Expr` or `Stmt::Return`.
+fn lower_single_expr_block(
+    stmts: &[Stmt],
+    state_names: &[String],
+    locals: &[String],
+) -> EmitResult<String> {
+    if stmts.len() == 1 {
+        match &stmts[0] {
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => return lower_expr(e, state_names, locals),
+            _ => {}
+        }
+    }
+    Err(EmitError {
+        message: "an `if` branch used as a value must be a single expression on the \
+                  client-WASM target (Phase 11.7 R3.5a.1)"
+            .to_string(),
+        context: "expression".to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1752,59 +1976,136 @@ fn lower_child_prop_value(
 }
 
 /// Lower a Fitz `Stmt` to Rust statements appended to `out` with the
-/// given `indent` prefix. Supports ONLY the subset needed for the
-/// counter POC: `Stmt::Assign` with target = state field ident and
-/// value = any expr accepted by [`lower_expr`].
+/// given `indent` prefix.
+///
+/// `locals` carries the in-scope local bindings accumulated by earlier
+/// `let`-style statements in the same body (Fitz does not distinguish
+/// `let x = ...` from `x = ...` at the AST level — an `Assign` whose
+/// target names something OTHER than a state field is a local binding).
+/// It is threaded mutably so a later statement can reference a name a
+/// prior one introduced, and cloned for nested scopes (`{#if}` arms) so
+/// branch-local names don't leak.
+///
+/// Supported (Phase 11.7 R3.5a.1):
+/// - `Stmt::Assign` to a state field → `*self.<f>.borrow_mut() = <rhs>`
+///   (covers list reassignment `cards = cards.filter(...)`).
+/// - `Stmt::Assign` to a non-state ident → `let <name> = <rhs>` local.
+/// - `Stmt::Expr(Expr::If ...)` → statement-position guard.
+/// - `Stmt::Expr(Expr::Call ...)` → `<state_list>.push/clear`.
+/// - `Stmt::Return` → `return <expr>` (used by transpiled helpers in
+///   R3.5a.2; harmless in event bodies, which never return).
 fn lower_stmt(
     stmt: &Stmt,
     state_names: &[String],
+    locals: &mut Vec<String>,
     indent: &str,
     out: &mut String,
 ) -> EmitResult<()> {
     match stmt {
         Stmt::Assign { target, value, .. } => match target {
             AssignTarget::Ident(name, _) => {
-                if !state_names.iter().any(|s| s == name) {
-                    return Err(EmitError {
-                        message: format!(
-                            "assign to `{}` — only state field reassignments supported in Phase 11.4.b",
-                            name
-                        ),
-                        context: "statement".to_string(),
-                    });
+                if state_names.iter().any(|s| s == name) {
+                    // Reassign a state field. The RHS is fully evaluated
+                    // into `__rhs` first (dropping any read-borrow of the
+                    // same field, e.g. `cards = cards.filter(...)`) before
+                    // the `borrow_mut()`, so there is no double-borrow.
+                    let rhs = lower_expr(value, state_names, locals)?;
+                    writeln!(out, "{}let __rhs = {};", indent, rhs).unwrap();
+                    writeln!(out, "{}*self.{}.borrow_mut() = __rhs;", indent, name).unwrap();
+                } else {
+                    // A local binding (`let target_id = ...`). Emit a Rust
+                    // `let`; re-binding the same name later shadows, which
+                    // matches Fitz's rebind semantics. Register the name so
+                    // subsequent statements / closures see it as in-scope.
+                    let rhs = lower_expr(value, state_names, locals)?;
+                    writeln!(out, "{}let {} = {};", indent, name, rhs).unwrap();
+                    if !locals.iter().any(|s| s == name) {
+                        locals.push(name.clone());
+                    }
                 }
-                // Event bodies run outside any `{#for}` scope, so no
-                // loop locals are in scope here.
-                let rhs = lower_expr(value, state_names, &[])?;
-                writeln!(out, "{}let __rhs = {};", indent, rhs).unwrap();
-                writeln!(out, "{}*self.{}.borrow_mut() = __rhs;", indent, name).unwrap();
                 Ok(())
             }
             AssignTarget::Field { .. } => Err(EmitError {
-                message: "assign to field (`obj.field = ...`) — deferred to Phase 11.4.c"
+                message: "assign to field (`obj.field = ...`) — deferred to a later \
+                          11.7 slice"
                     .to_string(),
                 context: "statement".to_string(),
             }),
             AssignTarget::Index { .. } => Err(EmitError {
-                message: "assign to index (`xs[i] = ...`) — deferred to Phase 11.4.c".to_string(),
+                message: "assign to index (`xs[i] = ...`) — deferred to a later 11.7 slice"
+                    .to_string(),
                 context: "statement".to_string(),
             }),
         },
-        // Phase 11.7 R3 — list mutation on a state `List<...>` field:
-        // `cards.push(Card { ... })` / `cards.clear()`. This is what
-        // makes keys appear / vanish at runtime, so reconciliation runs
-        // live (unlike the constant list of the keyed-composition demo).
-        // Shape: `Stmt::Expr(Call { callee: Field { object: Ident,
-        // field: method }, args })`.
-        Stmt::Expr(Expr::Call { callee, args, .. }, _) => {
+        // Phase 11.7 R3.5a.1 — `return <expr>` (transpiled helper bodies
+        // in R3.5a.2 use it; event bodies never return, so this arm is
+        // dormant there).
+        Stmt::Return(e, _) => {
+            let rhs = lower_expr(e, state_names, locals)?;
+            writeln!(out, "{}return {};", indent, rhs).unwrap();
+            Ok(())
+        }
+        Stmt::Expr(inner, _) => lower_expr_stmt(inner, state_names, locals, indent, out),
+        _ => Err(EmitError {
+            message: "statement kind — supported on the client-WASM target: state-field \
+                      reassignment, local `let` binding, `if` guard, `<state_list>.push/\
+                      clear`, and `return`"
+                .to_string(),
+            context: "statement".to_string(),
+        }),
+    }
+}
+
+/// Lower an expression used in statement position (Phase 11.7 R3.5a.1).
+/// Handles a statement-`if` guard and `<state_list>.push/clear`.
+///
+/// `locals` is read-only here — a statement-`if` opens fresh sub-scopes
+/// (cloned via `to_vec`) for its arms, so branch-local `let`s never leak
+/// into the enclosing body.
+fn lower_expr_stmt(
+    expr: &Expr,
+    state_names: &[String],
+    locals: &[String],
+    indent: &str,
+    out: &mut String,
+) -> EmitResult<()> {
+    match expr {
+        // Statement-position `if` guard: `if (cond) { <stmts> }` with an
+        // optional `else`. Each arm is a fresh sub-scope (locals cloned)
+        // so branch-local `let`s don't leak.
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            let cond = lower_cond_expr(condition, state_names, locals)?;
+            writeln!(out, "{}if {} {{", indent, cond).unwrap();
+            let inner_indent = format!("{indent}    ");
+            let mut then_locals = locals.to_vec();
+            for s in then {
+                lower_stmt(s, state_names, &mut then_locals, &inner_indent, out)?;
+            }
+            if let Some(else_stmts) = else_ {
+                writeln!(out, "{}}} else {{", indent).unwrap();
+                let mut else_locals = locals.to_vec();
+                for s in else_stmts {
+                    lower_stmt(s, state_names, &mut else_locals, &inner_indent, out)?;
+                }
+            }
+            writeln!(out, "{}}}", indent).unwrap();
+            Ok(())
+        }
+        // List mutation on a state `List<...>` field: `cards.push(...)` /
+        // `cards.clear()`. This is what makes keys appear / vanish at
+        // runtime, so reconciliation runs live.
+        Expr::Call { callee, args, .. } => {
             if let Expr::Field { object, field, .. } = callee.as_ref() {
                 if let Expr::Ident(list_name, _) = object.as_ref() {
                     if state_names.iter().any(|s| s == list_name) {
                         match (field.as_str(), args.len()) {
                             ("push", 1) => {
-                                // Event bodies run outside any `{#for}`,
-                                // so no loop locals are in scope.
-                                let arg = lower_expr(&args[0], state_names, &[])?;
+                                let arg = lower_expr(&args[0], state_names, locals)?;
                                 writeln!(out, "{indent}self.{list_name}.borrow_mut().push({arg});")
                                     .unwrap();
                                 return Ok(());
@@ -1821,16 +2122,17 @@ fn lower_stmt(
             }
             Err(EmitError {
                 message: "method-call statement — only `<state_list>.push(<expr>)` and \
-                          `<state_list>.clear()` are supported on the client-WASM target \
-                          (Phase 11.7 R3). `.map`/`.filter`/closures + imported helpers \
-                          defer to a later 11.7 slice or the SSR target."
+                          `<state_list>.clear()` are supported in statement position on \
+                          the client-WASM target. Transform-then-reassign \
+                          (`xs = xs.map(...)`) is an assignment, not a bare call."
                     .to_string(),
                 context: "statement".to_string(),
             })
         }
         _ => Err(EmitError {
-            message: "statement kind — only state-field reassignment + `<state_list>.push/clear` \
-                 supported on the client-WASM target"
+            message: "expression-statement kind — only an `if` guard or \
+                      `<state_list>.push/clear` is supported in statement position on \
+                      the client-WASM target"
                 .to_string(),
             context: "statement".to_string(),
         }),
@@ -2790,7 +3092,12 @@ component Row {
     }
 
     #[test]
-    fn phase_11_7_b_for_non_ident_iterable_rejects() {
+    fn phase_11_7_r3_5_a1_for_unlowerable_iterable_still_rejects() {
+        // Phase 11.7 R3.5a.1 opened `{#for}` to general iterables that
+        // lower (method calls like `.filter(...)`), but an iterable the
+        // expr lowerer can't handle — here a `Range` — still rejects,
+        // now via the general lowering path rather than a blanket
+        // "must be a state-field identifier" gate.
         let src = r#"component Foo {
   state { x: Int = 0 }
   event bump() { x = 1 }
@@ -2802,8 +3109,8 @@ component Row {
         let expanded = parse_expand(src);
         let err = emit_component(&expanded.components[0]).unwrap_err();
         assert!(
-            err.message.contains("state-field identifier") && err.message.contains("11.7.b"),
-            "non-ident iterable must reject citing the MVP restriction:\n{}",
+            err.message.contains("11.7"),
+            "an unlowerable `{{#for}}` iterable must still reject:\n{}",
             err
         );
     }
@@ -3614,6 +3921,169 @@ component Card {
         assert!(
             !out.contains("__seen_") && !out.contains("__child_map_"),
             "a for without child composition must not reconcile:\n{out}"
+        );
+    }
+
+    // ---- Phase 11.7 R3.5a.1 — richer expr/stmt lowerer -------------
+
+    #[test]
+    fn phase_11_7_r3_5_a1_map_closure_lowers_to_iterator_chain() {
+        let src = r#"component Nums {
+  state { nums: List<Int> = [1, 2, 3] }
+  event double_all() { nums = nums.map(fn(n) => n * 2) }
+  <template><ul>{#for n in nums}<li>{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(".clone().into_iter().map(|n| (n * 2i64)).collect::<Vec<_>>()"),
+            "`.map` closure must lower to an iterator chain:\n{out}"
+        );
+        // The reassignment writes the collected Vec back into the state
+        // RefCell via the `__rhs` snapshot (no double-borrow).
+        assert!(
+            out.contains("let __rhs =") && out.contains("*self.nums.borrow_mut() = __rhs;"),
+            "list reassignment must go through __rhs then borrow_mut:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_filter_closure_clones_ref_into_owned_param() {
+        let src = r#"component Nums {
+  state { nums: List<Int> = [1, 2, 3, 4] }
+  event keep_big() { nums = nums.filter(fn(n) => n > 1) }
+  <template><ul>{#for n in nums}<li>{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(
+                ".clone().into_iter().filter(|__it| { let n = __it.clone(); (n > 1i64) }).collect::<Vec<_>>()"
+            ),
+            "`.filter` must clone the &T param into an owned binding:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_len_lowers_to_usize_cast_i64() {
+        // `.len()` in an interpolation — the classic Fitz `.len()` returns
+        // Int, so the WASM lowering casts `usize` → `i64`.
+        let src = r#"component Nums {
+  state { nums: List<Int> = [1, 2, 3] }
+  event noop() { nums = nums }
+  <template><p>{nums.len()}</p></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("((*self.nums.borrow())).len() as i64"),
+            "`.len()` must cast to i64:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_list_literal_reassignment_emits_vec_macro() {
+        let src = r#"component Nums {
+  state { nums: List<Int> = [9] }
+  event reset() { nums = [1, 2, 3] }
+  <template><ul>{#for n in nums}<li>{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("let __rhs = vec![1i64, 2i64, 3i64];"),
+            "list-literal reassignment must emit a `vec!` macro:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_let_binding_is_in_scope_for_a_later_closure() {
+        let src = r#"component Nums {
+  state { nums: List<Int> = [1, 2] }
+  event bump_by() {
+    let k = 10
+    nums = nums.map(fn(n) => n + k)
+  }
+  <template><ul>{#for n in nums}<li>{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("let k = 10i64;"),
+            "a non-state assign must lower to a Rust `let` binding:\n{out}"
+        );
+        assert!(
+            out.contains(".map(|n| (n + k))"),
+            "the closure must capture the local `k` introduced earlier:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_for_over_method_call_uses_into_iter() {
+        // `{#for}` over a general (non-state-field) iterable takes the
+        // lower-then-`.into_iter()` path.
+        let src = r#"component Nums {
+  state { nums: List<Int> = [1, 2, 3, 4] }
+  event noop() { nums = nums }
+  <template><ul>{#for big in nums.filter(fn(n) => n > 2)}<li>{big}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(
+                ".filter(|__it| { let n = __it.clone(); (n > 2i64) }).collect::<Vec<_>>();"
+            ),
+            "the for-over-call iterable must lower the method chain:\n{out}"
+        );
+        assert!(
+            out.contains(".into_iter() {"),
+            "a general `{{#for}}` iterable must iterate with `.into_iter()`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_if_as_expression_lowers_to_rust_if() {
+        // `let x = if (cond) { a } else { b }` — if used as a value.
+        let src = r#"component Toggle {
+  state { count: Int = 0 }
+  event step() {
+    let next = if (count > 0) { 0 } else { 1 }
+    count = next
+  }
+  <template><span>{count}</span></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("let next = (if ((*self.count.borrow()) > 0i64) { 0i64 } else { 1i64 });"),
+            "if-as-expression must lower to a parenthesised Rust if:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_statement_if_guard_lowers_to_rust_if() {
+        let src = r#"component Guard {
+  state { count: Int = 0 }
+  event maybe_reset() {
+    if (count > 5) {
+      count = 0
+    }
+  }
+  <template><span>{count}</span></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("if ((*self.count.borrow()) > 5i64) {"),
+            "a statement-position `if` must lower to a Rust `if` block:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a1_free_fn_call_defers_to_a2() {
+        // A free-function call in an event body rejects with a pointer to
+        // R3.5a.2 (imported-fn transpilation) — nothing to call yet.
+        let src = r#"component Foo {
+  state { nums: List<Int> = [] }
+  event go() { nums = build_nums() }
+  <template><span>x</span></template>
+}"#;
+        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        assert!(
+            err.message.contains("free-function call") && err.message.contains("R3.5a.2"),
+            "a free-fn call must defer to R3.5a.2:\n{err}"
         );
     }
 }

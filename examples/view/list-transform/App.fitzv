@@ -1,0 +1,95 @@
+// Phase 11.7 R3.5a.1 — closures, `.map`/`.filter`, list reassignment,
+// and `{#for}` over a method-call RESULT on the client-WASM target.
+//
+// R3 (v0.21.8) brought nominal TYPES to WASM. R3.5a.1 brings the
+// expression machinery that operates on lists: inline closures, the
+// `.map`/`.filter`/`.len()` iterator methods, reassigning a list state
+// field from a transform (`nums = nums.filter(...)`), and iterating the
+// RESULT of a call with `{#for m in nums.filter(...)}` (not just a bare
+// state field). This demo exercises all of it with a pure `List<Int>`:
+//
+//   - `state { nums: List<Int> = [1, 2, 3, 4, 5] }` — a primitive list.
+//   - `event double_all() { nums = nums.map(fn(n) => n * 2) }` — a
+//     closure transform reassigned back into the state field. The read
+//     of `nums` is fully evaluated into a snapshot BEFORE the write, so
+//     there is no borrow conflict.
+//   - `event keep_big() { nums = nums.filter(fn(n) => n > 5) }` — a
+//     predicate closure. `.filter` hands the closure a `&T`, which the
+//     emitter clones into an owned binding so `n > 5` type-checks.
+//   - `event add_next() { nums.push(next) ... }` — live `.push` mutation
+//     (from R3), so the transforms operate on a growing list.
+//   - `{#for m in nums.filter(fn(n) => n > 4)}` — a `{#for}` over the
+//     RESULT of a method call, computed inline in the template.
+//   - `{nums.len()}` — `.len()` in an interpolation (returns Int; the
+//     WASM lowering casts `usize` → `i64`).
+//
+// WHY IT MATTERS (try it in the browser): every button transforms the
+// list entirely client-side — no server round-trip, no re-fetch. The
+// "big ones" list recomputes from the current `nums` on every render.
+//
+// STILL DEFERRED toward the full kanban: calling an IMPORTED classic
+// helper (`cards_in(cards, "todo")`) inside a closure or `{#for}`. That
+// is R3.5a.2 (imported-fn transpilation) — free-function calls reject
+// today with a clear pointer. Inline `==`/`!=` in a `.fitzv` event body
+// is a separate view-parser limit; comparisons like `>` / `<` work, and
+// equality belongs in imported classic helpers.
+
+component App {
+  state {
+    nums: List<Int> = [1, 2, 3, 4, 5]
+    next: Int = 6
+  }
+
+  event double_all() {
+    nums = nums.map(fn(n) => n * 2)
+  }
+
+  event keep_big() {
+    nums = nums.filter(fn(n) => n > 5)
+  }
+
+  event add_next() {
+    nums.push(next)
+    next = next + 1
+  }
+
+  event reset() {
+    nums = [1, 2, 3, 4, 5]
+    next = 6
+  }
+
+  <template>
+    <div class="playground">
+      <h1>List transform on WASM</h1>
+      <p class="hint">Map, filter and reassign a list of Ints entirely client-side — no server round-trip. The "big ones" list is recomputed in the template with a filter inside the loop.</p>
+      <div class="controls">
+        <button @click="double_all">double all</button>
+        <button @click="keep_big">keep over 5</button>
+        <button @click="add_next">add {next}</button>
+        <button @click="reset">reset</button>
+      </div>
+      <p class="count">count: {nums.len()}</p>
+      <ul class="nums">
+        {#for n in nums}
+          <li>{n}</li>
+        {/for}
+      </ul>
+      <h2>big ones (over 4)</h2>
+      <ul class="big">
+        {#for m in nums.filter(fn(n) => n > 4)}
+          <li>{m}</li>
+        {/for}
+      </ul>
+    </div>
+  </template>
+
+  <style scoped>
+    .playground { font-family: system-ui, sans-serif; max-width: 480px; }
+    .hint { color: #666; font-size: 0.9em; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    .controls button { padding: 8px 14px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+    .count { font-variant-numeric: tabular-nums; }
+    ul { list-style: none; padding: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+    li { padding: 6px 12px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; font-variant-numeric: tabular-nums; }
+  </style>
+}
