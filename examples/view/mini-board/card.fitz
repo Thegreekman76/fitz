@@ -1,0 +1,11 @@
+// Fitz view — mini-board shared type (Phase 11.7 R3.5a.2).
+//
+// `.fitzv` files can't declare `type`s, so shared nominals live in a
+// sibling classic module. The WASM emitter loads this `type Card` and
+// synthesises its Rust struct inline in the bundle (R3).
+
+type Card {
+  id: Int
+  title: Str
+  column: Str
+}

@@ -165,6 +165,88 @@ impl NominalRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// Imported classic-fn registry (Phase 11.7 R3.5a.2)
+// ---------------------------------------------------------------------------
+
+/// One imported classic `fn` transpiled into the WASM bundle.
+///
+/// The kanban's pure helpers (`cards_in`, `move_one`, `next_column`,
+/// `make_card`, ...) live in a sibling classic `.fitz` module. The SSR
+/// target gets them for free (it re-emits classic Fitz + a second pass);
+/// the WASM target has no second pass, so each helper is lowered to a
+/// real Rust `fn` here. Params + return type are required (the WASM
+/// lowerer has no inference); the body lowers with the shared
+/// `lower_stmt` walker, with the params as the initial local scope and
+/// NO state fields (a free function has no `self`).
+#[derive(Debug, Clone)]
+pub struct ImportedFn {
+    name: String,
+    /// `(param_name, declared_type)`. The type is required — an
+    /// un-annotated param rejects at emit.
+    params: Vec<(String, Option<TypeExpr>)>,
+    ret: Option<TypeExpr>,
+    body: Vec<Stmt>,
+}
+
+/// The classic `fn`s reachable through a `.fitzv`'s imports, loaded so
+/// the WASM emitter can transpile each to a Rust `fn` (Phase 11.7
+/// R3.5a.2). Populated by
+/// [`super::wasm_build::load_imported_fns`], which parses every sibling
+/// module named in the imports and registers ALL its top-level `fn`s
+/// (not just the explicitly-imported names — an imported helper like
+/// `move_one` calls internal siblings like `next_column`).
+///
+/// Keyed by function name (deterministic order), so the emitted `fn`s
+/// are stable across runs.
+#[derive(Debug, Clone, Default)]
+pub struct ImportedFnRegistry {
+    fns: std::collections::BTreeMap<String, ImportedFn>,
+}
+
+impl ImportedFnRegistry {
+    /// An empty registry — the common case (a `.fitzv` importing no
+    /// classic helpers) and what the primitive-only emit path passes so
+    /// the pre-R3.5a.2 output is byte-for-byte unchanged.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register (or overwrite) a transpiled function by name.
+    pub fn insert(
+        &mut self,
+        name: String,
+        params: Vec<(String, Option<TypeExpr>)>,
+        ret: Option<TypeExpr>,
+        body: Vec<Stmt>,
+    ) {
+        self.fns.insert(
+            name.clone(),
+            ImportedFn {
+                name,
+                params,
+                ret,
+                body,
+            },
+        );
+    }
+
+    /// True when no functions are registered — no `fn`s are emitted, so
+    /// the output stays byte-identical to the pre-R3.5a.2 path.
+    pub fn is_empty(&self) -> bool {
+        self.fns.is_empty()
+    }
+
+    /// True when a function named `name` is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.fns.contains_key(name)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &ImportedFn> {
+        self.fns.values()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -233,9 +315,26 @@ pub fn emit_module_with_nominals(
     file: &ExpandedViewFile,
     nominals: &NominalRegistry,
 ) -> EmitResult<String> {
+    emit_module_with_imports(file, nominals, &ImportedFnRegistry::new())
+}
+
+/// Like [`emit_module_with_nominals`], but also transpiles imported
+/// classic `fn`s into the module (Phase 11.7 R3.5a.2). The imported
+/// functions are emitted right after the nominal structs and before the
+/// components, so component render/event code can call them.
+///
+/// When `fns` is empty this is byte-for-byte identical to
+/// [`emit_module_with_nominals`], so the pre-R3.5a.2 examples regenerate
+/// unchanged.
+pub fn emit_module_with_imports(
+    file: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+    fns: &ImportedFnRegistry,
+) -> EmitResult<String> {
     let mut out = String::new();
     emit_module_header(&mut out);
     emit_nominal_structs(nominals, &mut out)?;
+    emit_imported_fns(fns, nominals, &mut out)?;
     for component in &file.components {
         emit_component_impl(component, file, nominals, &mut out)?;
     }
@@ -270,6 +369,79 @@ fn emit_nominal_structs(nominals: &NominalRegistry, out: &mut String) -> EmitRes
                 e
             })?;
             writeln!(out, "    {}: {},", fname, rust_ty).unwrap();
+        }
+        writeln!(out, "}}\n").unwrap();
+    }
+    Ok(())
+}
+
+/// Emit a Rust `fn` for every registered imported classic helper (Phase
+/// 11.7 R3.5a.2). Each `fn` is `#[allow(dead_code)]` (a `.fitzv` may
+/// import a helper that a sibling calls but the template itself never
+/// does) and lowers its body with the shared `lower_stmt` walker: NO
+/// state fields (`state_names = &[]`), and the params seed the initial
+/// local scope.
+///
+/// Params + return type are required — the WASM lowerer has no type
+/// inference, so an un-annotated param or a missing return type rejects
+/// with a clear message. The body may use the subset the lowerer
+/// supports (`if`/`let`/`return`, struct literals, field access,
+/// `.map`/`.filter`, free-fn calls, comparisons); an unsupported
+/// construct (`match`, loops, `Result`/`?`) rejects, naming the fn.
+fn emit_imported_fns(
+    fns: &ImportedFnRegistry,
+    nominals: &NominalRegistry,
+    out: &mut String,
+) -> EmitResult<()> {
+    if fns.is_empty() {
+        return Ok(());
+    }
+    for f in fns.iter() {
+        let mut param_sig: Vec<String> = Vec::with_capacity(f.params.len());
+        let mut local_scope: Vec<String> = Vec::with_capacity(f.params.len());
+        for (pname, pty) in &f.params {
+            let ty = pty.as_ref().ok_or_else(|| EmitError {
+                message: format!(
+                    "imported fn `{}` param `{pname}` needs a type annotation for the \
+                     client-WASM target (no type inference)",
+                    f.name
+                ),
+                context: format!("imported fn `{}`", f.name),
+            })?;
+            let rust_ty = type_expr_to_rust(ty, nominals).map_err(|mut e| {
+                e.context = format!("imported fn `{}` param `{pname}`", f.name);
+                e
+            })?;
+            param_sig.push(format!("{pname}: {rust_ty}"));
+            local_scope.push(pname.clone());
+        }
+        let ret = f.ret.as_ref().ok_or_else(|| EmitError {
+            message: format!(
+                "imported fn `{}` needs a return-type annotation for the client-WASM \
+                 target (no type inference)",
+                f.name
+            ),
+            context: format!("imported fn `{}`", f.name),
+        })?;
+        let ret_rust = type_expr_to_rust(ret, nominals).map_err(|mut e| {
+            e.context = format!("imported fn `{}` return type", f.name);
+            e
+        })?;
+
+        writeln!(out, "#[allow(dead_code)]").unwrap();
+        writeln!(
+            out,
+            "fn {}({}) -> {} {{",
+            f.name,
+            param_sig.join(", "),
+            ret_rust
+        )
+        .unwrap();
+        for stmt in &f.body {
+            lower_stmt(stmt, &[], &mut local_scope, "    ", out).map_err(|mut e| {
+                e.context = format!("imported fn `{}` (body)", f.name);
+                e
+            })?;
         }
         writeln!(out, "}}\n").unwrap();
     }
@@ -1775,14 +1947,30 @@ fn lower_call(
                 }),
             }
         }
-        Expr::Ident(name, _) => Err(EmitError {
-            message: format!(
-                "free-function call `{name}(...)` — calling an imported classic \
-                 helper is deferred to Phase 11.7 R3.5a.2, when sibling `.fitz` \
-                 functions are transpiled into the WASM bundle"
-            ),
-            context: "expression".to_string(),
-        }),
+        // Phase 11.7 R3.5a.2 — a free-function call to an imported classic
+        // helper (`cards_in(cards, "todo")`, `move_one(id, "right", c)`).
+        // The helper is transpiled into the bundle by `emit_imported_fns`;
+        // the view checker (K-4) already validated the name is imported,
+        // so we trust it and emit the call. Bare-ident arguments are
+        // `.clone()`d: a String/nominal argument captured by an enclosing
+        // `.map`/`.filter` closure would otherwise be MOVED out of the
+        // `FnMut` capture on the first call and fail to compile. Cloning
+        // per call is the price for the WASM target's by-value discipline.
+        Expr::Ident(name, _) => {
+            let mut arg_rust: Vec<String> = Vec::with_capacity(args.len());
+            for arg in args {
+                let a = lower_expr(arg, state_names, locals)?;
+                // `Expr::Field` already lowers with a trailing `.clone()`;
+                // literals / nested calls produce owned values. Only a
+                // bare ident needs an explicit clone.
+                if matches!(arg, Expr::Ident(..)) {
+                    arg_rust.push(format!("{a}.clone()"));
+                } else {
+                    arg_rust.push(a);
+                }
+            }
+            Ok(format!("{name}({})", arg_rust.join(", ")))
+        }
         _ => Err(EmitError {
             message: "unsupported call target on the client-WASM target — only method \
                       calls (`recv.method(...)`) and free-function calls are recognised"
@@ -4071,19 +4259,155 @@ component Card {
         );
     }
 
+    // ---- Phase 11.7 R3.5a.2 — imported classic-fn transpilation -----
+
+    /// Build an `ImportedFnRegistry` from a classic-Fitz source snippet,
+    /// mirroring `wasm_build::load_imported_fns` but from a string (no
+    /// disk). Used by the emit-side unit tests.
+    fn fns_from_classic(src: &str) -> ImportedFnRegistry {
+        let tokens = crate::lexer::tokenize(src).expect("tokenize classic snippet");
+        let program = crate::parser::parse(tokens).expect("parse classic snippet");
+        let mut reg = ImportedFnRegistry::new();
+        for stmt in &program {
+            if let Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                body,
+                ..
+            } = stmt
+            {
+                let params = params
+                    .iter()
+                    .map(|p| (p.name.clone(), p.type_.clone()))
+                    .collect();
+                reg.insert(name.clone(), params, return_type.clone(), body.clone());
+            }
+        }
+        reg
+    }
+
+    fn single_component_file(src: &str) -> ExpandedViewFile {
+        parse_expand(src)
+    }
+
     #[test]
-    fn phase_11_7_r3_5_a1_free_fn_call_defers_to_a2() {
-        // A free-function call in an event body rejects with a pointer to
-        // R3.5a.2 (imported-fn transpilation) — nothing to call yet.
-        let src = r#"component Foo {
-  state { nums: List<Int> = [] }
-  event go() { nums = build_nums() }
-  <template><span>x</span></template>
-}"#;
-        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+    fn phase_11_7_r3_5_a2_imported_fn_emitted_as_rust_fn() {
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic("fn double(n: Int) -> Int { return n * 2 }");
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
         assert!(
-            err.message.contains("free-function call") && err.message.contains("R3.5a.2"),
-            "a free-fn call must defer to R3.5a.2:\n{err}"
+            out.contains("#[allow(dead_code)]\nfn double(n: i64) -> i64 {"),
+            "the imported fn must emit with mapped param/return types:\n{out}"
+        );
+        assert!(
+            out.contains("return (n * 2i64);"),
+            "the imported fn body must lower:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a2_imported_fn_missing_param_type_rejects() {
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic("fn f(n) -> Int { return 1 }");
+        let err = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap_err();
+        assert!(
+            err.message.contains("param `n` needs a type annotation"),
+            "an un-annotated param must reject:\n{err}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a2_imported_fn_missing_return_type_rejects() {
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic("fn f(n: Int) { return n }");
+        let err = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap_err();
+        assert!(
+            err.message.contains("needs a return-type annotation"),
+            "a missing return type must reject:\n{err}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a2_free_fn_call_clones_ident_args_in_map() {
+        // `nums = nums.map(fn(n) => bump(n))` — the free-fn arg (a bare
+        // ident) is `.clone()`d so a captured value survives the FnMut.
+        let src = r#"component App {
+  state { nums: List<Int> = [1, 2] }
+  event go() { nums = nums.map(fn(n) => bump(n)) }
+  <template><ul>{#for n in nums}<li>{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(".map(|n| bump(n.clone())).collect::<Vec<_>>()"),
+            "a free-fn call inside .map must clone its ident argument:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a2_free_fn_call_in_push_arg() {
+        let src = r#"component App {
+  state {
+    nums: List<Int> = []
+    next: Int = 1
+  }
+  event add() { nums.push(seed(next)) }
+  <template><ul>{#for n in nums}<li>{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("self.nums.borrow_mut().push(seed((*self.next.borrow()).clone()));"),
+            "a free-fn call as a push arg must clone the state-field ident:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a2_for_over_imported_call() {
+        // `{#for n in make_nums()}` — a `{#for}` over a free-fn call
+        // result takes the general `.into_iter()` path.
+        let src = r#"component App {
+  state { nums: List<Int> = [] }
+  event noop() { nums = nums }
+  <template><ul>{#for n in make_nums()}<li>{n}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("= make_nums();") && out.contains(".into_iter() {"),
+            "a {{#for}} over a free-fn call must snapshot + .into_iter():\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_7_r3_5_a2_empty_registry_emits_no_fns() {
+        // Byte-identical guard — with no imported fns, no `fn` is emitted.
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let with_empty =
+            emit_module_with_imports(&file, &NominalRegistry::new(), &ImportedFnRegistry::new())
+                .unwrap();
+        let with_nominals = emit_module_with_nominals(&file, &NominalRegistry::new()).unwrap();
+        assert_eq!(
+            with_empty, with_nominals,
+            "an empty fn registry must match the nominals-only path byte-for-byte"
         );
     }
 }

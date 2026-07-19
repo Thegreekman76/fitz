@@ -44,7 +44,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::codegen_wasm::{emit_module_with_nominals, EmitError, EmitResult, NominalRegistry};
+use super::codegen_wasm::{
+    emit_module_with_imports, EmitError, EmitResult, ImportedFnRegistry, NominalRegistry,
+};
 use super::expand::{ExpandedViewFile, ExpandedViewImport};
 
 /// A `.fitzv` file has no components declared, so there is no
@@ -104,6 +106,30 @@ pub fn compose_lib_rs_with_nominals(
     mount_selector: &str,
     header_source_label: Option<&str>,
 ) -> EmitResult<String> {
+    compose_lib_rs_with_imports(
+        expanded,
+        nominals,
+        &ImportedFnRegistry::new(),
+        mount_selector,
+        header_source_label,
+    )
+}
+
+/// Like [`compose_lib_rs_with_nominals`], but also transpiles imported
+/// classic `fn`s into the emitted `lib.rs` (Phase 11.7 R3.5a.2), so the
+/// component code can call helpers like `cards_in(cards, "todo")` /
+/// `move_one(...)`. Populate `fns` with [`load_imported_fns`] before
+/// calling.
+///
+/// When `fns` is empty this is byte-for-byte identical to
+/// [`compose_lib_rs_with_nominals`].
+pub fn compose_lib_rs_with_imports(
+    expanded: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+    fns: &ImportedFnRegistry,
+    mount_selector: &str,
+    header_source_label: Option<&str>,
+) -> EmitResult<String> {
     let root = match expanded.components.first() {
         Some(c) => c,
         None => {
@@ -114,7 +140,7 @@ pub fn compose_lib_rs_with_nominals(
         }
     };
 
-    let emitted = emit_module_with_nominals(expanded, nominals)?;
+    let emitted = emit_module_with_imports(expanded, nominals, fns)?;
 
     let source_label = header_source_label.unwrap_or("(unknown source)");
     let mut out = String::new();
@@ -201,6 +227,79 @@ pub fn load_imported_nominals(
                         registry.insert(binding, field_list);
                     }
                 }
+            }
+        }
+    }
+    Ok(registry)
+}
+
+/// Load the classic top-level `fn`s reachable through a `.fitzv`'s
+/// imports into an [`ImportedFnRegistry`], so the WASM emitter can
+/// transpile each to a Rust `fn` (Phase 11.7 R3.5a.2).
+///
+/// Unlike [`load_imported_nominals`] — which registers only the
+/// explicitly-imported names — this registers **every** top-level `fn`
+/// in each imported sibling module. An imported helper (`move_one`)
+/// typically calls internal siblings (`next_column` / `prev_column`)
+/// that the `.fitzv` never names, so all of them must be transpiled.
+///
+/// **Best-effort + MVP scope** (parallel to `load_imported_nominals`):
+/// - Only single-segment sibling `.fitz` modules are scanned; each is
+///   scanned once even if several names are imported from it.
+/// - A sibling that is missing / a `.fitzv` / fails to read/parse is
+///   skipped silently (it may be a nominal-only module). A genuinely
+///   needed helper that ends up unregistered surfaces as a `cannot find
+///   function` rustc error in the generated crate.
+/// - Functions with an unsupported body (`match`, loops, `?`) or a
+///   missing param / return annotation reject at EMIT (`emit_imported_fns`),
+///   not here — so an unused complex sibling only bites if it is emitted.
+pub fn load_imported_fns(
+    imports: &[ExpandedViewImport],
+    base_dir: &Path,
+) -> EmitResult<ImportedFnRegistry> {
+    use crate::ast::Stmt;
+
+    let mut registry = ImportedFnRegistry::new();
+    let mut scanned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for imp in imports {
+        if imp.path.len() != 1 {
+            continue;
+        }
+        let stem = imp.path[0].clone();
+        // Scan each sibling module at most once.
+        if !scanned.insert(stem.clone()) {
+            continue;
+        }
+        let sibling = base_dir.join(format!("{stem}.fitz"));
+        if !sibling.is_file() {
+            continue;
+        }
+        let source = match fs::read_to_string(&sibling) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let tokens = match crate::lexer::tokenize(&source) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let program = match crate::parser::parse(tokens) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        for stmt in &program {
+            if let Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                body,
+                ..
+            } = stmt
+            {
+                let param_list: Vec<(String, Option<crate::ast::TypeExpr>)> = params
+                    .iter()
+                    .map(|p| (p.name.clone(), p.type_.clone()))
+                    .collect();
+                registry.insert(name.clone(), param_list, return_type.clone(), body.clone());
             }
         }
     }
@@ -398,6 +497,9 @@ impl From<EmitError> for ScaffoldError {
 /// - `nominals` — imported classic `type` defs loaded via
 ///   [`load_imported_nominals`] (Phase 11.7 R3). Pass
 ///   `&NominalRegistry::new()` when the `.fitzv` imports no nominals.
+/// - `fns` — imported classic `fn`s loaded via [`load_imported_fns`]
+///   (Phase 11.7 R3.5a.2). Pass `&ImportedFnRegistry::new()` when the
+///   `.fitzv` imports no helpers.
 /// - `bin_name` — the sanitised crate name. Used as
 ///   `package.name` in the emitted `Cargo.toml`.
 /// - `mount_selector` — the CSS selector for the composed
@@ -410,13 +512,14 @@ pub fn write_wasm_crate_scaffold(
     crate_dir: &Path,
     expanded: &ExpandedViewFile,
     nominals: &NominalRegistry,
+    fns: &ImportedFnRegistry,
     bin_name: &str,
     mount_selector: &str,
     source_label: Option<&str>,
 ) -> Result<ScaffoldResult, ScaffoldError> {
     let cargo_toml_text = compose_cargo_toml(bin_name);
     let lib_rs_text =
-        compose_lib_rs_with_nominals(expanded, nominals, mount_selector, source_label)?;
+        compose_lib_rs_with_imports(expanded, nominals, fns, mount_selector, source_label)?;
 
     let src_dir = crate_dir.join("src");
     fs::create_dir_all(&src_dir).map_err(|e| ScaffoldError::Io(e, src_dir.clone()))?;
@@ -661,6 +764,7 @@ component Beta {
             &crate_dir,
             &expanded,
             &NominalRegistry::new(),
+            &ImportedFnRegistry::new(),
             "web",
             "#app",
             None,
@@ -694,6 +798,7 @@ component Beta {
             &crate_dir,
             &expanded,
             &NominalRegistry::new(),
+            &ImportedFnRegistry::new(),
             "web",
             "#app",
             None,
@@ -704,6 +809,7 @@ component Beta {
             &crate_dir,
             &expanded,
             &NominalRegistry::new(),
+            &ImportedFnRegistry::new(),
             "web",
             "#app",
             None,
@@ -883,5 +989,67 @@ component Card {
             !reg.contains("Board"),
             "only the imported name is registered, not every type in the sibling"
         );
+    }
+
+    // ---- Phase 11.7 R3.5a.2 — load_imported_fns -------------------
+
+    #[test]
+    fn load_imported_fns_registers_all_fns_including_non_imported() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The SFC imports only `advance`, but `advance` calls the
+        // internal `next_column` — so BOTH must be registered.
+        fs::write(
+            tmp.path().join("helpers.fitz"),
+            "fn next_column(c: Str) -> Str { return c }\n\
+             fn advance(c: Str) -> Str { return next_column(c) }\n",
+        )
+        .unwrap();
+        let imports = vec![imp("helpers", &[("advance", None)])];
+        let reg = load_imported_fns(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.contains("advance"),
+            "the imported fn must be registered"
+        );
+        assert!(
+            reg.contains("next_column"),
+            "an internal (non-imported) helper reachable through an imported fn \
+             must be registered too"
+        );
+    }
+
+    #[test]
+    fn load_imported_fns_skips_missing_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let imports = vec![imp("helpers", &[("advance", None)])];
+        let reg = load_imported_fns(&imports, tmp.path()).unwrap();
+        assert!(reg.is_empty(), "a missing sibling yields an empty registry");
+    }
+
+    #[test]
+    fn load_imported_fns_nominal_only_sibling_registers_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A type-only module (no `fn`s) contributes no functions.
+        fs::write(tmp.path().join("card.fitz"), "type Card {\n  id: Int\n}\n").unwrap();
+        let imports = vec![imp("card", &[("Card", None)])];
+        let reg = load_imported_fns(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.is_empty(),
+            "a nominal-only sibling registers no functions"
+        );
+    }
+
+    #[test]
+    fn load_imported_fns_scans_each_module_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("helpers.fitz"),
+            "fn a(n: Int) -> Int { return n }\nfn b(n: Int) -> Int { return n }\n",
+        )
+        .unwrap();
+        // Two imports from the same module — the module is scanned once,
+        // and both fns are registered.
+        let imports = vec![imp("helpers", &[("a", None), ("b", None)])];
+        let reg = load_imported_fns(&imports, tmp.path()).unwrap();
+        assert!(reg.contains("a") && reg.contains("b"));
     }
 }

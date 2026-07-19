@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — mini board (Phase 11.7 R3.5a.2)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 860px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz mini board — Phase 11.7 R3.5a.2 smoke</h1>
+    <p>
+      An <code>App.fitzv</code> component compiled to WebAssembly that
+      calls <strong>imported classic helper functions</strong>
+      transpiled into the bundle from the sibling
+      <code>board_helpers.fitz</code>. Each column is a
+      <code>{#for c in cards_in(cards, "todo")}</code> over the RESULT of
+      an imported fn; <em>advance all</em> runs
+      <code>cards = cards.map(fn(c) =&gt; advance(c))</code>; <em>add</em>
+      pushes <code>make_card(next_id, "Task")</code>.
+    </p>
+    <p>
+      This is the kanban's shape minus per-card targeting — moving or
+      deleting a <em>specific</em> card needs a payload built from the
+      clicked element, which is the next slice (R3.5b). Here every button
+      acts on the whole board.
+    </p>
+    <div id="app"><!-- Board mounts here --></div>
+    <p>
+      If you see this text but no widget above, the WASM bundle failed
+      to load (check the DevTools console) or the page was opened over
+      <code>file://</code>. ES modules require an HTTP origin — serve
+      with <code>python -m http.server 8000</code>.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/mini_board.js';
+      init().catch((err) => {
+        console.error('Failed to load mini-board WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

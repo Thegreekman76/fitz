@@ -1,0 +1,40 @@
+// Fitz view — mini-board pure helpers (Phase 11.7 R3.5a.2).
+//
+// The `.fitzv` SFC can't declare top-level `fn`s, so the board's pure
+// logic lives here in a sibling classic module. R3.5a.2 transpiles each
+// of these into a Rust `fn` in the WASM bundle, so the SFC's template +
+// event bodies can call them (`cards_in(cards, "todo")`,
+// `cards.map(fn(c) => advance(c))`, `make_card(next_id, "Task")`).
+//
+// `move_one`-style equality (`c.column == col`) lives HERE, in the
+// classic parser, not in the `.fitzv` event bodies — the view event-body
+// parser doesn't accept inline `==`/`!=` (only `>`/`<` + arithmetic).
+
+from card import Card
+
+// Per-column filter — used by the template to render each column and its
+// count. `.filter` + a closure with a Str comparison.
+fn cards_in(all: List<Card>, col: Str) -> List<Card> {
+  return all.filter(fn(c) => c.column == col)
+}
+
+// Column-progression state machine. Internal helper — NOT imported by
+// the SFC, but reachable through `advance`, so it must be transpiled too.
+fn next_column(current: Str) -> Str {
+  if (current == "todo") { return "in_progress" }
+  if (current == "in_progress") { return "done" }
+  return current
+}
+
+// Move a card one column to the right. `let` + a free-fn call
+// (`next_column`) + a struct literal + field access.
+fn advance(c: Card) -> Card {
+  let moved = next_column(c.column)
+  return Card { id: c.id, title: c.title, column: moved }
+}
+
+// Row factory used by the `add` event to build a fresh Card in the
+// "todo" column.
+fn make_card(id: Int, title: Str) -> Card {
+  return Card { id: id, title: title, column: "todo" }
+}

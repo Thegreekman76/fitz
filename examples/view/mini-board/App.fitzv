@@ -1,0 +1,103 @@
+// Phase 11.7 R3.5a.2 — imported classic helper fns on the client-WASM
+// target. This is the kanban's SHAPE minus per-card targeting (which
+// needs a payload built from the clicked element — that is R3.5b).
+//
+// R3 (v0.21.8) brought nominal TYPES to WASM; R3.5a.1 brought the
+// list-expression machinery (closures, `.map`/`.filter`, `{#for}` over a
+// call). R3.5a.2 closes the loop: the sibling classic module
+// `board_helpers.fitz` is TRANSPILED into the WASM bundle, so the SFC can
+// call its pure helpers directly:
+//
+//   - `{#for c in cards_in(cards, "todo")}` — `{#for}` over the RESULT of
+//     an IMPORTED fn call (each column is a filtered view).
+//   - `{cards_in(cards, "done").len()}` — `.len()` on an imported-fn
+//     result, in an interpolation.
+//   - `cards.push(make_card(next_id, "Task"))` — a free-fn call as the
+//     argument of a live `.push` mutation.
+//   - `cards = cards.map(fn(c) => advance(c))` — a `.map` closure that
+//     calls the imported `advance` helper on every card.
+//
+// The move logic (`next_column`, the column state machine) lives in the
+// classic helper module, where the parser accepts `==`; the SFC event
+// bodies stay declarative. `advance` internally calls `next_column`,
+// which the SFC never imports — the emitter transpiles it anyway (it is
+// reachable through `advance`).
+//
+// STILL DEFERRED (toward the FULL kanban): per-card move/delete needs a
+// `payload` carrying the target card id, built from `data-flv-value-*` /
+// form fields on the clicked element. That is R3.5b (payload plumbing +
+// event wiring). Here every button acts on the whole board.
+
+from card import Card
+from board_helpers import cards_in, advance, make_card
+
+component Board {
+  state {
+    cards: List<Card> = []
+    next_id: Int = 1
+  }
+
+  event add() {
+    cards.push(make_card(next_id, "Task"))
+    next_id = next_id + 1
+  }
+
+  event advance_all() {
+    cards = cards.map(fn(c) => advance(c))
+  }
+
+  event reset() {
+    cards = []
+    next_id = 1
+  }
+
+  <template>
+    <div class="board">
+      <h1>Mini board on WASM</h1>
+      <p class="hint">Every action runs entirely client-side. "Add" builds a Card with the imported make_card helper, "advance all" moves each card one column by mapping the imported advance helper over the list, and each column is a filtered view over the imported cards_in helper.</p>
+      <div class="controls">
+        <button @click="add">add task ({next_id})</button>
+        <button @click="advance_all">advance all</button>
+        <button @click="reset">reset</button>
+      </div>
+      <div class="cols">
+        <section class="col">
+          <h2>To Do ({cards_in(cards, "todo").len()})</h2>
+          <ul>
+            {#for c in cards_in(cards, "todo")}
+              <li>{c.title} {c.id}</li>
+            {/for}
+          </ul>
+        </section>
+        <section class="col">
+          <h2>In Progress ({cards_in(cards, "in_progress").len()})</h2>
+          <ul>
+            {#for c in cards_in(cards, "in_progress")}
+              <li>{c.title} {c.id}</li>
+            {/for}
+          </ul>
+        </section>
+        <section class="col">
+          <h2>Done ({cards_in(cards, "done").len()})</h2>
+          <ul>
+            {#for c in cards_in(cards, "done")}
+              <li>{c.title} {c.id}</li>
+            {/for}
+          </ul>
+        </section>
+      </div>
+    </div>
+  </template>
+
+  <style scoped>
+    .board { font-family: system-ui, sans-serif; max-width: 720px; }
+    .hint { color: #666; font-size: 0.9em; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    .controls button { padding: 8px 14px; cursor: pointer; border: 1px solid #999; border-radius: 6px; background: white; }
+    .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .col { background: #f4f4f4; border-radius: 8px; padding: 12px; min-height: 120px; }
+    .col h2 { margin: 0 0 8px 0; font-size: 0.95em; text-transform: uppercase; letter-spacing: 0.04em; color: #333; }
+    .col ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+    .col li { background: white; border-radius: 6px; padding: 8px 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); font-variant-numeric: tabular-nums; }
+  </style>
+}

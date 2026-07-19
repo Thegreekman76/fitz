@@ -1204,6 +1204,20 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         }
     };
 
+    // Phase 11.7 R3.5a.2 — load the sibling `.fitz` helper functions the
+    // `.fitzv` imports (`from board_helpers import cards_in, ...`) so the
+    // emitter can transpile each into the bundle.
+    let imported_fns = match view::load_imported_fns(&expanded.imports, &base_dir) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "✗ loading imported functions for `{}`: {e}",
+                resolved.entry.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
     // Materialise the scaffold. Path is Cargo-style —
     // `target/wasm-build/<bin>/` for the temporary crate,
     // `target/wasm/<bin>/` for the final `pkg/` copy that the
@@ -1225,6 +1239,7 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         &scaffold_dir,
         &expanded,
         &nominals,
+        &imported_fns,
         &sanitised_pkg,
         mount,
         Some(&source_label),
