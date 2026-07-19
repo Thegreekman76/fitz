@@ -239,6 +239,20 @@ Extensions. Detalle en
   feature flags built-in `@flag("name")` + `flag(name) -> Bool`
   + módulo `flags` con manifest `[flags]` y override por env
   var `FITZ_FLAG_<UPPERCASE>` (12.8).
+- **Fase 11.7 R3.5 + Frente 2** (v0.22.0, 2026-07-19) — **el
+  kanban como WASM SPA + composición `<Child />` completa**.
+  Cierra Phase 11.7 entera para el target client-WASM: el Board
+  del kanban colaborativo compila a una SPA WebAssembly
+  standalone desde UN `.fitzv` (~57 KB raw / ~21.5 KB gzipped,
+  `examples/view/kanban/`). R3.5 trae el lowerer de listas
+  (closures + `.map`/`.filter`/`.len` + `{#for}` sobre un call),
+  fns clásicas importadas transpiladas al crate WASM, y payload
+  de click + form (`data-flv-*`). Frente 2 trae event bubbling
+  child→parent (`<Child @event="h" />`) y `<slot>fallback</slot>`
+  con contenido rellenado por el parent. 7 ejemplos runnable en
+  `examples/view/` (counter → kanban), cada uno a WASM real. Los
+  mismos convenios `data-flv-*` sirven a SSR y WASM. Cero cambios
+  a classic Fitz (aditivo al emitter `.fitzv` → WASM).
 - **Fase 11 hasta 11.6.e §9.bb** (v0.21.0, 2026-07-16) — **Native
   frontend `.fitzv` compilado a WASM + SSR emitter for
   `fitz-liveviews`**. Nueva extensión `.fitzv` (single-file

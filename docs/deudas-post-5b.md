@@ -4,6 +4,45 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 Phase 11.7 R3.5 + Frente 2 — CERRADAS 2026-07-19 (v0.22.0) + deuda residual nueva
+
+**Cierre**: Phase 11.7 entera cerró en v0.22.0 para el target
+client-WASM de `.fitzv`. R3.5 (a.1 lowerer de listas + a.2 fns
+importadas transpiladas + b.1 click payload + b.2 form payload + c
+kanban SPA) destrabó el port del kanban a una SPA WebAssembly
+standalone. Frente 2 (11.7.c event bubbling child→parent + 11.7.d
+`<slot>` con fallback) completó la composición `<Child />`. Las
+K-debts previas relevantes al WASM (K-1 event bubbling, interpolated
+props, imported-fn support) quedan cubiertas por este bloque para el
+target WASM (el SSR ya las tenía o las rechaza con puntero claro).
+
+**Deuda residual nueva derivada** (NO bloquea uso real; abre items
+para slices posteriores según demanda):
+
+- **Payload bubbling** — el bubble de 11.7.c (MVP) no lleva data, así
+  que el parent no distingue QUÉ child lo disparó (los N `<Item
+  @choose="on_pick" />` llaman al mismo `on_pick`). El próximo slice
+  pasaría el state del child (o un payload explícito) al handler.
+- **Named slots** — `<slot name="X" />` rechaza en el target WASM
+  (11.7.d cubre el slot default). Slot routing por nombre + múltiples
+  slots por child es un slice posterior.
+- **`<Child />` anidado en slot content** — el método `__render_slot_<n>`
+  del parent no tiene child-instance cache para un componente anidado;
+  rechaza con mensaje claro. Requiere threading de child-site indices
+  al render de slot content.
+- **Helper fns importadas con constructos no soportados** — R3.5a.2
+  emite TODAS las `fn` de un módulo sibling importado; una que use
+  `match`/loops/`Result`/`?` rechaza en emit aunque no se use. Fix:
+  emitir solo las alcanzables desde los nombres importados (closure
+  transitiva del call graph).
+- **Interactive slot content re-listeners** — el contenido de slot se
+  re-renderiza en cada render (listeners frescos), no se clona; OK para
+  el modelo naive-render pero un refinamiento a signals evitaría el
+  re-work.
+- **Cross-file `<Child />` composition** — sigue abierta (mi `<Child />`
+  es same-file). Workaround: runtime API `component("Name", "id")` de
+  `fitz-liveviews`.
+
 ## 🟡 Framework support gaps — surface durante fitz-liveviews kanban migration (Phase 8.5) — **ABIERTAS 2026-07-16** (Phase 11.7+ scope)
 
 **Trigger**: migración de kanban a `.fitzv` SFC (Phase 8.5 en

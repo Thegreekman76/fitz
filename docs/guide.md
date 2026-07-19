@@ -14992,17 +14992,34 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   title="{c.title}" />` con props primitivos desde campos del
   nominal. El emitter carga el `type` del `.fitz` sibling y sintetiza
   el struct Rust inline. Ejemplo runnable:
-  `examples/view/nominal-list/`. **Deferido hacia el kanban
-  completo** (próximo slice — imported-fn support): `{#for}` sobre el
-  resultado de un fn call (`{#for c in cards_in(cards, "todo")}`),
-  `.map`/`.filter` + closures en event bodies, e imported classic
-  helper fns transpiladas al crate WASM. El target SSR ya los
-  soporta.
-- **Cross-component event bubbling** — la K-1 shipped en
-  `fitz-liveviews` v0.5.0 con `dispatch_to(...)` explicit
-  event API; implicit bubbling (`@parent.event` decorator)
-  queda para Phase 11.7.c (R2b+).
-- **`<slot />` fallback** — Phase 11.7.d (R2b+).
+  `examples/view/nominal-list/`.
+- **El kanban completo como WASM SPA** — **CERRADO en Phase 11.7
+  R3.5 (v0.22.0)**. Todo lo que faltaba para portar el Board del
+  kanban a una SPA WebAssembly standalone cerró: closures inline +
+  `.map`/`.filter`/`.len()` + `{#for}` sobre el resultado de un call
+  (`{#for c in cards_in(cards, "todo")}`) — R3.5a.1
+  (`examples/view/list-transform/`); imported classic helper fns
+  transpiladas al crate WASM (`cards_in`, `move_one`, `make_card`, ...)
+  — R3.5a.2 (`examples/view/mini-board/`); payload de click
+  (`data-flv-click` + `data-flv-value-*` + `payload["k"]`/`.has(...)`)
+  — R3.5b.1 (`examples/view/click-payload/`); payload de form
+  (`data-flv-submit` + `data-flv-clear`) — R3.5b.2
+  (`examples/view/form-input/`); y la interpolación de strings
+  (`"{next_id}"`). El resultado end-to-end vive en
+  `examples/view/kanban/` (~57 KB raw / ~21.5 KB gzipped) — los mismos
+  convenios `data-flv-*` sirven a los targets SSR y WASM.
+- **Event bubbling child→parent** — **CERRADO en Phase 11.7.c
+  (v0.22.0)**: `<Child @event="handler" />` dispara un handler del
+  parent cuando el event del child se emite. Ejemplo:
+  `examples/view/event-bubbling/`. MVP: el bubble no lleva payload
+  (el parent no distingue qué child lo disparó).
+- **`<slot />` con fallback** — **CERRADO en Phase 11.7.d
+  (v0.22.0)**: un child expone un hueco `<slot>fallback</slot>` que
+  el parent llena con `<Child>content</Child>`, o se muestra el
+  fallback del child. El contenido se renderiza en scope del PARENT
+  (state + event handlers del parent), reactivo. Ejemplo:
+  `examples/view/slots/`. MVP: slot default solo (named rechaza), sin
+  `<Child />` anidado en slot content.
 - **Signature help / rename / references** dentro de `.fitzv`
   — no implementados por el LSP MVP.
 

@@ -9,6 +9,67 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.22.0] — 2026-07-19 — Phase 11.7 R3.5 + Frente 2: the kanban as a WASM SPA + full `<Child />` composition
+
+**Major release** — closes **Phase 11.7** (client-side dynamic
+capabilities) for the `.fitzv` client-WASM target. The headline: the
+collaborative-kanban Board — previously an SSR-only single-file
+component — now compiles to a **standalone WebAssembly single-page app**
+from one `.fitzv` (plus two sibling classic modules), ~57 KB raw /
+~21.5 KB gzipped. Everything runs in the browser: add cards, move them
+between columns, delete them — no server, no WebSocket.
+
+Nothing in this release changes classic Fitz (`fitz run`/`build`/`check`
+of `.fitz` programs are bit-for-bit identical); it is entirely additive
+to the `.fitzv` → WASM emitter. The ten pre-existing view examples
+regenerate byte-for-byte.
+
+### R3.5 — the kanban path
+
+- **R3.5a.1 — expression machinery on lists**: inline closures,
+  `.map`/`.filter`/`.len()` → Rust iterator chains, comparisons, `if`
+  as a value, list-literal reassignment (`nums = nums.map(...)` without
+  a borrow conflict), and `{#for}` over a call result (not just a bare
+  state field). New example `examples/view/list-transform`.
+- **R3.5a.2 — imported classic helper fns**: a sibling `.fitz`'s
+  top-level `fn`s are transpiled into the WASM bundle (`cards_in`,
+  `move_one`, `keep_if_not`, `make_card`, + internal helpers reachable
+  through them), so the SFC calls them from templates + event bodies.
+  Free-fn calls clone their ident arguments so a captured String/nominal
+  survives a `.map`/`.filter` closure. New example
+  `examples/view/mini-board`.
+- **R3.5b.1 — click payload**: `data-flv-click` + `data-flv-value-*`
+  (interpolated attributes) wire a click listener that reads per-item
+  data back into a `payload: Map<Str, Str>`; `payload["k"]` /
+  `payload.has("k")` lower against it. New example
+  `examples/view/click-payload`.
+- **R3.5b.2 — form-submit payload**: `data-flv-submit` on a form reads
+  its named inputs into the payload and clears `data-flv-clear` fields
+  (via the conditional `HtmlInputElement` web-sys feature). New example
+  `examples/view/form-input`.
+- **R3.5c — the full kanban WASM SPA**: string interpolation
+  (`"{next_id}"` → `format!`) + all of the above converge in
+  `examples/view/kanban` — nominal `Card`, six transpiled helpers,
+  `.map`/`.filter` closures, `{#for c in cards_in(...)}`, per-card click
+  payload, form-submit card creation. Builds to real WASM end-to-end.
+  The same `data-flv-*` conventions drive both the SSR and WASM targets.
+
+### Frente 2 — `<Child />` composition
+
+- **11.7.c — event bubbling** (`<Child @event="handler" />`): a child
+  event fires a parent handler. The child gains one callback slot per
+  bound event; only bound events get a slot (byte-for-byte unchanged
+  otherwise). MVP: no-payload bubble. New example
+  `examples/view/event-bubbling`.
+- **11.7.d — slots with fallback** (`<slot>fallback</slot>` +
+  `<Child>content</Child>`): a child exposes a `<slot />` hole; the
+  parent fills it with content rendered in PARENT scope (parent state +
+  event handlers) via a synthesised `__render_slot_<n>` method, or the
+  child's fallback shows. MVP: default slot only, no nested `<Child />`
+  in slot content. New example `examples/view/slots`.
+- Both are client-WASM capabilities: the SSR emitter rejects `@event` on
+  a child, `<slot />`, and `<Child>content</Child>` with clear pointers.
+
 ## [v0.21.0] — 2026-07-16 — Phase 11: Native frontend `.fitzv` compiled to WASM + SSR emitter for fitz-liveviews
 
 **Major release** — ships **Phase 11 (Native frontend in Fitz

@@ -9886,12 +9886,25 @@ de 3 releases:
   kanban**: `{#for}` sobre resultado de fn call, `.map`/`.filter` +
   closures en event bodies, imported classic helper fns transpiladas
   al WASM crate — próximo slice (imported-fn support).
-- ⏳ **11.7.c/d (R2b+)** — event bubbling + `<slot />` fallback.
-- ⏳ **11.7 imported-fn + f/g (R3.5 → v0.22.0)** — transpilación de
-  fns classic importadas al crate WASM + `{#for}` sobre call results +
-  `.map`/`.filter`/closures en event bodies (lo que el kanban necesita
-  sobre R3) + drag-drop primitives + kanban SPA port (acceptance
-  criterion).
+- ✅ **11.7 R3.5 (v0.22.0, 2026-07-19)** — kanban SPA port entero:
+  R3.5a.1 (lowerer de listas — closures + `.map`/`.filter`/`.len` +
+  `{#for}` sobre call result + reasignación de lista), R3.5a.2 (fns
+  classic importadas transpiladas al crate WASM + free-fn calls con
+  clonado de args), R3.5b.1 (click payload — `data-flv-click` +
+  `data-flv-value-*` + `payload[...]`/`.has`), R3.5b.2 (form payload —
+  `data-flv-submit` + `data-flv-clear` + feature `HtmlInputElement`
+  condicional), R3.5c (StrInterp + `examples/view/kanban` a WASM real,
+  ~21.5 KB gzipped). Ejemplos: list-transform, mini-board,
+  click-payload, form-input, kanban.
+- ✅ **11.7.c (v0.22.0)** — event bubbling `<Child @event="handler" />`
+  (callback slot por event bindeado, whole-file analysis, checker;
+  MVP sin payload). Ejemplo `examples/view/event-bubbling`.
+- ✅ **11.7.d (v0.22.0)** — `<slot>fallback</slot>` + `<Child>content
+  </Child>` (child `__slot` callback + método parent `__render_slot_<n>`
+  en scope del parent; MVP default slot, sin `<Child />` anidado).
+  Ejemplo `examples/view/slots`. **Cierra Phase 11.7 entera** para el
+  target client-WASM. Deuda residual en `docs/deudas-post-5b.md`
+  (payload bubbling, named slots, `<Child />` en slot content).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
