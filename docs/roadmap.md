@@ -9941,6 +9941,59 @@ de 3 releases:
   ~35 KB). Los 8 ejemplos view same-file regeneran byte-a-byte. Residual:
   local gana ante importado, sin manejo de colisión de aliasing, dir plano.
 
+### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
+
+La superficie de composición client-WASM (props, event bubbling, slots,
+cross-file) quedó completa al v0.26.0 con el modelo **dirty-flag + naive
+re-render**. Esta iteración ataca los cuatro saltos que faltan para que un
+`.fitzv` sea una app fullstack de primera clase. Orden por costo/beneficio,
+no por dependencia estricta.
+
+- 🔜 **11.10 — Reactividad fine-grained.** Reemplaza el naive re-render
+  (parent muta → re-renderiza todo su subtree) por un grafo reactivo con
+  **subscripciones locales**: al mutar un campo de `state`, solo se
+  recomputan los nodos del template que *leen* ese campo. Sin API nueva en
+  el caso base — el dev sigue escribiendo `{count}` pelado y el compilador
+  cablea la subscripción automática al bajar el `.fitzv` a WASM. Suma
+  **derivados** (`memo` — valor calculado que se recomputa solo cuando
+  cambia una dependencia) y **derivados async** (se re-disparan cuando
+  cambian sus deps). Cierra el límite conocido de 11.7.a/R1 ("el child se
+  recrea en cada re-render → pierde state local"): con subscripciones, el
+  child sobrevive porque se subscribe a lo que lee. Es el estándar moderno
+  de reactividad frontend. Toca `src/view/codegen_wasm.rs` (runtime
+  emitido: celdas reactivas + grafo de subscripción en lugar del
+  re-render top-down).
+
+- 🔜 **11.11 — Funciones de servidor (`@server`).** Decorator nuevo sobre
+  `async fn` que la vuelve **invocable directo desde el `.fitzv`
+  client-WASM** como si fuera local. El compilador emite las dos mitades de
+  un contrato tipado en un solo lugar: (a) el handler HTTP del lado server
+  (reusa el runtime HTTP nativo + auth + `Result` + marshaling JSON que ya
+  existen) y (b) el stub client que serializa los args → `http.request`
+  (built-in desde v0.17.0) → deserializa el return al tipo declarado.
+  **Bajo costo, alto valor**: las piezas ya están construidas; falta el
+  macro del compilador que las una. Es el feature que le da a la vista su
+  momento "todo el stack junto sin plumbing".
+
+- 🔜 **11.12 — Hidratación SSR → client.** Un mismo `.fitzv` rinde **SSR**
+  (first paint, SEO, funciona sin JS) y el runtime client-WASM **toma
+  control del DOM existente** en vez de re-crearlo: restaura el estado que
+  el server serializó (state inicial + resultados de `@server`) y mapea los
+  nodos del template a los nodos reales del DOM. Unifica los dos emitters
+  (SSR + WASM) que hoy son mundos separados con un solo check pass
+  compartido. Los IDs `data-flv-*` que ya emite el SSR emitter son la base
+  del mapeo. La visión grande que junta las dos mitades del frontend.
+
+- 🔜 **11.13 — Hot reload del template.** `fitz dev` re-parsea el
+  `<template>` de un `.fitzv` y aplica el diff sin recompilar el crate WASM
+  entero (hoy `fitz dev` recompila todo). Salto de DX; el más ambicioso
+  técnicamente (requiere un runtime del template en el cliente que acepte
+  diffs).
+
+**Orden sugerido:** 11.11 (server fns — piezas listas) → 11.10 (señales —
+desbloquea child state) → 11.12 (hidratación — unifica backends) → 11.13
+(hot reload — DX). Cada una es una sesión seria.
+
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
   4 nuevos `pub fn parse_*_from_source` en `src/parser.rs` +

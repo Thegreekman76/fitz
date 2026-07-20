@@ -4717,6 +4717,7 @@ impl ModuleLoader {
         // the root_segment "types", and `mod types;` is only
         // declared once in main.rs (the subdir's `mod.rs` declares
         // `pub mod user; pub mod api;`).
+        let renamed = self.renamed_module_names();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for m in &self.modules {
             let root = root_segment_of(&m.rel_path);
@@ -4726,14 +4727,51 @@ impl ModuleLoader {
             // For subdirectory imports, we also add a `mod.rs` with
             // `pub mod <last>;` in `into_mod_files`. Here we only
             // declare the root segment in `main.rs`.
-            output.push_str(&format!("mod {};\n", root));
+            if let Some(safe) = renamed.get(&root) {
+                // Name collides with an imported type of the same name;
+                // declare the module under a safe alias pointing at the file.
+                output.push_str(&format!("#[path = \"{}.rs\"]\nmod {};\n", root, safe));
+            } else {
+                output.push_str(&format!("mod {};\n", root));
+            }
         }
         if !self.modules.is_empty() {
             output.push('\n');
         }
     }
 
+    /// Flat modules whose name equals an imported TYPE's local name would
+    /// collide in Rust's type namespace (`mod Foo;` + `use Foo::Foo;` both
+    /// bind `Foo` there). Returns a map `original_root -> safe_alias` for
+    /// such modules, so the module is declared under `__fitzmod_<name>` (via
+    /// `#[path]`) while the type keeps the bare name user code references.
+    /// Common with `.fitzv` components (file name == component/type name).
+    fn renamed_module_names(&self) -> std::collections::HashMap<String, String> {
+        let mut renamed: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (local, binding) in self.bindings.iter() {
+            if let ResolvedBinding::Named {
+                module_index,
+                kind: NamedKind::Type,
+                ..
+            } = binding
+            {
+                if let Some(m) = self.modules.get(*module_index) {
+                    let root = root_segment_of(&m.rel_path);
+                    let qualifier = mod_qualifier_of(&m.rel_path);
+                    // Only flat modules (qualifier == root) collide this way,
+                    // and only when the imported type's local name equals it.
+                    if qualifier == root && local == &root {
+                        renamed.insert(root.clone(), format!("__fitzmod_{}", root));
+                    }
+                }
+            }
+        }
+        renamed
+    }
+
     fn emit_use_decls(&self, output: &mut String) {
+        let renamed = self.renamed_module_names();
         // We sort entries by name so the output is deterministic
         // (HashMap does not guarantee order).
         let mut entries: Vec<(&String, &ResolvedBinding)> = self.bindings.iter().collect();
@@ -4750,7 +4788,11 @@ impl ModuleLoader {
                 // `types::user`, not just `user` (which would be the
                 // mod_name). `mod_qualifier_of(rel_path)` computes
                 // the correct path.
-                let qualifier = mod_qualifier_of(&self.modules[*module_index].rel_path);
+                let raw_qualifier = mod_qualifier_of(&self.modules[*module_index].rel_path);
+                let qualifier = renamed
+                    .get(&raw_qualifier)
+                    .cloned()
+                    .unwrap_or(raw_qualifier);
                 // PreF8.4: if the local (HashMap key) differs from
                 // the item (name inside the module), we emit `as`
                 // so the generated Rust can reference the local
@@ -8558,9 +8600,14 @@ impl<'a> CodegenCtx<'a> {
     /// module, and the importer's TypeEnv uses them to resolve
     /// cross-module types / consts / fns.
     fn install_loader_bindings(&mut self, loader: &ModuleLoader) {
+        // Modules renamed to avoid a name collision with an imported type
+        // (see `renamed_module_names`) must carry the renamed qualifier so
+        // qualified references (e.g. `<mod>::__default_T_field()`) resolve.
+        let renamed = loader.renamed_module_names();
         for m in &loader.modules {
+            let raw_q = mod_qualifier_of(&m.rel_path);
             self.loaded_modules.push(LoadedModuleSigs {
-                mod_qualifier: mod_qualifier_of(&m.rel_path),
+                mod_qualifier: renamed.get(&raw_q).cloned().unwrap_or(raw_q),
                 type_sigs: m.type_sigs.clone(),
                 fn_sigs: m.fn_sigs.clone(),
                 const_sigs: m.const_sigs.clone(),

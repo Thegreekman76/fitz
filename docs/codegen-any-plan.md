@@ -297,14 +297,67 @@ fitz-liveviews app had ever reached `fitz build`)
   push a Result frame on `ret_stack` so the native Rust `?` compiles — gated
   on `body_has_try` so `?`-free WS handlers keep their plain `()` return.
 
-### Deferred (its own effort)
+### Cross-module: one general fix kept (#8); the rest reverted for a clean cut
 
-- **Cross-module type identity for dependency-imported fn return types.**
-  `component()` from the `fitz_liveviews` dependency returns `Html`; its
-  origin-module `TypeId` collides with a local type's id in the importer, so
-  codegen mis-types the call result. `remap_imported_nominals` exists but the
-  obvious call-site remap didn't take — dependency imports resolve through a
-  different path than sibling-file imports. Correctly unifying cross-module
-  type identity across all import paths is a focused follow-up; full
-  fitz-liveviews binary builds wait on it. The showcase runs under `fitz run`
-  meanwhile.
+Building a real fitz-liveviews app to a binary exposed a chain of pre-existing
+cross-module codegen gaps beyond `Any`. Four were explored with green minimal
+repros, but only **#8** is regression-clean and general enough to keep in the
+`Any` milestone; the others regressed existing cross-module tests (because they
+lean on `remap_imported_nominals`, which **degrades an unresolvable nominal to
+`Any`** — fine when the name is found, harmful when it isn't) and were reverted
+into the deferred workstream:
+
+- **#8 — module name == imported type name (KEPT).** `mod Foo;` + `use
+  Foo::Foo;` collided in Rust's type namespace (common with `.fitzv`: file name
+  == component/type name). Colliding flat modules are declared under
+  `__fitzmod_<name>` via `#[path]`, and the qualifier is threaded through
+  `emit_use_decls`, `emit_mod_decls`, and `install_loader_bindings` (so the
+  default-helper `<mod>::__default_T_f()` resolves). Repro: `Widget.fitz`
+  exporting `type Widget` → builds + runs. This only affects programs that
+  previously *failed* the collision, so it can't regress a passing test.
+- **#5 (reverted) — remap imported-fn return/param nominals at the call site.**
+  Fixed the collision case (`from lib import mk; mk() -> Html`) but the param
+  remap degraded a *working* nominal param to `Any` for
+  `loader_absoluto_data_sibling_import` (`make_name(user: User)` → `Any`),
+  emitting a dangling `__FitzValue::Instance`. Belongs in facet #1 below.
+- **#6 (reverted) — imported fn used as a VALUE** (`let f = greet`). Same
+  degrade-to-`Any` risk via the remap; niche, folded into the follow-up.
+
+### Deferred (the remaining, broad cross-module + `Any`-coercion workstream)
+
+With #5/#6/#7 reverted, the fitz-liveviews binary is deferred. When it resumes,
+the earlier build (with the chain applied) got the dashboard's **codegen fully
+passing** with rustc reporting ~10 errors across **four distinct roots** — a
+dedicated multi-part effort, not a near-finish:
+
+1. **Cross-module nominal → `Any` degradation for RE-imported / non-imported
+   nominals.** `diff_html() -> List<Patch>` is typed `List<Any>` and
+   `MetricTile_render -> Html` is cast to `-> __FitzValue`, because
+   `remap_imported_nominals` resolves a nominal's name only from the module's
+   *defined* `type_sigs` — `Patch`/`Html` are imported into that module, not
+   defined, so the name lookup fails and it degrades to `Any`. Fix: store a
+   per-module `TypeId -> name` map (defined + imported) in `LoadedModuleSigs`
+   and consult it in the remap.
+2. **Map/List literal as a call ARG doesn't receive the `Any` hint.**
+   `{"bump": handler}` passed to a `Map<Str, Any>` param emits the concrete
+   `Vec<(String, Arc<dyn Fn>)>` instead of `Vec<(FV, FV)>` (the hint is only
+   threaded to struct-lit fields today). Fix: pass the param type as a hint to
+   the arg's `gen_expr` in `gen_call_with_sig`.
+3. **Spurious `Any -> Response` coerce.** A value already typed `Response` is
+   emitted with the `__FitzValue::Instance` downcast — a coerce fired where the
+   source wasn't actually `Any`.
+4. **`component_state -> Any` return** body/return mismatch in the emitted lib
+   module.
+5. **`__FitzValue` in scope inside a non-DB module that uses `Any`.** The lib
+   module (`lib.fitz`) references `__FitzValue`, but the enum + helpers are
+   only emitted in main.rs. A naive `use crate::{__FitzValue, ...}` per-module
+   (attempted, reverted) regressed two existing tests: it *duplicated* the
+   import for modules that already get `__FitzValue` via the DB prelude
+   (E0252), and *dangled* when main itself doesn't emit the prelude (no
+   transitive detection → E0433). Fix must coordinate with the existing
+   DB-prelude mechanism + add transitive prelude emission in main.
+
+Each is a real codegen change touching shared cross-module paths, with
+regression risk, and fixing one tends to expose the next. The showcase runs
+under `fitz run` meanwhile; the error line numbers above are the exact starting
+point for the follow-up.
