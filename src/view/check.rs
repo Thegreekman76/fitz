@@ -98,6 +98,29 @@ impl std::error::Error for CheckError {}
 /// event handlers (declaration order), then template interpolations
 /// (source order — depth-first walk of the template AST).
 pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
+    check_with_imported_components(file, &[])
+}
+
+/// Like [`check`], but with the surfaces of cross-file `<Child />`
+/// components loaded from imported `.fitzv` siblings (Phase 11.7 —
+/// cross-file composition). Each imported [`ExpandedComponent`] joins the
+/// component map that `check_child_components` consults, so composition of
+/// an imported child (prop existence + type-compat, `@event` binding
+/// existence, slot-fill) is validated against its real surface instead of
+/// being reported as an unknown component.
+///
+/// Local components win on a name collision (a local component shadows an
+/// imported one of the same name). When `imported` is empty this is
+/// byte-for-byte identical to the same-file check.
+///
+/// Only the WASM-client build path (`fitz build --target wasm-client`)
+/// supplies imported components; the SSR / classic-import path keeps
+/// calling [`check`] with no cross-file surface (cross-file composition is
+/// a client-WASM capability).
+pub fn check_with_imported_components(
+    file: &ExpandedViewFile,
+    imported: &[ExpandedComponent],
+) -> Vec<CheckError> {
     let mut errors = Vec::new();
     // §9.dd (2026-07-16) — Convert top-level `from X import Y` view
     // imports to classic `Stmt::FromImport` ONCE at the top of the
@@ -129,7 +152,7 @@ pub fn check(file: &ExpandedViewFile) -> Vec<CheckError> {
         // state; the cascade concern (compound "your state is
         // broken AND props are broken") isn't relevant.
         if let Some(template) = &component.template {
-            check_child_components(file, component, template, &mut errors);
+            check_child_components(file, imported, component, template, &mut errors);
         }
         // Cascade avoidance — only check handlers + interpolations
         // when the state is clean, so consequential errors don't
@@ -1051,26 +1074,36 @@ fn is_str_friendly(ty: &Type) -> bool {
 /// So the concrete plan: this pass VALIDATES only, producing
 /// errors. The emitter re-derives the coerced representation
 /// using the same helper. Kept in sync via unit tests.
-fn check_child_components(
-    file: &ExpandedViewFile,
+fn check_child_components<'a>(
+    file: &'a ExpandedViewFile,
+    imported: &'a [ExpandedComponent],
     component: &ExpandedComponent,
     template: &ExpandedTemplate,
     errors: &mut Vec<CheckError>,
 ) {
-    let component_map = build_component_map(file);
+    let component_map = build_component_map(file, imported);
     for node in &template.roots {
         walk_child_components(node, &component_map, &component.name, errors);
     }
 }
 
-/// Build a `component_name → component` lookup for the file.
-fn build_component_map(
-    file: &ExpandedViewFile,
-) -> std::collections::HashMap<&str, &ExpandedComponent> {
-    file.components
-        .iter()
-        .map(|c| (c.name.as_str(), c))
-        .collect()
+/// Build a `component_name → component` lookup for the file, unioning the
+/// local components with any cross-file imported ones (Phase 11.7). Local
+/// components are inserted last so they WIN on a name collision — an
+/// imported component of the same name is shadowed by the local one.
+fn build_component_map<'a>(
+    file: &'a ExpandedViewFile,
+    imported: &'a [ExpandedComponent],
+) -> std::collections::HashMap<&'a str, &'a ExpandedComponent> {
+    let mut map: std::collections::HashMap<&'a str, &'a ExpandedComponent> =
+        std::collections::HashMap::new();
+    for c in imported {
+        map.insert(c.name.as_str(), c);
+    }
+    for c in &file.components {
+        map.insert(c.name.as_str(), c);
+    }
+    map
 }
 
 fn walk_child_components(
@@ -3238,6 +3271,121 @@ component Card {
         assert!(
             msg.contains("did you mean"),
             "expected typo hint in msg: {msg}"
+        );
+    }
+
+    // ---- Phase 11.7 — cross-file `<Child />` composition -----------
+
+    /// Check a parent `.fitzv` source with the components of an imported
+    /// child `.fitzv` supplied as cross-file surfaces. Mirrors what the
+    /// WASM CLI does: load imported components, then
+    /// `check_with_imported_components`.
+    fn check_str_with_imported(parent_src: &str, child_srcs: &[&str]) -> Vec<CheckError> {
+        let raw = view_parse(parent_src).expect("parent view parses");
+        let parent = expand(&raw).expect("parent expands cleanly");
+        let mut imported: Vec<ExpandedComponent> = Vec::new();
+        for child in child_srcs {
+            let raw = view_parse(child).expect("child view parses");
+            let ex = expand(&raw).expect("child expands cleanly");
+            imported.extend(ex.components);
+        }
+        check_with_imported_components(&parent, &imported)
+    }
+
+    #[test]
+    fn cross_file_child_composition_accepts_imported_component() {
+        // `<Card />` is declared in a SEPARATE file; supplied as an
+        // imported surface it composes cleanly — no "unknown component".
+        let parent = r#"from Card import Card
+component App {
+  state {}
+  <template><div><Card title="hi" /></div></template>
+}"#;
+        let child = r#"component Card {
+  state { title: Str = "" }
+  <template><article>{title}</article></template>
+}"#;
+        let errs = check_str_with_imported(parent, &[child]);
+        assert!(errs.is_empty(), "expected no errors, got: {errs:#?}");
+    }
+
+    #[test]
+    fn cross_file_unknown_imported_component_still_errors() {
+        // No imported surfaces supplied → `<Card />` is unknown.
+        let parent = r#"from Card import Card
+component App {
+  state {}
+  <template><div><Card title="hi" /></div></template>
+}"#;
+        let errs = check_str_with_imported(parent, &[]);
+        assert!(
+            errs.iter().any(|e| e.message.contains("unknown component")),
+            "an unresolved cross-file child must error: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn cross_file_child_prop_typo_validated_against_imported_surface() {
+        // The prop name is validated against the IMPORTED child's real
+        // state fields — a typo is caught cross-file.
+        let parent = r#"from Card import Card
+component App {
+  state {}
+  <template><div><Card titel="hi" /></div></template>
+}"#;
+        let child = r#"component Card {
+  state { title: Str = "" }
+  <template><article>{title}</article></template>
+}"#;
+        let errs = check_str_with_imported(parent, &[child]);
+        assert!(
+            !errs.is_empty(),
+            "an unknown prop on a cross-file child must error: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn cross_file_child_event_binding_validated_against_imported_surface() {
+        // Binding an event the imported child doesn't declare errors.
+        let parent = r#"from Card import Card
+component App {
+  state { n: Int = 0 }
+  event bump() { n = n + 1 }
+  <template><div><Card @nope="bump" /></div></template>
+}"#;
+        let child = r#"component Card {
+  state {}
+  event like() {}
+  <template><button @click="like">x</button></template>
+}"#;
+        let errs = check_str_with_imported(parent, &[child]);
+        assert!(
+            errs.iter().any(|e| e.message.contains("does not declare")),
+            "binding an event the imported child lacks must error: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn cross_file_local_component_shadows_imported_of_same_name() {
+        // A local `Card` wins over an imported `Card`: composition
+        // validates against the LOCAL surface (which has `local`, not
+        // `title`), so `title="..."` is an unknown prop.
+        let parent = r#"component App {
+  state {}
+  <template><div><Card title="hi" /></div></template>
+}
+component Card {
+  state { local: Str = "" }
+  <template><span>{local}</span></template>
+}"#;
+        let imported = r#"component Card {
+  state { title: Str = "" }
+  <template><article>{title}</article></template>
+}"#;
+        let errs = check_str_with_imported(parent, &[imported]);
+        assert!(
+            !errs.is_empty(),
+            "local Card wins → `title` is unknown on it: {errs:#?}"
         );
     }
 

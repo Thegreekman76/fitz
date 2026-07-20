@@ -1170,7 +1170,30 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
             std::process::exit(1);
         }
     };
-    let check_errs = view::check(&expanded);
+    // Phase 11.7 — cross-file `<Child />`. Load the components declared
+    // in imported sibling `.fitzv` files BEFORE the check so composition
+    // of an imported child validates against its real surface (state /
+    // events / slots) instead of being reported as an unknown component.
+    // Resolved against the entry `.fitzv`'s directory. Empty when the
+    // file composes no cross-file children.
+    let base_dir = resolved
+        .entry
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let imported_components = match view::load_imported_components(&expanded.imports, &base_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "✗ loading imported components for `{}`: {e}",
+                resolved.entry.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let check_errs =
+        view::check_with_imported_components(&expanded, imported_components.components());
     if !check_errs.is_empty() {
         eprintln!(
             "✗ view::check on `{}` reported {} error(s):",
@@ -1186,13 +1209,7 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
     // Phase 11.7 R3 — load the classic `type` defs imported by the
     // `.fitzv` (e.g. `from card import Card`) from their sibling
     // `.fitz` files so the emitter can synthesise a Rust `struct` for
-    // each. Resolved against the entry `.fitzv`'s directory. Empty when
-    // the file imports no nominals (the pre-R3 examples).
-    let base_dir = resolved
-        .entry
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // each. Empty when the file imports no nominals (the pre-R3 examples).
     let nominals = match view::load_imported_nominals(&expanded.imports, &base_dir) {
         Ok(n) => n,
         Err(e) => {
@@ -1240,6 +1257,7 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         &expanded,
         &nominals,
         &imported_fns,
+        &imported_components,
         &sanitised_pkg,
         mount,
         Some(&source_label),

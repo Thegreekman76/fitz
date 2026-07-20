@@ -14700,12 +14700,64 @@ state field del child. Aceptado:
   shipped) — `expr` es cualquier expresión Fitz que respete la
   regla de scoping del parent's template.
 
-**Cross-file `<Child />` composition** — cuando el `<Child />`
-vive en un `.fitzv` SEPARADO (importado con `from ChildFile
-import ChildComponent`), el emitter hoy **NO** lo permite;
-usá el runtime API `component("ChildName", "instance-id")` del
-`fitz-liveviews` package para components importados. Refinable
-cuando aparezca demanda concreta (memoria del proyecto).
+**Cross-file `<Child />` composition** (target WASM, shipped
+v0.25.0) — el `<Child />` puede vivir en un `.fitzv` SEPARADO,
+importado con `from Card import Card`. El emitter carga el
+sibling `.fitzv` (parse → expand), inlinea el componente entero
+(struct + `new` + event handlers + render + `<style scoped>`) en
+el crate generado, y el checker valida la composición del parent
+(props, `@event`, slots) contra la **surface real** del child.
+Toda la superficie de composición cruza el borde de archivo:
+props ↓, event bubbling ↑, slots default + named con fallback.
+
+```fitzv
+// Card.fitzv
+component Card {
+  state { title: Str = "Untitled"  likes: Int = 0 }
+  event like() { likes = likes + 1 }
+  <template>
+    <article>
+      <slot name="badge">·</slot>
+      <h2>{title}</h2>
+      <slot>(no body)</slot>
+      <button @click="like">♥ {likes}</button>
+    </article>
+  </template>
+}
+
+// App.fitzv
+from Card import Card
+component App {
+  state { total: Int = 0 }
+  event bump() { total = total + 1 }
+  <template>
+    <main>
+      <p>Total likes: {total}</p>
+      <Card title="Patagonia" @like="bump">
+        <span slot="badge">NEW</span>
+        <p>Body rendered in the parent's scope.</p>
+      </Card>
+    </main>
+  </template>
+}
+```
+
+`Card` se define UNA vez, en `Card.fitzv`, y se reusa sin
+copy-paste — la misma historia de reuso que los módulos clásicos
+de Fitz, ahora para components `.fitzv` en el target WASM.
+Ejemplo runnable: `examples/view/cross-file-child/`.
+
+Límites del MVP: un solo nivel de profundidad (los imports
+propios del `.fitzv` importado no se cargan transitivamente — el
+parent importa todo lo que cualquier child necesite; los
+components file-local del child SÍ están disponibles); el
+component local gana ante uno importado del mismo nombre; sin
+aliasing de components (`from Card import Card as Row` registra
+bajo el nombre original); y el diagnostics del LSP sobre un solo
+`.fitzv` todavía marca al child cross-file como desconocido
+(Phase 11.8). El path SSR usa el runtime API
+`component("ChildName", "instance-id")` del `fitz-liveviews`
+package para composición cross-file.
 
 **Keyed children dentro de `{#for}`** (target WASM, R2b shipped)
 — podés componer un child DENTRO de un loop, dándole una
@@ -14944,11 +14996,13 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
 
 ### Qué no está en el MVP
 
-- **Cross-file `<Child />` composition** — components
-  importados de otro `.fitzv` no se pueden componer con syntax
-  XML-like hoy. Workaround: runtime API `component("Name",
-  "id")` del `fitz-liveviews`. Refinable cuando entre el
-  ejemplo grid + forms del companion UI library como driver.
+- **Cross-file `<Child />` composition** — **CERRADO en v0.25.0
+  para el target WASM**: un `<Child />` importado de otro
+  `.fitzv` (`from Card import Card`) se compone con la misma
+  syntax XML-like que un child same-file (props, `@event`,
+  slots). Ver la sub-sección "Cross-file `<Child />`
+  composition" arriba. El path SSR sigue usando el runtime API
+  `component("Name", "id")` del `fitz-liveviews`.
 - **WASM interpolated props** — **caso simple CERRADO en
   Phase 11.7.a (v0.21.5)**: el target WASM ya acepta
   `<Child prop="{expr}" />` cuando el prop es un state field

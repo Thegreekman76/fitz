@@ -1,0 +1,59 @@
+// Phase 11.7 — cross-file `<Child />` composition on the client-WASM
+// target. This is the PARENT. It composes a `<Card />` that lives in a
+// SEPARATE `.fitzv` file (`Card.fitzv`), imported with `from Card import
+// Card`.
+//
+// This closes the last open piece of the WASM composition surface:
+// props flow DOWN (`title="..."`), events bubble UP (`@like="bump"`
+// carries the child's `like` event to the parent's `bump` handler), and
+// slots — default + named, each with a fallback — let the parent inject
+// content that renders in the PARENT's scope. All of it now works across
+// a file boundary, not just within one `.fitzv`.
+//
+// WHY IT MATTERS (try it in the browser):
+//   1. Tap a card's "♥" — its OWN like counter goes up (the child owns
+//      its state), and the shared "Total likes" at the top increments
+//      too (the `like` event bubbles up to the parent's `bump`).
+//   2. The first card fills BOTH slots — a "NEW" badge and a body
+//      paragraph. The second fills only the default slot, so the badge
+//      shows its fallback ("·"). Slot content renders in the parent's
+//      scope, so it can read parent state.
+//
+// The `Card` component is defined ONCE, in `Card.fitzv`, and reused
+// here without copy-paste — the same reuse story as classic Fitz
+// modules, now for `.fitzv` components on the WASM target.
+
+from Card import Card
+
+component App {
+  state {
+    heading: Str = "Cross-file cards"
+    total: Int = 0
+  }
+
+  event bump() {
+    total = total + 1
+  }
+
+  <template>
+    <main class="app">
+      <h1>{heading}</h1>
+      <p class="total">Total likes across cards: {total}</p>
+
+      <Card title="Patagonia" @like="bump">
+        <span slot="badge" class="badge">NEW</span>
+        <p>The body of a card is written by the PARENT and rendered in the parent's scope.</p>
+      </Card>
+
+      <Card title="El Chaltén" @like="bump">
+        <p>This card fills only the default slot, so the badge above falls back to its own content.</p>
+      </Card>
+    </main>
+  </template>
+
+  <style scoped>
+    .app { font-family: system-ui, sans-serif; max-width: 520px; display: flex; flex-direction: column; gap: 14px; }
+    .total { color: #555; font-weight: 600; }
+    .badge { background: #c33; color: #fff; font-size: 0.7em; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
+  </style>
+}

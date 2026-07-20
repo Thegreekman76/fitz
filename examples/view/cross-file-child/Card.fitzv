@@ -1,0 +1,51 @@
+// Phase 11.7 — cross-file `<Child />` composition on the client-WASM
+// target. This is the IMPORTED child. It lives in its OWN `.fitzv`
+// file and is composed by `App.fitzv` via `from Card import Card`.
+//
+// Before this slice, `<Card />` was same-file only: a child had to be
+// declared in the SAME `.fitzv` as its parent. Now the WASM emitter
+// loads this file (parse → expand), inlines the whole component —
+// struct + `new` + event handlers + render + `<style scoped>` — into
+// the generated crate, and the checker validates the parent's
+// composition against this component's real surface (props, events,
+// slots).
+//
+// The surface exercised end-to-end from `App.fitzv`:
+//   - `title: Str` — a static prop fanned in from the parent.
+//   - `event like()` — the child owns its OWN `likes` counter AND, when
+//     the parent binds `<Card @like="..." />`, the event bubbles up.
+//   - `<slot name="badge">` — a NAMED slot with a fallback.
+//   - `<slot>` — the default slot with a fallback. Parent-provided slot
+//     content renders in the PARENT's scope.
+
+component Card {
+  state {
+    title: Str = "Untitled"
+    likes: Int = 0
+  }
+
+  event like() {
+    likes = likes + 1
+  }
+
+  <template>
+    <article class="card">
+      <header class="head">
+        <slot name="badge">·</slot>
+        <h2 class="title">{title}</h2>
+      </header>
+      <div class="body">
+        <slot>(no body)</slot>
+      </div>
+      <button class="like" @click="like">♥ {likes}</button>
+    </article>
+  </template>
+
+  <style scoped>
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px 16px; background: #fff; display: flex; flex-direction: column; gap: 10px; }
+    .head { display: flex; align-items: center; gap: 8px; }
+    .title { margin: 0; font-size: 1.1em; }
+    .body { color: #444; }
+    .like { align-self: flex-start; padding: 6px 12px; cursor: pointer; border: 1px solid #c33; border-radius: 6px; background: #fff; color: #c33; }
+  </style>
+}

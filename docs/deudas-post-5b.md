@@ -68,9 +68,34 @@ para slices posteriores según demanda):
   re-renderiza en cada render (listeners frescos), no se clona; OK para
   el modelo naive-render pero un refinamiento a signals evitaría el
   re-work.
-- **Cross-file `<Child />` composition** — sigue abierta (mi `<Child />`
-  es same-file). Workaround: runtime API `component("Name", "id")` de
-  `fitz-liveviews`.
+- **Cross-file `<Child />` composition** — 🟢 **CERRADO 2026-07-19
+  (v0.25.0)**. Un `<Child />` puede vivir en un `.fitzv` SEPARADO,
+  importado con `from Card import Card`. Nuevo `load_imported_components`
+  (`src/view/wasm_build.rs`) lee el sibling `.fitzv` (parse → expand) y
+  registra sus components en un `ImportedComponentRegistry`
+  (`src/view/codegen_wasm.rs`, paralelo a `NominalRegistry`/
+  `ImportedFnRegistry`). El emitter mergea la clausura *reachable* de
+  components importados adelante de los locales en UN synthetic file
+  (`merge_imported_components`) → cada pass existente (bubbled events,
+  emit per-component, resolución de child) los trata como same-file, así
+  el child importado se inlinea entero (struct + `new` + handlers + render
+  + `<style scoped>`) y toda la superficie cruza el borde de archivo
+  (props ↓, event bubbling ↑, slots default + named con fallback). El
+  checker (`check_with_imported_components`, `src/view/check.rs`) valida
+  la composición contra la surface real del child importado. CLI cablea en
+  `build_wasm_client_cmd` (`src/main.rs`). Registry vacío → merge es un
+  clone estructural → same-file byte-a-byte (los 8 ejemplos view previos
+  regeneran sin cambios). Ejemplo `examples/view/cross-file-child`
+  (`App.fitzv` importa `Card.fitzv` con prop + `@like` bubble + named/
+  default slots; compila a WASM real 36.2 KB). **Deudas residuales
+  derivadas**: un solo nivel de profundidad (los imports propios del
+  `.fitzv` importado no se cargan transitivamente — el parent importa todo
+  lo que cualquier child necesite, paralelo a W17 del ORM; los components
+  file-local del child SÍ se cargan); local gana ante importado del mismo
+  nombre; sin aliasing de components (`from Card import Card as Row`
+  registra bajo el nombre original — nominales/fns sí honran alias); el
+  LSP sobre un solo `.fitzv` marca al child cross-file como desconocido
+  (Phase 11.8 — no tiene contexto de siblings).
 
 ## 🟡 Framework support gaps — surface durante fitz-liveviews kanban migration (Phase 8.5) — **ABIERTAS 2026-07-16** (Phase 11.7+ scope)
 
@@ -438,11 +463,13 @@ parent state y mounted children).
   - **Event bubbling** (11.7.c) + **`<slot />` fallback** (11.7.d)
     — R2b+/posterior.
 - **Nominal-type STATIC props** — workaround: interpolación cubre.
-- **Cross-file `<Child />` composition (S.6)** — deferido hasta
-  el ejemplo grid + forms del companion UI library como driver
-  concreto (evaluado 2026-07-17 — design decision needed entre
-  convention-based leaky vs proper loader integration; no bloquea
-  uso real, ningún ejemplo actual lo necesita).
+- **Cross-file `<Child />` composition (S.6)** — 🟢 **CERRADO
+  2026-07-19 (v0.25.0)** para el target WASM vía
+  `load_imported_components` + `ImportedComponentRegistry` +
+  `merge_imported_components` + `check_with_imported_components`
+  (ver la entrada dedicada arriba). El path elegido fue proper
+  loader integration (leer el sibling `.fitzv` y mergear la
+  clausura reachable), no convention-based leaky.
 - **Cross-component event flows más ergonómicos** — K-1 shipped
   explicit `dispatch_to()`; implicit bubbling / `@parent.event`
   decorator queda para futuro.
@@ -930,12 +957,11 @@ Phase 11 entero). `cargo fmt --all --check` + `cargo clippy
 
 ### Deudas residuales derivadas (NO bloquean)
 
-- **Cross-file `<Child />` composition** (§9.y debt) — low
-  priority: ninguno de los 4 ejemplos `fitz-liveviews`
-  (counter/dashboard/chat/kanban) lo necesita, todos usan
-  runtime `component(name, id)` API cross-file. Threading el
-  loader's expanded-file cache through checker + emitter es
-  refinable si demanda real aparece.
+- **Cross-file `<Child />` composition** (§9.y debt) — 🟢
+  **CERRADO 2026-07-19 (v0.25.0)** para el target WASM.
+  `load_imported_components` lee el sibling `.fitzv` y mergea
+  la clausura reachable a través de checker + emitter. Ver la
+  entrada dedicada al inicio del doc.
 - **`fitz check` inject-time errors** — cross-module auto-
   inject validation errors surface via `fitz run` / `fitz build`
   solo. El checker no corre inject (misma policy que v0.20.1

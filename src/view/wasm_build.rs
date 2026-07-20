@@ -45,7 +45,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::codegen_wasm::{
-    emit_module_with_imports, EmitError, EmitResult, ImportedFnRegistry, NominalRegistry,
+    emit_module_with_components, merge_imported_components, EmitError, EmitResult,
+    ImportedComponentRegistry, ImportedFnRegistry, NominalRegistry,
 };
 use super::expand::{ExpandedViewFile, ExpandedViewImport};
 
@@ -130,6 +131,32 @@ pub fn compose_lib_rs_with_imports(
     mount_selector: &str,
     header_source_label: Option<&str>,
 ) -> EmitResult<String> {
+    compose_lib_rs_with_components(
+        expanded,
+        nominals,
+        fns,
+        &ImportedComponentRegistry::new(),
+        mount_selector,
+        header_source_label,
+    )
+}
+
+/// Like [`compose_lib_rs_with_imports`], but also inlines imported
+/// `.fitzv` components so cross-file `<Child />` composition lowers to
+/// real Rust (Phase 11.7 — cross-file). Populate `components` with
+/// [`load_imported_components`] before calling.
+///
+/// When `components` is empty this is byte-for-byte identical to
+/// [`compose_lib_rs_with_imports`], so the same-file examples regenerate
+/// unchanged.
+pub fn compose_lib_rs_with_components(
+    expanded: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+    fns: &ImportedFnRegistry,
+    components: &ImportedComponentRegistry,
+    mount_selector: &str,
+    header_source_label: Option<&str>,
+) -> EmitResult<String> {
     let root = match expanded.components.first() {
         Some(c) => c,
         None => {
@@ -140,7 +167,7 @@ pub fn compose_lib_rs_with_imports(
         }
     };
 
-    let emitted = emit_module_with_imports(expanded, nominals, fns)?;
+    let emitted = emit_module_with_components(expanded, nominals, fns, components)?;
 
     let source_label = header_source_label.unwrap_or("(unknown source)");
     let mut out = String::new();
@@ -301,6 +328,77 @@ pub fn load_imported_fns(
                     .collect();
                 registry.insert(name.clone(), param_list, return_type.clone(), body.clone());
             }
+        }
+    }
+    Ok(registry)
+}
+
+/// Load the `.fitzv` components a `.fitzv` imports (`from Card import
+/// Card`) into an [`ImportedComponentRegistry`], so the WASM emitter can
+/// inline each imported component's whole emit (struct + `new` + event
+/// handlers + render + `<style scoped>`) into the standalone crate —
+/// enabling cross-file `<Child />` composition (Phase 11.7).
+///
+/// Unlike [`load_imported_nominals`] / [`load_imported_fns`], which read
+/// classic `.fitz` siblings (nominal `type`s + free `fn`s), a component
+/// lives in a `.fitzv` — so this resolves `{stem}.fitzv` and runs the view
+/// pipeline (`parse` → `expand`) on each sibling. Every component the
+/// sibling declares is registered (not just the explicitly-imported name)
+/// so an imported `Card` can compose its own file-local siblings — the
+/// same "load the whole file" policy as [`load_imported_fns`].
+///
+/// **Best-effort + MVP scope** (parallel to the nominal / fn loaders):
+/// - Only single-segment sibling `.fitzv` modules are scanned; each is
+///   scanned once even if several names are imported from it.
+/// - A sibling that is missing / a classic `.fitz` / fails to parse or
+///   expand is skipped silently (it is most likely a nominal-or-fn-only
+///   `.fitz` module, already handled by the other loaders). A genuinely
+///   needed component that ends up unregistered surfaces as an "unknown
+///   component" checker error at the parent's composition site.
+/// - MVP is one level deep: the imported `.fitzv`'s OWN `from X import Y`
+///   are NOT loaded transitively. The parent must import every nominal /
+///   helper any imported component needs (documented in
+///   `docs/deudas-post-5b.md`). File-local sibling components of an
+///   imported component ARE available (the whole file is loaded).
+/// - Aliasing a component import (`from Card import Card as Row`) is NOT
+///   supported in the MVP: the component is registered under its original
+///   declared name, so `<Row />` would report "unknown component".
+pub fn load_imported_components(
+    imports: &[ExpandedViewImport],
+    base_dir: &Path,
+) -> EmitResult<ImportedComponentRegistry> {
+    let mut registry = ImportedComponentRegistry::new();
+    let mut scanned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for imp in imports {
+        // MVP: single-segment sibling modules only.
+        if imp.path.len() != 1 {
+            continue;
+        }
+        let stem = imp.path[0].clone();
+        // Scan each sibling `.fitzv` at most once.
+        if !scanned.insert(stem.clone()) {
+            continue;
+        }
+        let sibling = base_dir.join(format!("{stem}.fitzv"));
+        if !sibling.is_file() {
+            // Not a `.fitzv` sibling — probably a classic `.fitz` module
+            // (nominals / helpers), handled by the other loaders.
+            continue;
+        }
+        let source = match fs::read_to_string(&sibling) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let raw = match super::parse(&source) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let expanded = match super::expand(&raw) {
+            Ok(x) => x,
+            Err(_) => continue,
+        };
+        for component in expanded.components {
+            registry.insert(component);
         }
     }
     Ok(registry)
@@ -521,6 +619,10 @@ impl From<EmitError> for ScaffoldError {
 /// - `fns` — imported classic `fn`s loaded via [`load_imported_fns`]
 ///   (Phase 11.7 R3.5a.2). Pass `&ImportedFnRegistry::new()` when the
 ///   `.fitzv` imports no helpers.
+/// - `components` — imported `.fitzv` components loaded via
+///   [`load_imported_components`] (Phase 11.7 — cross-file `<Child />`).
+///   Pass `&ImportedComponentRegistry::new()` when the `.fitzv` composes
+///   no cross-file children.
 /// - `bin_name` — the sanitised crate name. Used as
 ///   `package.name` in the emitted `Cargo.toml`.
 /// - `mount_selector` — the CSS selector for the composed
@@ -529,22 +631,38 @@ impl From<EmitError> for ScaffoldError {
 /// - `source_label` — an identifier for the `.fitzv` source
 ///   embedded in the `lib.rs` header comment (typically the
 ///   bin's `main` path relative to the manifest).
+// The three import registries (nominals / fns / components) each carry
+// a distinct kind of cross-file surface the standalone WASM crate needs
+// inlined; folding them into a struct would only move the argument list
+// one level down without clarifying anything.
+#[allow(clippy::too_many_arguments)]
 pub fn write_wasm_crate_scaffold(
     crate_dir: &Path,
     expanded: &ExpandedViewFile,
     nominals: &NominalRegistry,
     fns: &ImportedFnRegistry,
+    components: &ImportedComponentRegistry,
     bin_name: &str,
     mount_selector: &str,
     source_label: Option<&str>,
 ) -> Result<ScaffoldResult, ScaffoldError> {
     // Phase 11.7 R3.5b.2 — a `data-flv-submit` form needs the
     // `HtmlInputElement` web-sys feature; form-free crates keep the base
-    // feature set (byte-identical Cargo.toml).
-    let extra_features = super::codegen_wasm::wasm_extra_web_sys_features(expanded);
+    // feature set (byte-identical Cargo.toml). Detect over the MERGED
+    // file so a form declared inside a cross-file imported component is
+    // counted too — when `components` is empty the merge is a structural
+    // clone, so the Cargo.toml stays byte-identical for same-file crates.
+    let feature_file = merge_imported_components(expanded, components);
+    let extra_features = super::codegen_wasm::wasm_extra_web_sys_features(&feature_file);
     let cargo_toml_text = compose_cargo_toml_with_features(bin_name, &extra_features);
-    let lib_rs_text =
-        compose_lib_rs_with_imports(expanded, nominals, fns, mount_selector, source_label)?;
+    let lib_rs_text = compose_lib_rs_with_components(
+        expanded,
+        nominals,
+        fns,
+        components,
+        mount_selector,
+        source_label,
+    )?;
 
     let src_dir = crate_dir.join("src");
     fs::create_dir_all(&src_dir).map_err(|e| ScaffoldError::Io(e, src_dir.clone()))?;
@@ -790,6 +908,7 @@ component Beta {
             &expanded,
             &NominalRegistry::new(),
             &ImportedFnRegistry::new(),
+            &ImportedComponentRegistry::new(),
             "web",
             "#app",
             None,
@@ -824,6 +943,7 @@ component Beta {
             &expanded,
             &NominalRegistry::new(),
             &ImportedFnRegistry::new(),
+            &ImportedComponentRegistry::new(),
             "web",
             "#app",
             None,
@@ -835,6 +955,7 @@ component Beta {
             &expanded,
             &NominalRegistry::new(),
             &ImportedFnRegistry::new(),
+            &ImportedComponentRegistry::new(),
             "web",
             "#app",
             None,
@@ -1076,5 +1197,87 @@ component Card {
         let imports = vec![imp("helpers", &[("a", None), ("b", None)])];
         let reg = load_imported_fns(&imports, tmp.path()).unwrap();
         assert!(reg.contains("a") && reg.contains("b"));
+    }
+
+    // ---- Phase 11.7 — cross-file `<Child />` (load_imported_components)
+
+    #[test]
+    fn load_imported_components_reads_sibling_fitzv_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state { title: Str = \"\" }\n  <template><article>{title}</article></template>\n}\n",
+        )
+        .unwrap();
+        let imports = vec![imp("Card", &[("Card", None)])];
+        let reg = load_imported_components(&imports, tmp.path()).unwrap();
+        assert!(reg.contains("Card"), "Card must be registered");
+        assert_eq!(reg.get("Card").unwrap().state[0].name, "title");
+    }
+
+    #[test]
+    fn load_imported_components_registers_all_components_in_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A file declaring two components: the imported `Card` plus its
+        // file-local `Badge` sibling — both are loaded so `Card` can
+        // compose `Badge` internally.
+        fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state {}\n  <template><article><Badge /></article></template>\n}\ncomponent Badge {\n  state {}\n  <template><b>!</b></template>\n}\n",
+        )
+        .unwrap();
+        let imports = vec![imp("Card", &[("Card", None)])];
+        let reg = load_imported_components(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.contains("Card") && reg.contains("Badge"),
+            "both the imported component and its file-local sibling load"
+        );
+    }
+
+    #[test]
+    fn load_imported_components_skips_missing_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let imports = vec![imp("Card", &[("Card", None)])];
+        let reg = load_imported_components(&imports, tmp.path()).unwrap();
+        assert!(reg.is_empty(), "a missing sibling yields an empty registry");
+    }
+
+    #[test]
+    fn load_imported_components_skips_classic_fitz_only_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A `.fitz` (classic) sibling with no `.fitzv` → not a component
+        // import (handled by the nominal / fn loaders instead).
+        fs::write(tmp.path().join("card.fitz"), "type Card {\n  id: Int\n}\n").unwrap();
+        let imports = vec![imp("card", &[("Card", None)])];
+        let reg = load_imported_components(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.is_empty(),
+            "a classic-only sibling registers no components"
+        );
+    }
+
+    #[test]
+    fn load_imported_components_first_registration_wins_across_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("A.fitzv"),
+            "component Card {\n  state { n: Int = 1 }\n  <template><span>{n}</span></template>\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("B.fitzv"),
+            "component Card {\n  state { n: Int = 2 }\n  <template><span>{n}</span></template>\n}\n",
+        )
+        .unwrap();
+        let imports = vec![imp("A", &[("Card", None)]), imp("B", &[("Card", None)])];
+        let reg = load_imported_components(&imports, tmp.path()).unwrap();
+        assert_eq!(reg.components().len(), 1, "one Card survives the collision");
+        assert!(
+            matches!(
+                reg.get("Card").unwrap().state[0].default,
+                crate::ast::Expr::Int(1, _)
+            ),
+            "the first import (A) wins"
+        );
     }
 }

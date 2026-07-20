@@ -968,7 +968,13 @@ The pipeline lives entirely under `src/view/`:
   that mutates the DOM via `web-sys`, event handlers that
   update the state cells. Compiles with `wasm-pack`.
 - **`view/wasm_build.rs`** — builds the WASM crate scaffolding
-  (Cargo.toml + lib.rs) and invokes `wasm-pack build`.
+  (Cargo.toml + lib.rs) and invokes `wasm-pack build`. Also
+  hosts the sibling loaders the standalone crate needs inlined:
+  `load_imported_nominals` (classic `type`s), `load_imported_fns`
+  (classic helpers), and — since v0.25.0 — `load_imported_components`
+  (cross-file `.fitzv` `<Child />` components; parses + expands the
+  sibling `.fitzv` so the emitter inlines it and the checker
+  validates composition against its real surface).
 
 **Two emit branches, one check pass**: both the SSR and WASM
 emitters consume the same `ExpandedViewFile` — the view checker

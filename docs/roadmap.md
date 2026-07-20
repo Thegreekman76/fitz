@@ -9915,6 +9915,19 @@ de 3 releases:
   Ejemplo `examples/view/slots`. **Cierra Phase 11.7 entera** para el
   target client-WASM. Deuda residual en `docs/deudas-post-5b.md`
   (named slots, `<Child />` en slot content, cross-file `<Child />`).
+- ✅ **named slots (v0.24.0, 2026-07-19)** — `<slot name="X" />` +
+  múltiples slots por child (field `__slot_<name>` por named slot +
+  routing por atributo `slot="X"` del parent). Ejemplo
+  `examples/view/named-slots`.
+- ✅ **cross-file `<Child />` (v0.25.0, 2026-07-19)** — el `<Child />`
+  puede vivir en un `.fitzv` separado (`from Card import Card`). Nuevo
+  `load_imported_components` + `ImportedComponentRegistry` +
+  `merge_imported_components` (clausura reachable mergeada en UN
+  synthetic file) + `check_with_imported_components`. Toca checker +
+  emitter + loader + CLI; registry vacío → byte-a-byte same-file.
+  Ejemplo `examples/view/cross-file-child` (compila a WASM real 36.2 KB).
+  Deuda residual: un nivel de profundidad, local gana ante importado,
+  sin aliasing de components, LSP cross-file (Phase 11.8).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

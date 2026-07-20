@@ -247,6 +247,75 @@ impl ImportedFnRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// Imported-component registry (Phase 11.7 — cross-file `<Child />`)
+// ---------------------------------------------------------------------------
+
+/// The `.fitzv` components a `.fitzv` imports (`from Card import Card`),
+/// loaded so the WASM emitter can inline each imported component's WHOLE
+/// emit (struct + `new` + event handlers + render + `<style scoped>`)
+/// into the same standalone `wasm32` crate.
+///
+/// Cross-file `<Child />` composition needs more than a nominal's field
+/// list (Phase 11.7 R3) or a helper's body (R3.5a.2): the imported child
+/// is a first-class component with its own state, events, slots, and
+/// scoped style. The WASM target has no downstream classic pass to
+/// resolve the reference, so the child's full `ExpandedComponent` is
+/// carried here and re-emitted inline. Populated by
+/// [`super::wasm_build::load_imported_components`], which reads + parses +
+/// expands the sibling `.fitzv` files.
+///
+/// Every component declared in each imported `.fitzv` is registered
+/// (not just the explicitly-imported names) so an imported `Card` can
+/// compose its own file-local siblings — the same "load the whole file"
+/// policy as [`ImportedFnRegistry`]. Keyed by the component's declared
+/// name; first-registration wins on a cross-file name collision.
+#[derive(Debug, Clone, Default)]
+pub struct ImportedComponentRegistry {
+    comps: Vec<ExpandedComponent>,
+}
+
+impl ImportedComponentRegistry {
+    /// An empty registry — the common case (no imported components) and
+    /// what the same-file emit path passes, so the pre-cross-file
+    /// examples regenerate byte-for-byte.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register an imported component. First-registration wins on a name
+    /// collision (a component named `X` imported from two files → the
+    /// first import's version is kept), so the merge is deterministic.
+    pub fn insert(&mut self, component: ExpandedComponent) {
+        if !self.comps.iter().any(|c| c.name == component.name) {
+            self.comps.push(component);
+        }
+    }
+
+    /// True when no components are registered — no imported component is
+    /// emitted, so the same-file output stays byte-identical.
+    pub fn is_empty(&self) -> bool {
+        self.comps.is_empty()
+    }
+
+    /// Look an imported component up by declared name.
+    pub fn get(&self, name: &str) -> Option<&ExpandedComponent> {
+        self.comps.iter().find(|c| c.name == name)
+    }
+
+    /// True when a component named `name` is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.comps.iter().any(|c| c.name == name)
+    }
+
+    /// All imported component surfaces, in registration order. Consumed
+    /// by the view checker (to include cross-file children in its
+    /// component map) and the emitter's reachability walk.
+    pub fn components(&self) -> &[ExpandedComponent] {
+        &self.comps
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -391,15 +460,158 @@ pub fn emit_module_with_imports(
     nominals: &NominalRegistry,
     fns: &ImportedFnRegistry,
 ) -> EmitResult<String> {
+    emit_module_with_components(file, nominals, fns, &ImportedComponentRegistry::new())
+}
+
+/// Like [`emit_module_with_imports`], but also inlines imported `.fitzv`
+/// components so cross-file `<Child />` composition lowers to real Rust
+/// (Phase 11.7 — cross-file). Populate `components` with
+/// [`super::wasm_build::load_imported_components`] before calling.
+///
+/// The reachable subset of imported components (the transitive closure of
+/// `<Child />` refs starting from the local components) is merged ahead of
+/// the local components into ONE synthetic file, then every existing pass
+/// — bubbled-event collection, per-component emit, and the same-file child
+/// resolution inside [`emit_child_component`] — runs over the merge. So an
+/// imported child's struct/`new`/handlers/render/style are emitted inline,
+/// its `__on_<event>` bubble slots are wired when a local parent binds
+/// them, and the parent's cache field references its (now in-module) type.
+///
+/// Only *reachable* imported components are emitted — an imported component
+/// no local (or transitively-reached) component composes is left out, so an
+/// unused import can't drag in a nominal/helper the parent never imported.
+///
+/// When `components` is empty the merge is a structural clone of `file`, so
+/// this is byte-for-byte identical to the same-file path and the pre-cross-
+/// file examples regenerate unchanged.
+pub fn emit_module_with_components(
+    file: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+    fns: &ImportedFnRegistry,
+    components: &ImportedComponentRegistry,
+) -> EmitResult<String> {
     let mut out = String::new();
     emit_module_header(&mut out);
     emit_nominal_structs(nominals, &mut out)?;
     emit_imported_fns(fns, nominals, &mut out)?;
-    let bubbled = collect_bubbled_events(file);
-    for component in &file.components {
-        emit_component_impl(component, file, nominals, &bubbled, &mut out)?;
+    let merged = merge_imported_components(file, components);
+    let bubbled = collect_bubbled_events(&merged);
+    for component in &merged.components {
+        emit_component_impl(component, &merged, nominals, &bubbled, &mut out)?;
     }
     Ok(out)
+}
+
+/// Merge the reachable imported components ahead of `file`'s local
+/// components into a single synthetic [`ExpandedViewFile`], so the emit +
+/// analysis passes treat cross-file children as if they lived in the same
+/// file. See [`emit_module_with_components`] for the rationale.
+///
+/// Reachability = the transitive closure of `<Child />` names referenced
+/// from the local components (and, recursively, from each reached imported
+/// component). A local component name is never treated as imported (local
+/// wins on a name collision), and an unknown name is left for the checker
+/// to report — it is simply skipped here.
+///
+/// When `imported` is empty this returns a structural clone of `file`, so
+/// downstream emit stays byte-for-byte identical to the same-file path.
+pub fn merge_imported_components(
+    file: &ExpandedViewFile,
+    imported: &ImportedComponentRegistry,
+) -> ExpandedViewFile {
+    if imported.is_empty() {
+        return file.clone();
+    }
+
+    let local_names: std::collections::BTreeSet<&str> =
+        file.components.iter().map(|c| c.name.as_str()).collect();
+
+    let mut worklist: Vec<String> = Vec::new();
+    for c in &file.components {
+        collect_child_names(c, &mut worklist);
+    }
+
+    let mut reached: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut reachable: Vec<ExpandedComponent> = Vec::new();
+    while let Some(name) = worklist.pop() {
+        // Local components win — never resolve a local name to an import.
+        if local_names.contains(name.as_str()) {
+            continue;
+        }
+        if !reached.insert(name.clone()) {
+            continue;
+        }
+        if let Some(comp) = imported.get(&name) {
+            collect_child_names(comp, &mut worklist);
+            reachable.push(comp.clone());
+        }
+        // Unknown names (not local, not imported) fall through — the
+        // checker reports them as unknown components with a hint.
+    }
+
+    // Deterministic order regardless of worklist traversal.
+    reachable.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut components = reachable;
+    components.extend(file.components.iter().cloned());
+    ExpandedViewFile {
+        imports: file.imports.clone(),
+        components,
+    }
+}
+
+/// Collect the names of every `<Child />` referenced anywhere in a
+/// component's template (including inside `{#if}` / `{#for}` branches,
+/// `<slot>` fallbacks, and `<Child>...</Child>` slot content), for the
+/// cross-file reachability walk.
+fn collect_child_names(component: &ExpandedComponent, out: &mut Vec<String>) {
+    fn walk(node: &ExpandedTemplateNode, out: &mut Vec<String>) {
+        match node {
+            ExpandedTemplateNode::ChildComponent {
+                name, slot_content, ..
+            } => {
+                out.push(name.clone());
+                for c in slot_content {
+                    walk(c, out);
+                }
+            }
+            ExpandedTemplateNode::Element { children, .. } => {
+                for c in children {
+                    walk(c, out);
+                }
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                for c in children {
+                    walk(c, out);
+                }
+                if let Some(els) = else_children {
+                    for c in els {
+                        walk(c, out);
+                    }
+                }
+            }
+            ExpandedTemplateNode::For { children, .. } => {
+                for c in children {
+                    walk(c, out);
+                }
+            }
+            ExpandedTemplateNode::Slot { fallback, .. } => {
+                for c in fallback {
+                    walk(c, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &component.template {
+        for node in &t.roots {
+            walk(node, out);
+        }
+    }
 }
 
 /// Emit a `#[derive(Clone)] pub struct <Name> { ... }` for every
@@ -6157,5 +6369,174 @@ component Panel {
             out.contains("if let Some(__cb) = self.__slot_header.borrow().as_ref() {"),
             "the named slot still emits its callback-or-fallback branch:\n{out}"
         );
+    }
+
+    // ---- Phase 11.7 — cross-file `<Child />` composition -----------
+
+    /// Helper: build an `ImportedComponentRegistry` from one or more
+    /// `.fitzv` sources, as if their components were loaded from sibling
+    /// files. Mirrors what `load_imported_components` does at build time.
+    fn imported_registry(srcs: &[&str]) -> ImportedComponentRegistry {
+        let mut reg = ImportedComponentRegistry::new();
+        for src in srcs {
+            for comp in parse_expand(src).components {
+                reg.insert(comp);
+            }
+        }
+        reg
+    }
+
+    #[test]
+    fn cross_file_registry_first_registration_wins_on_name_collision() {
+        let mut reg = ImportedComponentRegistry::new();
+        let a = parse_expand(
+            "component Card {\n  state { n: Int = 1 }\n  <template><span>{n}</span></template>\n}",
+        )
+        .components
+        .remove(0);
+        let b = parse_expand(
+            "component Card {\n  state { n: Int = 2 }\n  <template><span>{n}</span></template>\n}",
+        )
+        .components
+        .remove(0);
+        reg.insert(a);
+        reg.insert(b);
+        // The second `Card` is dropped — first-registration wins.
+        assert_eq!(reg.components().len(), 1);
+        assert!(matches!(
+            reg.get("Card").unwrap().state[0].default,
+            crate::ast::Expr::Int(1, _)
+        ));
+    }
+
+    #[test]
+    fn merge_imported_components_empty_registry_is_structural_clone() {
+        // The byte-a-byte invariant: with no imported components the
+        // merge returns the file unchanged, so same-file examples emit
+        // identically.
+        let file = parse_expand(
+            "component App {\n  state { n: Int = 0 }\n  <template><span>{n}</span></template>\n}",
+        );
+        let merged = merge_imported_components(&file, &ImportedComponentRegistry::new());
+        assert_eq!(merged, file);
+    }
+
+    #[test]
+    fn merge_imported_components_only_pulls_reachable_children() {
+        // Local `App` composes `<Card />`; the registry also holds an
+        // unused `Ghost`. Only `Card` (reachable) is merged in.
+        let file = parse_expand(
+            "component App {\n  state {}\n  <template><div><Card /></div></template>\n}",
+        );
+        let reg = imported_registry(&[
+            "component Card {\n  state {}\n  <template><article>card</article></template>\n}",
+            "component Ghost {\n  state {}\n  <template><aside>ghost</aside></template>\n}",
+        ]);
+        let merged = merge_imported_components(&file, &reg);
+        let names: Vec<&str> = merged.components.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Card"), "reachable Card merged: {names:?}");
+        assert!(names.contains(&"App"), "local App preserved: {names:?}");
+        assert!(
+            !names.contains(&"Ghost"),
+            "unreachable Ghost NOT merged: {names:?}"
+        );
+    }
+
+    #[test]
+    fn merge_imported_components_transitively_reaches_grandchildren() {
+        // `App` -> `<Card />`; `Card` -> `<Badge />`. Both imported
+        // components are reachable and merged.
+        let file = parse_expand(
+            "component App {\n  state {}\n  <template><div><Card /></div></template>\n}",
+        );
+        let reg = imported_registry(&[
+            "component Card {\n  state {}\n  <template><article><Badge /></article></template>\n}",
+            "component Badge {\n  state {}\n  <template><b>!</b></template>\n}",
+        ]);
+        let merged = merge_imported_components(&file, &reg);
+        let names: Vec<&str> = merged.components.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"Card") && names.contains(&"Badge"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn merge_imported_components_local_wins_on_name_collision() {
+        // A local `Card` shadows an imported `Card` of the same name.
+        let file = parse_expand(
+            "component App {\n  state {}\n  <template><div><Card /></div></template>\n}\ncomponent Card {\n  state { local: Int = 7 }\n  <template><span>{local}</span></template>\n}",
+        );
+        let reg = imported_registry(&[
+            "component Card {\n  state { imported: Int = 9 }\n  <template><span>{imported}</span></template>\n}",
+        ]);
+        let merged = merge_imported_components(&file, &reg);
+        let card = merged
+            .components
+            .iter()
+            .find(|c| c.name == "Card")
+            .expect("a Card is present");
+        assert_eq!(
+            card.state[0].name, "local",
+            "the LOCAL Card wins — the imported one is not merged"
+        );
+        // Exactly one Card in the merge (the imported one is skipped).
+        assert_eq!(
+            merged
+                .components
+                .iter()
+                .filter(|c| c.name == "Card")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn cross_file_emit_inlines_imported_component_struct() {
+        // End-to-end: the parent's `<Card />` resolves to an imported
+        // component; the emitter inlines the child's struct + wires the
+        // parent's cache slot to it.
+        let file = parse_expand(
+            "component App {\n  state {}\n  <template><div><Card title=\"hi\" /></div></template>\n}",
+        );
+        let reg = imported_registry(&[
+            "component Card {\n  state { title: Str = \"\" }\n  <template><article>{title}</article></template>\n}",
+        ]);
+        let out = emit_module_with_components(
+            &file,
+            &NominalRegistry::new(),
+            &ImportedFnRegistry::new(),
+            &reg,
+        )
+        .unwrap();
+        assert!(out.contains("pub struct Card {"), "Card inlined:\n{out}");
+        assert!(
+            out.contains("__child_slot_0: RefCell<Option<Rc<Card>>>,"),
+            "parent caches the cross-file Card:\n{out}"
+        );
+        assert!(
+            out.contains(".title.borrow_mut() = \"hi\".to_string();"),
+            "static prop fanned into the cross-file child:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cross_file_emit_empty_registry_matches_same_file_path() {
+        // `emit_module_with_components` with an empty registry is
+        // byte-for-byte identical to `emit_module_with_imports`.
+        let file = parse_expand(
+            "component App {\n  state { n: Int = 0 }\n  event tap() { n = 1 }\n  <template><button @click=\"tap\">{n}</button></template>\n}",
+        );
+        let via_components = emit_module_with_components(
+            &file,
+            &NominalRegistry::new(),
+            &ImportedFnRegistry::new(),
+            &ImportedComponentRegistry::new(),
+        )
+        .unwrap();
+        let via_imports =
+            emit_module_with_imports(&file, &NominalRegistry::new(), &ImportedFnRegistry::new())
+                .unwrap();
+        assert_eq!(via_components, via_imports);
     }
 }

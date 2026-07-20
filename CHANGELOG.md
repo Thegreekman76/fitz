@@ -9,6 +9,54 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.25.0] — 2026-07-19 — Cross-file `<Child />` composition on the WASM target
+
+**Minor release** — a `<Child />` can now live in a SEPARATE `.fitzv`
+file, imported with `from Card import Card`. Before this, `<Child />` was
+same-file only (the workaround was the runtime `component("Name", "id")`
+API of `fitz-liveviews`). This is the last open piece of the WASM
+composition surface: props flow down, events bubble up, and slots fill —
+all across a file boundary. WASM-only; classic Fitz and the classic
+`fitz build` path are untouched.
+
+### What changed
+
+- `fitz build --target wasm-client` loads every component declared in
+  each imported sibling `.fitzv` (new `view::load_imported_components`,
+  parallel to the nominal / fn loaders) and inlines its **whole** emit —
+  struct + `new` + event handlers + render + `<style scoped>` — into the
+  one generated crate.
+- The emitter merges the *reachable* imported components (the transitive
+  closure of `<Child />` refs from the local components) ahead of the
+  local ones into a single synthetic file, so every existing pass —
+  bubbled-event collection, per-component emit, and same-file child
+  resolution — treats the cross-file child as if it were local.
+- The view checker validates the parent's `<Child />` composition (prop
+  existence + type, `@event` binding, slot fill) against the imported
+  child's **real surface** instead of reporting an unknown component (new
+  `view::check_with_imported_components`).
+- Each imported component brings its own scoped-style hash
+  (`FNV-1a(name::css)`), baked at its own file's expand — so the parent's
+  and the child's scoped styles never collide.
+
+### Scope
+
+- Touches checker + emitter + loader + CLI (`src/view/{check,
+  codegen_wasm,wasm_build}.rs` + `src/main.rs`). When no cross-file child
+  is composed the merge is a structural clone, so the emit and Cargo.toml
+  stay byte-for-byte identical — the eight same-file view examples
+  regenerate unchanged.
+- New example `examples/view/cross-file-child/` (`App.fitzv` imports
+  `Card.fitzv` with a static prop, a bubbled `@like`, and named + default
+  slots) compiles to real WASM (36.2 KB raw).
+- **MVP limits**: one level deep (an imported `.fitzv`'s own imports are
+  not loaded transitively — the parent imports everything any child
+  needs; the child's file-local siblings ARE available); local wins on a
+  name collision; no component aliasing (`from Card import Card as Row`
+  registers under the original name); the SSR path still uses the runtime
+  `component(...)` API; LSP over a single `.fitzv` still flags a
+  cross-file child as unknown (Phase 11.8).
+
 ## [v0.24.0] — 2026-07-19 — Named slots: `<slot name="X" />` on the WASM target
 
 **Minor release** — rounds out `<Child />` composition: v0.22.0 shipped
