@@ -9818,11 +9818,15 @@ ejemplos lo necesita), `fitz check` inject-time errors (checker
 no corre inject; UX visible solo vía `run`/`build`), migration
 commits en `fitz-liveviews` (counter draft uncommitted; dashboard/
 chat/kanban migrations land post-v0.21.0). See §9.z, §9.aa, §9.bb.
-**Estado actualizado (post-v0.21.4)**: **11.8** (LSP dentro de
+**Estado actualizado (post-v0.26.0)**: **11.8** (LSP dentro de
 `.fitzv`) shipped v0.21.3; **11.9** (pedagogic docs) shipped
-v0.21.4. Queda **11.7** (client-side dynamic capabilities +
-kanban SPA port) — arrancada 2026-07-18 con cadence incremental
-de 3 releases:
+v0.21.4; **11.7** (client-side dynamic capabilities + kanban SPA
+port) CERRADA entera al v0.24.0, más los refinements de
+composición cross-file (v0.25.0/v0.26.0). **Próximo norte de la
+Fase 11**: la iteración de reactividad fine-grained + fullstack
+(**11.10–11.13**, ver bloque "próxima iteración" más abajo) —
+señales, `@server`, hidratación SSR→client y hot reload del
+template. La sub-fase 11.7 se detalla a continuación:
 
 - ✅ **11.7.a (R1, v0.21.5)** — reactive interpolated child props
   en el target WASM. `<Child prop="{expr}" />` con `{expr}` = bare

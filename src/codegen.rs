@@ -4025,6 +4025,16 @@ struct LoadedModule {
     /// `async fn send_alert(addr, body) { smtp.send({...}).await? }`).
     /// The module's emitted code references `use crate::{__fitz_smtp_*}`.
     uses_smtp: bool,
+    /// Facet #1 (cross-module nominal identity) — `TypeId → canonical
+    /// name` for EVERY nominal registered in this module's TypeEnv,
+    /// both types DEFINED in the module and types the module IMPORTED
+    /// (`from other import T`). Built from `module_env.nominal_names()`
+    /// at load time. `remap_imported_nominals` consults it as a
+    /// fallback when a module's exported signature references a nominal
+    /// the module itself imported (absent from `type_sigs`, which only
+    /// lists DEFINED types). Without it those re-imported nominals
+    /// degraded to `Type::Any`, emitting a dangling `__FitzValue`.
+    nominal_names: HashMap<TypeId, String>,
 }
 
 /// Binding visible in the importer file. Produced by the loader
@@ -4658,6 +4668,12 @@ impl ModuleLoader {
             }
         }
 
+        // Facet #1 (cross-module nominal identity) — snapshot the id→name
+        // map of ALL nominals in the module's TypeEnv (defined + imported),
+        // so `remap_imported_nominals` can resolve re-imported nominals that
+        // are absent from `type_sigs`.
+        let module_nominal_names = module_env.nominal_names();
+
         let idx = self.modules.len();
         self.modules.push(LoadedModule {
             mod_name,
@@ -4686,6 +4702,7 @@ impl ModuleLoader {
             cron_fn_stmts: module_cron_fn_stmts,
             uses_http_client: module_uses_http_client,
             uses_smtp: module_uses_smtp,
+            nominal_names: module_nominal_names,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -5239,6 +5256,7 @@ fn generate_module_rs_with_bindings(
             table_metadata: m.table_metadata.clone(),
             uses_fitz_value: m.uses_fitz_value,
             uses_db: m.uses_db,
+            nominal_names: m.nominal_names.clone(),
         });
     }
     for (name, binding) in local_bindings {
@@ -7982,6 +8000,12 @@ struct LoadedModuleSigs {
     /// ctx can enrich it later without re-iterating the loader.)
     #[allow(dead_code)]
     uses_db: bool,
+    /// Facet #1 (cross-module nominal identity) — copied from
+    /// `LoadedModule::nominal_names` in `install_loader_bindings`.
+    /// `remap_imported_nominals` consults it to resolve nominals a
+    /// module IMPORTED (absent from `type_sigs`) instead of degrading
+    /// them to `Type::Any`.
+    nominal_names: HashMap<TypeId, String>,
 }
 
 struct CodegenCtx<'a> {
@@ -8616,6 +8640,7 @@ impl<'a> CodegenCtx<'a> {
                 table_metadata: m.table_metadata.clone(),
                 uses_fitz_value: m.uses_fitz_value,
                 uses_db: m.uses_db,
+                nominal_names: m.nominal_names.clone(),
             });
         }
         for (name, binding) in &loader.bindings {
@@ -12737,11 +12762,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Some(m) => m,
                     None => return Type::Any,
                 };
+                // First try `type_sigs` — only DEFINED types. Then fall back
+                // to `nominal_names` (facet #1), which also covers types the
+                // module IMPORTED (`from other import T`). A signature can
+                // reference a re-imported nominal (e.g. `fn make_name(u: User)`
+                // where `User` was imported into the module); without the
+                // fallback the id→name lookup failed here and the nominal
+                // degraded to `Type::Any`, emitting a dangling `__FitzValue`.
                 let name_opt = m
                     .type_sigs
                     .iter()
                     .find(|(_, sig)| sig.id == *id)
-                    .map(|(name, _)| name.clone());
+                    .map(|(name, _)| name.clone())
+                    .or_else(|| m.nominal_names.get(id).cloned());
                 let Some(name) = name_opt else {
                     return Type::Any;
                 };
@@ -14955,6 +14988,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     }
 
     fn gen_return(&mut self, e: &Expr, ret_expected: &Type) -> Result<(), FitzError> {
+        // Root #4 (facet #1 workstream) — a `return` inside an `if`/`match`
+        // EXPRESSION emitted as a statement re-enters via `gen_stmt`, which
+        // threads the `Type::Null` placeholder (not the enclosing fn's real
+        // return type). For a fn declared `-> Any`, that means `return null`
+        // coerces `Null → Null` (identity → bare `()`) instead of
+        // `Null → Any` (wrap → `__FitzValue::Null`), so rustc rejects the
+        // `()` against the `__FitzValue` return type. Recover the real
+        // target from `ret_stack` (which carries the correct frame per fn +
+        // closure) ONLY when it is `Any` — leaving WS/Result/Null frames
+        // and normal fns untouched.
+        let resolved_ret: Type = if matches!(ret_expected, Type::Null)
+            && matches!(self.ret_stack.last(), Some(Type::Any))
+        {
+            Type::Any
+        } else {
+            ret_expected.clone()
+        };
+        let ret_expected = &resolved_ret;
         // v0.9.53 8.7-ok-propagation: when ret_expected is
         // Result<T, E> and `e` is `Expr::Ok(inner)` /
         // `Expr::Err(inner)`, we propagate the T/E inside the
@@ -15787,6 +15838,47 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             ret: Box::new(sig.ret.clone()),
                         };
                         return Ok((code, ty));
+                    }
+                    // #6 (facet #1) — imported fn referenced as a VALUE
+                    // (`let f = greet`, or passing `MetricTile_render` to a
+                    // registry). The `use foo::greet;` decl already put the
+                    // bare name in Rust scope, so `Arc::new(<name>)` works.
+                    // Remap the sig's nominals to the importer's env so the
+                    // emitted `Arc<dyn Fn(..) -> ..>` names types that exist
+                    // here (facet #1 keeps re-imported nominals from
+                    // degrading to a dangling `__FitzValue`).
+                    if let Some(ResolvedBinding::Named {
+                        module_index,
+                        item,
+                        kind: NamedKind::Fn,
+                    }) = self.module_bindings.get(name).cloned()
+                    {
+                        if let Some(m) = self.loaded_modules.get(module_index) {
+                            if let Some(sig) = m.fn_sigs.get(&item).cloned() {
+                                let params: Vec<Type> = sig
+                                    .params
+                                    .iter()
+                                    .map(|t| self.remap_imported_nominals(t, module_index))
+                                    .collect();
+                                let ret = self.remap_imported_nominals(&sig.ret, module_index);
+                                let ps_rs: Vec<String> = params
+                                    .iter()
+                                    .map(|p| rust_type_for(p, self.env))
+                                    .collect::<Result<_, _>>()?;
+                                let ret_rs = rust_type_for(&ret, self.env)?;
+                                let code = format!(
+                                    "(Arc::new({}) as Arc<dyn Fn({}) -> {} + Send + Sync>)",
+                                    name,
+                                    ps_rs.join(", "),
+                                    ret_rs
+                                );
+                                let ty = Type::Function {
+                                    params,
+                                    ret: Box::new(ret),
+                                };
+                                return Ok((code, ty));
+                            }
+                        }
                     }
                 }
                 // v0.10.26 — Date/DateTime/Uuid as standalone Ident
@@ -17066,7 +17158,26 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if matches!(kind, NamedKind::Fn) {
                 if let Some(m) = self.loaded_modules.get(module_index) {
                     if let Some(sig) = m.fn_sigs.get(&item).cloned() {
-                        return self.gen_call_with_sig(name, &sig, args, call_span);
+                        // #5 (facet #1) — the imported sig's `params`/`ret`
+                        // carry the ORIGIN module's `TypeId`s. Remap them to
+                        // the importer's so arg coercion targets the right
+                        // nominal (and the return type resolves in this env).
+                        // Facet #1's `nominal_names` fallback keeps a
+                        // re-imported nominal (a type the origin module itself
+                        // imported, e.g. `make_name(u: User)`) from degrading
+                        // to `Type::Any` and emitting a dangling `__FitzValue`.
+                        let remapped = FnSig {
+                            params: sig
+                                .params
+                                .iter()
+                                .map(|t| self.remap_imported_nominals(t, module_index))
+                                .collect(),
+                            ret: self.remap_imported_nominals(&sig.ret, module_index),
+                            defaults: sig.defaults.clone(),
+                            has_varargs: sig.has_varargs,
+                            param_names: sig.param_names.clone(),
+                        };
+                        return self.gen_call_with_sig(name, &remapped, args, call_span);
                     }
                 }
             }

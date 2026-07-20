@@ -1,11 +1,12 @@
 # Codegen `Any` support via `__FitzValue` — design plan
 
-**Status**: **steps 1-6 IMPLEMENTED + validated (2026-07-20)**. The `Any`
-codegen support is done and regression-clean (see §8). Step 7 (acceptance) is
-partial: a fitz-liveviews app now gets *past* every `Any` error, but building
-one to a full binary surfaced a chain of pre-existing WS/view build gaps —
-four cleared, one (cross-module type identity for dependency-imported fn
-return types) deferred as its own effort (§8).
+**Status**: **steps 1-7 IMPLEMENTED + validated (2026-07-20)**. The `Any`
+codegen support is done and regression-clean (§8), and **the deferred
+cross-module workstream is now closed** (§9): the fitz-liveviews **Admin ABM
+showcase compiles to a native binary via `fitz build` and boots** (HTTP server
+listening). Facet #1 (cross-module nominal identity) + re-applied #5/#6 +
+root #4 (`-> Any` return inside an `if`-expression) resolved the whole cascade;
+roots #2/#3/#5 never manifested (they were downstream symptoms of #1).
 
 **Goal**: make `fitz build` (codegen → native binary) support programs that
 use the `Any` type in the specific shape that dynamic *registries* need —
@@ -323,12 +324,12 @@ into the deferred workstream:
 - **#6 (reverted) — imported fn used as a VALUE** (`let f = greet`). Same
   degrade-to-`Any` risk via the remap; niche, folded into the follow-up.
 
-### Deferred (the remaining, broad cross-module + `Any`-coercion workstream)
+### The cross-module workstream (resolved — see §9)
 
-With #5/#6/#7 reverted, the fitz-liveviews binary is deferred. When it resumes,
-the earlier build (with the chain applied) got the dashboard's **codegen fully
-passing** with rustc reporting ~10 errors across **four distinct roots** — a
-dedicated multi-part effort, not a near-finish:
+With #5/#6/#7 reverted, the fitz-liveviews binary was deferred. When it
+resumed, the earlier build (with the chain applied) got the dashboard's
+**codegen fully passing** with rustc reporting ~10 errors across **four
+distinct roots**:
 
 1. **Cross-module nominal → `Any` degradation for RE-imported / non-imported
    nominals.** `diff_html() -> List<Patch>` is typed `List<Any>` and
@@ -358,6 +359,59 @@ dedicated multi-part effort, not a near-finish:
    DB-prelude mechanism + add transitive prelude emission in main.
 
 Each is a real codegen change touching shared cross-module paths, with
-regression risk, and fixing one tends to expose the next. The showcase runs
-under `fitz run` meanwhile; the error line numbers above are the exact starting
-point for the follow-up.
+regression risk, and fixing one tends to expose the next.
+
+---
+
+## 9. Cross-module workstream — CLOSED (2026-07-20)
+
+The fitz-liveviews **Admin ABM showcase** (`examples/admin/`, a multi-module
+app depending on `fitz_liveviews` via a path dep) now **compiles to a native
+binary with `fitz build` and boots** (`Fitz HTTP listening at
+http://0.0.0.0:3000`). Bit-for-bit HTTP parity vs `fitz run` needs Postgres to
+fully exercise; the boot smoke + static routes pass.
+
+What resolved the four-root cascade:
+
+- **Facet #1 — cross-module nominal identity (root #1).** Every module's
+  loader now stores `nominal_names: HashMap<TypeId, String>`, snapshotted from
+  the module's `TypeEnv` via the new `TypeEnv::nominal_names()` — it covers
+  **both** types the module *defines* and types it *imports* (`from other
+  import T`), unlike `type_sigs` (defined only). `remap_imported_nominals`
+  consults it as a fallback before degrading to `Type::Any`. So a signature
+  that references a re-imported nominal (`make_name(u: User)` where the module
+  imported `User`) remaps to the importer's `TypeId` instead of emitting a
+  dangling `__FitzValue`. Threaded through `LoadedModule` → `LoadedModuleSigs`
+  (both construction sites) → the remap.
+- **#5 re-applied — imported-fn call-site sig remap.** In `gen_call`, an
+  imported fn's `params`/`ret` are remapped via `remap_imported_nominals`
+  before `gen_call_with_sig`, so arg coercion + the return type resolve in the
+  importer's env. Safe now that facet #1 stops the remap degrading re-imported
+  nominals (that was #5's original regression on
+  `loader_absoluto_data_sibling_import`).
+- **#6 re-applied — imported fn used as a VALUE.** In `gen_expr`'s `Ident`
+  arm, an imported `fn` referenced as a value (`let f = greet`, or passing
+  `MetricTile_render` to a registry) emits `Arc::new(<name>) as Arc<dyn Fn(..)
+  -> ..>` with the remapped sig.
+- **Root #4 — `-> Any` return inside an `if`/`match` expression.** `return
+  null` in a fn declared `-> Any` was emitting a bare `()` instead of
+  `__FitzValue::Null`, because an `if`/`match` expression emitted as a
+  statement re-enters via `gen_stmt`, which threads the `Type::Null`
+  placeholder. `gen_return` now recovers the real target from `ret_stack` when
+  the placeholder is `Null` **and** the enclosing frame is `Any` — surgical,
+  leaving WS/Result/Null frames and normal fns untouched.
+- **Roots #2, #3, #5 — never manifested.** They were downstream symptoms of
+  the root-#1 degradation observed in the *earlier* (facet-#1-less) build.
+  With #1 fixed, the Map/List-arg `Any` hint, the spurious `Any → Response`
+  coerce, and the non-DB-module `__FitzValue` scoping all resolved
+  transitively — the admin app uses the DB prelude (which emits `__FitzValue`),
+  and the correctly-remapped nominals removed the spurious `Any` coercions.
+
+**Validation**: `cargo test --lib` **3841 / 0** (no regression vs the Any
+milestone), targeted cross-module E2E **35 / 0**, targeted Any/JSONB E2E
+**12 / 0**, `loader_absoluto_data_sibling_import` **green with #5 re-applied**
+(facet #1 prevented the prior regression), `cli_e2e` **115 / 0**, fmt + clippy
+(`--lib --tests --bins -D warnings`) clean.
+
+fitz-liveviews-side: only the earlier step-6 annotation (`let inner: Html =
+render_fn(state)` in `src/lib.fitz`) is needed; no further library change.

@@ -1069,6 +1069,25 @@ impl TypeEnv {
         self.nominals.len()
     }
 
+    /// Facet #1 (cross-module nominal identity) — Returns a
+    /// `TypeId → canonical name` map for EVERY nominal registered in
+    /// this env, both types DEFINED here and types IMPORTED via
+    /// `from other import T` (both land in `nominals`/`by_name`).
+    ///
+    /// The codegen loader stores this per module. Its `remap_imported_
+    /// nominals` consults it as a fallback when a module's signature
+    /// references a nominal that the module itself IMPORTED (so it is
+    /// absent from that module's `type_sigs`, which only lists DEFINED
+    /// types). Without this the remap degraded such re-imported
+    /// nominals to `Type::Any`, emitting a dangling `__FitzValue`.
+    pub fn nominal_names(&self) -> HashMap<TypeId, String> {
+        self.nominals
+            .iter()
+            .enumerate()
+            .map(|(i, info)| (TypeId(i), info.name.clone()))
+            .collect()
+    }
+
     /// W12 (v0.10.8) — Registers info of an `@auth_provider` living in
     /// an imported module. The caller invokes this AFTER
     /// `resolve_program` (so the `User` nominal is already registered

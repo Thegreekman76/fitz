@@ -33,6 +33,14 @@ fitz-liveviews deferred until Fitz v0.21.0 release)**,
 11.7 (client-side dynamic capabilities + kanban SPA
 port), 11.8 (LSP support), 11.9 (pedagogic docs).
 
+**Update 2026-07-20**: 11.7 CLOSED entirely at v0.24.0, plus
+the cross-file composition refinements (v0.25.0/v0.26.0). The
+client-WASM composition surface is complete. The next Phase 11
+iteration is **fine-grained reactivity + fullstack (11.10–11.13)**
+— signals, `@server`, SSR→client hydration, template hot reload.
+See §11 at the bottom of this doc + the "próxima iteración" block
+in `docs/roadmap.md`.
+
 **11.6.b + 11.6.c + 11.6.d CLOSED ENTIRELY 2026-07-15** —
 `view::emit_module_ssr` emits classic Fitz source with the
 FULL template grammar (Text, Interpolation, Element, static
@@ -5605,3 +5613,62 @@ feedback points to `.fzv` or `.fitzc`), the change is trivial:
 this doc, the CLI dispatch in 11.5, and any editor grammar files
 that hard-code `.fitzv`. The parser code does not care about the
 extension.
+
+---
+
+## 11. Next iteration — fine-grained reactivity + fullstack (planned)
+
+The client-WASM composition surface (props, event bubbling,
+slots, cross-file `<Child />`) is complete as of v0.26.0 under
+the **dirty-flag + naive re-render** model. The next Phase 11
+iteration lands the four jumps that turn a `.fitzv` into a
+first-class fullstack app. Numbered **11.10–11.13** in
+`docs/roadmap.md` (see the "próxima iteración" block there for
+the user-facing summary). Ordered by cost/benefit, not strict
+dependency:
+
+- **11.10 — Fine-grained reactivity.** Replace the top-down
+  naive re-render with a reactive graph of **local
+  subscriptions**: mutating a `state` field only recomputes the
+  template nodes that *read* it. No new user-facing API in the
+  base case — the dev still writes `{count}` bare and the
+  compiler wires the subscription when lowering the `.fitzv` to
+  WASM. Adds **derived values** (a `memo` that recomputes only
+  when a dependency changes) and **async derived values**. Closes
+  the 11.7.a/R1 limit ("the child is recreated on each parent
+  re-render → loses local state"): with subscriptions the child
+  survives because it subscribes to what it reads. Touches
+  `src/view/codegen_wasm.rs` (emitted runtime: reactive cells +
+  subscription graph instead of the top-down re-render).
+
+- **11.11 — Server functions (`@server`).** New decorator on an
+  `async fn` making it **callable directly from the client-WASM
+  `.fitzv`** as if local. The compiler emits both halves of a
+  typed contract in one place: (a) the server-side HTTP handler
+  (reusing the existing native HTTP runtime + auth + `Result` +
+  JSON marshaling) and (b) the client stub that serializes args →
+  `http.request` (built-in since v0.17.0) → deserializes the
+  return into the declared type. **Low cost, high value** — the
+  pieces already exist; only the compiler macro that joins them
+  is missing. This is the feature that gives the view its "whole
+  stack together, no plumbing" moment.
+
+- **11.12 — SSR → client hydration.** A single `.fitzv` renders
+  **SSR** (first paint, SEO, works without JS) and the
+  client-WASM runtime **takes over the existing DOM** instead of
+  re-creating it: restore the state the server serialized
+  (initial state + `@server` results) and map template nodes to
+  the real DOM nodes. Unifies the two emitters (SSR + WASM),
+  today separate worlds sharing one check pass. The `data-flv-*`
+  IDs the SSR emitter already emits are the basis of the mapping.
+  The big vision that joins the two frontend halves.
+
+- **11.13 — Template hot reload.** `fitz dev` re-parses a
+  `.fitzv`'s `<template>` and applies the diff without
+  recompiling the whole WASM crate (today `fitz dev` recompiles
+  everything). A DX jump; the most ambitious technically (needs a
+  client-side template runtime that accepts diffs).
+
+**Suggested order:** 11.11 (server fns — pieces ready) → 11.10
+(signals — unblocks child state) → 11.12 (hydration — unifies
+backends) → 11.13 (hot reload — DX). Each is a serious session.
