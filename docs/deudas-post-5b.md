@@ -88,14 +88,33 @@ para slices posteriores según demanda):
   regeneran sin cambios). Ejemplo `examples/view/cross-file-child`
   (`App.fitzv` importa `Card.fitzv` con prop + `@like` bubble + named/
   default slots; compila a WASM real 36.2 KB). **Deudas residuales
-  derivadas**: un solo nivel de profundidad (los imports propios del
-  `.fitzv` importado no se cargan transitivamente — el parent importa todo
-  lo que cualquier child necesite, paralelo a W17 del ORM; los components
-  file-local del child SÍ se cargan); local gana ante importado del mismo
-  nombre; sin aliasing de components (`from Card import Card as Row`
-  registra bajo el nombre original — nominales/fns sí honran alias); el
-  LSP sobre un solo `.fitzv` marca al child cross-file como desconocido
-  (Phase 11.8 — no tiene contexto de siblings).
+  derivadas — 🟢 las tres CERRADAS 2026-07-20 (v0.26.0)**:
+  - **Transitividad** — 🟢 **CERRADO (v0.26.0)**. Nuevo
+    `collect_transitive_view_imports` (`src/view/wasm_build.rs`) recorre el
+    grafo de imports `.fitzv` (cycle-safe, un archivo por paso) y arma la
+    unión transitiva que los 3 loaders consumen — un component / nominal /
+    helper `fn` que vive en un archivo que el entry no importa directo se
+    descubre igual. El CLI (`build_wasm_client_cmd`) computa la unión antes
+    de los loaders.
+  - **Aliasing de components** — 🟢 **CERRADO (v0.26.0)**.
+    `load_imported_components` registra un clon renombrado bajo el alias
+    (`from Card import Card as Row` → `<Row />` resuelve), manteniendo el
+    nombre original para composición interna de siblings. Solo se emiten
+    los components reachable desde el parent → el original sin usar no se
+    duplica al lado del alias.
+  - **LSP cross-file** — 🟢 **CERRADO (v0.26.0)**. Nuevo
+    `lsp::check_view_source_with_base_dir`: el bin deriva el `base_dir` del
+    URI del documento y carga los sibling components importados (sobre la
+    unión transitiva, honrando aliases) antes de
+    `check_with_imported_components` — paralelo estructural al pre-scan
+    cross-module del path clásico `.fitz` (v0.19.3). Sin file context,
+    fallback a single-file. Ejemplo end-to-end
+    `examples/view/cross-file-transitive` (alias + transitivo, WASM real
+    ~35 KB).
+  - Residual restante: local gana ante importado del mismo nombre; sin
+    manejo de colisión de aliasing (importar el MISMO component dos veces
+    con dos aliases aplica solo el primero); resolución contra un único
+    dir plano.
 
 ## 🟡 Framework support gaps — surface durante fitz-liveviews kanban migration (Phase 8.5) — **ABIERTAS 2026-07-16** (Phase 11.7+ scope)
 

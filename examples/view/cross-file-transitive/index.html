@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — cross-file transitive + alias (v0.26.0)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz cross-file — transitive + alias (v0.26.0)</h1>
+    <p>
+      An <code>App.fitzv</code> compiled to WebAssembly that composes a
+      <code>&lt;Row /&gt;</code> — the alias for a <code>Card</code>
+      component imported with <code>from Card import Card as Row</code>.
+      <code>Card</code> in turn composes a <code>&lt;Badge /&gt;</code>
+      that lives in a THIRD file (<code>Badge.fitzv</code>) which
+      <code>App</code> never imports: the transitive import walk
+      discovers and inlines it.
+    </p>
+    <p>
+      Tap a card's <em>♥</em>: its own like counter goes up and the
+      shared <em>Cards liked</em> total at the top increments (the
+      <code>like</code> event bubbles across the file boundary through
+      the alias). Each card shows a small <em>peak</em> badge from the
+      transitively-reached <code>Badge</code>.
+    </p>
+    <div id="app"><!-- App mounts here --></div>
+    <p>
+      If you see this text but no widget above, the WASM bundle failed
+      to load (check the DevTools console) or the page was opened over
+      <code>file://</code>. ES modules require an HTTP origin — serve
+      with <code>python -m http.server 8000</code>.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/cross_file_transitive.js';
+      init().catch((err) => {
+        console.error('Failed to load cross-file-transitive WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,46 @@
+// v0.26.0 — cross-file composition, transitive + alias. This is the
+// PARENT (the WASM root). It exercises the two refinements that land in
+// v0.26.0 on top of v0.25.0's cross-file `<Child />`:
+//
+//   1. ALIASING — `from Card import Card as Row` binds the imported
+//      `Card` component under the local name `Row`, and `<Row />`
+//      resolves + composes it (props DOWN, `@like` event UP).
+//
+//   2. TRANSITIVITY — App imports ONLY `Card`. It never imports
+//      `Badge`. But `Card` composes `<Badge />` (a third file), so the
+//      loader follows `Card.fitzv`'s own imports to discover `Badge`
+//      and inline its emit too. Without transitivity the parent would
+//      have to import every grandchild by hand.
+//
+// WHY IT MATTERS (try it in the browser): tap a card's "♥" — its own
+// like counter goes up and the shared "Cards liked" total at the top
+// increments (the `like` event bubbles across the file boundary through
+// the alias). Each card shows a small "peak" badge that comes from the
+// transitively-reached `Badge` component.
+
+from Card import Card as Row
+
+component App {
+  state {
+    heading: Str = "Transitive + alias demo"
+    total: Int = 0
+  }
+
+  event bump() {
+    total = total + 1
+  }
+
+  <template>
+    <main class="app">
+      <h1>{heading}</h1>
+      <p class="total">Cards liked: {total}</p>
+      <Row title="Fitz Roy" @like="bump" />
+      <Row title="Cerro Torre" @like="bump" />
+    </main>
+  </template>
+
+  <style scoped>
+    .app { font-family: system-ui, sans-serif; max-width: 480px; display: flex; flex-direction: column; gap: 12px; }
+    .total { color: #555; font-weight: 600; }
+  </style>
+}

@@ -14747,17 +14747,23 @@ copy-paste — la misma historia de reuso que los módulos clásicos
 de Fitz, ahora para components `.fitzv` en el target WASM.
 Ejemplo runnable: `examples/view/cross-file-child/`.
 
-Límites del MVP: un solo nivel de profundidad (los imports
-propios del `.fitzv` importado no se cargan transitivamente — el
-parent importa todo lo que cualquier child necesite; los
-components file-local del child SÍ están disponibles); el
-component local gana ante uno importado del mismo nombre; sin
-aliasing de components (`from Card import Card as Row` registra
-bajo el nombre original); y el diagnostics del LSP sobre un solo
-`.fitzv` todavía marca al child cross-file como desconocido
-(Phase 11.8). El path SSR usa el runtime API
-`component("ChildName", "instance-id")` del `fitz-liveviews`
-package para composición cross-file.
+Desde **v0.26.0** la composición cross-file soporta:
+
+- **Aliasing** — `from Card import Card as Row` resuelve `<Row />`
+  (el loader registra un clon renombrado bajo el alias, manteniendo
+  el original para composición interna de siblings).
+- **Transitividad** — el parent importa solo lo que usa directo; si
+  un child importado compone a su vez un grandchild en OTRO archivo,
+  el walk de imports lo descubre e inlinea sin que el parent tenga
+  que importarlo. Ejemplo: `examples/view/cross-file-transitive/`.
+- **LSP cross-file** — editar un `.fitzv` en VSCode ya no marca al
+  child cross-file como desconocido: el LSP deriva el directorio del
+  documento y resuelve los sibling components importados.
+
+Límites restantes: el component local gana ante uno importado del
+mismo nombre; la resolución es contra un único directorio plano. El
+path SSR usa el runtime API `component("ChildName", "instance-id")`
+del `fitz-liveviews` package para composición cross-file.
 
 **Keyed children dentro de `{#for}`** (target WASM, R2b shipped)
 — podés componer un child DENTRO de un loop, dándole una

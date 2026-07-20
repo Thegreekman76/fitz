@@ -9,6 +9,47 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.26.0] — 2026-07-20 — Cross-file composition refinements: aliasing + transitivity + LSP
+
+**Minor release** — three refinements that finish the cross-file
+`<Child />` surface shipped in v0.25.0. WASM-only for the loader/emitter
+changes; the LSP change makes editing a `.fitzv` cross-file-aware. Classic
+Fitz and the classic `fitz build` path are untouched, and the v0.25.0
+same-file view examples regenerate byte-for-byte.
+
+### What changed
+
+- **Aliasing** — `from Card import Card as Row` now resolves `<Row />`.
+  `view::load_imported_components` registers a renamed clone under the
+  alias (keeping the original name too, so a component's own file-local
+  siblings that compose it by its real name still work). Only the
+  components reachable from the parent's `<Child />` refs are emitted, so
+  the unreached original is not double-emitted next to the alias.
+- **Transitivity** — the parent no longer has to import every grandchild
+  by hand. New `view::collect_transitive_view_imports` walks the `.fitzv`
+  import graph (cycle-safe, one file per step) and feeds the transitive
+  union to the three loaders, so a component / nominal / helper `fn` that
+  lives in a file the entry does not import directly is discovered.
+- **LSP cross-file** — editing a `.fitzv` in VSCode no longer flags a
+  cross-file `<Child />` as unknown. The bin derives the document's
+  directory from its URI and the new
+  `lsp::check_view_source_with_base_dir` loads the imported sibling
+  components (over the transitive union, honouring aliases) before running
+  `check_with_imported_components` — the structural parallel of the
+  classic `.fitz` cross-module pre-scan (v0.19.3). Falls back to
+  single-file when there is no file context.
+
+### Example
+
+- `examples/view/cross-file-transitive/` — `App` imports `Card as Row`
+  (alias) and composes `<Row />`; `Card` composes `<Badge />` from a third
+  file `App` never imports (transitive). Compiles to real WASM (~35 KB).
+
+### Debt closed
+
+- `docs/deudas-post-5b.md` — the three v0.25.0 residual debts (component
+  aliasing, one-level transitivity, LSP cross-file) are closed.
+
 ## [v0.25.0] — 2026-07-19 — Cross-file `<Child />` composition on the WASM target
 
 **Minor release** — a `<Child />` can now live in a SEPARATE `.fitzv`

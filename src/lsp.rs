@@ -55,12 +55,39 @@ pub fn check_source(source: &str) -> Vec<FitzError> {
 /// `.fitzv` files and produces cleaner diagnostics (no cascade errors
 /// from an already-broken tree).
 ///
-/// **Cross-module resolution**: this MVP does NOT walk the SFC's
-/// `from X import Y` graph. False positives on cross-module refs live
-/// as documented residual debt (parallel to the classic Fitz `.fitz`
-/// path where the LSP does walk the graph via `_and_base_dir`; the
-/// view path can be extended when demand appears).
+/// **Cross-module resolution**: when the caller passes a `base_dir`
+/// (via [`check_view_source_with_base_dir`]), the SFC's
+/// `from X import Y` graph IS walked — imported sibling `.fitzv`
+/// components are loaded (transitively) so a cross-file `<Child />`
+/// validates against its real surface instead of surfacing as a false
+/// "unknown component". The bare [`check_view_source`] keeps the
+/// single-file behaviour (no base_dir → no sibling loading) for
+/// callers without file context (REPL, unit tests).
 pub fn check_view_source(source: &str) -> Vec<FitzError> {
+    check_view_source_with_base_dir(source, None)
+}
+
+/// Base_dir-aware view diagnostics — the cross-file variant of
+/// [`check_view_source`]. When `base_dir` is `Some`, the imported
+/// sibling `.fitzv` components are loaded via
+/// `crate::view::load_imported_components` (over the transitive import
+/// closure) and fed to `check_with_imported_components`, so a cross-file
+/// `<Child />` — including an aliased or transitively-reached one —
+/// resolves instead of being reported as unknown. When `base_dir` is
+/// `None`, it falls back to the single-file `check` (byte-for-byte with
+/// the pre-cross-file behaviour).
+///
+/// Structural parallel of the classic
+/// [`check_source_with_types_and_base_dir`] + `pre_scan_imported_*_lsp`
+/// design, substituting `load_imported_components` (component surfaces)
+/// for the auth-provider / background-fn extractors. Same silent-fallback
+/// error policy: a sibling that is missing / fails to parse is skipped,
+/// and a genuinely-missing component still surfaces as an "unknown
+/// component" checker error.
+pub fn check_view_source_with_base_dir(
+    source: &str,
+    base_dir: Option<&std::path::Path>,
+) -> Vec<FitzError> {
     use crate::error::ErrorKind;
     // Layer 1 — view lexer + parser.
     let raw = match crate::view::parse(source) {
@@ -89,8 +116,21 @@ pub fn check_view_source(source: &str) -> Vec<FitzError> {
         }
     };
     // Layer 3 — type-check. Returns Vec<CheckError> — accumulates,
-    // doesn't short-circuit.
-    crate::view::check::check(&expanded)
+    // doesn't short-circuit. Cross-file when a base_dir is known.
+    let check_errors = match base_dir {
+        Some(bd) => {
+            // Walk the `.fitzv` import graph (transitive) and load the
+            // imported sibling components. Best-effort: a load failure
+            // yields an empty registry, so composition falls back to the
+            // single-file behaviour rather than crashing the request.
+            let all_imports = crate::view::collect_transitive_view_imports(&expanded.imports, bd);
+            let imported =
+                crate::view::load_imported_components(&all_imports, bd).unwrap_or_default();
+            crate::view::check::check_with_imported_components(&expanded, imported.components())
+        }
+        None => crate::view::check::check(&expanded),
+    };
+    check_errors
         .into_iter()
         .map(|e| FitzError {
             kind: ErrorKind::TypeMismatch {
@@ -384,7 +424,8 @@ fn view_event_decorator_completions() -> Vec<CompletionItem> {
 // line-by-line pass that survives arbitrary partial input.
 
 /// Dispatches on the URI's file extension:
-/// - `.fitzv` → view pipeline via `check_view_source`.
+/// - `.fitzv` → view pipeline via `check_view_source_with_base_dir`
+///   (base_dir derived from the URI so cross-file `<Child />` resolves).
 /// - anything else → classic Fitz pipeline via `check_source`.
 ///
 /// The URI is the primary discriminator; if the URI has no
@@ -394,7 +435,11 @@ fn view_event_decorator_completions() -> Vec<CompletionItem> {
 /// `fitz run` dispatch on the entry path's extension.
 pub fn check_source_by_uri(uri: &Url, source: &str) -> Vec<FitzError> {
     if uri_is_fitzv(uri) {
-        check_view_source(source)
+        let base_dir = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        check_view_source_with_base_dir(source, base_dir.as_deref())
     } else {
         check_source(source)
     }
@@ -7255,6 +7300,97 @@ fn make_resp() -> Response {
 print(x)"#;
         let errors = check_source_by_uri(&uri, src);
         assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 11.8 cross-file (v0.26.0) — `check_view_source_with_base_dir`
+    // resolves imported sibling `<Child />` (incl. aliased + transitive)
+    // instead of the single-file false "unknown component".
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn view_cross_file_child_resolves_with_base_dir_unknown_without() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state { title: Str = \"\" }\n  <template><article>{title}</article></template>\n}\n",
+        )
+        .unwrap();
+        let app_src = "from Card import Card\ncomponent App {\n  state {}\n  <template><div><Card title=\"hi\" /></div></template>\n}\n";
+
+        // Without base_dir: single-file → cross-file child is unknown.
+        let no_base = check_view_source(app_src);
+        assert!(
+            no_base
+                .iter()
+                .any(|e| e.message.contains("unknown component")),
+            "expected `unknown component` without base_dir, got: {:?}",
+            no_base.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // With base_dir: the sibling Card is loaded and composition validates.
+        let with_base = check_view_source_with_base_dir(app_src, Some(tmp.path()));
+        assert!(
+            with_base.is_empty(),
+            "expected no errors with base_dir, got: {:?}",
+            with_base.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn view_cross_file_aliased_child_resolves_with_base_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state { title: Str = \"\" }\n  <template><article>{title}</article></template>\n}\n",
+        )
+        .unwrap();
+        // `from Card import Card as Row` → `<Row />` must resolve.
+        let app_src = "from Card import Card as Row\ncomponent App {\n  state {}\n  <template><div><Row title=\"hi\" /></div></template>\n}\n";
+        let with_base = check_view_source_with_base_dir(app_src, Some(tmp.path()));
+        assert!(
+            with_base.is_empty(),
+            "expected aliased `<Row />` to resolve with base_dir, got: {:?}",
+            with_base.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn view_cross_file_genuinely_unknown_child_still_errors_with_base_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No sibling on disk for `<Nope />` and it is not imported.
+        let app_src =
+            "component App {\n  state {}\n  <template><div><Nope /></div></template>\n}\n";
+        let with_base = check_view_source_with_base_dir(app_src, Some(tmp.path()));
+        assert!(
+            with_base
+                .iter()
+                .any(|e| e.message.contains("unknown component")),
+            "a genuinely missing component still errors with base_dir, got: {:?}",
+            with_base.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn view_cross_file_dispatch_via_uri_resolves_sibling() {
+        // `check_source_by_uri` derives base_dir from the URI, so routing a
+        // `.fitzv` URI through the dispatcher resolves the sibling too.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state { title: Str = \"\" }\n  <template><article>{title}</article></template>\n}\n",
+        )
+        .unwrap();
+        let app_path = tmp.path().join("App.fitzv");
+        let app_src = "from Card import Card\ncomponent App {\n  state {}\n  <template><div><Card title=\"hi\" /></div></template>\n}\n";
+        std::fs::write(&app_path, app_src).unwrap();
+        let uri = Url::from_file_path(&app_path).expect("file url");
+        let errors = check_source_by_uri(&uri, app_src);
+        assert!(
+            errors.is_empty(),
+            "expected dispatcher to resolve the sibling via URI base_dir, got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     // -----------------------------------------------------------------------

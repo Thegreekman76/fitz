@@ -355,14 +355,16 @@ pub fn load_imported_fns(
 ///   `.fitz` module, already handled by the other loaders). A genuinely
 ///   needed component that ends up unregistered surfaces as an "unknown
 ///   component" checker error at the parent's composition site.
-/// - MVP is one level deep: the imported `.fitzv`'s OWN `from X import Y`
-///   are NOT loaded transitively. The parent must import every nominal /
-///   helper any imported component needs (documented in
-///   `docs/deudas-post-5b.md`). File-local sibling components of an
-///   imported component ARE available (the whole file is loaded).
-/// - Aliasing a component import (`from Card import Card as Row`) is NOT
-///   supported in the MVP: the component is registered under its original
-///   declared name, so `<Row />` would report "unknown component".
+/// - Transitivity: the loader itself reads only direct siblings, but the
+///   caller passes the transitive union computed by
+///   [`collect_transitive_view_imports`], so a grandchild component in a
+///   file the ENTRY does not import is still registered. File-local sibling
+///   components of an imported component are also available (whole file is
+///   loaded).
+/// - Aliasing is honoured (v0.26.0): `from Card import Card as Row`
+///   registers a renamed clone under `Row` (so `<Row />` resolves) *and*
+///   keeps the original `Card`, so an imported component's file-local
+///   siblings that compose it by its real name still work.
 pub fn load_imported_components(
     imports: &[ExpandedViewImport],
     base_dir: &Path,
@@ -398,10 +400,103 @@ pub fn load_imported_components(
             Err(_) => continue,
         };
         for component in expanded.components {
+            // Aliasing: if this import brings the component in under an alias
+            // (`from Card import Card as Row`), register a renamed clone so
+            // `<Row />` resolves. The original name is kept too, so the
+            // imported component's file-local siblings that compose it by its
+            // real name still work. Distinct names → both survive the
+            // first-wins `insert`.
+            let alias = imp.names.iter().find_map(|(orig, al)| {
+                if *orig == component.name {
+                    al.clone()
+                } else {
+                    None
+                }
+            });
+            if let Some(alias_name) = alias {
+                if alias_name != component.name {
+                    let mut renamed = component.clone();
+                    renamed.name = alias_name;
+                    registry.insert(renamed);
+                }
+            }
             registry.insert(component);
         }
     }
     Ok(registry)
+}
+
+/// Compute the transitive closure of `.fitzv` view imports reachable from
+/// `entry`, following each imported `.fitzv`'s OWN `from X import Y` one
+/// file at a time. The MVP loaders ([`load_imported_components`] /
+/// [`load_imported_nominals`] / [`load_imported_fns`]) each read only the
+/// direct siblings; this walks the `.fitzv` import graph so a grandchild
+/// component — or a nominal / helper `fn` an imported component needs — that
+/// lives in a file the ENTRY does not import is still discovered.
+///
+/// Returns the union of `entry` plus every import found in a reachable
+/// `.fitzv`, with entry imports first (so entry-level aliases take
+/// precedence in the `scanned`-deduped loaders). Feed it verbatim to the
+/// three loaders, which each de-dupe by module stem.
+///
+/// **Best-effort + MVP scope** (parallel to the loaders):
+/// - Only single-segment `.fitzv` siblings are expanded to read their own
+///   imports; classic `.fitz` imports (nominals / fns) reach the union but
+///   are not recursed into (following `.fitz → .fitz` chains is a separate,
+///   deeper feature).
+/// - Resolved against a single flat `base_dir` (all view files in one
+///   directory — the layout the examples use).
+/// - Cycle-safe: each `.fitzv` file is expanded at most once.
+/// - A sibling that is missing / fails to parse or expand is skipped
+///   silently; the same import still reaches the loaders.
+pub fn collect_transitive_view_imports(
+    entry: &[ExpandedViewImport],
+    base_dir: &Path,
+) -> Vec<ExpandedViewImport> {
+    use std::collections::{BTreeSet, VecDeque};
+
+    let mut result: Vec<ExpandedViewImport> = Vec::new();
+    let mut seen_entries: BTreeSet<String> = BTreeSet::new();
+    let mut expanded_files: BTreeSet<String> = BTreeSet::new();
+    let mut worklist: VecDeque<ExpandedViewImport> = entry.iter().cloned().collect();
+
+    while let Some(imp) = worklist.pop_front() {
+        // De-dupe exact import entries (same path + same names/aliases) so an
+        // import reached at two levels is not fed to the loaders twice.
+        let key = format!("{:?}|{:?}", imp.path, imp.names);
+        if seen_entries.insert(key) {
+            result.push(imp.clone());
+        }
+        // Follow only single-segment `.fitzv` siblings — those can compose
+        // further children. Each expanded at most once (cycle-safe).
+        if imp.path.len() != 1 {
+            continue;
+        }
+        let stem = imp.path[0].clone();
+        if !expanded_files.insert(stem.clone()) {
+            continue;
+        }
+        let sibling = base_dir.join(format!("{stem}.fitzv"));
+        if !sibling.is_file() {
+            continue;
+        }
+        let source = match fs::read_to_string(&sibling) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let raw = match super::parse(&source) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let expanded = match super::expand(&raw) {
+            Ok(x) => x,
+            Err(_) => continue,
+        };
+        for child_imp in expanded.imports {
+            worklist.push_back(child_imp);
+        }
+    }
+    result
 }
 
 /// The `#[wasm_bindgen(start)]` wrapper appended to the emitter
@@ -1279,5 +1374,116 @@ component Card {
             ),
             "the first import (A) wins"
         );
+    }
+
+    // ---- v0.26.0 — aliasing (load_imported_components) ------------------
+
+    #[test]
+    fn load_imported_components_honours_alias_registers_both_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state { title: Str = \"\" }\n  <template><article>{title}</article></template>\n}\n",
+        )
+        .unwrap();
+        // `from Card import Card as Row` → `<Row />` must resolve, and the
+        // original `Card` stays available for a file-local sibling.
+        let imports = vec![imp("Card", &[("Card", Some("Row"))])];
+        let reg = load_imported_components(&imports, tmp.path()).unwrap();
+        assert!(reg.contains("Row"), "the alias binding is registered");
+        assert!(reg.contains("Card"), "the original name is kept too");
+        assert_eq!(
+            reg.get("Row").unwrap().state[0].name,
+            "title",
+            "the aliased clone carries the original component's surface"
+        );
+    }
+
+    #[test]
+    fn load_imported_components_alias_only_affects_imported_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        // File declares Card + file-local Badge; only Card is aliased.
+        fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state {}\n  <template><article><Badge /></article></template>\n}\ncomponent Badge {\n  state {}\n  <template><b>!</b></template>\n}\n",
+        )
+        .unwrap();
+        let imports = vec![imp("Card", &[("Card", Some("Row"))])];
+        let reg = load_imported_components(&imports, tmp.path()).unwrap();
+        assert!(reg.contains("Row"), "Card aliased to Row");
+        assert!(reg.contains("Card"), "original Card kept");
+        assert!(
+            reg.contains("Badge"),
+            "the non-aliased sibling keeps its declared name"
+        );
+        assert_eq!(
+            reg.components().len(),
+            3,
+            "Card + Row (alias clone) + Badge — no spurious extra"
+        );
+    }
+
+    // ---- v0.26.0 — transitivity (collect_transitive_view_imports) -------
+
+    #[test]
+    fn collect_transitive_view_imports_reaches_grandchild_imports() {
+        let tmp = tempfile::tempdir().unwrap();
+        // App imports Card; Card.fitzv itself imports Badge.
+        fs::write(
+            tmp.path().join("Card.fitzv"),
+            "from Badge import Badge\ncomponent Card {\n  state {}\n  <template><article><Badge /></article></template>\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("Badge.fitzv"),
+            "component Badge {\n  state {}\n  <template><b>!</b></template>\n}\n",
+        )
+        .unwrap();
+        let entry = vec![imp("Card", &[("Card", None)])];
+        let union = collect_transitive_view_imports(&entry, tmp.path());
+        assert!(
+            union.iter().any(|i| i.path == vec!["Card".to_string()]),
+            "entry import is present"
+        );
+        assert!(
+            union.iter().any(|i| i.path == vec!["Badge".to_string()]),
+            "the grandchild's Badge import is discovered transitively"
+        );
+        // And loading over the union registers the grandchild component.
+        let reg = load_imported_components(&union, tmp.path()).unwrap();
+        assert!(
+            reg.contains("Card") && reg.contains("Badge"),
+            "the transitively-reached Badge is registered"
+        );
+    }
+
+    #[test]
+    fn collect_transitive_view_imports_is_cycle_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A imports B, B imports A — the walk must terminate.
+        fs::write(
+            tmp.path().join("A.fitzv"),
+            "from B import B\ncomponent A {\n  state {}\n  <template><B /></template>\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("B.fitzv"),
+            "from A import A\ncomponent B {\n  state {}\n  <template><A /></template>\n}\n",
+        )
+        .unwrap();
+        let entry = vec![imp("A", &[("A", None)])];
+        let union = collect_transitive_view_imports(&entry, tmp.path());
+        // Terminates; both files' imports are present, each once.
+        assert!(union.iter().any(|i| i.path == vec!["A".to_string()]));
+        assert!(union.iter().any(|i| i.path == vec!["B".to_string()]));
+    }
+
+    #[test]
+    fn collect_transitive_view_imports_no_siblings_is_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No `.fitzv` siblings on disk — the union is just the entry imports.
+        let entry = vec![imp("Card", &[("Card", None)]), imp("util", &[("f", None)])];
+        let union = collect_transitive_view_imports(&entry, tmp.path());
+        assert_eq!(union.len(), 2, "nothing transitive → union == entry");
     }
 }

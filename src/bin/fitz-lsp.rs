@@ -33,11 +33,11 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use fitz::ast::Program;
 use fitz::lsp::{
-    check_source_with_types_and_base_dir, check_view_source, completion_at_position_with_uri,
-    definition_at_position_view, definition_for_position, fitz_errors_to_diagnostics_with_source,
-    hover_at_position_view, hover_for_position, make_definition_location_with_source,
-    make_hover_with_range, resolve_cross_module_definition, signature_help_at_position,
-    uri_is_fitzv, utf16_to_unicode_char,
+    check_source_with_types_and_base_dir, check_view_source_with_base_dir,
+    completion_at_position_with_uri, definition_at_position_view, definition_for_position,
+    fitz_errors_to_diagnostics_with_source, hover_at_position_view, hover_for_position,
+    make_definition_location_with_source, make_hover_with_range, resolve_cross_module_definition,
+    signature_help_at_position, uri_is_fitzv, utf16_to_unicode_char,
 };
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
@@ -98,7 +98,16 @@ impl Backend {
         // stash empty defaults so hover requests over a `.fitzv`
         // buffer resolve to `None` cleanly.
         if uri_is_fitzv(&uri) {
-            let errors = check_view_source(&text);
+            // Derive the document's directory so cross-file `<Child />`
+            // composition validates against imported sibling `.fitzv`
+            // components (Phase 11.8 cross-file, v0.26.0) instead of
+            // surfacing them as unknown. Same base_dir derivation as the
+            // classic branch below; `None` when the URI is not a file path.
+            let base_dir = uri
+                .to_file_path()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            let errors = check_view_source_with_base_dir(&text, base_dir.as_deref());
             let diagnostics = fitz_errors_to_diagnostics_with_source(&errors, &text);
             self.documents.lock().insert(
                 uri.clone(),

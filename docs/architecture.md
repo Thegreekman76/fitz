@@ -974,7 +974,14 @@ The pipeline lives entirely under `src/view/`:
   (classic helpers), and — since v0.25.0 — `load_imported_components`
   (cross-file `.fitzv` `<Child />` components; parses + expands the
   sibling `.fitzv` so the emitter inlines it and the checker
-  validates composition against its real surface).
+  validates composition against its real surface). Since v0.26.0 the
+  loader honours `as` aliases (registers a renamed clone), and
+  `collect_transitive_view_imports` walks the `.fitzv` import graph
+  (cycle-safe) so the three loaders run over the transitive union —
+  a grandchild in a file the entry does not import directly is still
+  discovered. The LSP reuses the same loaders (via
+  `lsp::check_view_source_with_base_dir`) so editing a `.fitzv`
+  resolves cross-file children too.
 
 **Two emit branches, one check pass**: both the SSR and WASM
 emitters consume the same `ExpandedViewFile` — the view checker

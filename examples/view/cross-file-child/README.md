@@ -45,19 +45,24 @@ cd ..
 python -m http.server 8000   # open http://localhost:8000/
 ```
 
-## MVP limits
+## Since v0.26.0
 
-- **One level deep** — the imported `.fitzv`'s own `from X import Y` are
-  not loaded transitively; the parent must import every nominal / helper
-  any imported component needs. File-local sibling components of an
-  imported component ARE available (the whole file is loaded).
+The three MVP limits this example originally shipped with are now closed
+(see `examples/view/cross-file-transitive/` for a demo):
+
+- **Transitivity** — an imported `.fitzv`'s own `from X import Y` are now
+  followed, so a grandchild component in a file the entry does not import
+  is discovered and inlined.
+- **Component aliasing** — `from Card import Card as Row` now registers a
+  renamed clone, so `<Row />` resolves.
+- **LSP cross-file** — diagnostics over a single `.fitzv` now resolve
+  imported sibling components (the LSP derives the document's directory),
+  so a cross-file `<Child />` is no longer flagged as unknown.
+
+## Remaining limits
+
 - **Local wins on a name collision** — a local component shadows an
   imported one of the same name; a cross-file dup (same name from two
   files) keeps the first import.
-- **No component aliasing** — `from Card import Card as Row` registers the
-  component under its original name (`<Row />` reports "unknown
-  component"). Nominal/fn imports still honour aliases.
 - Cross-file composition is a client-WASM capability; the SSR target uses
   the runtime `component(...)` API instead.
-- LSP diagnostics over a single `.fitzv` still flag a cross-file child as
-  unknown (the LSP has no sibling-file context yet — Phase 11.8).

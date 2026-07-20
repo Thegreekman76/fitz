@@ -1,0 +1,16 @@
+// v0.26.0 — cross-file composition, transitive + alias. This is the
+// GRANDCHILD. `App.fitzv` never imports it; it is reached only because
+// `Card.fitzv` (which App imports, aliased to `Row`) composes `<Badge />`.
+// The transitive loader (`collect_transitive_view_imports`) follows
+// `Card.fitzv`'s own `from Badge import Badge` so this component's whole
+// emit is inlined into the standalone WASM crate.
+
+component Badge {
+  state { label: Str = "" }
+
+  <template><span class="badge">{label}</span></template>
+
+  <style scoped>
+    .badge { background: #eef; color: #33c; font-size: 0.7em; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
+  </style>
+}

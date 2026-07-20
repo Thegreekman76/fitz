@@ -1181,7 +1181,13 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let imported_components = match view::load_imported_components(&expanded.imports, &base_dir) {
+    // Transitivity — walk the `.fitzv` import graph so a grandchild
+    // component / nominal / helper `fn` that lives in a file the entry does
+    // not import directly is still discovered. The three loaders below run
+    // over this union (each de-dupes by module stem). Byte-for-byte with the
+    // one-level path when nothing is transitively reachable.
+    let all_imports = view::collect_transitive_view_imports(&expanded.imports, &base_dir);
+    let imported_components = match view::load_imported_components(&all_imports, &base_dir) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
@@ -1210,7 +1216,7 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
     // `.fitzv` (e.g. `from card import Card`) from their sibling
     // `.fitz` files so the emitter can synthesise a Rust `struct` for
     // each. Empty when the file imports no nominals (the pre-R3 examples).
-    let nominals = match view::load_imported_nominals(&expanded.imports, &base_dir) {
+    let nominals = match view::load_imported_nominals(&all_imports, &base_dir) {
         Ok(n) => n,
         Err(e) => {
             eprintln!(
@@ -1224,7 +1230,7 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
     // Phase 11.7 R3.5a.2 — load the sibling `.fitz` helper functions the
     // `.fitzv` imports (`from board_helpers import cards_in, ...`) so the
     // emitter can transpile each into the bundle.
-    let imported_fns = match view::load_imported_fns(&expanded.imports, &base_dir) {
+    let imported_fns = match view::load_imported_fns(&all_imports, &base_dir) {
         Ok(f) => f,
         Err(e) => {
             eprintln!(

@@ -9926,8 +9926,20 @@ de 3 releases:
   synthetic file) + `check_with_imported_components`. Toca checker +
   emitter + loader + CLI; registry vacío → byte-a-byte same-file.
   Ejemplo `examples/view/cross-file-child` (compila a WASM real 36.2 KB).
-  Deuda residual: un nivel de profundidad, local gana ante importado,
-  sin aliasing de components, LSP cross-file (Phase 11.8).
+- ✅ **cross-file refinements: aliasing + transitividad + LSP (v0.26.0,
+  2026-07-20)** — cierra las tres deudas residuales de v0.25.0.
+  **Aliasing**: `load_imported_components` registra un clon renombrado
+  bajo el alias (`from Card import Card as Row` → `<Row />` resuelve),
+  manteniendo el original; solo se emiten los reachable (sin double-emit).
+  **Transitividad**: nuevo `collect_transitive_view_imports` recorre el
+  grafo de imports `.fitzv` (cycle-safe) y los 3 loaders corren sobre la
+  unión → un grandchild en un archivo que el entry no importa se descubre.
+  **LSP cross-file**: nuevo `lsp::check_view_source_with_base_dir`, el bin
+  deriva `base_dir` del URI y carga los sibling components antes del
+  checker (paralelo al pre-scan cross-module clásico v0.19.3). Ejemplo
+  `examples/view/cross-file-transitive` (alias + transitivo, WASM real
+  ~35 KB). Los 8 ejemplos view same-file regeneran byte-a-byte. Residual:
+  local gana ante importado, sin manejo de colisión de aliasing, dir plano.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
