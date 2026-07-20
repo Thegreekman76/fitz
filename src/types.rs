@@ -12102,11 +12102,15 @@ fn check_render_for_decorator(
         }
     }
 
-    // Return type: MVP accepts `Str` (raw HTML). When Fitz adds a
-    // built-in nominal `Html`, we will accept both. `Any` is also
-    // accepted (fn without declared return type).
+    // Return type: accepts `Str` (raw HTML) or a nominal `Html` (the
+    // fitz-liveviews `type Html { raw: Str }`, which render fns build with
+    // `html(...)`). `Any` is also accepted (fn without a declared return
+    // type). Accepting the `Html` nominal is what lets a fitz-liveviews app
+    // compile with `fitz build` — the framework's `component` fn recovers
+    // the concrete `Html` from the render result.
     match ret {
         Type::Str | Type::Any => {}
+        Type::Nominal(id) if ctx.types.info(*id).name == "Html" => {}
         other => {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,

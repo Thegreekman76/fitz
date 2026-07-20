@@ -5583,6 +5583,11 @@ fn generate_module_rs_with_bindings(
     for s in program {
         match s {
             Stmt::TypeDef { .. } => type_defs.push(s),
+            // Phase 9.z.2.c parity: `@test` fns are not emitted in codegen
+            // (parallel to Rust's `#[cfg(test)]`) — in imported modules too,
+            // so an imported library that ships `@test` suites (e.g.
+            // fitz-liveviews' `lib.fitz`) still compiles with `fitz build`.
+            Stmt::FnDef { decorators, .. } if decorators.iter().any(|d| d.name == "test") => {}
             Stmt::FnDef { .. } => top_fns.push(s),
             Stmt::Assign { .. } => top_lets.push(s),
             Stmt::Import { .. } | Stmt::FromImport { .. } => {
@@ -10886,6 +10891,8 @@ fn __fitz_fv_to_json(v: &__FitzValue) -> serde_json::Value {
             }
             serde_json::Value::Object(obj)
         }
+        __FitzValue::Instance(_, _) => serde_json::Value::Null,
+        __FitzValue::Function(_) => serde_json::Value::Null,
     }
 }
 
@@ -11277,7 +11284,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             //     type check (F13.D follow-up) or serialize/
             //     deserialize via JSON manually.
             self.emit(
-                "#[derive(Clone, Debug)]\n\
+                "#[derive(Clone)]\n\
                  #[allow(dead_code)]\n\
                  pub(crate) enum __FitzValue {\n    \
                      Int(i64),\n    \
@@ -11288,7 +11295,26 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                      Bytes(Vec<u8>),\n    \
                      Nominal(String),\n    \
                      List(Vec<__FitzValue>),\n    \
-                     Map(Vec<(__FitzValue, __FitzValue)>),\n\
+                     Map(Vec<(__FitzValue, __FitzValue)>),\n    \
+                     Instance(std::sync::Arc<dyn std::any::Any + Send + Sync>, String),\n    \
+                     Function(std::sync::Arc<dyn Fn(Vec<__FitzValue>) -> __FitzValue + Send + Sync>),\n\
+                 }\n\n\
+                 impl std::fmt::Debug for __FitzValue {\n    \
+                     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        \
+                         match self {\n            \
+                             Self::Int(n) => write!(f, \"Int({})\", n),\n            \
+                             Self::Float(x) => write!(f, \"Float({})\", x),\n            \
+                             Self::Str(s) => write!(f, \"Str({:?})\", s),\n            \
+                             Self::Bool(b) => write!(f, \"Bool({})\", b),\n            \
+                             Self::Null => write!(f, \"Null\"),\n            \
+                             Self::Bytes(bs) => write!(f, \"Bytes({} bytes)\", bs.len()),\n            \
+                             Self::Nominal(r) => write!(f, \"Nominal({:?})\", r),\n            \
+                             Self::Instance(_, r) => write!(f, \"Instance({:?})\", r),\n            \
+                             Self::Function(_) => write!(f, \"Function(<fn>)\"),\n            \
+                             Self::List(items) => f.debug_list().entries(items.iter()).finish(),\n            \
+                             Self::Map(pairs) => write!(f, \"Map({:?})\", pairs),\n        \
+                         }\n    \
+                     }\n\
                  }\n\n\
                  impl std::fmt::Display for __FitzValue {\n    \
                      fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        \
@@ -11300,6 +11326,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                              Self::Null => write!(f, \"null\"),\n            \
                              Self::Bytes(bs) => write!(f, \"{}\", __fitz_fmt_bytes(bs)),\n            \
                              Self::Nominal(repr) => write!(f, \"{}\", repr),\n            \
+                             Self::Instance(_, repr) => write!(f, \"{}\", repr),\n            \
+                             Self::Function(_) => write!(f, \"<function>\"),\n            \
                              Self::List(items) => {\n                \
                                  write!(f, \"[\")?;\n                \
                                  for (i, it) in items.iter().enumerate() {\n                    \
@@ -11333,6 +11361,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                              (Self::Nominal(a), Self::Nominal(b)) => a == b,\n            \
                              (Self::List(a), Self::List(b)) => a == b,\n            \
                              (Self::Map(a), Self::Map(b)) => a == b,\n            \
+                             (Self::Instance(_, a), Self::Instance(_, b)) => a == b,\n            \
                              _ => false,\n        \
                          }\n    \
                      }\n\
@@ -11348,9 +11377,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                          __FitzValue::Bytes(_) => \"Bytes\",\n        \
                          __FitzValue::Nominal(_) => \"Instance\",\n        \
                          __FitzValue::List(_) => \"List\",\n        \
-                         __FitzValue::Map(_) => \"Map\",\n    \
+                         __FitzValue::Map(_) => \"Map\",\n        \
+                         __FitzValue::Instance(_, _) => \"Instance\",\n        \
+                         __FitzValue::Function(_) => \"Function\",\n    \
                      }\n\
-                 }\n\n",
+                 }\n\n\
+                 #[allow(dead_code)]\n\
+                 fn __fv_to_i64(v: &__FitzValue) -> i64 { match v { __FitzValue::Int(n) => *n, __FitzValue::Float(x) => *x as i64, _ => panic!(\"Any: expected Int, got {}\", __fv_type_name(v)) } }\n\
+                 #[allow(dead_code)]\n\
+                 fn __fv_to_f64(v: &__FitzValue) -> f64 { match v { __FitzValue::Float(x) => *x, __FitzValue::Int(n) => *n as f64, _ => panic!(\"Any: expected Float, got {}\", __fv_type_name(v)) } }\n\
+                 #[allow(dead_code)]\n\
+                 fn __fv_to_string(v: &__FitzValue) -> String { match v { __FitzValue::Str(s) => s.clone(), _ => panic!(\"Any: expected Str, got {}\", __fv_type_name(v)) } }\n\
+                 #[allow(dead_code)]\n\
+                 fn __fv_to_bool(v: &__FitzValue) -> bool { match v { __FitzValue::Bool(b) => *b, _ => panic!(\"Any: expected Bool, got {}\", __fv_type_name(v)) } }\n\n",
             );
             // F13.C — `__FromFitzJson` and `__ToFitzJson` for
             // `__FitzValue`. Only if HTTP is active (serde_json
@@ -11407,6 +11446,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                  __FitzValue::Null => serde_json::Value::Null,\n            \
                                  __FitzValue::Bytes(bs) => serde_json::Value::String(__fv_b64_encode(bs)),\n            \
                                  __FitzValue::Nominal(s) => serde_json::Value::String(s.clone()),\n            \
+                                 __FitzValue::Instance(_, _) => serde_json::Value::Null,\n            \
+                                 __FitzValue::Function(_) => serde_json::Value::Null,\n            \
                                  __FitzValue::List(items) => serde_json::Value::Array(items.iter().map(__ToFitzJson::__to_fitz_json).collect()),\n            \
                                  __FitzValue::Map(pairs) => {\n                \
                                      let mut obj = serde_json::Map::new();\n                \
@@ -13860,6 +13901,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let is_http_handler = decorators
             .iter()
             .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete"));
+        // A `@ws` handler is an `async fn(conn: WsConn<T>, ...)` whose body
+        // is a `loop { ws.recv()? ... }`. The declared return is `Null`, but
+        // the body propagates errors with `?` (the checker allows it: the
+        // handler runs inside the WS loop). To keep the native Rust `?`
+        // working we emit the fn as `-> Result<(), String>` (the never-typed
+        // infinite loop coerces) and push a Result frame on `ret_stack`. The
+        // wrapper (`gen_ws_handler_wrapper`) already discards the return
+        // (`let _ = <name>(__conn).await;`), so an `Err` just ends the conn.
+        let is_ws_handler = decorators.iter().any(|d| d.name == "ws");
         // MW.3: a fn referenced as `@middleware(name)` in any
         // FnDef is treated as HTTP context (parity with the
         // checker in types.rs). Its Rust return type is
@@ -14026,6 +14076,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.emit(" -> __FitzResponse");
         } else if has_return_status {
             self.emit(" -> __FitzResponse");
+        } else if is_ws_handler && body_has_try {
+            // WS handler that uses `?` (e.g. `ws.recv()?`): emit as
+            // Result-returning so the native Rust `?` propagates. The
+            // infinite `loop` body coerces to it; the wrapper discards the
+            // returned Result. Gated on `body_has_try` so a `?`-free WS
+            // handler keeps its plain `()` return (no spurious Result).
+            self.emit(" -> Result<(), String>");
         } else if !matches!(emit_ret, Type::Null) {
             self.emit(" -> ");
             self.emit(&rust_type_for(&emit_ret, self.env)?);
@@ -14094,7 +14151,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // the body the `return x` return pure `T` — `async` is
         // transparent from inside (mirror of the checker in
         // `types.rs`).
-        self.ret_stack.push(emit_ret.clone());
+        // WS handlers that use `?` run their body in a `Result<(), String>`
+        // context (see the return-type emission above), so `ws.recv()?`
+        // propagates via the native Rust `?`.
+        let ret_frame = if is_ws_handler && body_has_try {
+            Type::Result {
+                ok: Box::new(Type::Null),
+                err: Box::new(Type::Str),
+            }
+        } else {
+            emit_ret.clone()
+        };
+        self.ret_stack.push(ret_frame);
         let saved_response_mode = self.response_mode;
         let saved_in_middleware = self.in_middleware_fn;
         // P1 — Post mws: response_mode true to wrap
@@ -16955,6 +17023,27 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }
                 }
             }
+        }
+
+        // Any call (dynamic dispatch): the name is bound as `Any` and
+        // holds a `__FitzValue::Function` (a type-erased callable). Emit
+        // the erased invocation — marshal each argument to `__FitzValue`,
+        // call the boxed closure, get an `Any` back. This is how a fn
+        // that was erased through a `Map<Str, Any>` value or an `Any`
+        // field (fitz-liveviews' `render_fn(state)` /
+        // `handler(state, payload)`) is invoked.
+        if matches!(self.lookup_var(name), Some(Type::Any)) {
+            let mut wrapped = Vec::with_capacity(args.len());
+            for a in args {
+                let (ac, at) = self.gen_expr(a)?;
+                wrapped.push(coerce(&ac, &at, &Type::Any, self.env));
+            }
+            let code = format!(
+                "(match ({name}).clone() {{ __FitzValue::Function(__g) => __g(vec![{args}]), __nc => panic!(\"Any: value is not callable, got {{}}\", __fv_type_name(&__nc)) }})",
+                name = name,
+                args = wrapped.join(", ")
+            );
+            return Ok((code, Type::Any));
         }
 
         // Higher-order (F12): if the name is bound in some local
@@ -27341,7 +27430,17 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Ok((code, Type::Str))
             }
             Type::Map(k_ty, v_ty) => {
-                let coerced_idx = coerce(&idx_code, &idx_ty, k_ty, self.env);
+                // When either K or V is `Any`, the map's runtime storage is
+                // `Vec<(__FitzValue, __FitzValue)>` (both sides wrapped, see
+                // `gen_map_lit_with_hint`), so the lookup key must be wrapped
+                // to `__FitzValue` too — comparing a `__FitzValue` key against
+                // a raw `String`/`i64` would not typecheck. Otherwise the
+                // storage is homogeneous and the key coerces to `k_ty`.
+                let coerced_idx = if matches!(**k_ty, Type::Any) || matches!(**v_ty, Type::Any) {
+                    wrap_as_fitz_value_with_env(&idx_code, &idx_ty, self.env)?
+                } else {
+                    coerce(&idx_code, &idx_ty, k_ty, self.env)
+                };
                 // Linear search by equality. `unwrap_or_else(panic)`
                 // with a message in the interpreter style. We bind
                 // the Rc to a local var before `.lock().unwrap()`
@@ -34835,8 +34934,89 @@ fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
 /// capture Display directly, `wrap_as_fitz_value` does not
 /// need the env, but call sites pass it for uniformity —
 /// the wrapper ignores the env.
-fn wrap_as_fitz_value_with_env(code: &str, ty: &Type, _env: &TypeEnv) -> Result<String, FitzError> {
-    wrap_as_fitz_value(code, ty)
+fn wrap_as_fitz_value_with_env(code: &str, ty: &Type, env: &TypeEnv) -> Result<String, FitzError> {
+    match ty {
+        // Function values wrap into a type-erased `__FitzValue::Function`
+        // adapter — needed for `Map<Str, Any>` / `List<Any>` literals that
+        // hold function references (e.g. fitz-liveviews' event-handler
+        // maps). Everything else keeps the historical heterogeneous-literal
+        // behavior, including Nominal → Display-string capture (so the
+        // JSONB / heterogeneous-literal semantics are unchanged).
+        Type::Function { .. } => wrap_fn_as_any(code, ty, env),
+        _ => wrap_as_fitz_value(code, ty),
+    }
+}
+
+/// Wrap a concrete-typed Rust expression into a `__FitzValue` for the
+/// general `Any` path (`coerce(concrete → Any)`). Unlike
+/// `wrap_as_fitz_value` (heterogeneous-literal path, which stores a
+/// Nominal as its Display string only), this stores a Nominal
+/// RECOVERABLY as `__FitzValue::Instance` — the actual
+/// `Arc<Mutex<FooData>>` unsized to `Arc<dyn Any>` (downcastable back)
+/// plus its Display for formatting/equality. Aliasing is preserved: the
+/// inner `Arc<Mutex>` is shared, not copied. Primitives / List / Map /
+/// Null / Bytes delegate to `wrap_as_fitz_value`. Functions are wrapped
+/// by `wrap_fn_as_any` (the marshalling adapter, Any step 5).
+fn wrap_any_value(code: &str, from: &Type, env: &TypeEnv) -> Result<String, FitzError> {
+    match from {
+        Type::Nominal(_) => Ok(format!(
+            "{{ let __inst = {code}; __FitzValue::Instance(__inst.clone() as std::sync::Arc<dyn std::any::Any + Send + Sync>, format!(\"{{}}\", &*__inst.lock().unwrap())) }}",
+            code = code
+        )),
+        Type::Function { .. } => wrap_fn_as_any(code, from, env),
+        _ => wrap_as_fitz_value(code, from),
+    }
+}
+
+/// Wrap a concrete function value (`Arc<dyn Fn(P..) -> R + Send + Sync>`,
+/// or a bare top-level `fn` item) into a `__FitzValue::Function` — a
+/// type-erased callable `Arc<dyn Fn(Vec<__FitzValue>) -> __FitzValue +
+/// Send + Sync>`. The generated adapter unmarshals each `__FitzValue`
+/// argument to the function's concrete parameter type, calls the real
+/// function, and marshals the result back to `__FitzValue`. This is how
+/// a heterogeneous registry of top-level functions (e.g.
+/// fitz-liveviews' per-component event handlers, keyed in a
+/// `Map<Str, Any>`) survives type erasure and dynamic dispatch.
+///
+/// Sync functions only for now — `async` function values inside `Any`
+/// (a `Future`-returning fn stored in `Any`) remain follow-up debt.
+fn wrap_fn_as_any(code: &str, from: &Type, env: &TypeEnv) -> Result<String, FitzError> {
+    let (params, ret) = match from {
+        Type::Function { params, ret } => (params, ret.as_ref()),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                "wrap_fn_as_any called on a non-function type".to_string(),
+            ))
+        }
+    };
+    if matches!(ret, Type::Future(_)) {
+        return Err(FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            "async function values inside `Any` are not supported in `fitz build` yet \
+             (the value is a Future-returning fn stored as Any). Workaround: `fitz run`."
+                .to_string(),
+        ));
+    }
+    let mut bindings = String::new();
+    let mut call_args = Vec::new();
+    for (i, p) in params.iter().enumerate() {
+        let unwrapped = coerce(&format!("__a[{}].clone()", i), &Type::Any, p, env);
+        bindings.push_str(&format!("let __p{} = {}; ", i, unwrapped));
+        call_args.push(format!("__p{}", i));
+    }
+    let ret_wrap = wrap_any_value("__r", ret, env)?;
+    Ok(format!(
+        "{{ let __f = {code}; __FitzValue::Function(std::sync::Arc::new(move |__a: Vec<__FitzValue>| -> __FitzValue {{ {bindings}let __r = __f({call}); {ret_wrap} }})) }}",
+        code = code,
+        bindings = bindings,
+        call = call_args.join(", "),
+        ret_wrap = ret_wrap
+    ))
 }
 
 /// 10.8.4 (v0.10.8) — codegen parity of the checker's
@@ -35130,6 +35310,14 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                 Ok(format!("({})", parts.join(", ")))
             }
         }
+        // Any codegen support — a bare `Any` lowers to the tagged
+        // runtime enum `__FitzValue` (the same representation used for
+        // ORM JSONB / heterogeneous literals). Enables `Any`-typed
+        // bindings, params, returns, and struct fields — the shape
+        // dynamic registries (e.g. fitz-liveviews' component store)
+        // rely on. The `program_uses_fitz_value` detector already fires
+        // on explicit `Any` annotations, so the prelude is emitted.
+        Type::Any => Ok("__FitzValue".to_string()),
         other => Err(FitzError::new(
             ErrorKind::TypeError,
             0,
@@ -36014,6 +36202,44 @@ fn coerce(code: &str, from: &Type, to: &Type, env: &TypeEnv) -> String {
                 // K non-Str — gradual (minor debt).
                 code.to_string()
             }
+        }
+        // Any support — wrap concrete → Any, unwrap Any → concrete.
+        // (`Any → Any` and `Any → Nullable` fall through: the former to
+        // the identity catch-all, the latter to the generic Nullable
+        // arm above which composes `Some(coerce(code, Any, inner))`.)
+        (from, Type::Any) if !matches!(from, Type::Any) => {
+            wrap_any_value(code, from, env).unwrap_or_else(|_| code.to_string())
+        }
+        (Type::Any, Type::Int) => format!("__fv_to_i64(&({}))", code),
+        (Type::Any, Type::Float) => format!("__fv_to_f64(&({}))", code),
+        (Type::Any, Type::Str) => format!("__fv_to_string(&({}))", code),
+        (Type::Any, Type::Bool) => format!("__fv_to_bool(&({}))", code),
+        (Type::Any, Type::Null) => "()".to_string(),
+        (Type::Any, Type::Nominal(id)) => {
+            let name = &env.info(*id).name;
+            format!(
+                "{{ let __av = {code}; match __av.clone() {{ __FitzValue::Instance(__d, _) => __d.downcast::<std::sync::Mutex<{name}Data>>().expect(\"Any: expected {name} instance\"), _ => panic!(\"Any: expected {name} instance, got {{}}\", __fv_type_name(&__av)) }} }}",
+                code = code,
+                name = name
+            )
+        }
+        (Type::Any, Type::List(inner)) => {
+            let item = coerce("__it", &Type::Any, inner, env);
+            format!(
+                "{{ match ({code}).clone() {{ __FitzValue::List(__items) => std::sync::Arc::new(std::sync::Mutex::new(__items.into_iter().map(|__it| {item}).collect::<Vec<_>>())), _ => panic!(\"Any: expected List\") }} }}",
+                code = code,
+                item = item
+            )
+        }
+        (Type::Any, Type::Map(k, v)) => {
+            let kc = coerce("__k", &Type::Any, k, env);
+            let vc = coerce("__v", &Type::Any, v, env);
+            format!(
+                "{{ match ({code}).clone() {{ __FitzValue::Map(__pairs) => std::sync::Arc::new(std::sync::Mutex::new(__pairs.into_iter().map(|(__k, __v)| ({kc}, {vc})).collect::<Vec<_>>())), _ => panic!(\"Any: expected Map\") }} }}",
+                code = code,
+                kc = kc,
+                vc = vc
+            )
         }
         _ => code.to_string(),
     }
