@@ -26922,7 +26922,29 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             arm_pieces.push("_ => panic!(\"`match` did not match any arm\")".to_string());
         }
 
-        let code = format!("(match {} {{ {} }})", scrut_code, arm_pieces.join(", "));
+        // Deadlock guard (run↔build parity): if the scrutinee locks a Mutex
+        // (`.lock()` — every Fitz nominal/List/Map is `Arc<Mutex<_>>`), bind
+        // it to a temp `let` BEFORE the `match`. Rust extends a match
+        // scrutinee's temporaries (here the `MutexGuard`) to the END of the
+        // match expression, so an arm that re-locks the same value deadlocks
+        // (`std::sync::Mutex` is non-reentrant) — e.g. `match rows.len() == 0
+        // { false => rows.map(...) }`. The interpreter (`fitz run`) is
+        // unaffected, so this was a silent `fitz build`-only hang. Binding to
+        // a `let` drops the guard before the arms run. Only wrapped when a
+        // lock is present, so the generated code (and codegen string tests)
+        // is byte-identical for lock-free matches.
+        let code = if scrut_code.contains(".lock()") {
+            let id = self.pattern_slot_counter;
+            self.pattern_slot_counter += 1;
+            format!(
+                "{{ let __match_scrut_{id} = {scrut}; (match __match_scrut_{id} {{ {arms} }}) }}",
+                id = id,
+                scrut = scrut_code,
+                arms = arm_pieces.join(", "),
+            )
+        } else {
+            format!("(match {} {{ {} }})", scrut_code, arm_pieces.join(", "))
+        };
         Ok((code, result_ty))
     }
 
@@ -47621,6 +47643,43 @@ mod tests {
                        return Ok(null)\n\
                    }\n";
         assert_err_contains(src, &["ascending", "Bool literal"]);
+    }
+
+    #[test]
+    fn codegen_match_with_lock_scrutinee_binds_temp_to_avoid_deadlock() {
+        // A `match` whose scrutinee locks a Mutex (`items.len()` on a
+        // `List<Int>` = `Arc<Mutex<Vec<i64>>>`) must bind it to a temp FIRST,
+        // else the `MutexGuard` outlives into the arms and the re-locking
+        // arm (`items.len()`) deadlocks in the binary (`std::sync::Mutex` is
+        // non-reentrant). Interpreter is unaffected → silent build-only hang.
+        let src = "fn describe(items: List<Int>) -> Int {\n  \
+                       return match items.len() == 0 {\n    \
+                           true => 0,\n    \
+                           false => items.len(),\n  \
+                       }\n\
+                   }\n\
+                   let xs = [1, 2, 3]\n\
+                   print(describe(xs))\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__match_scrut_"),
+            "expected the lock-holding scrutinee bound to a temp, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_match_without_lock_stays_byte_identical() {
+        // A lock-free scrutinee must NOT be wrapped (keeps the emitted code —
+        // and every existing codegen string test — unchanged).
+        let src = "fn label(n: Int) -> Int {\n  \
+                       return match n == 0 { true => 1, false => 2 }\n\
+                   }\n\
+                   print(label(5))\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            !rust.contains("__match_scrut_"),
+            "a lock-free match must not bind a temp, was: {rust}",
+        );
     }
 
     #[test]
