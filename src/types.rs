@@ -6721,8 +6721,27 @@ fn infer_query_builder_method(
     match method {
         // Chain methods — preserve QueryBuilder<Row>, EXCEPT
         // `.group_by(...)` which mutates to Aggregated<Row> (10.b.14).
-        "where" | "order_by" => {
+        "where" => {
             check_method_arity(ctx, method, args_ty, 1, span);
+            qb()
+        }
+        // `.order_by(closure)` or `.order_by(closure, ascending: Bool)` —
+        // the documented optional kwarg controls direction. 1 arg (the
+        // closure/field string) or 2 (that + a Bool for `ascending`).
+        "order_by" => {
+            if args_ty.len() == 2 {
+                if !matches!(args_ty[1], Type::Bool | Type::Any) {
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.order_by(..., ascending=...)` expects a Bool, got `{}`",
+                            args_ty[1].display(ctx.types)
+                        ),
+                    );
+                }
+            } else {
+                check_method_arity(ctx, method, args_ty, 1, span);
+            }
             qb()
         }
         "group_by" => {

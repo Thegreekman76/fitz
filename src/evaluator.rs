@@ -5195,6 +5195,80 @@ fn dispatch_builtin_kwargs(
         }
     }
 
+    // Case 3: QueryBuilder.order_by(closure, ascending=Bool). The guide
+    // documents `.order_by(closure, ascending: Bool)`; the positional
+    // path only reads direction from a `-field` prefix, so the kwarg
+    // form reached the generic named-args path and errored ("does not
+    // accept named arguments"). Here we accept it: 1 positional (the
+    // closure or `"field"`/`"-field"` Str) + optional `ascending` (Bool,
+    // default true), which overrides the prefix.
+    if let Value::QueryBuilder(arc) = &receiver {
+        if method == "order_by" {
+            let mut clause: Option<Value> = None;
+            let mut ascending: Option<bool> = None;
+            for (key, value) in named_args {
+                match key.as_deref() {
+                    None => {
+                        if clause.is_some() {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                span.line, span.column,
+                                "`.order_by(closure, ascending=...)` expects 1 positional arg (the closure or field string) — received 2 unnamed".to_string(),
+                            )));
+                        }
+                        clause = Some(value.clone());
+                    }
+                    Some("ascending") => match value {
+                        Value::Bool(b) => ascending = Some(*b),
+                        other => {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::TypeMismatch {
+                                    expected: "Bool".into(),
+                                    found: other.type_name().into(),
+                                },
+                                span.line,
+                                span.column,
+                                format!(
+                                    "`.order_by(..., ascending=...)` expects Bool, received `{}`",
+                                    other.type_name()
+                                ),
+                            )));
+                        }
+                    },
+                    Some(other) => {
+                        return Err(EvalSignal::Error(FitzError::new(
+                            ErrorKind::InvalidSyntax,
+                            span.line,
+                            span.column,
+                            format!(
+                                "`.order_by` does not accept kwarg `{}` (supported: `ascending`)",
+                                other
+                            ),
+                        )));
+                    }
+                }
+            }
+            let clause = clause.ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    "`.order_by(closure, ascending=...)` requires the positional arg (the closure or field string)".to_string(),
+                ))
+            })?;
+            let state = arc.clone().downcast::<QueryBuilderState>().map_err(|_| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    "QueryBuilder downcast failed (runtime bug)".to_string(),
+                ))
+            })?;
+            return orm_qb_order_by((*state).clone(), vec![clause], span, ascending)
+                .map(Some)
+                .map_err(EvalSignal::Error);
+        }
+    }
+
     Ok(None)
 }
 
@@ -13912,7 +13986,7 @@ pub fn orm_dispatch_qb_method(
         "where" => orm_qb_where(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
-        "order_by" => orm_qb_order_by(state, args, span)
+        "order_by" => orm_qb_order_by(state, args, span, None)
             .map(Some)
             .map_err(EvalSignal::Error),
         "limit" => orm_qb_limit(state, args, span)
@@ -14241,6 +14315,11 @@ fn orm_qb_order_by(
     mut state: QueryBuilderState,
     args: Vec<Value>,
     span: Span,
+    // `ascending: Bool` kwarg (documented in the guide as
+    // `.order_by(closure, ascending: Bool)`). `Some(true)` forces ASC,
+    // `Some(false)` forces DESC, overriding the `-field` / `-u.field`
+    // prefix. `None` = no kwarg → the prefix decides (positional path).
+    ascending_override: Option<bool>,
 ) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -14266,10 +14345,15 @@ fn orm_qb_order_by(
     // back to the field name (which the type system already validated).
     if let Value::Str(raw) = &args[0] {
         let raw = raw.trim();
-        let (direction, field_name) = if let Some(rest) = raw.strip_prefix('-') {
+        let (prefix_dir, field_name) = if let Some(rest) = raw.strip_prefix('-') {
             ("DESC", rest.trim().to_string())
         } else {
             ("ASC", raw.to_string())
+        };
+        let direction = match ascending_override {
+            Some(true) => "ASC",
+            Some(false) => "DESC",
+            None => prefix_dir,
         };
         if field_name.is_empty() {
             return Err(FitzError::new(
@@ -14345,14 +14429,20 @@ fn orm_qb_order_by(
         }
     };
 
-    // Detect direction: `-u.field` = DESC, `u.field` = ASC.
-    let (direction, field_expr) = match &body_expr {
+    // Detect direction: `-u.field` = DESC, `u.field` = ASC. The
+    // `ascending:` kwarg, when present, overrides this.
+    let (prefix_dir, field_expr) = match &body_expr {
         crate::ast::Expr::UnaryOp {
             op: crate::ast::UnaryOpKind::Neg,
             operand,
             ..
         } => ("DESC", operand.as_ref().clone()),
         other => ("ASC", other.clone()),
+    };
+    let direction = match ascending_override {
+        Some(true) => "ASC",
+        Some(false) => "DESC",
+        None => prefix_dir,
     };
     // v0.10.32 (Tier C.1) — `.order_by(fn(u) => u.field.rank("query"))`
     // emits `ts_rank("field", to_tsquery($N))` (with
@@ -32078,6 +32168,58 @@ let r = match n {
             sql,
             "SELECT \"id\", \"name\", \"age\" FROM \"users\" WHERE (\"age\" > $1) ORDER BY \"age\" DESC, \"name\" ASC"
         );
+    }
+
+    // Extracts the single order-by clause from the QueryBuilder returned by
+    // `orm_qb_order_by`.
+    fn one_order_clause(v: Value) -> String {
+        let arc = match v {
+            Value::QueryBuilder(a) => a,
+            _ => panic!("expected QueryBuilder"),
+        };
+        let st = arc.downcast::<QueryBuilderState>().unwrap();
+        assert_eq!(st.order_by_clauses.len(), 1);
+        st.order_by_clauses[0].clone()
+    }
+
+    #[test]
+    fn order_by_ascending_kwarg_controls_direction() {
+        let sp = crate::ast::Span::ZERO;
+        // `ascending: false` → DESC.
+        let desc = orm_qb_order_by(
+            empty_state(),
+            vec![Value::Str("age".into())],
+            sp,
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(one_order_clause(desc), "\"age\" DESC");
+        // `ascending: true` → ASC.
+        let asc = orm_qb_order_by(
+            empty_state(),
+            vec![Value::Str("age".into())],
+            sp,
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(one_order_clause(asc), "\"age\" ASC");
+    }
+
+    #[test]
+    fn order_by_ascending_kwarg_overrides_dash_prefix() {
+        let sp = crate::ast::Span::ZERO;
+        // `"-age"` would be DESC, but `ascending: true` overrides → ASC.
+        let v = orm_qb_order_by(
+            empty_state(),
+            vec![Value::Str("-age".into())],
+            sp,
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(one_order_clause(v), "\"age\" ASC");
+        // No kwarg (`None`) → the `-` prefix decides → DESC.
+        let v2 = orm_qb_order_by(empty_state(), vec![Value::Str("-age".into())], sp, None).unwrap();
+        assert_eq!(one_order_clause(v2), "\"age\" DESC");
     }
 
     #[test]

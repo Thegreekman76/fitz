@@ -21977,27 +21977,63 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         meta: &crate::types::TableMetadata,
         fields: &[TypeSigField],
     ) -> Result<String, FitzError> {
-        if args.len() != 1 {
-            return Err(self.err_at(
-                call_span,
-                format!(
-                    "`.order_by(closure)` expects 1 argument, got {}",
-                    args.len()
-                ),
-            ));
+        // Separate the positional arg (closure / field string) from the
+        // optional `ascending: Bool` kwarg. The kwarg, when present,
+        // overrides the `-field` / `-u.field` DESC prefix. In `fitz build`
+        // it must be a Bool LITERAL (MVP — the SQL direction is baked at
+        // compile time); a dynamic value works under `fitz run`.
+        let mut positional: Option<&Expr> = None;
+        let mut desc_from_kwarg: Option<bool> = None;
+        for a in args {
+            match a {
+                Expr::NamedArg { name, value, .. } if name == "ascending" => {
+                    match value.as_ref() {
+                        Expr::Bool(b, _) => desc_from_kwarg = Some(!b),
+                        _ => {
+                            return Err(self.err_at(
+                                call_span,
+                                "`.order_by(..., ascending=...)` in `fitz build` requires a Bool literal (MVP); use `-u.field` for DESC, or `fitz run` for a dynamic value".to_string(),
+                            ))
+                        }
+                    }
+                }
+                Expr::NamedArg { name, .. } => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!("`.order_by` does not accept kwarg `{}` (supported: `ascending`)", name),
+                    ))
+                }
+                other => {
+                    if positional.is_some() {
+                        return Err(self.err_at(
+                            call_span,
+                            "`.order_by(closure, ascending=...)` expects 1 positional argument".to_string(),
+                        ));
+                    }
+                    positional = Some(other);
+                }
+            }
         }
+        let arg0 = positional.ok_or_else(|| {
+            self.err_at(
+                call_span,
+                "`.order_by(closure)` requires the closure or field string".to_string(),
+            )
+        })?;
         // B1 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — accept
         // a Str literal as shorthand: `.order_by("name")` ≡
         // `.order_by(fn(u) => u.name)`. `"-name"` = DESC. Field
         // existence validated against the type's fields list. Identical
         // SQL output to the closure path via `with_order_by`.
-        if let Expr::Str(raw, _) = &args[0] {
+        if let Expr::Str(raw, _) = arg0 {
             let raw = raw.trim();
-            let (descending, field_name) = if let Some(rest) = raw.strip_prefix('-') {
+            let prefix_desc = if let Some(rest) = raw.strip_prefix('-') {
                 (true, rest.trim().to_string())
             } else {
                 (false, raw.to_string())
             };
+            let field_name = prefix_desc.1;
+            let descending = desc_from_kwarg.unwrap_or(prefix_desc.0);
             if field_name.is_empty() {
                 return Err(self.err_at(
                     call_span,
@@ -22023,9 +22059,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 desc = if descending { "true" } else { "false" },
             ));
         }
-        let (param_name, body) = self.extract_closure_body(&args[0], "order_by")?;
-        // Detect direction: `-u.field` = DESC, `u.field` = ASC.
-        let (descending, field_expr) = match &body {
+        let (param_name, body) = self.extract_closure_body(arg0, "order_by")?;
+        // Detect direction: `-u.field` = DESC, `u.field` = ASC. The
+        // `ascending:` kwarg, when present, overrides the prefix.
+        let (prefix_desc, field_expr) = match &body {
             Expr::UnaryOp {
                 op: crate::ast::UnaryOpKind::Neg,
                 operand,
@@ -22033,6 +22070,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             } => (true, operand.as_ref().clone()),
             other => (false, other.clone()),
         };
+        let descending = desc_from_kwarg.unwrap_or(prefix_desc);
         // v0.10.32 (Tier C.1) — `u.field.rank("query")` or
         // `u.field.plainto_rank("query")` emits
         // `ts_rank("col", to_tsquery('query'))` with `DESC`/`ASC` based
@@ -47520,6 +47558,69 @@ mod tests {
                        return Ok(null)\n\
                    }\n";
         assert_err_contains(src, &["`.order_by`", "field `name`", "does not exist"]);
+    }
+
+    fn order_by_kwarg_src(clause: &str) -> String {
+        format!(
+            "@table(\"users\") type User {{\n  \
+                 @primary id: Int = 0\n  \
+                 age: Int\n\
+             }}\n\
+             async fn boot() -> Result<Null> {{\n  \
+                 let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                 let _u = User.where(fn(u) => u.id > 0).order_by({clause}).all(db).await?\n  \
+                 return Ok(null)\n\
+             }}\n"
+        )
+    }
+
+    #[test]
+    fn codegen_orm_order_by_ascending_true_kwarg_emits_asc() {
+        // `ascending: true` → ASC → `with_order_by("age", false)`.
+        let rust = gen(&order_by_kwarg_src("fn(u) => u.age, ascending: true")).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"age\", false)"),
+            "expected ASC (descending=false), was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_order_by_ascending_false_kwarg_emits_desc() {
+        // `ascending: false` → DESC → `with_order_by("age", true)`.
+        let rust =
+            gen(&order_by_kwarg_src("fn(u) => u.age, ascending: false")).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"age\", true)"),
+            "expected DESC (descending=true), was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_order_by_ascending_kwarg_overrides_dash_prefix() {
+        // `-u.age` would be DESC, but `ascending: true` overrides → ASC.
+        let rust =
+            gen(&order_by_kwarg_src("fn(u) => -u.age, ascending: true")).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"age\", false)"),
+            "expected the kwarg to override the `-` prefix (ASC), was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_order_by_ascending_nonliteral_aborts() {
+        // A non-literal `ascending` value is a documented MVP limit in
+        // `fitz build` (the SQL direction is baked at compile time).
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let asc = true\n  \
+                       let _u = User.where(fn(u) => u.id > 0).order_by(fn(u) => u.age, ascending: asc).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        assert_err_contains(src, &["ascending", "Bool literal"]);
     }
 
     #[test]
