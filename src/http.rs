@@ -2964,6 +2964,9 @@ fn build_ws_method_router(
             let ws_conn_param_name = route.ws_conn_param_name.clone();
             let ws_msg_type = route.ws_msg_type.clone();
             let ws_send_type = route.ws_send_type.clone();
+            // Phase 9.w.2-ws-headers — `@header(...)` params on a `@ws` handler
+            // read the handshake headers (the WS upgrade IS an HTTP request).
+            let header_specs = route.headers.clone();
             // Handler env — Value::Function carries it as `closure`.
             // recv() uses it to resolve nominal T and coerce Map →
             // Instance.
@@ -3015,6 +3018,24 @@ fn build_ws_method_router(
                         args.push(conn_value.clone());
                     } else if auth_user_param_name.as_deref() == Some(name.as_str()) {
                         args.push(auth_user.clone().unwrap_or(Value::Null));
+                    } else if let Some(hdr) = header_specs.iter().find(|h| &h.param_name == name) {
+                        // `@header(...)` param — read from the handshake headers
+                        // (case-insensitive). Missing + nullable → Null; missing
+                        // + required → close the conn (we can't 400 post-upgrade).
+                        let key = hdr.http_name.to_lowercase();
+                        match (raw_headers.get(&key), hdr.is_nullable) {
+                            (Some(v), _) => args.push(Value::Str(v.clone())),
+                            (None, true) => args.push(Value::Null),
+                            (None, false) => {
+                                eprintln!(
+                                    "WS handler '{}': required header '{}' missing, closing conn",
+                                    handler_name, hdr.http_name,
+                                );
+                                broadcaster.unregister(&endpoint, conn_id);
+                                writer_task.abort();
+                                return;
+                            }
+                        }
                     } else {
                         // Unclassified param — registration bug.
                         // Log and close the conn.

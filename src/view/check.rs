@@ -194,6 +194,7 @@ fn check_state_field(
         target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
         type_: Some(field.type_expr.clone()),
         value: field.default.clone(),
+        is_let: true,
         span: Span::ZERO,
     });
     let (_env, _info, _defs, classic_errors) = check_program(&program);
@@ -297,6 +298,7 @@ fn check_template_interpolations(
                 target: AssignTarget::Ident(check_var, Span::ZERO),
                 type_: None,
                 value: interp.expr.clone(),
+                is_let: true,
                 span: Span::ZERO,
             }),
             &interp.for_scope,
@@ -362,6 +364,7 @@ fn check_template_if_conds(
                 target: AssignTarget::Ident(check_var, Span::ZERO),
                 type_: None,
                 value: cond_ref.cond.clone(),
+                is_let: true,
                 span: Span::ZERO,
             }),
             &cond_ref.for_scope,
@@ -651,6 +654,7 @@ fn build_env_program(
             target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
             type_: Some(field.type_expr.clone()),
             value: field.default.clone(),
+            is_let: true,
             span: Span::ZERO,
         });
     }
@@ -683,6 +687,7 @@ fn build_env_program(
                 ],
             }),
             value: Expr::Map(Vec::new(), Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         });
     }

@@ -14455,7 +14455,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
 
     fn gen_stmt_in_fn(&mut self, stmt: &Stmt, ret_expected: &Type) -> Result<(), FitzError> {
         match stmt {
-            Stmt::Assign { target, type_, value, .. } => self.gen_assign(target, type_.as_ref(), value),
+            Stmt::Assign { target, type_, value, is_let, .. } => {
+                self.gen_assign(target, type_.as_ref(), value, *is_let)
+            }
             Stmt::Destructure { pattern, value, .. } => self.gen_destructure(pattern, value),
             Stmt::Return(e, _) => self.gen_return(e, ret_expected),
             Stmt::ReturnStatus { status, body, span } => {
@@ -14681,6 +14683,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         target: &AssignTarget,
         type_: Option<&TypeExpr>,
         value: &Expr,
+        is_let: bool,
     ) -> Result<(), FitzError> {
         let name = match target {
             AssignTarget::Ident(n, _) => n,
@@ -14740,7 +14743,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // outside. This is a known discrepancy of 5b.1
         // codegen; refining it requires pre-declaring all the
         // vars of the program, which comes later.
-        if self.var_in_any_scope(name) {
+        // A declaration (`let x = ...`) always emits a fresh `let mut`,
+        // shadowing any outer/imported name or enclosing param — Rust allows
+        // shadowing, so this never reassigns (nor mis-types against) a binding
+        // from another scope. Only a bare reassignment (`x = ...`) of a name
+        // already in scope emits a plain `x = ...`.
+        if !is_let && self.var_in_any_scope(name) {
             // Reassignment.
             self.emit(name);
             self.emit(" = ");
@@ -29605,11 +29613,46 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("        None => ws,\n");
         self.emit("    };\n");
 
+        // 9.w.2-ws-headers — `@header(...)` params read the handshake headers
+        // (the WS upgrade IS an HTTP request). Bound BEFORE the upgrade so a
+        // missing required header can return 400 pre-upgrade (parallel to HTTP);
+        // the `move` closure then captures the bindings.
+        let ws_header_specs = crate::openapi::headers_from_decorators(decorators, params);
+        for (http_name, fitz_name, is_nullable) in &ws_header_specs {
+            let lower = http_name.to_lowercase();
+            if *is_nullable {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: Option<String> = __hmap.get(\"{}\").and_then(|v| v.to_str().ok().map(|s| s.to_string()));",
+                    fitz_name, lower,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: String = match __hmap.get(\"{}\").and_then(|v| v.to_str().ok()) {{",
+                    fitz_name, lower,
+                )
+                .unwrap();
+                self.emit("        Some(v) => v.to_string(),\n");
+                self.emit("        None => return (\n");
+                self.emit("            axum::http::StatusCode::BAD_REQUEST,\n");
+                writeln!(
+                    &mut self.output,
+                    "            axum::Json(serde_json::json!({{\"error\": \"header '{}': missing — is required\"}})),",
+                    http_name,
+                )
+                .unwrap();
+                self.emit("        ).into_response(),\n");
+                self.emit("    };\n");
+            }
+        }
+
         // Upgrade closure.
-        // The `move` captures `__user` if it applies (including
-        // when there is only `@requires` without
+        // The `move` captures `__user` and any `@header` bindings when they
+        // apply (including when there is only `@requires` without
         // `@authenticated`).
-        if has_auth_decorator {
+        if has_auth_decorator || !ws_header_specs.is_empty() {
             self.emit("    ws.on_upgrade(move |__socket| async move {\n");
         } else {
             self.emit("    ws.on_upgrade(|__socket| async move {\n");
@@ -29684,20 +29727,29 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .unwrap();
         }
         self.emit("        let __conn_id = __conn.conn_id;\n");
-        // Call the handler. If there is a user, pass it in
-        // addition to the conn.
-        let _ = conn_name;
-        if let Some((user_name, _user_ty)) = &user_param {
-            let _ = user_name;
-            writeln!(
-                &mut self.output,
-                "        let _ = {}(__conn, __user).await;",
-                name,
-            )
-            .unwrap();
-        } else {
-            writeln!(&mut self.output, "        let _ = {}(__conn).await;", name).unwrap();
-        }
+        // Call the handler with args in the DECLARED param order: the
+        // `WsConn` → `__conn`, the auth user → `__user`, each `@header` param →
+        // its pre-upgrade binding (captured by the `move` closure).
+        let call_args: Vec<String> = params
+            .iter()
+            .map(|p| {
+                if p.name == conn_name {
+                    "__conn".to_string()
+                } else if user_param.as_ref().is_some_and(|(n, _)| n == &p.name) {
+                    "__user".to_string()
+                } else {
+                    // A `@header` param — passed by its own name.
+                    p.name.clone()
+                }
+            })
+            .collect();
+        writeln!(
+            &mut self.output,
+            "        let _ = {}({}).await;",
+            name,
+            call_args.join(", "),
+        )
+        .unwrap();
         // Cleanup.
         self.emit("        __fitz_ws_unregister(&__endpoint, __conn_id);\n");
         self.emit("        let _ = __writer.await;\n");

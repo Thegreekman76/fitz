@@ -6336,6 +6336,7 @@ async fn run_fitz_migration_callback(
         target: ast::AssignTarget::Ident("__fitz_mig_result".to_string(), ast::Span::ZERO),
         type_: None,
         value: await_expr,
+        is_let: true,
         span: ast::Span::ZERO,
     };
     program.push(assign_stmt);

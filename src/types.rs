@@ -9629,6 +9629,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             target,
             type_,
             value,
+            is_let,
             span,
         } => {
             // L2 expanded (2026-06-05) — Bidirectional inference
@@ -9681,9 +9682,18 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         ctx.declare_var_annotated(name.clone(), declared.clone(), *span);
                         final_ty = declared;
                     }
+                    None if *is_let => {
+                        // A declaration (`let x = ...`) ALWAYS introduces a
+                        // fresh binding in the current scope, shadowing any
+                        // outer/imported name of the same name — it never
+                        // reassigns an import, an enclosing param or a
+                        // module-level fn. Type is inferred from the RHS.
+                        ctx.declare_var(name.clone(), value_ty.clone(), *span);
+                        final_ty = value_ty.clone();
+                    }
                     None => {
-                        // Without new annotation: if the variable already exists
-                        // with previous annotation, we require the new
+                        // Bare reassignment (`x = ...`): if the variable already
+                        // exists with a previous annotation, we require the new
                         // value to be compatible with that type. If the
                         // variable was inferred without annotation, the
                         // gradual model allows the type to change.
@@ -11114,12 +11124,15 @@ fn check_ws_handler(
     let has_auth = decorators
         .iter()
         .any(|d| matches!(d.name.as_str(), "authenticated" | "admin"));
-    let expected_params = if has_auth { 2 } else { 1 };
+    // Each `@header(...)` reads one handshake header into its own param
+    // (the WS upgrade IS an HTTP request), so it adds to the expected count.
+    let header_count = decorators.iter().filter(|d| d.name == "header").count();
+    let expected_params = 1 + if has_auth { 1 } else { 0 } + header_count;
     if params.len() != expected_params {
         let extra = if has_auth {
-            " (1 `WsConn<T>` + 1 User param from `@auth_provider`)"
+            " (1 `WsConn<T>` + 1 User param from `@auth_provider` + 1 per `@header`)"
         } else {
-            " (1 `WsConn<T>`)"
+            " (1 `WsConn<T>` + 1 per `@header`)"
         };
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -12969,6 +12982,36 @@ mod tests {
     }
 
     #[test]
+    fn let_shadows_module_fn_without_type_error() {
+        // A local `let f = 99` DECLARES a fresh binding that shadows the
+        // module-level `fn f` locally — it must NOT be treated as reassigning
+        // `f` (which would flag `Int` vs `fn(Int) -> Int`). Regression for the
+        // scoping bug found internationalizing the Admin ABM (S9).
+        let errors = errors_of(
+            "fn f(x: Int) -> Int => x + 1\n\
+             fn a() -> Int {\n  let f = 99\n  return f\n}\n\
+             fn b() -> Int {\n  return f(10)\n}\n",
+        );
+        assert!(
+            errors.is_empty(),
+            "shadowing a module fn with a local `let` should be clean, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn let_shadows_param_of_different_type_without_error() {
+        // `let cookie = "abc"` inside a fn with a `cookie: Str?` param declares
+        // a fresh `Str` binding; it must not be checked against the param's
+        // nullable type. Regression for the codegen `Option<String>` E0308.
+        let errors =
+            errors_of("fn h(cookie: Str?) -> Str {\n  let cookie = \"abc\"\n  return cookie\n}\n");
+        assert!(
+            errors.is_empty(),
+            "shadowing a param with a local `let` should be clean, was {errors:?}"
+        );
+    }
+
+    #[test]
     fn assignment_error_with_incompatible_type_cites_real_line() {
         // B.1: the error points to the stmt's `let` (real line/col),
         // not the generic `0:0` used before.
@@ -14124,6 +14167,7 @@ mod tests {
                 target: AssignTarget::Ident("v".into(), Span::default()),
                 type_: Some(TE::Nullable(Box::new(TE::named("X")))),
                 value: Expr::Null(Span::ZERO),
+                is_let: true,
                 span: Span::ZERO,
             },
         ];
@@ -17270,6 +17314,7 @@ mod tests {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: Some(TypeExpr::Named("Int".into())),
             value: AstExpr::Error(Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         }];
         let (_env, _types, _defs, errors) = check_program(&program);
@@ -17440,6 +17485,7 @@ let v = match r {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: AstExpr::Int(42, Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         }];
         let (_env, type_info, _defs, _errors) = check_program(&program);
@@ -17468,6 +17514,7 @@ let v = match r {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: AstExpr::Error(span),
+            is_let: true,
             span,
         }];
         let (_env, type_info, _defs, _errors) = check_program(&program);
@@ -18701,6 +18748,26 @@ print(total)
                    @ws(\"/me-chat\")\n\
                    async fn h(conn: WsConn<Str>, user: User) -> Null { return null }";
         assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_handler_with_header_accepts_extra_param() {
+        // `@header(...)` on a `@ws` handler reads the handshake header into its
+        // own param — the WS upgrade IS an HTTP request. The checker counts it.
+        // (Previously @header on @ws was rejected; fixed 2026-07-22.)
+        let src = "@header(name=\"cookie\")\n\
+                   @ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>, cookie: Str?) -> Null { return null }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_handler_missing_header_param_is_error() {
+        // A `@header` with no matching param → arity mismatch.
+        let src = "@header(name=\"cookie\")\n\
+                   @ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>) -> Null { return null }";
+        assert_auth_err(src, "expects");
     }
 
     #[test]

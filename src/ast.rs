@@ -588,15 +588,20 @@ impl Eq for Span {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// Assignment / declaration. E.g. `x = 42`, `name: Str = "Fitz"`,
-    /// `user.name = "Otro"`. In Fitz we do not differentiate `let x
-    /// = ...` from `x = ...` at the AST level. The `type_`
-    /// annotation is only valid when `target` is `Ident` (assigning
-    /// to a field does not allow re-annotating the type); the
-    /// parser enforces that.
+    /// `user.name = "Otro"`. `is_let` records whether the statement
+    /// declared the binding (`let x = ...` or an annotated
+    /// `x: T = ...`) versus a bare reassignment (`x = ...`). A
+    /// declaration always defines a fresh binding in the current
+    /// scope (shadowing any outer/imported name of the same name); a
+    /// reassignment walks up to reassign the nearest existing binding.
+    /// The `type_` annotation is only valid when `target` is `Ident`
+    /// (assigning to a field does not allow re-annotating the type);
+    /// the parser enforces that.
     Assign {
         target: AssignTarget,
         type_: Option<TypeExpr>,
         value: Expr,
+        is_let: bool,
         span: Span,
     },
 
@@ -1146,6 +1151,7 @@ mod tests {
                 target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
+                is_let: true,
                 span: Span::ZERO,
             },
             // x = 10 + 5
@@ -1158,6 +1164,7 @@ mod tests {
                     right: Box::new(Expr::Int(5, Span::ZERO)),
                     span: Span::ZERO,
                 },
+                is_let: true,
                 span: Span::ZERO,
             },
             // print("Hola, {name}!")
@@ -1674,6 +1681,7 @@ mod tests {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(1, Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         };
         if let Stmt::Assign { target, .. } = s1 {
@@ -1690,6 +1698,7 @@ mod tests {
             },
             type_: None,
             value: Expr::Str("x".into(), Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         };
         if let Stmt::Assign {

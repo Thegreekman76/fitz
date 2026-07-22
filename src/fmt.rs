@@ -529,6 +529,7 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
             target,
             type_,
             value,
+            is_let: _,
             span,
         } => {
             fmt_assign(ctx, target, type_.as_ref(), value, *span);

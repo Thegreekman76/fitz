@@ -1245,6 +1245,7 @@ impl Parser {
             target: AssignTarget::Ident(name, name_span),
             type_,
             value,
+            is_let: true,
             span,
         })
     }
@@ -1285,6 +1286,8 @@ impl Parser {
                 target: AssignTarget::Ident(name, name_span),
                 type_: Some(type_),
                 value,
+                // An annotated `x: T = v` (no `let`) is still a declaration.
+                is_let: true,
                 span,
             });
         }
@@ -1312,6 +1315,8 @@ impl Parser {
                 target,
                 type_: None,
                 value,
+                // Bare `lvalue = expr` — a reassignment, not a declaration.
+                is_let: false,
                 span,
             });
         }
@@ -1393,6 +1398,8 @@ impl Parser {
                 target,
                 type_: None,
                 value,
+                // `x += v` desugars to `x = x + v` — a reassignment.
+                is_let: false,
                 span,
             });
         }
@@ -4860,6 +4867,7 @@ mod tests {
                 target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(42, Span::ZERO),
+                is_let: true,
                 span: Span::ZERO
             }
         );
@@ -4873,9 +4881,31 @@ mod tests {
                 target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: Some(TypeExpr::named("Int")),
                 value: Expr::Int(42, Span::ZERO),
+                is_let: true,
                 span: Span::ZERO
             }
         );
+    }
+
+    #[test]
+    fn is_let_flag_declaration_vs_reassignment() {
+        // A `let` declaration and an annotated declaration set `is_let = true`;
+        // a bare reassignment sets `is_let = false`. The evaluator/checker/
+        // codegen use this to decide shadow-local vs reassign-existing.
+        let cases = [
+            ("let x = 1", true),
+            ("x: Int = 1", true),
+            ("x = 1", false),
+            ("x += 1", false),
+        ];
+        for (src, expected) in cases {
+            match parse_one_stmt(src) {
+                Stmt::Assign { is_let, .. } => {
+                    assert_eq!(is_let, expected, "is_let mismatch for `{src}`")
+                }
+                other => panic!("expected Stmt::Assign for `{src}`, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -4886,6 +4916,7 @@ mod tests {
                 target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(42, Span::ZERO),
+                is_let: false,
                 span: Span::ZERO
             }
         );
@@ -4899,6 +4930,7 @@ mod tests {
                 target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: Some(TypeExpr::named("Str")),
                 value: Expr::Str("Fitz".into(), Span::ZERO),
+                is_let: true,
                 span: Span::ZERO
             }
         );
@@ -4918,6 +4950,7 @@ mod tests {
                     right: Box::new(Expr::Int(5, Span::ZERO)),
                     span: Span::ZERO,
                 },
+                is_let: false,
                 span: Span::ZERO
             }
         );
@@ -5328,6 +5361,7 @@ mod tests {
                 target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(1, Span::ZERO),
+                is_let: false,
                 span: Span::ZERO
             }
         );
@@ -5499,6 +5533,7 @@ mod tests {
                             right: Box::new(Expr::Int(2, Span::ZERO)),
                             span: Span::ZERO,
                         },
+                        is_let: true,
                         span: Span::ZERO
                     },
                     Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO),
@@ -6386,6 +6421,7 @@ mod tests {
                 target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
+                is_let: false,
                 span: Span::ZERO
             }
         );
@@ -6402,6 +6438,7 @@ mod tests {
                     right: Box::new(Expr::Int(5, Span::ZERO)),
                     span: Span::ZERO,
                 },
+                is_let: false,
                 span: Span::ZERO
             }
         );
@@ -6857,6 +6894,7 @@ mod tests {
                     ],
                     Span::ZERO
                 ),
+                is_let: true,
                 span: Span::ZERO
             },
         );
@@ -6878,6 +6916,7 @@ mod tests {
                     ],
                     Span::ZERO
                 ),
+                is_let: true,
                 span: Span::ZERO
             },
         );

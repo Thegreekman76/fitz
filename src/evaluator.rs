@@ -2832,7 +2832,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //  - `Field`: evaluate the receiver object (must be
         //    `Value::Instance`), validate the field exists, and mutate
         //    the shared `Arc<Mutex<...>>` `fields` cell.
-        Stmt::Assign { target, type_, value, span: _ } => {
+        Stmt::Assign { target, type_, value, is_let, span: _ } => {
             let v = eval_expr(value, env.clone()).await?;
             // Phase 8.4.3: when there's a nominal type annotation and
             // the RHS is a `Value::Map` (typically a Python dict
@@ -2859,15 +2859,25 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             };
             match target {
                 AssignTarget::Ident(name, _) => {
-                    // Separate borrows: `has` takes an immutable
-                    // borrow, drop it before requesting a mutable one.
-                    let already_defined = env.lock().has(name);
-                    if already_defined {
-                        env.lock()
-                            .assign(name, v)
-                            .expect("variable exists — just checked with has()");
-                    } else {
+                    // A declaration (`let x = ...` or annotated `x: T = ...`)
+                    // ALWAYS defines a fresh binding in the current scope,
+                    // shadowing any outer/imported name — never reassigning an
+                    // import, an enclosing param, or a module-level fn of the
+                    // same name. A bare reassignment (`x = ...`) walks up to
+                    // reassign the nearest existing binding.
+                    if *is_let {
                         env.lock().define(name.clone(), v);
+                    } else {
+                        // Separate borrows: `has` takes an immutable
+                        // borrow, drop it before requesting a mutable one.
+                        let already_defined = env.lock().has(name);
+                        if already_defined {
+                            env.lock()
+                                .assign(name, v)
+                                .expect("variable exists — just checked with has()");
+                        } else {
+                            env.lock().define(name.clone(), v);
+                        }
                     }
                 }
                 AssignTarget::Field { object, field } => {
@@ -3088,9 +3098,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // confusing no-op).
             let collected_headers = collect_headers(decorators, name, params)?;
             if !collected_headers.is_empty()
-                && !decorators
-                    .iter()
-                    .any(|d| HttpMethod::from_decorator_name(&d.name).is_some())
+                && !decorators.iter().any(|d| {
+                    HttpMethod::from_decorator_name(&d.name).is_some() || d.name == "ws"
+                })
             {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -3098,7 +3108,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     0,
                     format!(
                         "@header on fn '{}': only applies to HTTP handlers \
-                         (stack with `@get`/`@post`/`@put`/`@delete`).",
+                         (stack with `@get`/`@post`/`@put`/`@delete`/`@ws`).",
                         name,
                     ),
                 )));
@@ -19775,6 +19785,7 @@ mod tests {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(42, Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         };
         eval_stmt(&stmt, env.clone()).await.unwrap();
@@ -19791,6 +19802,7 @@ mod tests {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(99, Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         };
         eval_stmt(&stmt, env.clone()).await.unwrap();
@@ -19808,6 +19820,8 @@ mod tests {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(42, Span::ZERO),
+            // Bare reassignment (no `let`) walks up to reassign the parent.
+            is_let: false,
             span: Span::ZERO,
         };
         eval_stmt(&stmt, child).await.unwrap();
@@ -19825,6 +19839,7 @@ mod tests {
             target: AssignTarget::Ident("nueva".into(), Span::default()),
             type_: None,
             value: Expr::Int(7, Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         };
         eval_stmt(&stmt, child.clone()).await.unwrap();
@@ -19843,6 +19858,7 @@ mod tests {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: Some(TypeExpr::named("Int")),
             value: Expr::Str("soy un string".into(), Span::ZERO),
+            is_let: true,
             span: Span::ZERO,
         };
         assert!(eval_stmt(&stmt, env.clone()).await.is_ok());
@@ -20256,6 +20272,7 @@ mod tests {
                     right: Box::new(Expr::Int(2, Span::ZERO)),
                     span: Span::ZERO,
                 },
+                is_let: true,
                 span: Span::ZERO,
             },
             Stmt::Return(
@@ -20398,6 +20415,7 @@ mod tests {
                     target: AssignTarget::Ident("y".into(), Span::default()),
                     type_: None,
                     value: Expr::Int(99, Span::ZERO),
+                    is_let: true,
                     span: Span::ZERO,
                 }],
                 None,
@@ -20439,6 +20457,7 @@ mod tests {
                 vec![Stmt::Expr(Expr::Int(42, Span::ZERO), Span::ZERO)],
                 Some(vec![Stmt::Expr(Expr::Int(0, Span::ZERO), Span::ZERO)]),
             ),
+            is_let: true,
             span: Span::ZERO,
         };
         eval_stmt(&stmt, env.clone()).await.unwrap();
@@ -20916,6 +20935,7 @@ print(_)\n";
                         right: Box::new(Expr::Ident("i".into(), Span::ZERO)),
                         span: Span::ZERO,
                     },
+                    is_let: true,
                     span: Span::ZERO,
                 },
                 Stmt::Assign {
@@ -20927,6 +20947,7 @@ print(_)\n";
                         right: Box::new(Expr::Int(1, Span::ZERO)),
                         span: Span::ZERO,
                     },
+                    is_let: true,
                     span: Span::ZERO,
                 },
             ],
@@ -20948,6 +20969,7 @@ print(_)\n";
                 target: AssignTarget::Ident("counter".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(99, Span::ZERO),
+                is_let: true,
                 span: Span::ZERO,
             }],
             label: None,
@@ -20975,6 +20997,7 @@ print(_)\n";
                         right: Box::new(Expr::Int(1, Span::ZERO)),
                         span: Span::ZERO,
                     },
+                    is_let: true,
                     span: Span::ZERO,
                 },
                 Stmt::Expr(
@@ -21028,6 +21051,7 @@ print(_)\n";
                         right: Box::new(Expr::Int(1, Span::ZERO)),
                         span: Span::ZERO,
                     },
+                    is_let: true,
                     span: Span::ZERO,
                 },
                 Stmt::Expr(
@@ -21053,6 +21077,7 @@ print(_)\n";
                         right: Box::new(Expr::Ident("i".into(), Span::ZERO)),
                         span: Span::ZERO,
                     },
+                    is_let: true,
                     span: Span::ZERO,
                 },
             ],
@@ -21101,6 +21126,7 @@ print(_)\n";
                         right: Box::new(Expr::Int(1, Span::ZERO)),
                         span: Span::ZERO,
                     },
+                    is_let: true,
                     span: Span::ZERO,
                 },
                 Stmt::Expr(
@@ -21286,6 +21312,7 @@ print(_)\n";
                 target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
+                is_let: true,
                 span: Span::ZERO,
             },
             Stmt::Assign {
@@ -21297,6 +21324,7 @@ print(_)\n";
                     right: Box::new(Expr::Int(5, Span::ZERO)),
                     span: Span::ZERO,
                 },
+                is_let: true,
                 span: Span::ZERO,
             },
             Stmt::Expr(
@@ -21393,6 +21421,7 @@ print(factorial(5))
                 target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Patagonia".into(), Span::ZERO),
+                is_let: true,
                 span: Span::ZERO,
             },
             Stmt::Expr(
@@ -23069,6 +23098,7 @@ let r = match n {
                     )),
                     Span::ZERO,
                 ),
+                is_let: true,
                 span: Span::ZERO,
             },
             Stmt::Return(

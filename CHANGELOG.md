@@ -9,6 +9,39 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.0] — 2026-07-22 — scoping de `let` + `@header` sobre `@ws` (dogfood i18n del Admin ABM)
+
+Dos fixes de core que salieron internacionalizando el showcase Admin ABM de
+fitz-liveviews. Sin sintaxis nueva; el AST gana un campo interno.
+
+### Fixed — `let` local que shadowea un import / param (scoping)
+
+- Antes, un `let x = ...` local dentro de una fn PISABA un nombre importado o un
+  param del mismo nombre en vez de crear un binding local que lo shadowea. El
+  checker no lo cazaba (o lo rechazaba como reasignación incompatible), y el
+  codegen mis-infería el tipo (ej: `let cookie = "abc"` con param `cookie: Str?`
+  → `Option<String>` → `fitz build` rompía con E0308).
+- **La solución**: `Stmt::Assign` gana `is_let: bool`. El parser lo setea —
+  `let x` / `x: T =` (declaración) → `true`; `x =` / `x += ` (reasignación) →
+  `false`. Una declaración SIEMPRE define un binding fresco en el scope actual
+  (shadow), nunca reasigna un import/param/fn de arriba; una reasignación camina
+  hacia arriba a reasignar el binding existente. Aplicado en evaluator, checker
+  y codegen, con tests. Sin cambio de comportamiento para código que no
+  shadowea.
+
+### Fixed — `@header(...)` sobre `@ws` (contexto del handshake)
+
+- Un handler `@ws` ahora puede leer headers del handshake:
+  `@header(name="cookie") @ws("/live/x") async fn sock(ws: WsConn<T>, cookie: Str?)`.
+  Antes el runtime lo rechazaba (aunque el checker lo aceptaba — mismatch). El
+  WS upgrade ES un request HTTP, así que sus headers (cookies incluidas) ahora
+  se bindean al param como en los handlers HTTP: nullable ausente → Null,
+  requerido ausente → cierra la conn (runtime) / 400 pre-upgrade (binario).
+  Paridad `fitz run` ↔ `fitz build` validada. Destraba pasar contexto
+  per-conexión (locale, tenant) a un LiveView sin workarounds del lado cliente.
+- Queda abierto (menor): query/path params en el path de `@ws` (sigue exigiendo
+  un `Str` literal).
+
 ## [v0.27.0] — 2026-07-22 — `str.to_int()` + dynamic `.order_by(ascending:)` (Admin ABM Slice 3 dogfood)
 
 **Minor release** — one new builtin (`str.to_int()`) plus an ORM

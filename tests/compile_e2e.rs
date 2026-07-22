@@ -13525,3 +13525,64 @@ from handlers import protected
         emitted
     );
 }
+
+/// Scoping (2026-07-22) — a local `let` that shadows an enclosing param of a
+/// DIFFERENT type must emit a fresh `let mut` (shadowing), not a reassignment.
+/// Before the fix the codegen saw the param in scope, emitted `cookie = "abc"`,
+/// and rustc rejected it (`Str` into `Option<String>`, E0308). Found
+/// internationalizing the Admin ABM (login_submit's `cookie: Str?` param).
+#[test]
+fn let_shadows_param_of_different_type_compiles_and_runs() {
+    let (out, code) = build_and_run(
+        "scoping-let-shadows-param",
+        "fn h(cookie: Str?) -> Str {\n\
+         \x20   let cookie = \"abc\"\n\
+         \x20   return cookie\n\
+         }\n\
+         print(h(\"x\"))\n",
+    );
+    assert_eq!(code, 0, "binary should exit 0, out:\n{out}");
+    assert_eq!(out.trim(), "abc");
+}
+
+/// Scoping (2026-07-22) — a local `let` shadowing a module-level fn must not
+/// clobber it: other functions still see the fn. Regression for the runtime
+/// clobber found internationalizing the Admin ABM (`let t` vs imported `t`).
+#[test]
+fn let_shadows_module_fn_does_not_clobber_it() {
+    let (out, code) = build_and_run(
+        "scoping-let-shadows-module-fn",
+        "fn f(x: Int) -> Int => x + 1\n\
+         fn a() -> Int {\n  let f = 99\n  return f\n}\n\
+         fn b() -> Int {\n  return f(10)\n}\n\
+         print(a())\nprint(b())\n",
+    );
+    assert_eq!(code, 0, "binary should exit 0, out:\n{out}");
+    assert_eq!(out.trim(), "99\n11");
+}
+
+/// @ws + @header (2026-07-22) — a `@header(...)` param on a `@ws` handler reads
+/// the handshake header. Verifies `fitz build` emits a valid wrapper (binds the
+/// header from the HeaderMap + passes it to the handler in declared order).
+/// Previously @header on @ws was rejected; run↔build parity validated manually
+/// (cookie value bound; nullable missing → Null).
+#[test]
+fn ws_handler_with_header_builds() {
+    build_expect_ok(
+        "ws-handler-with-header",
+        "@header(name=\"cookie\")\n\
+         @ws(\"/live/x\")\n\
+         async fn sock(ws: WsConn<Str>, cookie: Str?) {\n\
+         \x20   let who = match cookie {\n\
+         \x20       null => \"anon\",\n\
+         \x20       c => c,\n\
+         \x20   }\n\
+         \x20   ws.send(\"hi {who}\")?\n\
+         \x20   loop {\n\
+         \x20       let _m = ws.recv()?\n\
+         \x20   }\n\
+         }\n\
+         @server(3902)\n\
+         fn main() => 0\n",
+    );
+}
