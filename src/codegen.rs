@@ -12817,6 +12817,108 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         }
     }
 
+    /// W19 (2026-07-21) — true when `name` is a type defined in some
+    /// loaded module. Such a type is always in scope in main.rs because
+    /// `emit_helpers_for_imported_types` emits `use <module>::{name,
+    /// nameData};` for every type in every module's `type_sigs` (and a
+    /// type imported to main via `from X import name` is in scope via
+    /// `emit_use_decls`). So the bare alias name can be referenced
+    /// directly from a cross-module `impl` body.
+    fn nominal_name_renderable(&self, name: &str) -> bool {
+        self.loaded_modules
+            .iter()
+            .any(|m| m.type_sigs.keys().any(|k| k == name))
+    }
+
+    /// W19 (2026-07-21) — resolve a module-scoped nominal TypeId to its
+    /// canonical name (defined or re-imported), parallel to the name
+    /// resolution in `remap_imported_nominals`.
+    fn imported_nominal_name(&self, id: TypeId, module_index: usize) -> Option<String> {
+        let m = self.loaded_modules.get(module_index)?;
+        m.type_sigs
+            .iter()
+            .find(|(_, sig)| sig.id == id)
+            .map(|(name, _)| name.clone())
+            .or_else(|| m.nominal_names.get(&id).cloned())
+    }
+
+    /// W19 (2026-07-21) — recursively checks that every nominal nested
+    /// in `ty` resolves to a renderable (loaded-module-defined) name.
+    /// Used to decide whether a cross-module `__FromFitzJson` body can
+    /// be emitted with concrete nested types instead of falling back to
+    /// the runtime-`Err` stub.
+    fn nested_nominals_renderable(&self, ty: &Type, module_index: usize) -> bool {
+        match ty {
+            Type::Nominal(id) => self
+                .imported_nominal_name(*id, module_index)
+                .map(|n| self.nominal_name_renderable(&n))
+                .unwrap_or(false),
+            Type::Nullable(inner) | Type::List(inner) => {
+                self.nested_nominals_renderable(inner, module_index)
+            }
+            Type::Map(k, v) => {
+                self.nested_nominals_renderable(k, module_index)
+                    && self.nested_nominals_renderable(v, module_index)
+            }
+            Type::Tuple(items) => items
+                .iter()
+                .all(|t| self.nested_nominals_renderable(t, module_index)),
+            _ => true,
+        }
+    }
+
+    /// W19 (2026-07-21) — renders the Rust type of a field of a
+    /// cross-module imported type for the `impl __FromFitzJson for
+    /// <T>Data` body emitted in main.rs. Nested nominals are resolved
+    /// to their concrete Rust alias name (guaranteed in scope via the
+    /// `use <module>::{Name, NameData};` that
+    /// `emit_helpers_for_imported_types` emits), matching the concrete
+    /// struct layout declared in the origin module's `.rs`. This is the
+    /// difference vs `rust_type_for(remap(...))`, which degrades such
+    /// nominals to `__FitzValue` and forces the `FromFitzJsonMode::Stub`
+    /// path (which returns a runtime `Err` and silently breaks
+    /// cross-module WS/body deserialization). Falls back to
+    /// `__FitzValue` only for a nominal not defined in any loaded module
+    /// (genuinely opaque — the caller keeps such a field on the Stub
+    /// path via `nested_nominals_renderable`).
+    fn rust_type_for_imported_body(
+        &self,
+        ty: &Type,
+        module_index: usize,
+    ) -> Result<String, FitzError> {
+        match ty {
+            Type::Nominal(id) => match self.imported_nominal_name(*id, module_index) {
+                Some(n) if self.nominal_name_renderable(&n) => Ok(n),
+                _ => Ok("__FitzValue".to_string()),
+            },
+            Type::Nullable(inner) => Ok(format!(
+                "Option<{}>",
+                self.rust_type_for_imported_body(inner, module_index)?
+            )),
+            Type::List(inner) => Ok(format!(
+                "Arc<Mutex<Vec<{}>>>",
+                self.rust_type_for_imported_body(inner, module_index)?
+            )),
+            Type::Map(k, v) => {
+                let ks = self.rust_type_for_imported_body(k, module_index)?;
+                let vs = self.rust_type_for_imported_body(v, module_index)?;
+                if ks == "__FitzValue" || vs == "__FitzValue" {
+                    Ok("Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>".to_string())
+                } else {
+                    Ok(format!("Arc<Mutex<Vec<({}, {})>>>", ks, vs))
+                }
+            }
+            Type::Tuple(items) => {
+                let parts: Result<Vec<_>, _> = items
+                    .iter()
+                    .map(|t| self.rust_type_for_imported_body(t, module_index))
+                    .collect();
+                Ok(format!("({})", parts?.join(", ")))
+            }
+            other => rust_type_for(other, self.env),
+        }
+    }
+
     /// Returns the fields of a nominal type by TypeId. First
     /// looks at the internal table (`fields_by_id`, populated
     /// with local and imported types) and, as a historical
@@ -13567,7 +13669,39 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     // serializes existing fields via
                     // `.__to_fitz_json()`, never references the
                     // remapped type).
-                    let from_mode = if has_compound_degrade {
+                    // W19 (2026-07-21) — a compound degrade no longer
+                    // forces the runtime-`Err` stub when every degraded
+                    // nested nominal IS a loaded-module type: those are
+                    // in scope in main.rs (`use <module>::{Name,
+                    // NameData};`) with their real `__FromFitzJson`
+                    // impl, so the body can be emitted with the concrete
+                    // nested type (matching the struct layout).
+                    // `FromFitzJsonMode::Stub` is kept only when a
+                    // degraded field references a nominal not defined in
+                    // any loaded module (genuinely opaque). This closes
+                    // a silent WS/body deserialization hang: a
+                    // `WsConn<Frame>` whose `Frame` lives in a submodule
+                    // (or dep) with a `List<Thing>` field used to
+                    // deserialize via the stub → `recv()` returned `Err`
+                    // → the handler ended → conn cleanup blocked on the
+                    // heartbeat-held writer → the client hung.
+                    let all_degrade_renderable = remapped_sig
+                        .fields
+                        .iter()
+                        .zip(sig.fields.iter())
+                        .all(|(rf, of)| {
+                            if let Some(meta) = table_meta {
+                                if meta.is_virtual_field(&rf.name) {
+                                    return true;
+                                }
+                            }
+                            if field_type_compound_degraded(&of.type_, &rf.type_) {
+                                self.nested_nominals_renderable(&of.type_, module_index)
+                            } else {
+                                true
+                            }
+                        });
+                    let from_mode = if has_compound_degrade && !all_degrade_renderable {
                         FromFitzJsonMode::Stub
                     } else {
                         FromFitzJsonMode::Real
@@ -13577,6 +13711,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         &remapped_sig,
                         meta,
                         from_mode,
+                        Some((module_index, sig)),
                     )?;
                 }
                 if do_python {
@@ -14589,6 +14724,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             _ => self.gen_expr(value)?,
         };
+        // W20 (2026-07-21) — remember whether the user wrote an
+        // annotation before `declared_ty_opt` is consumed below.
+        let has_user_annotation = declared_ty_opt.is_some();
         let declared_ty = declared_ty_opt.unwrap_or_else(|| rhs_ty.clone());
 
         let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
@@ -14624,10 +14762,44 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // We do not declare `_` in the scope — it is
                 // not a binding.
             } else {
+                // W20 (2026-07-21) — when the binding has NO user
+                // annotation and its inferred type degraded to a
+                // `__FitzValue`-containing type (e.g. an imported fn
+                // returning `List<Nominal>` whose inner nominal is not
+                // in THIS module's env → remapped to `List<Any>` →
+                // `Vec<__FitzValue>`), omit the annotation and let Rust
+                // infer the concrete type from the RHS expression. The
+                // RHS already has the real concrete Rust type via the
+                // imported fn's own signature (e.g.
+                // `Arc<Mutex<Vec<Patch>>>`), so inference produces the
+                // correct type without needing `Patch`/`__FitzValue` in
+                // scope. Excludes bare collection literals (`[]`/`{}`),
+                // whose element type Rust cannot infer without the
+                // annotation. Parallel in spirit to W19 (which fixes the
+                // cross-module `__FromFitzJson` body in main.rs): both
+                // remove the need to `from <module> import` every nested
+                // nominal a cross-module type transitively references.
+                let rendered = rust_type_for(&declared_ty, self.env)?;
+                // Only omit for RHS exprs that Rust can type on their own
+                // (concretely-typed accessors): a call, a field access,
+                // an index, or an `.await`/`?` wrapping one of those. This
+                // excludes constructors like `Ok(...)`/`[...]`/`{...}`
+                // whose element/error type Rust cannot infer without the
+                // annotation.
+                let rhs_is_concretely_typed = matches!(
+                    value,
+                    Expr::Call { .. } | Expr::Field { .. } | Expr::Index { .. }
+                ) || matches!(value, Expr::Await(inner, _) | Expr::Try(inner, _)
+                        if matches!(inner.as_ref(), Expr::Call { .. } | Expr::Field { .. } | Expr::Index { .. }));
+                let omit_annotation = !has_user_annotation
+                    && rendered.contains("__FitzValue")
+                    && rhs_is_concretely_typed;
                 self.emit("let mut ");
                 self.emit(name);
-                self.emit(": ");
-                self.emit(&rust_type_for(&declared_ty, self.env)?);
+                if !omit_annotation {
+                    self.emit(": ");
+                    self.emit(&rendered);
+                }
                 self.emit(" = ");
                 self.emit(&final_rhs);
                 self.emit(";\n");
@@ -28373,7 +28545,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         sig: &TypeSig,
         meta: Option<&crate::types::TableMetadata>,
     ) -> Result<(), FitzError> {
-        self.gen_type_http_impls_for_sig_with_meta_and_mode(name, sig, meta, FromFitzJsonMode::Real)
+        self.gen_type_http_impls_for_sig_with_meta_and_mode(
+            name,
+            sig,
+            meta,
+            FromFitzJsonMode::Real,
+            None,
+        )
     }
 
     /// B11 (cosecha post-fitzwatch, 2026-06-19) — variant that
@@ -28394,6 +28572,16 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         sig: &TypeSig,
         meta: Option<&crate::types::TableMetadata>,
         from_mode: FromFitzJsonMode,
+        // W19 (2026-07-21) — cross-module rendering context
+        // `(module_index, original sig)`. When `Some`, the
+        // `__FromFitzJson` body renders each compound-degraded field
+        // (`List<Nominal>`/`Map<_, Nominal>` whose inner nominal is not
+        // in main's env but IS a loaded-module type) with its concrete
+        // Rust alias name instead of `Vec<__FitzValue>`, which matches
+        // the struct layout emitted in the origin module and lets the
+        // real `__FromFitzJson` body compile. `None` for local types
+        // (their fields already resolve against main's env).
+        xmod: Option<(usize, &TypeSig)>,
     ) -> Result<(), FitzError> {
         let data_name = format!("{}Data", name);
 
@@ -28579,7 +28767,27 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if is_virtual(&f.name) || f.hidden {
                 continue;
             }
-            let rust_ty = rust_type_for(&f.type_, self.env)?;
+            // W19 (2026-07-21) — a compound-degraded field
+            // (`List<Nominal>`/`Map<_, Nominal>` remapped to
+            // `List<Any>`/`Map<_, Any>` because the inner nominal is not
+            // in main's env) is rendered with its concrete nested type
+            // when the inner nominals ARE loaded-module types (in scope
+            // via `use <module>::{Name, NameData};`). This matches the
+            // struct's actual layout (`Arc<Mutex<Vec<Thing>>>`), so the
+            // real body compiles and cross-module deserialization works
+            // instead of hitting the runtime-`Err` stub. Non-degraded
+            // fields keep the remapped rendering (unchanged).
+            let rust_ty = match xmod {
+                Some((module_index, orig_sig)) => {
+                    match orig_sig.fields.iter().find(|of| of.name == f.name) {
+                        Some(of) if field_type_compound_degraded(&of.type_, &f.type_) => {
+                            self.rust_type_for_imported_body(&of.type_, module_index)?
+                        }
+                        _ => rust_type_for(&f.type_, self.env)?,
+                    }
+                }
+                None => rust_type_for(&f.type_, self.env)?,
+            };
             writeln!(
                 &mut self.output,
                 "        let {}: {} = match __obj.get(\"{}\") {{",

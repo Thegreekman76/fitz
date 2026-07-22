@@ -2881,6 +2881,35 @@ canónicos.
 
 ---
 
+## 🟢 W19 + W20 (2026-07-21, v0.26.1) — Cross-module `List<Nominal>`: deser real + inferencia de var, sin importar el anidado
+
+**Hito**: cierra el hang de `ws.recv()` en binario (paridad `run`↔`build`) cuando el tipo del mensaje de un `@ws` vive en un módulo/dep con un field compound `List<Nominal>` cuyo nominal NO se importa a main. Descubierto en el showcase Admin ABM (`WsConn<LiveFrame>` con `LiveFrame.patches: List<Patch>`) al reconstruir el Slice 2 (grid + paginación WS). Ambos fixes eliminan la necesidad del workaround "importá todos los tipos anidados que un tipo cross-module referencia transitivamente".
+
+**Repro mínima** (3 archivos, submódulo): `handlers.fitz` con `type Thing { id, label }` + `type Frame { kind: Str, items: List<Thing> }` + `@ws("/echo") async fn echo(ws: WsConn<Frame>) { loop { let f = ws.recv()?; ws.send(f)? } }`; `main.fitz` con `import handlers` + `@server(...)`. Pre-fix: el binario imprime `[ws] recv` y nunca `[ws] got` — el cliente WS cuelga (timeout). `fitz run` funcionaba OK.
+
+**Causa raíz (W19 — deser stub)**: `remap_imported_nominals` degradaba `Thing` → `Any` (main no lo tiene en su env) → `items: List<Thing>` → `List<Any>` → compound degrade → `emit_helpers_for_imported_types` elegía `FromFitzJsonMode::Stub` → `impl __FromFitzJson for FrameData` devolvía `Err("...is a stub...")`. En runtime: `recv()` → deser → `Err` inmediato → el handler propaga con `?` y termina → el cleanup de la conn (`let _ = handler(conn).await; __writer.await`) se colgaba porque el heartbeat mantenía vivo el `outbox_tx` del writer (socket medio-abierto) → el cliente colgaba. **El "hang en `__from_fitz_json`" era un síntoma; la causa era el stub `Err` + el cleanup bloqueado.**
+
+**Fix W19** (`src/codegen.rs`): el stub ya no es necesario cuando cada nominal anidado degradado ES un tipo definido en algún módulo cargado — esos YA están en scope en main.rs (`use <mod>::{Name, NameData};` + su `impl __FromFitzJson` real, ambos emitidos por el mismo loop). Helpers nuevos: `nominal_name_renderable` (¿el nombre está en `type_sigs` de algún módulo?), `imported_nominal_name` (id→nombre del módulo), `nested_nominals_renderable` (recursivo), `rust_type_for_imported_body` (renderiza el field con el nominal concreto, `Arc<Mutex<Vec<Thing>>>`, en vez de `Vec<__FitzValue>`). `emit_helpers_for_imported_types` solo mantiene `Stub` cuando un field degradado referencia un nominal NO definido en ningún módulo (opaco genuino). `gen_type_http_impls_for_sig_with_meta_and_mode` recibe `xmod: Option<(usize, &TypeSig)>` y, para fields compound-degradados, renderiza con el tipo concreto.
+
+**Causa raíz (W20 — inferencia de var)**: un `let` sin anotación cuyo RHS es una fn importada que retorna `List<Nominal>` (nominal no importado al módulo) infería `Vec<__FitzValue>` para la var y rompía rustc con `cannot find type __FitzValue` cuando `__FitzValue` no estaba activado (ej. `let patches = diff_html(last, new_html)` en el módulo `empleados` — `diff_html` retorna `List<Patch>`). **Este es el motivo real por el que el admin importaba `Patch`.**
+
+**Fix W20** (`src/codegen.rs`, path de declaración de `Stmt::Assign`): cuando NO hay anotación del usuario, el tipo inferido renderiza a algo que contiene `__FitzValue`, y el RHS es un acceso concretamente tipado (`Call`/`Field`/`Index`, o `.await`/`?` envolviendo uno de esos), se OMITE la anotación de tipo y Rust infiere el tipo concreto de la firma de la fn importada (`Arc<Mutex<Vec<Patch>>>`). Se excluyen literales de colección (`[]`/`{}`), cuyo tipo de elemento Rust no puede inferir sin la anotación. El struct lit downstream (`LiveFrame { patches: patches }`) usa `patches` directo porque `coerce(List<Any> → List<Patch>)` cae al catch-all identidad.
+
+**Tests** (2 E2E nuevos en `tests/compile_e2e.rs`):
+- `ws_cross_module_message_with_nested_nominal_not_stub_w19` — build de `@ws` con `Frame { items: List<Thing> }` en submódulo; asegura que main.rs NO emite el stub y usa `Arc<Mutex<Vec<Thing>>>` concreto.
+- `w20_imported_fn_returning_list_nominal_infers_type_without_importing_nested` — CLI que hace `let ps = make_patches()` (fn importada `-> List<Patch>` sin importar `Patch`); asegura `let mut ps = make_patches()` sin anotación `__FitzValue`, binario corre e imprime `count=2`.
+
+**Validación end-to-end**:
+- Repro `wsmod` (submódulo): binario pre-fix cuelga, post-fix responde el echo (cliente Python websocket-client recibe la respuesta). `wslocal` (todo en main) siempre funcionó — aísla el bug a la emisión cross-module.
+- Showcase Admin ABM: `WsConn<LiveFrame>` a binario nativo, WS round-trip completo (`[ws] got frame` → `[ws] sent`, cliente recibe el `LiveFrame`), primero CON el import de `Patch` y luego SIN él (removido + comentario del workaround limpiado). `let mut patches = diff_html(...)` se emite sin anotación.
+- lib **3849/0**, `cargo fmt --all --check` limpio, `cargo clippy --lib --tests --bins -- -D warnings` limpio, subset compile_e2e cross-module/WS/response **21/0**, smoke guía verde.
+
+**Impacto user-facing**: sin breaking. Programas cuyos tipos cross-module ya resolvían (nominal anidado importado, o tipos sin field `List<Nominal>` degradado) emiten idéntico. Los que degradaban a stub/`__FitzValue` ahora compilan con el tipo concreto. Se elimina el workaround "import all nested types" para WS y para vars inferidas desde fns importadas.
+
+**Deudas residuales derivadas** (NO bloquean): (a) aliasing de un tipo anidado importado a main (`from X import Inner as Alias`) haría fallar el render por nombre — caso muy raro, y sería error de compilación ruidoso, no hang silencioso. (b) W20 solo omite la anotación para RHS accesor concreto; un `let x = Ok(<any>)` sin anotación que degrade seguiría con el path viejo (no es el caso real observado).
+
+---
+
 ## 🟢 W18 (post-B8) — Codegen cross-module observability CERRADA (2026-06-18, v0.17.0, commit `63b3d3f`)
 
 **Hito**: cierra el gap más visible del codegen cross-module heredado de Fase 12.3.b y la dieta de los bloques W11/W16: cuando un módulo importado declaraba un handler HTTP (`@get`/`@post`/`@put`/`@delete`) y/o llamaba `log.{info,warn,error,debug}(...)`, el `__handler_<name>` wrapper emitido en el módulo invocaba 6 símbolos del preludio LOGGING + SPAN_CONTEXT + OTEL pero faltaban los `use crate::{...}` correspondientes. Resultado: `fitz build` rompía con 12-134+ errores E0425/E0433 según el tamaño del proyecto. Bloqueaba la primera versión del boilerplate `boilerplates/api-orm-full` end-to-end (la deuda pre-existente que B8 dejó documentada).

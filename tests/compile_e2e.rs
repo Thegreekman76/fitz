@@ -10139,6 +10139,198 @@ fn main() => 0\n\
 }
 
 #[test]
+fn ws_cross_module_message_with_nested_nominal_not_stub_w19() {
+    // W19 (2026-07-21) — `@ws` handler con `WsConn<Frame>` donde
+    // `Frame` vive en un módulo importado (o dep) y tiene un field
+    // compound `items: List<Thing>` cuyo inner nominal `Thing` NO se
+    // importa al main.
+    //
+    // **Bug que cierra (paridad run↔build)**: el codegen emitía
+    // `impl __FromFitzJson for FrameData` en main.rs como STUB que
+    // devuelve `Err(...)` (porque el remap degradaba `List<Thing>` a
+    // `List<Any>` → `Vec<__FitzValue>` que choca con el
+    // `Arc<Mutex<Vec<Thing>>>` del struct). En runtime, `ws.recv()`
+    // sobre ese tipo → `Err` inmediato → el handler termina → el
+    // cleanup de la conn se colgaba esperando el writer que el
+    // heartbeat mantenía vivo (socket medio-abierto) → el cliente
+    // WS colgaba (timeout), mientras `fitz run` funcionaba OK.
+    //
+    // **Fix**: `Thing`/`ThingData` YA están en scope en main.rs (via
+    // `use handlers::{Thing, ThingData};` + su `impl __FromFitzJson`),
+    // así que el cuerpo real puede emitirse con el tipo concreto
+    // `Arc<Mutex<Vec<Thing>>>`. Solo se mantiene el stub cuando un
+    // nominal anidado no está definido en ningún módulo cargado.
+    let stem = "ws_xmod_nested_nominal_w19";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("handlers.fitz"),
+        "type Thing {\n\
+             id: Int\n\
+             label: Str\n\
+         }\n\
+         \n\
+         type Frame {\n\
+             kind: Str\n\
+             items: List<Thing>\n\
+         }\n\
+         \n\
+         @ws(\"/echo\")\n\
+         async fn echo(ws: WsConn<Frame>) {\n\
+             loop {\n\
+                 let f = ws.recv()?\n\
+                 ws.send(f)?\n\
+             }\n\
+         }\n",
+    )
+    .expect("escribir handlers.fitz");
+
+    let main_src = "\
+import handlers\n\
+\n\
+@server(43913)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (W19):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+    // El impl real de FrameData debe estar presente…
+    assert!(
+        content.contains("impl __FromFitzJson for FrameData"),
+        "main.rs debe emitir `impl __FromFitzJson for FrameData` (W19)"
+    );
+    // …y NO debe ser el stub que devuelve Err.
+    assert!(
+        !content.contains("`__FromFitzJson for Frame` is a stub"),
+        "main.rs NO debe emitir el stub de `__FromFitzJson for Frame` (W19): {}",
+        content
+            .lines()
+            .filter(|l| l.contains("Frame"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // El field `items` debe deserializar con el tipo concreto
+    // `Arc<Mutex<Vec<Thing>>>`, no `Vec<__FitzValue>`.
+    assert!(
+        content.contains("<Arc<Mutex<Vec<Thing>>> as __FromFitzJson>::__from_fitz_json"),
+        "main.rs debe deserializar `items` con el tipo concreto `Arc<Mutex<Vec<Thing>>>` (W19)"
+    );
+    // `Thing`/`ThingData` deben tener su propio impl real (chain del
+    // Vec<Thing>).
+    assert!(
+        content.contains("impl __FromFitzJson for ThingData"),
+        "main.rs debe emitir `impl __FromFitzJson for ThingData` (W19)"
+    );
+}
+
+#[test]
+fn w20_imported_fn_returning_list_nominal_infers_type_without_importing_nested() {
+    // W20 (2026-07-21) — un `let` sin anotación cuyo RHS es una fn
+    // importada que retorna `List<Nominal>` (con el nominal NO
+    // importado a este módulo) degradaba el tipo inferido a
+    // `List<Any>` → `Vec<__FitzValue>`. Como `__FitzValue` no se
+    // activa para un programa CLI sin literales heterogéneos, rustc
+    // rompía con "cannot find type __FitzValue".
+    //
+    // **Fix**: omitir la anotación de tipo y dejar que Rust infiera el
+    // tipo concreto del RHS (la fn importada YA tiene la firma
+    // concreta `Arc<Mutex<Vec<Patch>>>`). Esto elimina el workaround
+    // "importá todos los tipos anidados" (paralelo a W19 del lado del
+    // `__FromFitzJson`). Caso real: el showcase Admin ABM importaba
+    // `Patch` solo para tipar el `let patches = diff_html(...)`.
+    let stem = "w20_imported_fn_list_nominal";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // plib.fitz — declara `Patch` + `make_patches() -> List<Patch>`.
+    std::fs::write(
+        dir.join("plib.fitz"),
+        "type Patch {\n\
+             op: Str\n\
+         }\n\
+         \n\
+         fn make_patches() -> List<Patch> {\n\
+             return [Patch { op: \"a\" }, Patch { op: \"b\" }]\n\
+         }\n",
+    )
+    .expect("escribir plib.fitz");
+
+    // main.fitz — importa SOLO `make_patches` (NO `Patch`) y usa el
+    // resultado en un `let` sin anotación.
+    let main_src = "\
+from plib import make_patches\n\
+\n\
+fn count() -> Int {\n\
+    let ps = make_patches()\n\
+    return len(ps)\n\
+}\n\
+\n\
+print(\"count={count()}\")\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (W20):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // El `let ps` NO debe llevar la anotación degradada
+    // `Vec<__FitzValue>` — se omite para que Rust infiera el tipo
+    // concreto del RHS.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+    assert!(
+        content.contains("let mut ps = make_patches()"),
+        "main.rs debe emitir `let mut ps = make_patches()` sin anotación (W20)"
+    );
+    assert!(
+        !content.contains("let mut ps: Arc<Mutex<Vec<__FitzValue>>>"),
+        "main.rs NO debe anotar `ps` como `Vec<__FitzValue>` (W20)"
+    );
+
+    // El binario debe correr y contar 2.
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+    let run = Command::new(&bin).output().expect("correr binario");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("count=2"),
+        "salida esperada `count=2`, fue: {:?}",
+        out
+    );
+}
+
+#[test]
 fn openapi_cross_module_includes_module_handlers() {
     // 10.8.5 (v0.10.8) — fix #3: el schema OpenAPI 3.1 emitido por
     // `fitz build` ahora incluye los handlers HTTP de módulos

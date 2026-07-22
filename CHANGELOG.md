@@ -9,6 +9,50 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.26.1] — 2026-07-21 — Cross-module `List<Nominal>`: WS deser + var inference without importing the nested type
+
+**Patch release** — a codegen `run`↔`build` parity fix. No new syntax,
+no grammar/LSP change; `.vsix` regenerated only for version parity.
+
+A `@ws` handler with `WsConn<T>` where `T` lives in a submodule (or a
+dep) and has a compound field `List<Nominal>` whose inner nominal is not
+imported into main used to hang `ws.recv()` in the native binary while
+`fitz run` worked. Two coordinated codegen fixes close it and, as a
+bonus, remove the "import every nested type" workaround.
+
+### What changed
+
+- **W19 — real cross-module `__FromFitzJson` instead of a stub.** When
+  an imported type's `List<Nominal>` field degraded because the inner
+  nominal wasn't in main's env, `impl __FromFitzJson for <T>Data` was
+  emitted as a stub returning `Err(...)`. At runtime a `WsConn<T>.recv()`
+  over such a type deserialized to that `Err` → the handler ended → the
+  connection cleanup blocked on the heartbeat-held writer (half-open
+  socket) → the WS client hung. Fix: the nested nominals are already in
+  scope in main.rs (`use <mod>::{Name, NameData};` + their real
+  `__FromFitzJson` impl), so the body is now emitted with the concrete
+  nested type (`Arc<Mutex<Vec<Thing>>>`). The stub is kept only for a
+  nominal not defined in any loaded module (genuinely opaque).
+
+- **W20 — infer the concrete type for a `let` bound to an imported fn.**
+  `let x = imported_fn()` where `imported_fn` returns `List<Nominal>`
+  (nominal not imported) inferred `Vec<__FitzValue>` and failed rustc
+  when `__FitzValue` wasn't activated. Fix: omit the type annotation for
+  such bindings (concretely-typed accessor RHS) and let Rust infer the
+  concrete type from the imported fn's signature.
+
+Together they remove the workaround where the Admin ABM showcase imported
+`Patch` only so `WsConn<LiveFrame>` (`LiveFrame.patches: List<Patch>`)
+and `let patches = diff_html(...)` would type. Verified end-to-end: the
+showcase compiles to a native binary and the WS round-trips **with and
+without** the `Patch` import.
+
+### Tests
+
+- `+2` E2E in `tests/compile_e2e.rs` (`ws_cross_module_..._not_stub_w19`,
+  `w20_imported_fn_returning_list_nominal_infers_type_...`). lib 3849/0,
+  fmt + clippy clean, guide smoke green.
+
 ## [v0.26.0] — 2026-07-20 — Cross-file composition refinements: aliasing + transitivity + LSP
 
 **Minor release** — three refinements that finish the cross-file
