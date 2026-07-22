@@ -3140,6 +3140,7 @@ fn after_dot_completions(
             ("upper", "fn() -> Str".into()),
             ("lower", "fn() -> Str".into()),
             ("len", "fn() -> Int".into()),
+            ("to_int", "fn() -> Result<Int>".into()),
             // v0.10.32 (Tier D.1) — ORM operators over Str. They only
             // take effect inside `.where(closure)` of the ORM — the
             // evaluator intercepts them and translates to SQL.
@@ -4256,6 +4257,7 @@ const STR_METHOD_SIGS: &[(&str, &str, &[&str])] = &[
     ("len", "fn len() -> Int", &[]),
     ("upper", "fn upper() -> Str", &[]),
     ("lower", "fn lower() -> Str", &[]),
+    ("to_int", "fn to_int() -> Result<Int>", &[]),
 ];
 
 /// V4 expanded — simple heuristic to infer the "kind" of an Ident

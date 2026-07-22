@@ -9,6 +9,42 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.27.0] — 2026-07-22 — `str.to_int()` + dynamic `.order_by(ascending:)` (Admin ABM Slice 3 dogfood)
+
+**Minor release** — one new builtin (`str.to_int()`) plus an ORM
+`run`↔`build` parity fix. Both surfaced while building the Admin ABM
+showcase's Slice 3 (a live DataGrid with search + filters + sort +
+numbered pages), fixed in the core language rather than worked around.
+
+### Added — `str.to_int() -> Result<Int>` (W22)
+
+- Parses a string (trimmed) into a signed 64-bit integer; `Err(Str)` when
+  it isn't a valid integer. Enables turning string payloads into `Int`
+  (e.g. a WebSocket event carrying a page number or a filter id from a
+  `Map<Str, Str>` payload). Wired through the evaluator, the checker
+  (`Result<Int>`), codegen (`.trim().parse::<i64>()` → `Result<i64,
+  String>`, so `?`/`match` work), and LSP completions. Unblocks the grid's
+  numbered pages and departamento filter.
+
+### Fixed — dynamic `.order_by(closure, ascending: <Bool>)` in `fitz build` (W21)
+
+- `fitz build` rejected `.order_by(fn(e) => e.field, ascending: <var>)`
+  when the direction was a runtime `Bool` (it required a literal — the SQL
+  direction was baked at compile time), while `fitz run` always accepted
+  it. Codegen now passes the descending direction as a runtime expression
+  `!(<ascending>)` to the QueryBuilder's `with_order_by(col, descending)`
+  (which already took a runtime bool). A Bool literal still bakes
+  `true`/`false`; `-u.field` DESC is unchanged; full-text `.rank(...)`
+  still needs a literal direction.
+
+### Tests
+
+- `+4` (2 for `str.to_int` across evaluator/codegen, 2 for dynamic
+  `ascending:`). lib 3852/0, fmt + clippy clean. The Admin ABM grid (search
+  + estado/departamento filters + dynamic sort + numbered pages) compiles
+  to a native binary with parity vs `fitz run` (validated against a real
+  Postgres).
+
 ## [v0.26.1] — 2026-07-21 — Cross-module `List<Nominal>`: WS deser + var inference without importing the nested type
 
 **Patch release** — a codegen `run`↔`build` parity fix. No new syntax,

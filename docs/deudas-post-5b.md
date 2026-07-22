@@ -2881,6 +2881,38 @@ canónicos.
 
 ---
 
+## 🟢 W22 (2026-07-22, v0.27.0) — builtin `str.to_int() -> Result<Int>`
+
+**Hito**: cierra el gap "no hay `Str -> Int`" documentado desde el Slice 2 del Admin ABM (numbered pages) y bloqueante del Slice 3 (departamento filter). El grid manda el número de página / id de departamento como string en el payload WS (`Map<Str, Str>`) y necesita parsearlo a `Int`. **Directiva del autor**: en el showcase ABM nada de workarounds — lo que no anda se arregla en el core. Así que se implementó el builtin en vez de deferir.
+
+**API**: `str.to_int() -> Result<Int>` — método sobre `Str`, sin args. `Ok(n)` si el string (trimmeado) parsea como entero con signo de 64 bits, `Err(Str)` si no. Consistente con `find`/`get`/`json.loads` — fuerza al usuario a manejar la falla con `match` o `?`.
+
+**Implementación** (4 sitios, paralelo a `.upper()`/`.lower()`): (a) **evaluator** (`src/evaluator.rs`) — dispatch `(Value::Str(_), "to_int")` + `str_to_int` que hace `s.trim().parse::<i64>()` → `Value::Result(Ok(Int))` / `Err(Str)`; (b) **checker** (`src/types.rs::infer_str_method`) — `to_int` tipa `Result<Int>` (activa la exhaustividad de match sobre Result + la regla del `?`); (c) **codegen** (`src/codegen.rs`) — emite `{ let __s = <code>; match __s.trim().parse::<i64>() { Ok(__n) => Ok(__n), Err(_) => Err(format!(...)) } }` tipado `Result<i64, String>` (Fitz `Result<Int>` → Rust `Result<i64, String>`, así `?`/`match` andan igual); (d) **LSP** (`src/lsp.rs`) — `to_int` en las completions de métodos Str (dos catálogos).
+
+**Tests** (+2): `evaluator::tests::str_to_int_parses_valid_and_errs_on_invalid` (Ok/Err/negativos/trim), `codegen::tests::str_to_int_emits_parse_result_w22`.
+
+**Validación**: lib 3852/0, fmt + clippy (default + lsp) limpios. Admin ABM grid (Slice 3) con departamento filter + páginas numeradas compila a binario + funciona con paridad ante `fitz run` (validado con Postgres real: filter depto=1 → total 5, goto page 2).
+
+**Impacto**: sin breaking (builtin nuevo, no toca nada existente). Cierra la deuda "Str→Int" que estaba anotada como deferida.
+
+---
+
+## 🟢 W21 (2026-07-22, v0.27.0) — `.order_by(closure, ascending: <Bool dinámico>)` en `fitz build`
+
+**Hito**: cierra un gap de paridad `run`↔`build` del ORM. `fitz build` rechazaba `.order_by(fn(e) => e.field, ascending: <var>)` cuando la dirección era un `Bool` runtime (exigía literal — la dirección SQL se bakeaba en compile-time), mientras `fitz run` siempre lo aceptó. Descubierto en el Admin ABM Slice 3: el grid con sort por header clickeable togglea asc/desc, o sea la dirección es dinámica.
+
+**Causa**: `gen_orm_order_by` (`src/codegen.rs`) parseaba el kwarg `ascending` y sólo aceptaba `Expr::Bool(b)` literal → `descending = !b` bakeado como `"true"`/`"false"`. Cualquier otra expresión → error "requires a Bool literal (MVP)". Pero `with_order_by(sql_col, descending: bool)` del QueryBuilder emitido YA toma un bool runtime — la restricción era sólo conservadora.
+
+**Fix**: cuando el valor del kwarg `ascending` no es `Expr::Bool` literal, `gen_expr` la expresión y capturarla como `desc_expr = Some("!(<code>)")` (descending = !ascending); emitir ese token dinámico en `with_order_by(col, <desc>)` en los dos paths (Str shorthand + closure). Literal sigue bakeando `true`/`false`; el prefijo `-u.field` (DESC) intacto. El path full-text `.rank(...)` sigue exigiendo dirección literal (bakea ASC/DESC en el SQL string) — dinámico ahí da error claro.
+
+**Test** (+1 unit): `codegen::tests::codegen_orm_order_by_dynamic_ascending_emits_runtime_bool_w21` — `.order_by(fn(u) => u.name, ascending: asc)` con `asc: Bool` emite `.with_order_by("name", !(asc))`.
+
+**Validación**: lib 3850/0, fmt + clippy limpios. Admin ABM grid (Slice 3) con sort toggle compila a binario nativo + Docker con paridad ante `fitz run`.
+
+**Impacto**: sin breaking. Programas con `ascending:` literal o `-field` DESC emiten idéntico. El caso dinámico (sort direction runtime) ahora compila en vez de forzar `fitz run`.
+
+---
+
 ## 🟢 W19 + W20 (2026-07-21, v0.26.1) — Cross-module `List<Nominal>`: deser real + inferencia de var, sin importar el anidado
 
 **Hito**: cierra el hang de `ws.recv()` en binario (paridad `run`↔`build`) cuando el tipo del mensaje de un `@ws` vive en un módulo/dep con un field compound `List<Nominal>` cuyo nominal NO se importa a main. Descubierto en el showcase Admin ABM (`WsConn<LiveFrame>` con `LiveFrame.patches: List<Patch>`) al reconstruir el Slice 2 (grid + paginación WS). Ambos fixes eliminan la necesidad del workaround "importá todos los tipos anidados que un tipo cross-module referencia transitivamente".

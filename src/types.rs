@@ -8765,6 +8765,15 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::Str
         }
+        // W22 (2026-07-22) — `str.to_int() -> Result<Int>`: parse the string
+        // as an integer; `Err` when it isn't a valid integer.
+        "to_int" => {
+            check_method_arity(ctx, "to_int", args_ty, 0, span);
+            Type::Result {
+                ok: Box::new(Type::Int),
+                err: Box::new(Type::Str),
+            }
+        }
         // S.1 (mini-batch S) — `contains`/`starts_with`/`ends_with`
         // take a `Str` and return `Bool`. Same shape for all 3.
         "contains" | "starts_with" | "ends_with" => {

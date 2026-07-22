@@ -22156,30 +22156,40 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // compile time); a dynamic value works under `fitz run`.
         let mut positional: Option<&Expr> = None;
         let mut desc_from_kwarg: Option<bool> = None;
+        // W21 (2026-07-22) — `ascending:` may be a DYNAMIC Bool (not just a
+        // literal). When it is, we capture the descending direction as a
+        // runtime Rust expression `!(<ascending expr>)` and pass it straight
+        // to `with_order_by(col, descending)` (which already takes a runtime
+        // bool). Parity with `fitz run`, where a dynamic sort direction has
+        // always worked. Surfaced by the Admin ABM grid's asc/desc toggle.
+        let mut desc_expr: Option<String> = None;
         for a in args {
             match a {
                 Expr::NamedArg { name, value, .. } if name == "ascending" => {
                     match value.as_ref() {
                         Expr::Bool(b, _) => desc_from_kwarg = Some(!b),
-                        _ => {
-                            return Err(self.err_at(
-                                call_span,
-                                "`.order_by(..., ascending=...)` in `fitz build` requires a Bool literal (MVP); use `-u.field` for DESC, or `fitz run` for a dynamic value".to_string(),
-                            ))
+                        other => {
+                            // Dynamic Bool: descending = !(ascending).
+                            let (code, _) = self.gen_expr(other)?;
+                            desc_expr = Some(format!("!({})", code));
                         }
                     }
                 }
                 Expr::NamedArg { name, .. } => {
                     return Err(self.err_at(
                         call_span,
-                        format!("`.order_by` does not accept kwarg `{}` (supported: `ascending`)", name),
+                        format!(
+                            "`.order_by` does not accept kwarg `{}` (supported: `ascending`)",
+                            name
+                        ),
                     ))
                 }
                 other => {
                     if positional.is_some() {
                         return Err(self.err_at(
                             call_span,
-                            "`.order_by(closure, ascending=...)` expects 1 positional argument".to_string(),
+                            "`.order_by(closure, ascending=...)` expects 1 positional argument"
+                                .to_string(),
                         ));
                     }
                     positional = Some(other);
@@ -22224,11 +22234,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 .and_then(|c| c.sql_name.as_deref())
                 .unwrap_or(field_name.as_str())
                 .to_string();
+            let desc_tok = desc_expr.clone().unwrap_or_else(|| {
+                if descending {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            });
             return Ok(format!(
                 "({recv}).with_order_by({col}, {desc})",
                 recv = receiver_code,
                 col = rust_str_literal(&sql_col),
-                desc = if descending { "true" } else { "false" },
+                desc = desc_tok,
             ));
         }
         let (param_name, body) = self.extract_closure_body(arg0, "order_by")?;
@@ -22307,6 +22324,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 } else {
                                     "to_tsquery"
                                 };
+                                // W21 — a dynamic `ascending:` can't be baked
+                                // into the ts_rank SQL string; require a literal
+                                // direction for full-text ranking.
+                                if desc_expr.is_some() {
+                                    return Err(self.err_at(
+                                        call_span,
+                                        format!("`.order_by(..., ascending=<dynamic>)` is not supported with `.{method}(...)` (full-text ranking bakes the direction into SQL); use a Bool literal"),
+                                    ));
+                                }
                                 let dir = if descending { "DESC" } else { "ASC" };
                                 let escaped_q = q.replace('\'', "''");
                                 let raw = format!(
@@ -22357,11 +22383,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .and_then(|c| c.sql_name.as_deref())
             .unwrap_or(col_name.as_str())
             .to_string();
+        let desc_tok = desc_expr.unwrap_or_else(|| {
+            if descending {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        });
         Ok(format!(
             "({recv}).with_order_by({col}, {desc})",
             recv = receiver_code,
             col = rust_str_literal(&sql_col),
-            desc = if descending { "true" } else { "false" },
+            desc = desc_tok,
         ))
     }
 
@@ -24017,6 +24050,23 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             (Type::Str, "lower") => {
                 check_method_arity(method, args, 0)?;
                 Ok((format!("({}).to_lowercase()", obj_code), Type::Str))
+            }
+            // W22 (2026-07-22) — `str.to_int() -> Result<Int>`: parse the
+            // string (trimmed) as `i64`; `Err(String)` when invalid. Fitz
+            // `Result<Int>` maps to Rust `Result<i64, String>`, so the `?`
+            // operator and `match` work as usual.
+            (Type::Str, "to_int") => {
+                check_method_arity(method, args, 0)?;
+                Ok((
+                    format!(
+                        "{{ let __s = {}; match __s.trim().parse::<i64>() {{ Ok(__n) => Ok(__n), Err(_) => Err(format!(\"to_int: `{{}}` is not a valid integer\", __s)) }} }}",
+                        obj_code
+                    ),
+                    Type::Result {
+                        ok: Box::new(Type::Int),
+                        err: Box::new(Type::Str),
+                    },
+                ))
             }
             // S.1 — `contains`/`starts_with`/`ends_with` take 1 arg
             // `Str` and return `Bool`. Rust `str::contains/starts_with/
@@ -41695,6 +41745,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn str_to_int_emits_parse_result_w22() {
+        // W22 (2026-07-22) — `str.to_int()` emits a `parse::<i64>()` that
+        // yields `Result<i64, String>` (Fitz `Result<Int>`).
+        let rust =
+            gen("let s = \"42\"\nlet n = match s.to_int() { Ok(v) => v, Err(_) => 0 }\nprint(n)")
+                .unwrap();
+        assert!(
+            rust.contains(".trim().parse::<i64>()"),
+            "expected `.trim().parse::<i64>()`, was: {rust}"
+        );
+    }
+
     // (Unknown methods on Str are caught by the checker before reaching
     // codegen, so we don't test that path from here.)
 
@@ -47696,6 +47759,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codegen_orm_order_by_dynamic_ascending_emits_runtime_bool_w21() {
+        // W21 (2026-07-22) — `.order_by(fn(u) => u.name, ascending: asc)`
+        // with `asc` a runtime Bool must emit
+        // `.with_order_by("name", !(asc))` (descending = !ascending), NOT
+        // reject with "requires a Bool literal". Parity with `fitz run`,
+        // surfaced by the Admin ABM grid's asc/desc sort toggle.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str = \"\"\n\
+                   }\n\
+                   async fn boot(asc: Bool) -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.order_by(fn(u) => u.name, ascending: asc).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"name\", !(asc))"),
+            "expected `.with_order_by(\"name\", !(asc))` (dynamic DESC), was: {rust}",
+        );
+    }
+
     // B1 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — accept
     // a Str literal as shorthand for `.order_by`. ASC by default,
     // DESC if prefixed with `-`. Field existence validated.
@@ -47837,9 +47923,11 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_order_by_ascending_nonliteral_aborts() {
-        // A non-literal `ascending` value is a documented MVP limit in
-        // `fitz build` (the SQL direction is baked at compile time).
+    fn codegen_orm_order_by_ascending_nonliteral_emits_runtime_bool_w21() {
+        // W21 (2026-07-22) — a non-literal `ascending` value used to abort in
+        // `fitz build` ("requires a Bool literal"); it now emits the descending
+        // direction as a runtime expression `!(<ascending>)`, in parity with
+        // `fitz run`. Covers the local-var + Int-field + `.where(...)` chain.
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
                        age: Int\n\
@@ -47850,7 +47938,11 @@ mod tests {
                        let _u = User.where(fn(u) => u.id > 0).order_by(fn(u) => u.age, ascending: asc).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        assert_err_contains(src, &["ascending", "Bool literal"]);
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"age\", !(asc))"),
+            "expected `.with_order_by(\"age\", !(asc))` (dynamic), was: {rust}",
+        );
     }
 
     #[test]

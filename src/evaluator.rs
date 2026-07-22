@@ -6009,6 +6009,7 @@ async fn dispatch_method(
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
         (Value::Str(_), "lower") => str_lower(receiver, args, span),
+        (Value::Str(_), "to_int") => str_to_int(receiver, args, span),
         // S.1 (mini-batch S) — small methods on Str:
         (Value::Str(_), "contains") => str_contains(receiver, args, span),
         (Value::Str(_), "starts_with") => str_starts_with(receiver, args, span),
@@ -9567,6 +9568,27 @@ fn str_lower(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
         _ => unreachable!(),
     };
     Ok(Value::Str(s.to_lowercase()))
+}
+
+/// W22 (2026-07-22) — `str.to_int() -> Result<Int>`: parses the string
+/// (trimmed) as a signed 64-bit integer. `Err(Str)` when it isn't a valid
+/// integer. Enables parsing string payloads (e.g. a WS event carrying a page
+/// number or an id) into `Int` — surfaced by the Admin ABM grid's numbered
+/// pages + departamento filter.
+fn str_to_int(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("to_int", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    match s.trim().parse::<i64>() {
+        Ok(n) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+            Value::Int(n),
+        )))),
+        Err(_) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+            Value::Str(format!("to_int: `{}` is not a valid integer", s)),
+        )))),
+    }
 }
 
 /// S.1 — Common helper: extracts the `receiver: Str` and the
@@ -23577,6 +23599,21 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("HOLA".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("mundo".into())));
+    }
+
+    // W22 (2026-07-22) — `str.to_int() -> Result<Int>`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_to_int_parses_valid_and_errs_on_invalid() {
+        let src = "\
+            let a = match \"  42 \".to_int() { Ok(n) => n, Err(_) => -1 }\n\
+            let b = match \"12x\".to_int() { Ok(n) => n, Err(_) => -1 }\n\
+            let c = match \"-7\".to_int() { Ok(n) => n, Err(_) => -1 }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(42)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(-1)));
+        assert_eq!(env.lock().get("c"), Some(Value::Int(-7)));
     }
 
     // ---- S.1: contains/starts_with/ends_with ----
