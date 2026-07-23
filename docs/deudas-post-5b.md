@@ -2881,6 +2881,24 @@ canónicos.
 
 ---
 
+## 🟢 W23 (2026-07-22, v0.28.1) — codegen: `use crate::__FitzValue` independiente del prelude DB
+
+**Hito**: paridad `run`↔`build` para módulos que referencian `__FitzValue` sin usar Postgres. Descubierto construyendo el `examples/gallery` de fitz-liveviews (ejemplo del paquete de adopción de la Companion UI): un programa que consume la lib `fitz_liveviews` **sin ORM** rompía `fitz build` con 50 errores `cannot find type __FitzValue in this scope`.
+
+**Causa raíz**: la lib declara `type ComponentReg { render_fn: Any, handlers: Map<Str, Any>, initial: Any }`. El codegen emite esos fields con el tipo Rust `__FitzValue` (`Any → __FitzValue`), pero el `use crate::__FitzValue;` del **archivo del módulo** vivía **anidado dentro del bloque `if module_needs_db_prelude`** (`src/codegen.rs::generate_module_rs_with_bindings`). Un módulo que referenciaba `__FitzValue` sin tocar la DB nunca emitía el import. El Admin ABM compilaba solo porque su ORM (mapas heterogéneos) activa `__FitzValue` globalmente vía otro camino. El crate root (`main.rs`) YA emitía el `enum __FitzValue` correctamente (vía `loader.modules.iter().any(|m| m.uses_fitz_value)`, que detecta el `Any` field por el AST) — el bug era **solo** el import faltante del módulo.
+
+**Fix** (`src/codegen.rs`): el `use crate::__FitzValue;` + `use crate::__fv_type_name;` (helper usado al invocar un valor `Any` como callable, ej. `render_fn(state)`) se emiten en un bloque **independiente** del prelude DB, gobernado por `program_uses_fitz_value(program) || module_imports_fitz_value_table` (superset exacto de la condición previa). Los helpers JSONB (`__fitz_jsonb_to_fitz_value` / `__fitz_fitz_value_to_jsonb`), que sí son de DB/serde_json, quedan gated dentro del bloque DB como antes. Sin doble-emisión (la condición del bloque DB para `__FitzValue` se movió entera, no se duplicó).
+
+**Test** (+1): `compile_e2e::cross_module_any_field_without_db_emits_fitz_value_import_w23` — módulo con `type X { f: Any, ... }` importado por un programa CLI sin DB; verifica build OK + `use crate::__FitzValue;` presente en el `.rs` del módulo.
+
+**Validación**: lib verde, fmt + clippy limpios, mkdocs `--strict` verde. `examples/gallery` de fitz-liveviews compila a binario nativo con paridad WS bit-a-bit ante `fitz run` (contador reactivo + tab switch validados por harness WS crudo).
+
+**Impacto**: sin breaking. Cualquier programa fitz-liveviews que no use el ORM (todos los ejemplos visuales del paquete de adopción) ahora compila a binario nativo. Cierra el último gap conocido para el gallery / playground de la Companion UI.
+
+**Deuda residual derivada**: ninguna nueva — el fix es el patrón espejo del que ya emite el import en módulos DB.
+
+---
+
 ## 🟢 W22 (2026-07-22, v0.27.0) — builtin `str.to_int() -> Result<Int>`
 
 **Hito**: cierra el gap "no hay `Str -> Int`" documentado desde el Slice 2 del Admin ABM (numbered pages) y bloqueante del Slice 3 (departamento filter). El grid manda el número de página / id de departamento como string en el payload WS (`Map<Str, Str>`) y necesita parsearlo a `Int`. **Directiva del autor**: en el showcase ABM nada de workarounds — lo que no anda se arregla en el core. Así que se implementó el builtin en vez de deferir.

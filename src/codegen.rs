@@ -5346,27 +5346,51 @@ fn generate_module_rs_with_bindings(
              #[allow(unused_imports)]\n\
              use crate::__fitz_db_runtime;\n\n",
         );
-        // W11 (v0.10.7) — the module imports `__FitzValue` + JSONB
+        // W11 (v0.10.7) — the module imports the JSONB conversion
         // helpers when: (a) the local program declares Map<Str, Any> /
         // List<Any>, or (b) it imports a @table type that has
         // jsonb/heterogeneous-array fields. Case (b) is typical when
         // `models.fitz` declares `meta: Map<Str, Any>` and `posts.fitz`
-        // emits `Post.insert(...)` that references `__FitzValue`.
+        // emits `Post.insert(...)` that references `__FitzValue`. These
+        // helpers are DB-specific, so they stay gated by the DB prelude.
+        // The bare `use crate::__FitzValue;` import is emitted below,
+        // INDEPENDENT of the DB prelude (v0.28.1).
         let module_imports_fitz_value_table = ctx
             .loaded_modules
             .iter()
             .any(|m| m.uses_fitz_value && !m.table_metadata.is_empty());
         if program_uses_fitz_value(program) || module_imports_fitz_value_table {
-            ctx.uses_fitz_value = true;
             ctx.emit(
                 "#[allow(unused_imports)]\n\
-                 use crate::__FitzValue;\n\
-                 #[allow(unused_imports)]\n\
-                 use crate::{__fitz_jsonb_to_fitz_value, __fitz_fitz_value_to_jsonb};\n\
-                 #[allow(unused_imports)]\n\
-                 use crate::__fv_type_name;\n\n",
+                 use crate::{__fitz_jsonb_to_fitz_value, __fitz_fitz_value_to_jsonb};\n\n",
             );
         }
+    }
+
+    // v0.28.1 — a module references `__FitzValue` (emitted as the Rust
+    // type of any `Any` field / heterogeneous Map/List) whenever
+    // `program_uses_fitz_value(program)` is true, OR because it imports
+    // a @table type with jsonb fields. This is INDEPENDENT of the DB
+    // prelude: a module can hold a `type X { f: Any }` (e.g.
+    // fitz-liveviews' `ComponentReg { render_fn: Any, ... }`) without
+    // touching Postgres. Before this fix, the `use crate::__FitzValue;`
+    // import lived inside the DB block, so a non-DB module that emitted
+    // `__FitzValue`-typed fields failed to compile (`cannot find type
+    // __FitzValue in this scope`). The crate root emits the enum
+    // whenever any module's `uses_fitz_value` is set; the flag is set
+    // here so the OR at the crate-root emit picks it up.
+    let module_imports_fitz_value_table = ctx
+        .loaded_modules
+        .iter()
+        .any(|m| m.uses_fitz_value && !m.table_metadata.is_empty());
+    if program_uses_fitz_value(program) || module_imports_fitz_value_table {
+        ctx.uses_fitz_value = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::__FitzValue;\n\
+             #[allow(unused_imports)]\n\
+             use crate::__fv_type_name;\n\n",
+        );
     }
 
     // W11 (v0.10.7) — if the module declares `@auth_provider` or uses

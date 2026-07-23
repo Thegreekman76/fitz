@@ -9,6 +9,32 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.1] — 2026-07-22 — codegen: `use crate::__FitzValue` independiente del prelude DB
+
+Fix de codegen de **paridad `run`↔`build`** descubierto construyendo el
+component gallery de fitz-liveviews (ejemplo del paquete de adopción de la
+Companion UI). Sin sintaxis nueva, sin cambio de comportamiento del lenguaje.
+
+### Fixed — módulo con campo `Any` (sin DB) no importaba `__FitzValue`
+
+- Un módulo que declara un `type X { f: Any }` (o `Map<Str, Any>` / `List<Any>`)
+  emite ese field con el tipo Rust `__FitzValue`, pero el
+  `use crate::__FitzValue;` del módulo vivía **dentro** del bloque del prelude
+  DB. Un módulo que referenciaba `__FitzValue` **sin usar Postgres** nunca
+  emitía el import → `fitz build` rompía con `cannot find type __FitzValue in
+  this scope`. El caso canónico es el `ComponentReg { render_fn: Any, ... }` de
+  la lib `fitz_liveviews` cuando lo consume un programa sin ORM (el Admin ABM
+  compilaba solo porque su ORM activa `__FitzValue` globalmente).
+- **Fix**: el `use crate::__FitzValue;` (y el helper `__fv_type_name`, usado al
+  invocar un valor `Any` como callable) se emiten en un bloque **independiente**
+  del prelude DB, gobernado por `program_uses_fitz_value(program)`. Los helpers
+  JSONB (`__fitz_jsonb_to_fitz_value` / `__fitz_fitz_value_to_jsonb`), que sí son
+  de DB, quedan gated como antes. El crate root ya emitía el `enum __FitzValue`
+  cuando cualquier módulo lo necesita; el bug era solo el import del módulo.
+- Test E2E nuevo `cross_module_any_field_without_db_emits_fitz_value_import_w23`.
+  Validado end-to-end: `examples/gallery` de fitz-liveviews compila a binario
+  nativo con paridad WS bit-a-bit ante `fitz run`.
+
 ## [v0.28.0] — 2026-07-22 — scoping de `let` + `@header` sobre `@ws` (dogfood i18n del Admin ABM)
 
 Dos fixes de core que salieron internacionalizando el showcase Admin ABM de

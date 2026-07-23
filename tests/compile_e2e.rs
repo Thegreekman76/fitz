@@ -10331,6 +10331,72 @@ print(\"count={count()}\")\n\
 }
 
 #[test]
+fn cross_module_any_field_without_db_emits_fitz_value_import_w23() {
+    // v0.28.1 (2026-07-22) — a module declares a `type X { f: Any }`
+    // (which the codegen emits with the Rust type `__FitzValue`) but the
+    // program does NOT touch the DB. Before the fix, the module's
+    // `use crate::__FitzValue;` import lived INSIDE the DB-prelude block,
+    // so a non-DB module that referenced `__FitzValue` failed to compile
+    // with `cannot find type __FitzValue in this scope`. This is the
+    // exact shape of fitz-liveviews' `ComponentReg { render_fn: Any, ...
+    // }` registry when consumed by a program without ORM usage.
+    let stem = "xmod_any_no_db_w23";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create tempdir");
+
+    std::fs::write(
+        dir.join("reg.fitz"),
+        "type ComponentReg {\n\
+             render_fn: Any\n\
+             handlers: Map<Str, Any>\n\
+             initial: Any\n\
+         }\n\
+         \n\
+         fn make_reg(f: Any) -> ComponentReg {\n\
+             return ComponentReg { render_fn: f, handlers: {}, initial: 0 }\n\
+         }\n",
+    )
+    .expect("write reg.fitz");
+
+    let main_src = "\
+from reg import make_reg, ComponentReg\n\
+\n\
+let r = make_reg(42)\n\
+print(\"reg ok\")\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("write main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (W23):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // The module file must import `__FitzValue` even without a DB
+    // prelude, because it emits `ComponentRegData { render_fn:
+    // __FitzValue, ... }`.
+    let module_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/reg.rs", stem));
+    let content = std::fs::read_to_string(&module_rs).expect("read reg.rs");
+    assert!(
+        content.contains("use crate::__FitzValue;"),
+        "reg.rs must emit `use crate::__FitzValue;` (W23):\n{}",
+        content.lines().take(12).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        content.contains("render_fn: __FitzValue"),
+        "reg.rs must emit the `__FitzValue`-typed field (W23)"
+    );
+}
+
+#[test]
 fn openapi_cross_module_includes_module_handlers() {
     // 10.8.5 (v0.10.8) — fix #3: el schema OpenAPI 3.1 emitido por
     // `fitz build` ahora incluye los handlers HTTP de módulos
