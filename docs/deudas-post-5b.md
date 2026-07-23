@@ -2881,6 +2881,20 @@ canónicos.
 
 ---
 
+## 🟢 W24 (2026-07-23, v0.28.2) — `.fitzv` view lexer: operadores de comparación `==` `!=` `<=` `>=`
+
+**Hito**: cierra un gap del round-trip de operadores en los single-file components (`.fitzv`). Descubierto escribiendo el curso "Learn Fitz LiveViews" (paquete de adopción de la Companion UI) — un `event` handler con `if (x != y)` fallaba.
+
+**Causa raíz** (`src/view/lexer.rs` + `src/view/parser.rs`): el view lexer tokeniza el `.fitzv` char por char, y los event bodies se capturan como texto crudo (`capture_balanced_body_raw`) reconstruido token→string con `append_token_source`, para re-parsearse después con el Fitz clásico. Los operadores multi-char no sobrevivían: `==` era dos `Token::Eq` → reconstruido como `= =` (con espacio, por `needs_space_before`); `>=` era `Gt Eq` → `> =`; `!=` no lexeaba porque `!` era "unexpected character". Classic Fitz sí soporta los cuatro — el gap era exclusivo del view lexer. Bonus: `fitz check` no view-parseaba el `.fitzv`, así que el error solo aparecía en `run`/`build` (gap separado, no cerrado acá).
+
+**Fix**: el view lexer tokeniza `==`, `!=`, `<=`, `>=` como tokens únicos nuevos (`EqEq`/`Neq`/`Le`/`Ge`) con lookahead de un char. `!` peek `=` → `Neq`; `!` solo → error espejo del clásico ("`!` is only valid as part of `!=`"). `=` peek `=` → `EqEq`. `>` peek `=` → `Ge`. `<` peek `=` → `Le` (seguro: `<template`/`<style` se manejan antes, y los genéricos siempre tienen letra tras `<`). `append_token_source` re-emite cada uno verbatim. `needs_space_before` los trata como operadores normales (espaciado a ambos lados, lex-equivalente para el re-parse clásico).
+
+**Tests** (+3): `view::lexer::tests::tokenizes_comparison_operators_as_single_tokens_v0_28_2`, `lone_bang_is_a_lex_error_v0_28_2`, `generic_lt_still_distinct_from_le_v0_28_2`. Suite view completa: 576/576. Validado end-to-end: `.fitzv` con `payload["v"] == "yes"` / `!= "yes"` muta estado correcto sobre WebSocket; C2 del curso (name list SFC con `it != target` en `.filter`) anda add/filter/remove.
+
+**Deuda residual derivada** (NO bloquea): (a) `fitz check` no view-parsea `.fitzv` → los view parse errors solo salen en `run`/`build`; refinable haciendo que `check` corra el view lexer/expand sobre archivos `.fitzv`. (b) Operadores compuestos de asignación (`+=`, `-=`) siguen sin round-trip en event bodies (poco comunes; se puede reescribir como `x = x + 1`).
+
+---
+
 ## 🟢 W23 (2026-07-22, v0.28.1) — codegen: `use crate::__FitzValue` independiente del prelude DB
 
 **Hito**: paridad `run`↔`build` para módulos que referencian `__FitzValue` sin usar Postgres. Descubierto construyendo el `examples/gallery` de fitz-liveviews (ejemplo del paquete de adopción de la Companion UI): un programa que consume la lib `fitz_liveviews` **sin ORM** rompía `fitz build` con 50 errores `cannot find type __FitzValue in this scope`.

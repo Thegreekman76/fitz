@@ -9,6 +9,31 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.2] — 2026-07-23 — `.fitzv`: operadores de comparación `==` `!=` `<=` `>=` en event bodies
+
+Fix del view lexer de `.fitzv` (single-file components) descubierto escribiendo
+el curso de fitz-liveviews. Sin sintaxis nueva; cierra un gap real del round-trip
+de operadores.
+
+### Fixed — comparaciones multi-char rotas dentro de `.fitzv`
+
+- El view lexer tokenizaba los operadores char por char, y
+  `capture_balanced_body_raw` reconstruía el event body con espaciado que rompía
+  las comparaciones multi-char: `==` se reconstruía como `= =`, `>=` como
+  `> =`, y `!=` **ni siquiera lexeaba** (`!` era "unexpected character"). El
+  resultado: `event go() { if (x != y) { ... } }` fallaba con "view parse error"
+  / "expected `)`" al correr o compilar (aunque `fitz check` no lo cazaba).
+- **Fix**: el view lexer ahora tokeniza `==`, `!=`, `<=`, `>=` como **tokens
+  únicos** (`EqEq`/`Neq`/`Le`/`Ge`), y `append_token_source` los re-emite
+  verbatim. Un `!` solo sigue siendo error, espejando el lexer clásico
+  (`!` solo vale como parte de `!=`; la negación lógica se escribe `not`). Los
+  genéricos (`List<Str>`) no se ven afectados — el `<` de un genérico siempre va
+  seguido de una letra, nunca de `=`.
+- Tests nuevos: `view::lexer::tests::tokenizes_comparison_operators_as_single_tokens_v0_28_2`,
+  `lone_bang_is_a_lex_error_v0_28_2`, `generic_lt_still_distinct_from_le_v0_28_2`.
+  Validado end-to-end: un `.fitzv` con `payload["v"] == "yes"` y `!= "yes"` en un
+  event handler muta el estado correctamente sobre el WebSocket.
+
 ## [v0.28.1] — 2026-07-22 — codegen: `use crate::__FitzValue` independiente del prelude DB
 
 Fix de codegen de **paridad `run`↔`build`** descubierto construyendo el

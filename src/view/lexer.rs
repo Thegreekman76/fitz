@@ -81,15 +81,26 @@ pub enum Token {
     Lt,       // < (only when not opening a `<template>`/`<style scoped>` block)
     Gt,       // >
     Question, // ?
+    // Comparison operators (multi-char). Emitted as SINGLE tokens (not
+    // char-by-char) so `append_token_source` round-trips `x == y`,
+    // `x != y`, `x <= y`, `x >= y` verbatim into event-handler bodies —
+    // the classic Fitz lexer then re-tokenises the raw blob correctly.
+    // Char-by-char tokenisation broke these: `==` reconstructed as
+    // `= =`, `>=` as `> =`, and `!=` did not lex at all (`!` was an
+    // unknown char). v0.28.2 closes the gap the note below deferred.
+    EqEq, // ==
+    Neq,  // !=
+    Le,   // <=
+    Ge,   // >=
     // Arithmetic operators — pre-req of 11.4.c (closes the deuda
     // documented in §9.m of `docs/fase-11-plan.md`). Emitted as bare
     // tokens so `capture_balanced_body_raw` can serialise them verbatim
     // into event handler bodies (`count = count + 1`, `n = n * 2`),
     // which the classic Fitz lexer then re-tokenises correctly when
     // `expand::parse_statements_from_source` runs on the raw blob.
-    // Comparisons (`==`/`!=`/`<=`/`>=`) and logical / bitwise ops stay
-    // out until a future sub-commit needs them (e.g. `{#if x > 0}`
-    // when that directive stops rejecting at emit time in 11.4.c+).
+    // Logical / bitwise symbol ops stay out until a future sub-commit
+    // needs them; Fitz spells logical ops as `and`/`or`/`not` keywords,
+    // which lex as plain identifiers and round-trip already.
     Plus,  // +
     Minus, // -
     Star,  // *
@@ -150,6 +161,10 @@ impl fmt::Display for Token {
             Token::Eq => write!(f, "`=`"),
             Token::Lt => write!(f, "`<`"),
             Token::Gt => write!(f, "`>`"),
+            Token::EqEq => write!(f, "`==`"),
+            Token::Neq => write!(f, "`!=`"),
+            Token::Le => write!(f, "`<=`"),
+            Token::Ge => write!(f, "`>=`"),
             Token::Question => write!(f, "`?`"),
             Token::Plus => write!(f, "`+`"),
             Token::Minus => write!(f, "`-`"),
@@ -344,9 +359,19 @@ impl ViewLexer {
                         column: start_col,
                     });
                 }
+                // A `<` followed by `=` is the `<=` comparison operator.
+                // Safe to peek here: `<template`/`<style` were handled
+                // above, and generics (`List<Str>`) always have a letter
+                // after `<`, never `=`.
                 self.advance();
+                let token = if self.peek() == Some('=') {
+                    self.advance();
+                    Token::Le
+                } else {
+                    Token::Lt
+                };
                 self.tokens.push(TokenWithLoc {
-                    token: Token::Lt,
+                    token,
                     line: start_line,
                     column: start_col,
                 });
@@ -436,16 +461,48 @@ impl ViewLexer {
                 }
                 '=' => {
                     self.advance();
+                    let token = if self.peek() == Some('=') {
+                        self.advance();
+                        Token::EqEq
+                    } else {
+                        Token::Eq
+                    };
                     self.tokens.push(TokenWithLoc {
-                        token: Token::Eq,
+                        token,
                         line: start_line,
                         column: start_col,
                     });
                 }
+                '!' => {
+                    // Mirror the classic Fitz lexer: `!` is only valid as
+                    // part of `!=`. A lone `!` is an error (Fitz spells
+                    // logical negation as the `not` keyword).
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        self.tokens.push(TokenWithLoc {
+                            token: Token::Neq,
+                            line: start_line,
+                            column: start_col,
+                        });
+                    } else {
+                        return Err(ViewLexError {
+                            message: "`!` is only valid as part of `!=`".to_string(),
+                            line: start_line,
+                            column: start_col,
+                        });
+                    }
+                }
                 '>' => {
                     self.advance();
+                    let token = if self.peek() == Some('=') {
+                        self.advance();
+                        Token::Ge
+                    } else {
+                        Token::Gt
+                    };
                     self.tokens.push(TokenWithLoc {
-                        token: Token::Gt,
+                        token,
                         line: start_line,
                         column: start_col,
                     });
@@ -924,6 +981,46 @@ mod tests {
         assert_eq!(toks[map_idx + 3], Token::Comma);
         assert_eq!(toks[map_idx + 4], Token::Ident("Int".into()));
         assert_eq!(toks[map_idx + 5], Token::Gt);
+    }
+
+    #[test]
+    fn tokenizes_comparison_operators_as_single_tokens_v0_28_2() {
+        // v0.28.2 — `==`, `!=`, `<=`, `>=` must each lex as ONE token so
+        // they round-trip verbatim into event-handler bodies. Before the
+        // fix, `==` was two `Eq` tokens (reconstructed as `= =`), `>=`
+        // was `Gt Eq` (`> =`), and `!=` did not lex (`!` unknown char).
+        let src = "component X { event go() { \
+                   if (a == b) {} if (a != b) {} if (a <= b) {} if (a >= b) {} } \
+                   <template><div id=\"x\">y</div></template> }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        assert!(toks.contains(&Token::EqEq), "`==` should lex as EqEq");
+        assert!(toks.contains(&Token::Neq), "`!=` should lex as Neq");
+        assert!(toks.contains(&Token::Le), "`<=` should lex as Le");
+        assert!(toks.contains(&Token::Ge), "`>=` should lex as Ge");
+    }
+
+    #[test]
+    fn lone_bang_is_a_lex_error_v0_28_2() {
+        // Mirrors the classic Fitz lexer: `!` is only valid as `!=`.
+        let src = "component X { event go() { x = !y } \
+                   <template><div id=\"x\">y</div></template> }";
+        let err = tokenize(src).unwrap_err();
+        assert!(
+            err.message.contains("`!` is only valid as part of `!=`"),
+            "expected the lone-`!` error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn generic_lt_still_distinct_from_le_v0_28_2() {
+        // `List<Str>` keeps `Lt` (not `Le`) — the `<` is followed by a
+        // letter, never `=`, so the `<=` peek does not misfire.
+        let src = "component X { state { xs: List<Str> = [] } \
+                   <template><div id=\"x\">y</div></template> }";
+        let toks = strip_pos(tokenize(src).unwrap());
+        assert!(toks.contains(&Token::Lt), "generic `<` stays Lt");
+        assert!(!toks.contains(&Token::Le), "generic `<` must not become Le");
     }
 
     #[test]
