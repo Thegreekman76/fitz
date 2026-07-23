@@ -9,6 +9,45 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.4] — 2026-07-23 — `.fitzv` SSR: imports del usuario al head del módulo
+
+Fix parcial hacia "SFCs con nominales importados en el estado compilan a binario"
+(seguimiento de v0.28.3). Descubierto escribiendo el cap C5 del curso de
+fitz-liveviews. La pieza que falta (registro del nominal transitivo en main) queda
+como deuda **W26**, a cerrar en una tanda dedicada.
+
+### Fixed — el emisor SSR emitía los imports del usuario mid-file
+
+- El emisor SSR de `.fitzv` (`src/view/codegen_ssr.rs`) emitía el helper
+  `__fitz_view_str_join` (una `fn`) ANTES de los imports del usuario (`from X
+  import Y`), dejando esos imports **en medio del archivo** — clásico Fitz exige
+  todo `import` / `from ... import` en el head, antes de cualquier `fn` / `type`.
+  Un `.fitzv` cuyo estado referencia un nominal de un `.fitz` hermano
+  (`state { xs: List<Member> }`) generaba classic Fitz con el import de `Member`
+  mal ubicado.
+- **Fix**: `emit_module_header` deja solo el import de framework al head;
+  `emit_user_imports` va justo después; y el helper `__fitz_view_str_join` se
+  emite en una fn nueva `emit_str_join_helper` **después de todos los imports**.
+  View tests 576/0.
+
+### Nota — el gap de `.raw over Any` era user-code, no core
+
+- El "field access `.raw` over `Any`" que aparecía en SFCs con estado `List` NO
+  era un bug del compilador: faltaba importar `Html` en el `main.fitz` del
+  proyecto. Sin `Html` importado, el retorno de `component(...) -> Html` no
+  resolvía y caía a `Any`. Los ejemplos del curso (c2/c3 SFC) suman el import.
+
+### Deuda W26 (v0.28.5) — nominal importado en estado `@live_component`
+
+- Un `.fitzv` con `state { xs: List<Member> }` donde `Member` viene de un `.fitz`
+  hermano todavía no compila a binario: el codegen de main gen'ea `Member { ... }`
+  (el nominal transitivo del default del estado del componente importado) sin
+  registrarlo en su `type_sigs`, justo tras enriquecer el tipo importado del
+  componente en `pre_register_types`. El caso plano equivalente (`from models
+  import Outer` con `Outer { items: List<Nested> }`, Nested del mismo módulo) sí
+  compila — la diferencia es que el nominal del default es **transitivo**. Detalle
+  en `docs/deudas-post-5b.md` → "W26".
+
 ## [v0.28.3] — 2026-07-23 — LiveComponents compilan a binario nativo (`fitz build`)
 
 Dos fixes de codegen coordinados que destraban las **LiveComponents** de

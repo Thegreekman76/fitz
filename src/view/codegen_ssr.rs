@@ -234,6 +234,10 @@ pub fn emit_module_ssr(file: &ExpandedViewFile) -> SsrEmitResult<String> {
     // event bodies).
     emit_user_imports(&file.imports, &mut out);
 
+    // v0.28.4 — the `{#for}` join helper goes AFTER all imports (classic
+    // Fitz requires imports at the file head, before any fn/type).
+    emit_str_join_helper(&mut out);
+
     // K-4 (post-K-3, 2026-07-16) — Flatten the file's imports into
     // a single slice of names so `format_fitz_expr_scoped` can
     // resolve bare Idents against them (imported top-level fns /
@@ -274,6 +278,7 @@ pub fn emit_module_ssr(file: &ExpandedViewFile) -> SsrEmitResult<String> {
 pub fn emit_component_ssr(component: &ExpandedComponent) -> SsrEmitResult<String> {
     let mut out = String::new();
     emit_module_header(&mut out);
+    emit_str_join_helper(&mut out);
     let siblings = std::slice::from_ref(component);
     // K-4: single-component emit sees no imports (no file wrapper);
     // tests exercising this path can't reference imported fns.
@@ -331,14 +336,28 @@ fn emit_module_header(out: &mut String) {
          // Do NOT edit — regenerate from the source `.fitzv`.\n\
          \n\
          from fitz_liveviews import Html, html\n\
-         \n\
-         // Phase 11.6.c continuation — helper consumed by every\n\
+         \n",
+    );
+}
+
+/// v0.28.4 — The `{#for}` join helper. Emitted AFTER all imports
+/// (the framework header + the user's `from X import ...`), because
+/// classic Fitz requires every `import` / `from ... import` to sit at
+/// the file head, before any `fn` / `type` declaration. Previously it
+/// lived inside `emit_module_header`, so `emit_user_imports` placed the
+/// user imports AFTER this fn — an import mid-file that the codegen's
+/// loader didn't resolve, so a `.fitzv` whose state referenced a nominal
+/// imported from a sibling `.fitz` (`state { xs: List<Member> }`) failed
+/// with "unknown type Member in codegen".
+fn emit_str_join_helper(out: &mut String) {
+    out.push_str(
+        "// Phase 11.6.c continuation — helper consumed by every\n\
          // `{#for x in xs} <body> {/for}` template directive: joins\n\
          // a `List<Str>` (typically the output of `xs.map(fn(x) =>\n\
          // <body as Str>)`) into a single `Str` for concatenation\n\
          // into the surrounding HTML. Classic Fitz's `List<Str>`\n\
          // built-in methods do not include `.join()`, so this\n\
-         // helper is emitted at module header time. Unused when\n\
+         // helper is emitted after the imports. Unused when\n\
          // no `{#for}` is present — accepted as generated-code dead\n\
          // code.\n\
          fn __fitz_view_str_join(xs: List<Str>) -> Str {\n  \

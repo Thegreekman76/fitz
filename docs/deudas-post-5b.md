@@ -2881,6 +2881,26 @@ canónicos.
 
 ---
 
+## 🔴 W26 (ABIERTA, caracterizada 2026-07-23) — nominal importado en el estado de un `@live_component` no compila a binario
+
+**Síntoma**: un `.fitzv` con `state { xs: List<Member> }` donde `Member` viene de un `.fitz` hermano (`from models import Member` en el `.fitzv`) falla `fitz build` con `unknown type \`Member\` in codegen`. Corre bien con `fitz run`. Es el patrón del `examples/course/c3-team-panel-sfc` (`List<Member>` con `Member`+helpers en `helpers.fitz`). El core de LiveComponents (v0.28.3) ya compila; esto es el long tail de nominales importados en el estado.
+
+**Ya resuelto en v0.28.4 (parte del camino)**:
+- **Gap 1** (falso positivo): el `.raw over Any` que aparecía era user-code — faltaba `import Html` en el `main.fitz`. Arreglado en los ejemplos.
+- **Gap 2 layer 1** (fix real): el emisor SSR ponía los imports del usuario mid-file (después del helper `__fitz_view_str_join`). Fix: helper emitido después de todos los imports (`emit_str_join_helper`). Necesario pero no suficiente.
+
+**Localización precisa de lo que falta (layer 2, para retomar fresco)**:
+- El error se dispara en el codegen de **main**, **justo después** de que `pre_register_types` enriquece el tipo importado del componente (ej `M`/`TeamPanel`, que tiene `members: List<Member> = [Member { ... }]`). Confirmado con debug: la secuencia es `... registering imported type M` → inmediatamente `unknown-type struct_lit: Member | main=true`.
+- El `gen_struct_lit(Member { ... })` corre en el contexto de **main**, donde `Member` NO está en `type_sigs` (main solo importó `M`/`TeamPanel`, no `Member`). El struct lit del componente `M {}` (del `flv_register` auto-inyectado) **nunca** llega a `gen_struct_lit` en main — el `Member{}` aparece antes, en una pre-pass.
+- **El caso plano equivalente FUNCIONA**: `from models import Outer` + `let o = Outer {}` con `type Outer { items: List<Nested> = [Nested { name: "a" }] }` (Nested en el MISMO módulo `models`) compila y corre (`Outer { items: [Nested { name: "a" }] }`). La diferencia clave es que en el caso `.fitzv` el nominal del default (`Member`) es **transitivo** — importado por el módulo intermedio (`M`/`TeamPanel`), no por main.
+- `gen_type_default_helpers` (que emite `__default_M_members()` inlineando `[Member{}]`) corre en el módulo M (main=false), NO en main — descartado como fuente del `Member{}` de main.
+
+**Hipótesis del fix** (a validar en la próxima tanda): (a) que `pre_register_types`, al enriquecer un tipo importado, registre también sus nominales **transitivos** (los que el módulo del tipo importó a su vez) en el `type_sigs`/env de main con sus fields — paralelo al remap de W9/W17; o (b) que el `M {}` del flv_register (y en general el fill de defaults de un tipo importado) llame el `__default_<T>_<field>()` del módulo definidor en vez de inlinear el default_expr con nominales del contexto ajeno. La opción (b) es más quirúrgica pero primero hay que identificar exactamente qué pre-pass gen'ea el `Member{}` en main (está entre `pre_register_types` y `emit_main_rs_body`: candidatos `pre_register_fns`, `partition_program_stmts`, `resolve_state_var_types` — este último solo toca shared state vars, que nmin no tiene, así que probablemente es otro path del pre-registro de tipos importados con default de nominal transitivo).
+
+**Reproductor mínimo**: `models.fitz` (`type Member { name: Str, active: Bool }` + `fn badge`), `M.fitzv` (`from models import Member, badge` + `state { members: List<Member> = [Member { name: "Ada", active: true }] }`), `main.fitz` (`from fitz_liveviews import Html, ...` + `from M import M, M_render, M_toggle` + flv_register auto-inyectado + `@get`/`@ws`/`@server`). Ver `examples/course/c3-team-panel-sfc` en fitz-liveviews.
+
+---
+
 ## 🟢 W25 (2026-07-23, v0.28.3) — LiveComponents compilan a binario nativo (`fitz build`)
 
 **Hito**: las LiveComponents de fitz-liveviews (`@live_component` / `component()` / `flv_register` / `dispatch_component_events`) andaban solo en `fitz run`; ahora compilan a binario nativo con paridad. Descubierto escribiendo el cap C5 del curso (dashboard de tiles per-instancia). Dos gaps de codegen coordinados.
