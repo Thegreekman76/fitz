@@ -12,6 +12,14 @@
 *.exe
 *.pdb
 
+# Scratch/output de corridas de test y lint en la raíz del repo —
+# archivos temporales que a veces se generan al capturar salida de
+# `cargo test`/`clippy`. Nunca se versionan.
+/libfull*.txt
+/viewfull.txt
+/vt_result.txt
+/clippy.txt
+
 # Windows
 Thumbs.db
 desktop.ini
