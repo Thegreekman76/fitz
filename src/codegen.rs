@@ -15020,7 +15020,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
         }
 
-        // Path 3: runtime — accessor function `pub fn X() -> T { ... }`.
+        // Path 3: runtime accessor for a module-level `let` global.
         let ret_rs = rust_type_for(&declared_ty, self.env).map_err(|_| {
             self.err_at(
                 value.span(),
@@ -15032,6 +15032,35 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             )
         })?;
         let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
+
+        // v0.28.3 — reference/container globals (List / Map / Nominal, whose
+        // Rust rep is `Arc<Mutex<...>>`) must be a SINGLE shared instance so
+        // that mutation persists and is visible across the HTTP worker
+        // threads. Emitting `pub fn X() -> T { <default> }` returned a FRESH
+        // empty value on every call, so state written to a module global (the
+        // fitz-liveviews `COMPONENT_REGISTRY` / `COMPONENT_STATE_STORE` that
+        // back LiveComponents) was silently lost — `flv_register` populated
+        // one instance, `component()` read another → "key not found in map".
+        // Mirror how main's HTTP state globals are emitted (F17.4b):
+        // `LazyLock<Arc<Mutex<T>>>` + a getter that clones the Arc (shares
+        // the Mutex). Primitives keep the const/static paths above; only
+        // reference types reach here needing sharing.
+        if matches!(
+            declared_ty,
+            Type::List(_) | Type::Map(_, _) | Type::Nominal(_)
+        ) {
+            writeln!(
+                &mut self.output,
+                "static __FITZ_GLOBAL_{name}: std::sync::LazyLock<{ret}> = std::sync::LazyLock::new(|| {{ {rhs} }});\n\
+                 pub fn {name}() -> {ret} {{ __FITZ_GLOBAL_{name}.clone() }}\n",
+                name = name,
+                ret = ret_rs,
+                rhs = final_rhs
+            )
+            .unwrap();
+            return Ok(());
+        }
+
         writeln!(
             &mut self.output,
             "pub fn {}() -> {} {{ {} }}\n",
@@ -36793,6 +36822,54 @@ fn coerce(code: &str, from: &Type, to: &Type, env: &TypeEnv) -> String {
                 vc = vc
             )
         }
+        // v0.28.3 — `Map<K, Function> → Map<K, Any>` (function values
+        // widening to `Any`). The map literal emitter computes its own LUB,
+        // so a homogeneous map of same-signature functions (`{"bump":
+        // Tile_bump, "reset": Tile_reset}`) is typed `Map<Str, Function>`,
+        // NOT `Map<Str, Any>` — and passing it to a `Map<Str, Any>`
+        // parameter (the `flv_register` event-handler map that drives
+        // LiveComponents) hit this coerce with no matching arm, leaking the
+        // raw `Arc<dyn Fn>` casts (E0308: expected `__FitzValue`, found
+        // `Arc<...>`). We rebuild the Vec, coercing each function value
+        // `Function → Any` through `wrap_fn_as_any`, which emits the
+        // `__FitzValue::Function(...)` marshalling adapter. Runtime rep of
+        // `Map<K,V>` is `Arc<Mutex<Vec<(K, V)>>>`. NARROW guard: only fires
+        // when the value is a concrete `Function` widening to `Any` — a
+        // general `Map → Map` rewrap would over-fire on the library's own
+        // `Map<Any,Any>`/`Map<Str,Any>` coercions and emit `__fv_to_*`
+        // helper calls into module files that don't import them. The
+        // function-widening case only ever occurs in the user's main.rs
+        // (the auto-injected `flv_register` call), where the helpers live.
+        (Type::Map(k1, v1), Type::Map(_k2, v2))
+            if matches!(v1.as_ref(), Type::Function { .. }) && matches!(v2.as_ref(), Type::Any) =>
+        {
+            // The Rust rep of `Map<K, Any>` is `Vec<(__FitzValue,
+            // __FitzValue)>` — BOTH key and value are `__FitzValue` when the
+            // value is `Any` (the __FitzValue::Map shape). So coerce the key
+            // to `Any` too, not to `k2` (which would leave it a raw `String`
+            // and mismatch the tuple type).
+            let kc = coerce("__k", k1, &Type::Any, env);
+            let vc = coerce("__v", v1, v2, env);
+            format!(
+                "{{ let __src_m = {code}; let __g_m = __src_m.lock().unwrap(); let __out_m: Vec<(__FitzValue, __FitzValue)> = __g_m.iter().map(|(__k0, __v0)| {{ let __k = __k0.clone(); let __v = __v0.clone(); ({kc}, {vc}) }}).collect(); std::sync::Arc::new(std::sync::Mutex::new(__out_m)) }}",
+                code = code,
+                kc = kc,
+                vc = vc
+            )
+        }
+        // v0.28.3 — `List<Function> → List<Any>`, the parallel of the Map
+        // arm above (same narrow guard: only a concrete function value
+        // widening to `Any`).
+        (Type::List(i1), Type::List(i2))
+            if matches!(i1.as_ref(), Type::Function { .. }) && matches!(i2.as_ref(), Type::Any) =>
+        {
+            let ic = coerce("__it", i1, i2, env);
+            format!(
+                "{{ let __src_l = {code}; let __g_l = __src_l.lock().unwrap(); let __out_l: Vec<__FitzValue> = __g_l.iter().map(|__it0| {{ let __it = __it0.clone(); {ic} }}).collect(); std::sync::Arc::new(std::sync::Mutex::new(__out_l)) }}",
+                code = code,
+                ic = ic
+            )
+        }
         _ => code.to_string(),
     }
 }
@@ -44811,6 +44888,29 @@ mod tests {
         let x = ast_test::find_item_const(&file, "X").expect("missing const X");
         assert!(ast_test::vis_is_pub(&x.vis), "expected `pub const X`");
         assert_eq!(ast_test::ts(&*x.ty), "i64", "expected type i64 for X");
+    }
+
+    #[test]
+    fn module_let_map_top_level_emits_shared_lazylock_global_w25() {
+        // v0.28.3 — a mutable reference/container global (Map/List/Nominal,
+        // Rust rep `Arc<Mutex<...>>`) must be a SINGLE shared instance so
+        // state persists across calls + HTTP worker threads. Previously it
+        // was `pub fn X() -> T { <fresh default> }` (a new empty value per
+        // call → lost state, which broke fitz-liveviews' COMPONENT_REGISTRY).
+        // Now: a `LazyLock` static + a getter that clones the shared Arc.
+        let code = gen_module("let CACHE: Map<Str, Int> = {}").unwrap();
+        assert!(
+            code.contains("LazyLock") && code.contains("__FITZ_GLOBAL_CACHE"),
+            "expected a shared LazyLock global for CACHE, got:\n{}",
+            code.lines()
+                .filter(|l| l.contains("CACHE"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            code.contains("__FITZ_GLOBAL_CACHE.clone()"),
+            "the CACHE getter must clone the shared Arc, not build a fresh value"
+        );
     }
 
     #[test]

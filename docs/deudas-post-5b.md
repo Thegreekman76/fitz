@@ -2881,6 +2881,22 @@ canónicos.
 
 ---
 
+## 🟢 W25 (2026-07-23, v0.28.3) — LiveComponents compilan a binario nativo (`fitz build`)
+
+**Hito**: las LiveComponents de fitz-liveviews (`@live_component` / `component()` / `flv_register` / `dispatch_component_events`) andaban solo en `fitz run`; ahora compilan a binario nativo con paridad. Descubierto escribiendo el cap C5 del curso (dashboard de tiles per-instancia). Dos gaps de codegen coordinados.
+
+**Gap 1 — `coerce(Map<K,Function> → Map<K,Any>)` faltante** (`src/codegen.rs::coerce`): el `flv_register("Name", state, render_fn, {"event": handler, ...})` auto-inyectado (v0.20.1) pasa un `Map<Str, Any>` de funciones. El LUB del map literal lo tipaba `Map<Str, Function>` (homogéneo), y al coaccionarlo al parámetro `Map<Str, Any>` no había rama `(Map, Map)` → los `Arc<dyn Fn>` crudos sobrevivían → E0308 (`expected __FitzValue, found Arc<...>`). **Fix**: ramas nuevas `(Map<K,Function> → Map<K,Any>)` y `(List<Function> → List<Any>)` que reconstruyen el contenedor envolviendo cada función en `__FitzValue::Function(...)` vía `wrap_fn_as_any` (el adapter que marshalea `Vec<__FitzValue>` ↔ tipos concretos por la firma; ya existía y `coerce(fn→Any)` ya lo usaba — solo faltaba la rama del contenedor). La key también se coacciona a `__FitzValue` porque el rep Rust de `Map<K, Any>` es `Vec<(__FitzValue, __FitzValue)>`. **Guard estrecho**: solo cuando el value es `Function` concreta ensanchando a `Any` — un rewrap general `Map→Map` sobre-disparaba en las coerciones internas del propio módulo lib (`Map<Any,Any>→Map<Str,Str>` etc.) y emitía `__fv_to_*` en archivos de módulo que no los importan. El caso función-widening solo ocurre en main.rs (el flv_register auto-inyectado), donde los helpers viven.
+
+**Gap 2 — globals de módulo mutables perdían estado** (`src/codegen.rs`, path del `let` top-level de módulo, "Path 3"): un `let X = {}` a nivel de módulo (Map/List/Nominal mutable) se emitía como `pub fn X() -> T { <default fresco> }` — devolvía un valor **nuevo vacío en cada llamada**. El estado escrito a un global de módulo se perdía silenciosamente entre llamadas y entre threads worker de HTTP. Esto rompía el `COMPONENT_REGISTRY`/`COMPONENT_STATE_STORE` de fitz-liveviews (`flv_register` poblaba una instancia, `component()` leía otra vacía → "key not found in map"). **Fix**: globals de módulo de tipo referencia (List/Map/Nominal, rep Rust `Arc<Mutex<...>>`) se emiten como `static __FITZ_GLOBAL_<NAME>: LazyLock<Arc<Mutex<T>>>` + getter que clona el Arc (misma instancia compartida). Espejo del state HTTP del main (F17.4b). Alinea `fitz build` con `fitz run` (un global de módulo es UNA instancia). Primitivos siguen por const/static.
+
+**Tests** (+3): `compile_e2e::coerce_map_of_functions_to_map_any_wraps_in_fitzvalue_function_w25` (repro aislado: map de 2 fns → `Map<Str,Any>`, build+run → `2`), `compile_e2e::module_mutable_global_persists_state_via_shared_lazylock_w25` (repro aislado: write 42 a global de módulo, read back → `42` en binario), `codegen::tests::module_let_map_top_level_emits_shared_lazylock_global_w25`.
+
+**Validado**: counter SFC (C1) y dashboard de tiles (C5, multi-instancia) compilan a binario + paridad run↔binario exacta (aislamiento per-instancia downloads=2/signups=1/errors=0 en el binario).
+
+**Deuda residual derivada (v0.28.4+, para que el admin ABM use LiveComponents completas)**: SFCs con estado `List` pegan `.raw` sobre `Any` en el render de listas del emisor SSR; SFCs con nominales importados en el estado pegan `unknown type X in codegen` (primo de W17/W19 cross-module). El core (registro + dispatch + estado per-instancia) ya compila; falta el long tail de features del path SSR→binario.
+
+---
+
 ## 🟢 W24 (2026-07-23, v0.28.2) — `.fitzv` view lexer: operadores de comparación `==` `!=` `<=` `>=`
 
 **Hito**: cierra un gap del round-trip de operadores en los single-file components (`.fitzv`). Descubierto escribiendo el curso "Learn Fitz LiveViews" (paquete de adopción de la Companion UI) — un `event` handler con `if (x != y)` fallaba.

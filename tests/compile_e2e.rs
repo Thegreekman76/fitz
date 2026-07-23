@@ -10397,6 +10397,115 @@ print(\"reg ok\")\n\
 }
 
 #[test]
+fn coerce_map_of_functions_to_map_any_wraps_in_fitzvalue_function_w25() {
+    // v0.28.3 — a homogeneous map of same-signature functions is typed
+    // `Map<Str, Function>` by the LUB, and passing it to a `Map<Str, Any>`
+    // parameter used to leak the raw `Arc<dyn Fn>` casts (E0308: expected
+    // `__FitzValue`, found `Arc<...>`). The new `(Map, Map)` coerce arm
+    // rebuilds the map wrapping each function value in a
+    // `__FitzValue::Function(...)` adapter. This is the core of what makes
+    // fitz-liveviews LiveComponents (`flv_register`'s event-handler map)
+    // compile to a native binary. Self-contained repro (no external lib).
+    let src = "\
+fn takes(h: Map<Str, Any>) -> Int {\n\
+    return len(h)\n\
+}\n\
+fn a() -> Int => 1\n\
+fn b() -> Int => 2\n\
+let n = takes({\"x\": a, \"y\": b})\n\
+print(n)\n\
+";
+    let (stdout, code) = build_and_run("coerce_map_of_fns_w25", src);
+    assert_eq!(code, 0, "binary should exit 0");
+    assert_eq!(
+        stdout.trim(),
+        "2",
+        "map of 2 functions coerced to Map<Str, Any>"
+    );
+}
+
+#[test]
+fn module_mutable_global_persists_state_via_shared_lazylock_w25() {
+    // v0.28.3 — a module-level `let X = {}` (a mutable Map/List/Nominal
+    // global) was emitted as `pub fn X() -> T { <fresh default> }`, which
+    // returned a NEW empty value on every call — so state written to it was
+    // silently lost across calls and across HTTP worker threads. This is
+    // what broke fitz-liveviews' `COMPONENT_REGISTRY` / `COMPONENT_STATE_STORE`
+    // (`flv_register` populated one instance, `component()` read another →
+    // "key not found in map"). The fix emits a shared `LazyLock<Arc<Mutex<T>>>`
+    // static + a getter that clones the Arc. Self-contained repro: write to a
+    // module global, read it back — it must persist.
+    let stem = "module_global_persist_w25";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create tempdir");
+
+    std::fs::write(
+        dir.join("store.fitz"),
+        "let CACHE: Map<Str, Int> = {}\n\
+         \n\
+         fn put(k: Str, v: Int) -> Null {\n\
+             CACHE[k] = v\n\
+             return null\n\
+         }\n\
+         \n\
+         fn get_or_zero(k: Str) -> Int {\n\
+             return match CACHE.get(k) {\n\
+                 Ok(v) => v,\n\
+                 Err(_) => 0,\n\
+             }\n\
+         }\n",
+    )
+    .expect("write store.fitz");
+
+    let main_src = "\
+from store import put, get_or_zero\n\
+let _ = put(\"a\", 42)\n\
+print(get_or_zero(\"a\"))\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("write main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (W25):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // The emitted module must use a shared LazyLock (not a fresh-value getter).
+    let module_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/store.rs", stem));
+    let content = std::fs::read_to_string(&module_rs).expect("read store.rs");
+    assert!(
+        content.contains("LazyLock") && content.contains("__FITZ_GLOBAL_CACHE"),
+        "store.rs must emit a shared LazyLock global for CACHE (W25):\n{}",
+        content
+            .lines()
+            .filter(|l| l.contains("CACHE"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    let run = Command::new(&bin).output().expect("run binary");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "42",
+        "module global state must persist (write 42, read back 42), not reset to 0"
+    );
+}
+
+#[test]
 fn openapi_cross_module_includes_module_handlers() {
     // 10.8.5 (v0.10.8) — fix #3: el schema OpenAPI 3.1 emitido por
     // `fitz build` ahora incluye los handlers HTTP de módulos
