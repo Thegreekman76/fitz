@@ -9,6 +9,45 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.5] — 2026-07-23 — nominal transitivo en defaults cross-module (W26): SFCs con `List<Member>` importado compilan a binario
+
+Cierra la deuda **W26** abierta en v0.28.4: un `.fitzv` con
+`state { members: List<Member> = [Member { ... }] }` donde `Member` viene de un
+`.fitz` hermano ya compila con `fitz build` y corre con paridad ante `fitz run`.
+Era el patrón del `examples/course/c3-team-panel-sfc` del curso de fitz-liveviews.
+Con esto, las LiveComponents con nominales importados en el estado quedan
+completas end-to-end (core en v0.28.3, imports al head en v0.28.4, defaults
+transitivos acá).
+
+### Fixed — `impl __FromFitzJson` cross-module inlineaba defaults con nominales transitivos
+
+- El `impl __FromFitzJson for <T>Data` que main.rs emite para tipos de módulos
+  cargados (`emit_helpers_for_imported_types`, cuando hay HTTP) inlineaba el
+  default expr de cada field ausente vía `gen_expr` **en el ctx de main**. Si el
+  default instancia un nominal **transitivo** (importado por el módulo que define
+  el tipo, no por main — ej. `members: List<Member> = [Member { ... }]`), el
+  build abortaba con `unknown type \`Member\` in codegen`.
+- **Fix**: con contexto cross-module (`xmod = Some`, plumbing de W19), los dos
+  sitios que materializan defaults (arm `None =>` del field ausente + init de
+  fields `@hidden`) delegan al helper `<mod>::__default_<T>_<field>()` que
+  PreF8.3 ya emite en el módulo definidor — mismo patrón que el struct lit de
+  tipos importados en `gen_struct_lit`. Tipos locales siguen inlineando igual.
+- Validado end-to-end sobre el c3-team-panel-sfc: build verde, `GET /` con el
+  render inicial correcto, toggle por WS con paridad exacta ante `fitz run`
+  (el frame sin `html`/`patches` ejercita en runtime el nuevo path
+  `fitz_liveviews::__default_LiveFrame_patches()`).
+- Test nuevo:
+  `compile_e2e::cross_module_default_with_transitive_nominal_delegates_to_module_helper_w26`.
+
+### Deuda residual derivada
+
+- El path Python espejo (`py_field_extract_code`) tiene el mismo patrón latente
+  (inline `gen_expr` del default) — solo dispara con `uses_python` + coerción
+  PyDict→Instance de tipos importados con defaults transitivos; misma delegación
+  si aparece el caso real. Bonus caracterizado: `return Panel {}` (struct lit
+  vacío en return position) parsea como Ident + bloque — gap de parser menor,
+  separado. Detalle en `docs/deudas-post-5b.md` → "W26".
+
 ## [v0.28.4] — 2026-07-23 — `.fitzv` SSR: imports del usuario al head del módulo
 
 Fix parcial hacia "SFCs con nominales importados en el estado compilan a binario"

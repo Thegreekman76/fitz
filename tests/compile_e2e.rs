@@ -10331,6 +10331,105 @@ print(\"count={count()}\")\n\
 }
 
 #[test]
+fn cross_module_default_with_transitive_nominal_delegates_to_module_helper_w26() {
+    // W26 (2026-07-23, v0.28.5) — un tipo importado cuyo DEFAULT
+    // referencia un nominal TRANSITIVO (importado por el módulo que
+    // define el tipo, NO por main) rompía `fitz build` con
+    // "unknown type `Member` in codegen". Caso real: un `.fitzv` con
+    // `state { members: List<Member> = [Member { ... }] }` donde
+    // `Member` vive en un `.fitz` hermano (c3-team-panel-sfc de
+    // fitz-liveviews).
+    //
+    // **Causa**: el `impl __FromFitzJson for PanelData` que
+    // `emit_helpers_for_imported_types` emite en main.rs (cuando hay
+    // HTTP) inlineaba el default expr vía `gen_expr` en el ctx de
+    // main, donde `Member` no está en `type_sigs`.
+    //
+    // **Fix**: con contexto cross-module (`xmod = Some`), el arm
+    // `None =>` del default delega al helper
+    // `<mod>::__default_<T>_<field>()` que PreF8.3 ya emite en el
+    // módulo definidor (mismo patrón que el struct lit importado de
+    // `gen_struct_lit`).
+    let stem = "xmod_transitive_default_w26";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // models.fitz — el nominal transitivo.
+    std::fs::write(
+        dir.join("models.fitz"),
+        "type Member {\n\
+             name: Str\n\
+             active: Bool\n\
+         }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // panel.fitz — el tipo importado por main, con default que
+    // instancia `Member` (transitivo: main nunca lo importa).
+    std::fs::write(
+        dir.join("panel.fitz"),
+        "from models import Member\n\
+         \n\
+         type Panel {\n\
+             title: Str\n\
+             members: List<Member> = [Member { name: \"Ada\", active: true }, Member { name: \"Grace\", active: false }]\n\
+         }\n",
+    )
+    .expect("escribir panel.fitz");
+
+    // main.fitz — importa SOLO `Panel` + handler HTTP (dispara
+    // `emit_helpers_for_imported_types` con do_http).
+    let main_src = "\
+from panel import Panel\n\
+\n\
+@get(\"/panel\")\n\
+fn get_panel() -> Panel {\n\
+    return Panel { title: \"Team\" }\n\
+}\n\
+\n\
+@server(43931)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (W26):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // El `impl __FromFitzJson for PanelData` de main.rs debe delegar
+    // el default de `members` al helper del módulo definidor…
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+    assert!(
+        content.contains("panel::__default_Panel_members()"),
+        "main.rs debe delegar el default de `members` a `panel::__default_Panel_members()` (W26)"
+    );
+    // …y NO inlinear el literal del default en el ctx de main (el
+    // literal `\"Ada\"` solo debe vivir en panel.rs, adentro del
+    // helper `__default_Panel_members`).
+    assert!(
+        !content.contains("String::from(\"Ada\")"),
+        "main.rs NO debe inlinear el default `[Member {{ ... }}]` (W26)"
+    );
+    let panel_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/panel.rs", stem));
+    let panel_content = std::fs::read_to_string(&panel_rs).expect("leer panel.rs");
+    assert!(
+        panel_content.contains("pub fn __default_Panel_members()"),
+        "panel.rs debe emitir el helper `__default_Panel_members` (PreF8.3)"
+    );
+}
+
+#[test]
 fn cross_module_any_field_without_db_emits_fitz_value_import_w23() {
     // v0.28.1 (2026-07-22) — a module declares a `type X { f: Any }`
     // (which the codegen emits with the Rust type `__FitzValue`) but the

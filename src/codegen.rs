@@ -28928,6 +28928,25 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         _ => unreachable!(),
                     };
                     writeln!(&mut self.output, "            None => {},", default_code).unwrap();
+                } else if let Some((module_index, _)) = xmod {
+                    // W26 (v0.28.5) — cross-module: the default expr may
+                    // reference nominals of the ORIGIN module that main
+                    // never imported (transitive, e.g. `members:
+                    // List<Member> = [Member { ... }]` with `Member`
+                    // imported only by the module that defines the type).
+                    // Inlining it via `gen_expr` in main's ctx aborts with
+                    // "unknown type `Member` in codegen". Delegate to the
+                    // module's `__default_<T>_<field>()` helper (PreF8.3),
+                    // whose body was emitted in the origin module's scope
+                    // and already returns the field's exact Rust type.
+                    let qual = self.loaded_modules[module_index].mod_qualifier.clone();
+                    let prefix = self.mod_path_prefix();
+                    writeln!(
+                        &mut self.output,
+                        "            None => {}{}::__default_{}_{}(),",
+                        prefix, qual, name, f.name
+                    )
+                    .unwrap();
                 } else {
                     let (code, ty) = self.gen_expr(default_expr)?;
                     let coerced = coerce(&code, &ty, &f.type_, self.env);
@@ -28981,6 +29000,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             &mut self.output,
                             "            {}: {},",
                             f.name, default_code
+                        )
+                        .unwrap();
+                    } else if let Some((module_index, _)) = xmod {
+                        // W26 (v0.28.5) — same cross-module delegation as
+                        // the non-hidden default arm above: the default
+                        // expr may reference transitive nominals of the
+                        // origin module.
+                        let qual = self.loaded_modules[module_index].mod_qualifier.clone();
+                        let prefix = self.mod_path_prefix();
+                        writeln!(
+                            &mut self.output,
+                            "            {}: {}{}::__default_{}_{}(),",
+                            f.name, prefix, qual, name, f.name
                         )
                         .unwrap();
                     } else {
