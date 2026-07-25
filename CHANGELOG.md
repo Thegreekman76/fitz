@@ -9,6 +9,35 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.6] — 2026-07-24 — import de `__FitzValue` por coerción en módulos (W27): el refactor a LiveComponents del Admin ABM compila a binario
+
+Cierra la deuda **W27**, descubierta en el primer slice del refactor a
+LiveComponents del Admin ABM de fitz-liveviews (ConfirmDialog como `.fitzv` con
+instancias per-connection). Un módulo que pasa una instancia nominal a un param
+`Any` de una fn importada (`component_with(name, id, initial: Any)`) o baja un
+retorno `Any` a nominal con anotación (`let st: confirm_dialog =
+component_state(...)`) emitía `__FitzValue::Instance`/`__fv_type_name` sin el
+`use crate::__FitzValue;` correspondiente → E0433/E0425 en `fitz build`.
+
+### Fixed — gate W23 no cubría `__FitzValue` emitido por coerción
+
+- El gate de v0.28.1 (W23) emite el import cuando el módulo **declara** shapes
+  `Any` (`program_uses_fitz_value`) o importa un `@table` jsonb. La coerción
+  Instance→`Any` (args de fns importadas) y el downcast `Any`→nominal (let
+  anotado) emiten `__FitzValue` sin ninguna declaración detectable en el AST.
+- **Fix**: post-scan del Rust generado del módulo — si referencia `__FitzValue`
+  y el import falta, se inserta tras el header (`use std::sync::{Arc, Mutex};`)
+  con `#[allow(unused_imports)]`; el flag transitivo `module_uses_fitz_value`
+  hace OR con el scan para que el crate root emita el `enum __FitzValue`.
+- Test nuevo: `compile_e2e::cross_module_any_coercions_emit_fitz_value_import_w27`.
+- Validado end-to-end sobre el Admin ABM: build verde + smoke WS 10/10 con
+  paridad exacta ante `fitz run` (uuid per-connection, ask/cancel/confirm,
+  delete real en Postgres).
+- Convenciones confirmadas de paso (no son bugs; detalle en
+  `docs/deudas-post-5b.md` → W27): `Uuid.v4().to_str()` para instance ids
+  `Str`; el entry file importa `Html` cuando registra SFCs; la
+  auto-registración §9.bb pre-scanea solo los imports DIRECTOS del entry.
+
 ## [v0.28.5] — 2026-07-23 — nominal transitivo en defaults cross-module (W26): SFCs con `List<Member>` importado compilan a binario
 
 Cierra la deuda **W26** abierta en v0.28.4: un `.fitzv` con

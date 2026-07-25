@@ -4538,7 +4538,7 @@ impl ModuleLoader {
             &self.dep_registry,
         );
         module_mw_names.extend(self.main_imported_middleware_fns.iter().cloned());
-        let rust_content = generate_module_rs_with_bindings(
+        let mut rust_content = generate_module_rs_with_bindings(
             &module_program,
             &module_env,
             &local_bindings,
@@ -4547,6 +4547,33 @@ impl ModuleLoader {
             self.main_observability_enabled,
             &module_mw_names,
         )?;
+
+        // W27 (v0.28.6) — the W23 gate emits `use crate::__FitzValue;`
+        // when the module DECLARES `Any`-shaped fields
+        // (`program_uses_fitz_value`) or imports a jsonb @table type.
+        // But a module can also *emit* `__FitzValue` without either:
+        // coercing a nominal instance into an imported fn's `Any`
+        // param (e.g. fitz-liveviews' `component_with(name, id,
+        // initial: Any)`), or downcasting an `Any` return into a
+        // nominal via `let x: T = component_state(...)`. Those shapes
+        // are only knowable post-generation, so scan the emitted Rust:
+        // if it references `__FitzValue` and the import is absent,
+        // insert it right after the module header. The flag OR below
+        // (`module_uses_fitz_value`) also makes the crate root emit
+        // the `enum __FitzValue` definition.
+        let module_emits_fitz_value = rust_content.contains("__FitzValue");
+        if module_emits_fitz_value && !rust_content.contains("use crate::__FitzValue;") {
+            let anchor = "use std::sync::{Arc, Mutex};\n";
+            if let Some(pos) = rust_content.find(anchor) {
+                rust_content.insert_str(
+                    pos + anchor.len(),
+                    "#[allow(unused_imports)]\n\
+                     use crate::__FitzValue;\n\
+                     #[allow(unused_imports)]\n\
+                     use crate::__fv_type_name;\n",
+                );
+            }
+        }
 
         let mod_name = segments.last().cloned().unwrap_or_default();
         let rel_path = mod_rel_path_from_segments(segments);
@@ -4593,7 +4620,13 @@ impl ModuleLoader {
         let module_uses_logging = program_uses_logging(&module_program);
         // W11 (v0.10.7) — transitive module flags
         // (uses_fitz_value, uses_db, has_http).
-        let module_uses_fitz_value = program_uses_fitz_value(&module_program);
+        // W27 (v0.28.6) — OR the post-generation scan: a module whose
+        // emitted Rust references `__FitzValue` (Any-param coercion /
+        // Any→nominal downcast, see above) needs the crate root to
+        // emit the enum even when the declaration-based detector
+        // doesn't fire.
+        let module_uses_fitz_value =
+            program_uses_fitz_value(&module_program) || module_emits_fitz_value;
         let module_uses_db = program_uses_db(&module_program);
         let module_uses_date_or_uuid = program_uses_date_or_uuid(&module_program);
         let module_has_http = has_http_routes(&module_program);

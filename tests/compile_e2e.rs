@@ -10496,6 +10496,100 @@ print(\"reg ok\")\n\
 }
 
 #[test]
+fn cross_module_any_coercions_emit_fitz_value_import_w27() {
+    // v0.28.6 (2026-07-24) — W23 gated the module's `use crate::__FitzValue;`
+    // on DECLARATION shapes (`type X { f: Any }` / imported jsonb @table).
+    // But a module can also *emit* `__FitzValue` with no such declaration:
+    //   (a) passing a nominal instance to an imported fn's `Any` param
+    //       (coerce Instance → Any wraps in `__FitzValue::Instance`), and
+    //   (b) downcasting an `Any` return into a nominal via annotation
+    //       (`let c: Card = peek()` emits the `__FitzValue::Instance` match
+    //       + `__fv_type_name` panic arm).
+    // Exact shape of the Admin ABM's empleados.fitz calling fitz-liveviews'
+    // `component_with(name, id, initial: Any)` + `component_state(...)`.
+    // W27 post-scans the emitted module Rust and inserts the import (and
+    // ORs the crate-root enum flag) when the declaration detector misses.
+    let stem = "xmod_any_coerce_w27";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create tempdir");
+
+    std::fs::write(
+        dir.join("store.fitz"),
+        "fn stash(v: Any) -> Null {\n\
+             return null\n\
+         }\n\
+         \n\
+         fn peek() -> Any {\n\
+             return 0\n\
+         }\n",
+    )
+    .expect("write store.fitz");
+
+    // cards.fitz declares NO `Any` field/param — the declaration-based
+    // detector does not fire here, yet both bodies emit `__FitzValue`.
+    std::fs::write(
+        dir.join("cards.fitz"),
+        "from store import stash, peek\n\
+         \n\
+         type Card {\n\
+             id: Int = 0\n\
+             title: Str = \"\"\n\
+         }\n\
+         \n\
+         fn save_card() -> Null {\n\
+             stash(Card { id: 1, title: \"x\" })\n\
+             return null\n\
+         }\n\
+         \n\
+         fn load_card() -> Card {\n\
+             let c: Card = peek()\n\
+             return c\n\
+         }\n",
+    )
+    .expect("write cards.fitz");
+
+    let main_src = "\
+from cards import Card, save_card, load_card\n\
+\n\
+save_card()\n\
+print(\"cards ok\")\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("write main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (W27):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let module_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/cards.rs", stem));
+    let content = std::fs::read_to_string(&module_rs).expect("read cards.rs");
+    assert!(
+        content.contains("use crate::__FitzValue;"),
+        "cards.rs must emit `use crate::__FitzValue;` (W27):\n{}",
+        content.lines().take(12).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        content.contains("use crate::__fv_type_name;"),
+        "cards.rs must emit `use crate::__fv_type_name;` (W27)"
+    );
+    // The Instance→Any wrap and the Any→nominal downcast both live in
+    // cards.rs (proof the import is actually needed).
+    assert!(
+        content.contains("__FitzValue::Instance"),
+        "cards.rs must emit `__FitzValue::Instance` coercions (W27)"
+    );
+}
+
+#[test]
 fn coerce_map_of_functions_to_map_any_wraps_in_fitzvalue_function_w25() {
     // v0.28.3 — a homogeneous map of same-signature functions is typed
     // `Map<Str, Function>` by the LUB, and passing it to a `Map<Str, Any>`

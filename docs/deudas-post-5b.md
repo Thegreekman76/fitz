@@ -2881,6 +2881,22 @@ canónicos.
 
 ---
 
+## 🟢 W27 (2026-07-24, v0.28.6) — import de `__FitzValue` en módulos que lo emiten por coerción (no por declaración)
+
+**Hito**: un módulo que pasa una instancia nominal a un param `Any` de una fn importada, o que baja un retorno `Any` a nominal con anotación (`let st: confirm_dialog = component_state(...)`), ya compila con `fitz build`. Descubierto en el **primer slice del refactor a LiveComponents del Admin ABM** (fitz-liveviews): `empleados.fitz` llama `component_with(name, id, initial: Any)` con `confirm_dialog { locale: locale }` y lee estado con `component_state(...)` anotado → el `.rs` emitido referenciaba `__FitzValue::Instance` + `__fv_type_name` sin el `use crate::__FitzValue;` (E0433 ×2 + E0425).
+
+**Causa raíz**: el gate W23 (v0.28.1) emite el import cuando el módulo **declara** shapes `Any` (`program_uses_fitz_value`: fields `Any`, `Map<Str, Any>`, etc.) o importa un `@table` con jsonb. Pero la coerción Instance→`Any` (args de fns importadas) y el downcast `Any`→nominal (let anotado) emiten `__FitzValue` **sin que haya ninguna declaración detectable** en el AST del módulo — solo se sabe post-generación.
+
+**Fix (quirúrgico, `src/codegen.rs` call site del loader ~4550)**: post-scan del `rust_content` generado del módulo — si contiene `__FitzValue` y el import está ausente, se insertan `use crate::__FitzValue;` + `use crate::__fv_type_name;` (con `#[allow(unused_imports)]`) tras el anchor estable `use std::sync::{Arc, Mutex};`. Además `module_uses_fitz_value` hace OR con el scan para que el crate root emita el `enum __FitzValue` aunque el detector declarativo no dispare en ningún módulo.
+
+**Test** (+1 E2E): `compile_e2e::cross_module_any_coercions_emit_fitz_value_import_w27` — 3 archivos (`store.fitz` con `stash(v: Any)` + `peek() -> Any`, `cards.fitz` SIN declaraciones `Any` que ejercita ambas coerciones, main importer); asegura build OK + `cards.rs` emite los dos imports + `__FitzValue::Instance`.
+
+**Validado end-to-end** sobre el Admin ABM (fitz-liveviews) con el ConfirmDialog SFC: `fitz build` verde y smoke WS 10/10 con paridad exacta ante `fitz run` (mint de uuid per-connection, ask/cancel/confirm, delete real en Postgres).
+
+**Notas de convención confirmadas de paso (NO son bugs)**: (a) `Uuid.v4()` tipa `Type::Uuid` (tipo de primera clase desde v0.10.30) — para usarlo como instance id `Str` la forma canónica es `Uuid.v4().to_str()`; el intérprete acepta el `Uuid` crudo por tipado gradual pero el binario es estricto. (b) El entry file debe importar `Html` de `fitz_liveviews` cuando registra SFCs cuyo render retorna `Html` (sin el import, la firma cross-module degrada a `Any` y el adapter del `flv_register` inyectado castea mal — misma convención que documentó v0.28.4 para los mains del curso C2/C3). (c) La auto-registración §9.bb pre-scanea los imports DIRECTOS del entry (regla un-nivel, paralela a W12/B10): el SFC debe importarse en `main.fitz` aunque solo lo use un módulo intermedio.
+
+---
+
 ## 🟢 W26 (2026-07-23, v0.28.5) — nominal importado en el estado de un `@live_component` compila a binario
 
 **Hito**: un `.fitzv` con `state { members: List<Member> = [Member { ... }] }` donde `Member` viene de un `.fitz` hermano (`from helpers import Member` en el `.fitzv`) ya compila con `fitz build` y corre con paridad ante `fitz run`. Era el patrón del `examples/course/c3-team-panel-sfc` de fitz-liveviews (`List<Member>` con `Member`+helpers en `helpers.fitz`), que fallaba con `unknown type \`Member\` in codegen`. Cierra el long tail de nominales importados en el estado de LiveComponents (el core compilaba desde v0.28.3/W25; los imports mid-file se arreglaron en v0.28.4).
