@@ -9,6 +9,48 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.7] — 2026-07-25 — mixed attribute interpolation en `.fitzv` + retry en la copia del binario
+
+Dos cambios de core surgidos del refactor a LiveComponents del Admin ABM de
+fitz-liveviews (slice Toast) y de la familia de flakes de test en Windows.
+
+### Added — mixed attribute interpolation en templates `.fitzv`
+
+El emitter SSR sólo reescribía interpolaciones de atributo de **valor completo**
+(`attr="{field}"`); un valor **mixto** (`class="toast toast-{kind}"`,
+`style="width: {pct}%"`) caía al path Static y se emitía verbatim, dejando
+`{kind}` como una interpolación classic-Fitz de una variable inexistente →
+`fitz build` fallaba con `unknown variable kind` (`fitz check`, gradual, lo
+aceptaba, así que sólo aparecía al compilar). Las interpolaciones de **texto**
+puras (`<span>{msg}</span>`) sí se reescribían — la asimetría rompía cualquier
+SFC que interpole state en un atributo (Vue/Svelte/JSX lo soportan).
+
+- Nueva variante `ExpandedAttr::MixedInterpolation` con segmentos
+  `Literal`/`Expr`. `expand` detecta los segmentos `{...}` en atributos Static
+  (balancea llaves, respeta `\{`/`\}`), parsea cada expr, y el emitter SSR los
+  reescribe a `state.<field>` con el mismo walker de scoping que texto e
+  interpolación completa. El checker type-chequea los segmentos; el rewrite de
+  `<style scoped>` appendea la scope class a un `class` mixto. El target
+  client-WASM difiere con error claro (usar interpolación completa ahí).
+- Byte-a-byte para los `.fitzv` sin atributos mixtos. 9 tests nuevos (6 emit
+  SSR + 3 expand).
+
+### Fixed — retry con backoff en la copia del binario (Windows os error 32)
+
+En Windows el linker/antivirus/indexador puede retener un file handle sobre
+`target/release/<stem>.exe` recién linkeado un instante después del build, y un
+proceso previo que aún sale puede retener el destino. Una `fs::copy` bare
+fallaba con os error 32 (`ERROR_SHARING_VIOLATION`), que se manifestaba como
+flakes de test (`hidden_decorator`, `handler_panic_r6`) desde que T2 (v0.10.13)
+quitó el mutex `SERIAL` y los builds E2E pasaron a correr en paralelo.
+
+- Nuevo helper `copy_binary_with_retry`: reintenta hasta 8 veces con backoff
+  creciente (25ms × intento) sólo ante os error 32; no-op en el happy path.
+  Wired en los dos sitios de copia (`build_file` + `build_file_with_bundle`).
+- Al eliminar el flake, `hidden_decorator` llegaba por primera vez a su tercer
+  assert, que quedó stale tras la traducción ES→EN (v0.16.0): el runtime emite
+  `"undeclared field"` pero el test chequeaba `"no declarado"`. Assert corregido.
+
 ## [v0.28.6] — 2026-07-24 — import de `__FitzValue` por coerción en módulos (W27): el refactor a LiveComponents del Admin ABM compila a binario
 
 Cierra la deuda **W27**, descubierta en el primer slice del refactor a

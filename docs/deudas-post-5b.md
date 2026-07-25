@@ -4,6 +4,39 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 SSR emitter — mixed attribute interpolation en `.fitzv` — **CERRADO v0.28.7 (2026-07-25)**
+
+**Gap**: descubierto en el slice Toast del refactor a LiveComponents del Admin
+ABM. El emitter SSR (`src/view/codegen_ssr.rs`) sólo reescribía interpolaciones
+de atributo de **valor completo** (`attr="{field}"` → `ExpandedAttr::Interpolation`,
+reescrito a `state.<field>`). Un valor **mixto** (`class="toast toast-{kind}"`)
+lo clasificaba el parser como `RawAttr::Static` (`extract_full_interp` sólo
+matchea `{...}` que ocupa todo el valor), llegaba a `expand_attr` como Static, y
+se emitía verbatim → el `{kind}` embebido quedaba como interpolación classic-Fitz
+de una variable inexistente. `fitz check` (gradual) lo aceptaba; `fitz build`
+rompía con `unknown variable kind`. Las interpolaciones de **texto** puras sí se
+reescribían — la asimetría rompía cualquier SFC que interpole state en un
+atributo. ConfirmDialog nunca lo pegó porque no interpola state en atributos.
+
+**Fix (v0.28.7)**: nueva variante `ExpandedAttr::MixedInterpolation { name,
+segments }` con `AttrValueSegment::{Literal, Expr}`. `expand_attr` detecta los
+segmentos `{...}` en atributos Static (`split_mixed_attr_value`: balancea llaves,
+respeta `\{`/`\}`, error claro sobre `{` sin cerrar), parsea cada expr con
+`parse_expr_at`, y el emitter SSR reescribe cada segmento con el mismo
+`format_fitz_expr_scoped` que texto/interpolación-completa. El checker
+(`collect_interpolations`) type-chequea los Expr segments; `rewrite_class_attrs_in_template`
+appendea la scope class a un `class` mixto. El target client-WASM difiere con
+error claro (`set_attribute` + `format!` de cada segmento quedaría pendiente;
+ningún ejemplo WASM lo usa). Byte-a-byte para los `.fitzv` sin atributos mixtos.
+9 tests nuevos (6 emit SSR + 3 expand). Validado end-to-end: el Toast del Admin
+ABM (`class="toast toast-{kind}"`) compila a binario y corre con paridad exacta
+`fitz run` ↔ binario.
+
+**Deuda residual derivada** (NO bloquea): mixed attribute interpolation en el
+target **client-WASM** (hoy error diferido); un `class` mixto en un componente
+con `<style scoped>` recibe la scope class como literal al final (correcto para
+el caso común, pero no reordena los segmentos).
+
 ## 🟢 Phase 11.7 R3.5 + Frente 2 — CERRADAS 2026-07-19 (v0.22.0) + deuda residual nueva
 
 **Cierre**: Phase 11.7 entera cerró en v0.22.0 para el target

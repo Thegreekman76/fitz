@@ -14551,7 +14551,10 @@ K-4 shipped 2026-07-17).
 - **Directivas** — `{#if <cond>} ... {#else} ... {/if}` y
   `{#for <x> in <iter>} ... {/for}` para conditionals + loops.
 - **Attribute interpolation** — `data-flv-value-card_id="{c.id}"`
-  con `"{expr}"` shape (K-3 shipped).
+  con `"{expr}"` shape (K-3 shipped). También **mixed**: un valor
+  con parte estática + `{expr}` (`class="toast toast-{kind}"`,
+  `style="width: {pct}%"`) rewrite-a cada segmento `{...}` a
+  `state.<field>` igual que la interpolación de texto (v0.28.7).
 - **Event decorators** — `data-flv-click="handler_name"`,
   `data-flv-submit="handler_name"` para wire eventos del DOM a
   event handlers declared en el componente.
