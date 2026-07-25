@@ -792,13 +792,35 @@ fn collect_interpolations<'a>(
                 attrs, children, ..
             } => {
                 for attr in attrs {
-                    if let ExpandedAttr::Interpolation { name, expr, loc } = attr {
-                        out.push(InterpolationRef {
-                            expr,
-                            loc: *loc,
-                            attr_name: Some(name.clone()),
-                            for_scope: for_scope.clone(),
-                        });
+                    match attr {
+                        ExpandedAttr::Interpolation { name, expr, loc } => {
+                            out.push(InterpolationRef {
+                                expr,
+                                loc: *loc,
+                                attr_name: Some(name.clone()),
+                                for_scope: for_scope.clone(),
+                            });
+                        }
+                        // Each `{expr}` segment of a mixed value
+                        // (`class="toast toast-{kind}"`) is type-checked
+                        // like a full attribute interpolation.
+                        ExpandedAttr::MixedInterpolation {
+                            name,
+                            segments,
+                            loc,
+                        } => {
+                            for seg in segments {
+                                if let crate::view::expand::AttrValueSegment::Expr(expr) = seg {
+                                    out.push(InterpolationRef {
+                                        expr,
+                                        loc: *loc,
+                                        attr_name: Some(name.clone()),
+                                        for_scope: for_scope.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 collect_interpolations(children, out, for_scope);

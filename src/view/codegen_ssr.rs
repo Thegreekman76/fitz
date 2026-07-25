@@ -1409,6 +1409,36 @@ fn emit_attr_to_pieces(
             push_text(pieces, &format!("{name}=\"{{{rendered}}}\""));
             Ok(())
         }
+        // Mixed attribute value (`class="toast toast-{kind}"`): literal
+        // chunks pass through verbatim, `{expr}` segments get the same
+        // state-field rewriting as a full interpolation so they resolve
+        // to `state.<field>` in the emitted classic-Fitz string. The
+        // reassembled value is one Text piece (interpolations ride
+        // inside the emitted string, exactly like the full-interp arm) —
+        // never an Expr piece (those are reserved for `{#if}`/`{#for}`).
+        ExpandedAttr::MixedInterpolation { name, segments, .. } => {
+            let mut value = String::new();
+            for seg in segments {
+                match seg {
+                    super::expand::AttrValueSegment::Literal(lit) => value.push_str(lit),
+                    super::expand::AttrValueSegment::Expr(expr) => {
+                        let rendered = format_fitz_expr_scoped(
+                            expr,
+                            state_field_names,
+                            local_scope,
+                            imported_names,
+                            &component.name,
+                            "template attribute interpolation",
+                        )?;
+                        value.push('{');
+                        value.push_str(&rendered);
+                        value.push('}');
+                    }
+                }
+            }
+            push_text(pieces, &format!("{name}=\"{value}\""));
+            Ok(())
+        }
         ExpandedAttr::Event {
             event_name,
             handler_name,
@@ -4538,6 +4568,100 @@ component X {
         assert!(
             out.contains("from utils import User as U, Post, Comment as C"),
             "expected mixed aliased + bare in emitted classic:\n{out}"
+        );
+    }
+
+    // ---- Mixed attribute interpolation -----------------------
+    // `attr="prefix-{field}"` — a state field interpolated inside a
+    // partly-static attribute value. Rewrites the `{field}` segment to
+    // `state.field` in the emitted classic-Fitz string, same as a text
+    // interpolation or a full `attr="{field}"`. Regression guard for
+    // the Admin ABM Toast (`class="toast toast-{kind}"`), which built
+    // to `unknown variable kind` before the fix (mixed values fell to
+    // the Static path and emitted the brace verbatim).
+
+    #[test]
+    fn mixed_attr_interp_rewrites_state_field_in_class() {
+        let file = parse_expand(
+            r#"component Badge { state { kind: Str = "ok" } <template><span class="badge badge-{kind}">x</span></template> }"#,
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("badge badge-{state.kind}"),
+            "mixed attr must rewrite {{kind}} to {{state.kind}}:\n{out}"
+        );
+        assert!(
+            !out.contains("badge-{kind}"),
+            "bare {{kind}} must not survive into the emitted attribute:\n{out}"
+        );
+    }
+
+    #[test]
+    fn mixed_attr_interp_multiple_segments() {
+        let file = parse_expand(
+            "component P {\n  state {\n    a: Str = \"1\"\n    b: Str = \"2\"\n  }\n  <template><div data-x=\"p-{a}-q-{b}\">x</div></template>\n}",
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("p-{state.a}-q-{state.b}"),
+            "both segments must rewrite:\n{out}"
+        );
+    }
+
+    #[test]
+    fn mixed_attr_interp_inside_if_block() {
+        // The exact Admin ABM Toast shape: a mixed-interp attribute on
+        // an element nested inside a `{#if}` directive.
+        let file = parse_expand(
+            "component Toast {\n  state {\n    open: Bool = false\n    kind: Str = \"success\"\n  }\n  <template><div>{#if open}<div class=\"toast toast-{kind}\">x</div>{/if}</div></template>\n}",
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("toast toast-{state.kind}"),
+            "mixed attr inside {{#if}} must rewrite {{kind}}:\n{out}"
+        );
+    }
+
+    #[test]
+    fn mixed_attr_interp_imported_name_passes_through() {
+        // An imported helper referenced inside a mixed attribute stays
+        // verbatim (not rewritten to state.<name>), same rule as text.
+        let file = parse_expand(
+            r#"from helpers import cls
+component X { state { n: Int = 0 } <template><div class="row {cls(n)}">x</div></template> }"#,
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("row {cls(state.n)}"),
+            "imported name stays bare, state field rewrites:\n{out}"
+        );
+    }
+
+    #[test]
+    fn full_attr_interp_still_works_after_mixed_support() {
+        // Regression: a whole-value `attr="{field}"` still routes
+        // through the Interpolation path (not MixedInterpolation).
+        let file = parse_expand(
+            r#"component X { state { q: Str = "" } <template><input value="{q}" /></template> }"#,
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("value=\"{state.q}\""),
+            "full interpolation must still rewrite to state.q:\n{out}"
+        );
+    }
+
+    #[test]
+    fn static_attr_without_braces_unchanged() {
+        // Regression: a plain static attribute with no `{` stays a
+        // verbatim Static value.
+        let file = parse_expand(
+            r#"component X { state {} <template><div class="a b c">x</div></template> }"#,
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("class=\"a b c\""),
+            "static class must pass through verbatim:\n{out}"
         );
     }
 }

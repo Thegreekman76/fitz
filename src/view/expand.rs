@@ -291,6 +291,17 @@ impl ChildComponentProp {
     }
 }
 
+/// A segment of a mixed-interpolation attribute value
+/// (`class="toast toast-{kind}"`). Literal chunks pass through
+/// verbatim; `Expr` chunks are parsed classic-Fitz expressions the
+/// SSR emitter rewrites to `state.<field>` (same scoping walker as a
+/// full `attr="{expr}"` interpolation or a `{expr}` text node).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttrValueSegment {
+    Literal(String),
+    Expr(fast::Expr),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExpandedAttr {
     Static {
@@ -301,6 +312,16 @@ pub enum ExpandedAttr {
     Interpolation {
         name: String,
         expr: fast::Expr,
+        loc: Loc,
+    },
+    /// Mixed attribute value with one or more `{expr}` interpolation
+    /// segments alongside literal text (`class="toast toast-{kind}"`,
+    /// `style="width: {pct}%"`). A whole-value `attr="{expr}"` is the
+    /// `Interpolation` variant above; this one carries the literal +
+    /// interpolated segments in source order.
+    MixedInterpolation {
+        name: String,
+        segments: Vec<AttrValueSegment>,
         loc: Loc,
     },
     /// `@click="handler"` — the value must be a bare identifier that
@@ -546,10 +567,20 @@ fn rewrite_class_attrs_in_template(nodes: &mut [ExpandedTemplateNode], scope_cla
                 attrs, children, ..
             } => {
                 for attr in attrs.iter_mut() {
-                    if let ExpandedAttr::Static { name, value, .. } = attr {
-                        if name == "class" {
+                    match attr {
+                        ExpandedAttr::Static { name, value, .. } if name == "class" => {
                             *value = rewrite_class_value(value, scope_class);
                         }
+                        // A mixed-interpolation `class` (`class="card
+                        // {kind}"`) gets the scope class appended as a
+                        // trailing literal segment so scoped styles still
+                        // match. The interpolated segments are untouched.
+                        ExpandedAttr::MixedInterpolation { name, segments, .. }
+                            if name == "class" =>
+                        {
+                            segments.push(AttrValueSegment::Literal(format!(" {scope_class}")));
+                        }
+                        _ => {}
                     }
                 }
                 rewrite_class_attrs_in_template(children, scope_class);
@@ -909,13 +940,123 @@ fn expand_child_component(
     })
 }
 
+/// One raw chunk of a mixed attribute value before its `{expr}`
+/// segments are parsed. `Interp` holds the un-parsed source between
+/// the braces.
+enum RawAttrSeg {
+    Literal(String),
+    Interp(String),
+}
+
+/// Split an attribute value into literal + interpolation segments.
+///
+/// Returns `Ok(None)` when the value has no unescaped `{expr}`
+/// interpolation (a plain static value — the caller keeps it as
+/// `ExpandedAttr::Static`). Returns `Ok(Some(segments))` for a mixed
+/// value (`toast toast-{kind}`), preserving source order. `\{` / `\}`
+/// are literal braces and never start an interpolation. Nested braces
+/// inside an interpolation (a map/struct literal in the expr) are
+/// balanced by depth. An unmatched `{` is a hard error.
+///
+/// Whole-value `{expr}` interpolations never reach here — the parser
+/// classifies those as `RawAttr::Interpolation` up front
+/// (`extract_full_interp`).
+fn split_mixed_attr_value(
+    value: &str,
+    loc: Loc,
+    ctx: &str,
+) -> ExpandResult<Option<Vec<RawAttrSeg>>> {
+    let mut segs: Vec<RawAttrSeg> = Vec::new();
+    let mut lit = String::new();
+    let mut found_interp = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                // Preserve `\{` / `\}` as literal escaped braces.
+                match chars.peek() {
+                    Some('{') | Some('}') => {
+                        lit.push('\\');
+                        lit.push(chars.next().unwrap());
+                    }
+                    _ => lit.push('\\'),
+                }
+            }
+            '{' => {
+                found_interp = true;
+                if !lit.is_empty() {
+                    segs.push(RawAttrSeg::Literal(std::mem::take(&mut lit)));
+                }
+                let mut inner = String::new();
+                let mut depth = 1_i32;
+                for ic in chars.by_ref() {
+                    match ic {
+                        '{' => {
+                            depth += 1;
+                            inner.push(ic);
+                        }
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            inner.push(ic);
+                        }
+                        _ => inner.push(ic),
+                    }
+                }
+                if depth != 0 {
+                    return Err(ExpandError {
+                        message: format!(
+                            "unmatched `{{` in attribute value interpolation: `{value}`"
+                        ),
+                        loc,
+                        context: ctx.to_string(),
+                    });
+                }
+                segs.push(RawAttrSeg::Interp(inner));
+            }
+            c => lit.push(c),
+        }
+    }
+    if !found_interp {
+        return Ok(None);
+    }
+    if !lit.is_empty() {
+        segs.push(RawAttrSeg::Literal(lit));
+    }
+    Ok(Some(segs))
+}
+
 fn expand_attr(attr: &RawAttr, component_name: &str, tag: &str) -> ExpandResult<ExpandedAttr> {
     match attr {
-        RawAttr::Static { name, value, loc } => Ok(ExpandedAttr::Static {
-            name: name.clone(),
-            value: value.clone(),
-            loc: *loc,
-        }),
+        RawAttr::Static { name, value, loc } => {
+            let ctx = format!("component '{component_name}': <{tag}> attr '{name}' interpolation");
+            match split_mixed_attr_value(value, *loc, &ctx)? {
+                Some(raw_segs) => {
+                    let mut segments = Vec::with_capacity(raw_segs.len());
+                    for seg in raw_segs {
+                        match seg {
+                            RawAttrSeg::Literal(s) => segments.push(AttrValueSegment::Literal(s)),
+                            RawAttrSeg::Interp(expr_raw) => {
+                                let expr = parse_expr_at(expr_raw.trim(), *loc, ctx.clone())?;
+                                segments.push(AttrValueSegment::Expr(expr));
+                            }
+                        }
+                    }
+                    Ok(ExpandedAttr::MixedInterpolation {
+                        name: name.clone(),
+                        segments,
+                        loc: *loc,
+                    })
+                }
+                None => Ok(ExpandedAttr::Static {
+                    name: name.clone(),
+                    value: value.clone(),
+                    loc: *loc,
+                }),
+            }
+        }
         RawAttr::Interpolation {
             name,
             expr_raw,
@@ -1292,6 +1433,66 @@ mod tests {
             }
             _ => panic!("expected <input/>"),
         }
+    }
+
+    #[test]
+    fn mixed_attribute_value_becomes_mixed_interpolation() {
+        let src = r#"component X {
+  state { kind: Str = "ok" }
+  <template><span class="badge badge-{kind}">x</span></template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let node = &file.components[0].template.as_ref().unwrap().roots[0];
+        let ExpandedTemplateNode::Element { attrs, .. } = node else {
+            panic!("expected <span>");
+        };
+        match &attrs[0] {
+            ExpandedAttr::MixedInterpolation { name, segments, .. } => {
+                assert_eq!(name, "class");
+                assert_eq!(segments.len(), 2);
+                match &segments[0] {
+                    AttrValueSegment::Literal(s) => assert_eq!(s, "badge badge-"),
+                    other => panic!("expected Literal, got {other:?}"),
+                }
+                match &segments[1] {
+                    AttrValueSegment::Expr(fast::Expr::Ident(n, _)) => assert_eq!(n, "kind"),
+                    other => panic!("expected Expr(Ident), got {other:?}"),
+                }
+            }
+            other => panic!("expected MixedInterpolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_attribute_without_braces_stays_static() {
+        let src = r#"component X {
+  state {}
+  <template><div class="a b c">x</div></template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let node = &file.components[0].template.as_ref().unwrap().roots[0];
+        let ExpandedTemplateNode::Element { attrs, .. } = node else {
+            panic!("expected <div>");
+        };
+        assert!(
+            matches!(&attrs[0], ExpandedAttr::Static { value, .. } if value == "a b c"),
+            "plain static attr must stay Static: {:?}",
+            attrs[0]
+        );
+    }
+
+    #[test]
+    fn mixed_attribute_unmatched_brace_is_an_error() {
+        let src = r#"component X {
+  state { kind: Str = "ok" }
+  <template><span class="badge-{kind">x</span></template>
+}"#;
+        let err = expand_str(src).expect_err("unmatched brace must error");
+        assert!(
+            err.message.contains("unmatched"),
+            "error should mention the unmatched brace: {}",
+            err.message
+        );
     }
 
     #[test]

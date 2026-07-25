@@ -1885,6 +1885,24 @@ fn emit_element(
             } => {
                 emit_event_attr(event_name, handler_name, &var, ctx, out)?;
             }
+            // Mixed attribute interpolation (`class="toast toast-{kind}"`)
+            // is an SSR-target feature today. The client-WASM target
+            // mutates attributes via `set_attribute` and would need each
+            // `{expr}` segment lowered into a `format!` — deferred. Full
+            // interpolation (`class="{cls}"`) works here.
+            ExpandedAttr::MixedInterpolation { name, .. } => {
+                return Err(EmitError {
+                    message: format!(
+                        "mixed attribute interpolation (`{name}=\"...{{expr}}...\"`) is not \
+                         supported in the client-WASM target yet — use a full interpolation \
+                         (`{name}=\"{{expr}}\"`) or the SSR target"
+                    ),
+                    context: format!(
+                        "attribute `{}` of element `<{}>` in component `{}`",
+                        name, tag, ctx.component_name
+                    ),
+                });
+            }
             // Phase 11.7 R3.5b.1 — an interpolated attribute
             // (`data-flv-value-card_id="{c.id}"`, `class="{cls}"`).
             ExpandedAttr::Interpolation { name, expr, .. } => {

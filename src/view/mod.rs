@@ -43,8 +43,9 @@ pub use codegen_wasm::{
 };
 pub use css_parser::{apply_scope, CssParseError};
 pub use expand::{
-    expand, ExpandError, ExpandResult, ExpandedAttr, ExpandedComponent, ExpandedEventHandler,
-    ExpandedStateField, ExpandedStyle, ExpandedTemplate, ExpandedTemplateNode, ExpandedViewFile,
+    expand, AttrValueSegment, ExpandError, ExpandResult, ExpandedAttr, ExpandedComponent,
+    ExpandedEventHandler, ExpandedStateField, ExpandedStyle, ExpandedTemplate,
+    ExpandedTemplateNode, ExpandedViewFile,
 };
 pub use parser::{parse, ViewParseError, ViewParseResult};
 pub use wasm_build::{
