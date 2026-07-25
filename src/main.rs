@@ -2091,6 +2091,40 @@ fn check_file(path: &PathBuf) {
 ///   the dispatch in `main()` when the user runs `fitz build`
 ///   without args and there's a `fitz.toml`.
 ///
+/// Copy the freshly-built binary to its final destination, retrying
+/// on Windows `ERROR_SHARING_VIOLATION` (os error 32).
+///
+/// On Windows the linker/antivirus/Search indexer can keep a file
+/// handle open on the just-linked `target/release/<stem>.exe` for a
+/// brief moment after the build completes, and a previous run's exe
+/// that is still exiting can hold the destination. A bare `fs::copy`
+/// then fails with os error 32, which surfaced as a flaky-test family
+/// (`hidden_decorator`, `handler_panic_r6`) once the serializing
+/// `SERIAL` mutex was removed (T2, v0.10.13) and E2E builds began
+/// running fully in parallel. A short retry-with-backoff eliminates
+/// the race without serializing anything. No-op on the happy path
+/// (the first attempt succeeds).
+fn copy_binary_with_retry(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    // os error 32 = ERROR_SHARING_VIOLATION on Windows. On other
+    // platforms this code never matches, so the loop just returns the
+    // first result.
+    const SHARING_VIOLATION: i32 = 32;
+    const MAX_ATTEMPTS: u32 = 8;
+
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match fs::copy(src, dst) {
+            Ok(_) => return Ok(()),
+            Err(e) if attempt < MAX_ATTEMPTS && e.raw_os_error() == Some(SHARING_VIOLATION) => {
+                // Backoff: 25ms, 50ms, 75ms, ... capped by MAX_ATTEMPTS.
+                std::thread::sleep(std::time::Duration::from_millis(25 * attempt as u64));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Since 5b.5 we generate a Cargo project instead of invoking
 /// rustc directly. Reasons: (a) cross-file imports need multiple
 /// `.rs` with `mod`, which is native to cargo; (b) when 5b.6
@@ -2317,7 +2351,7 @@ fn build_file(
         }
     }
 
-    if let Err(e) = fs::copy(&release_bin_path, &bin_out) {
+    if let Err(e) = copy_binary_with_retry(&release_bin_path, &bin_out) {
         eprintln!(
             "Error copying {} to {}: {}",
             release_bin_path.display(),
@@ -2992,7 +3026,7 @@ fn build_file_with_bundle(
             }
         }
     }
-    if let Err(e) = fs::copy(&launcher_release_path, &bin_out) {
+    if let Err(e) = copy_binary_with_retry(&launcher_release_path, &bin_out) {
         eprintln!(
             "Error copying {} to {}: {}",
             launcher_release_path.display(),

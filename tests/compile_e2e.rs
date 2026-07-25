@@ -7325,7 +7325,7 @@ fn hidden_decorator_skips_field_in_json_io_v0_10_11() {
     //   - El field NO aparece en `__to_fitz_json` (response al
     //     cliente — útil para `password_hash`, tokens internos).
     //   - El field NO se acepta en `__FromFitzJson` (body del
-    //     cliente rechaza enviarlo con 400 "campo no declarado").
+    //     cliente rechaza enviarlo con 400 "undeclared field").
     //   - El field SÍ existe en el struct Rust con su default
     //     (`Str = ""` queda `""`, `Default::default()` si no hay
     //     default). El código Fitz interno puede asignarlo
@@ -7474,7 +7474,7 @@ fn main() => 0\n\
     );
 
     // Caso 3: POST /users CON password_hash en el body → 400,
-    // el server rechaza "campo no declarado".
+    // el server rechaza "undeclared field".
     let (status, body) = send_req(
         "POST",
         "/users",
@@ -7487,7 +7487,7 @@ fn main() => 0\n\
         (status, &body)
     );
     assert!(
-        body.contains("password_hash") && body.contains("no declarado"),
+        body.contains("password_hash") && body.contains("undeclared field"),
         "POST /users error debe citar el field rechazado: {:?}",
         body
     );
