@@ -33,9 +33,11 @@ ABM (`class="toast toast-{kind}"`) compila a binario y corre con paridad exacta
 `fitz run` ↔ binario.
 
 **Deuda residual derivada** (NO bloquea): mixed attribute interpolation en el
-target **client-WASM** (hoy error diferido); un `class` mixto en un componente
-con `<style scoped>` recibe la scope class como literal al final (correcto para
-el caso común, pero no reordena los segmentos).
+target **client-WASM** (hoy error diferido). ~~Un `class` mixto en un componente
+con `<style scoped>` recibe la scope class como token separado en vez de sufijar
+los tokens literales~~ → **CERRADO v0.28.8**: `pure_literal_class_tokens` sufija
+los tokens de clase puramente literales de un `class` mixto (`badge` →
+`badge-<scope>`) y excluye los pegados a un `{expr}` (`badge-{kind}`, runtime).
 
 ## 🟢 Phase 11.7 R3.5 + Frente 2 — CERRADAS 2026-07-19 (v0.22.0) + deuda residual nueva
 

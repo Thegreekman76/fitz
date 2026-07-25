@@ -572,13 +572,25 @@ fn rewrite_class_attrs_in_template(nodes: &mut [ExpandedTemplateNode], scope_cla
                             *value = rewrite_class_value(value, scope_class);
                         }
                         // A mixed-interpolation `class` (`class="card
-                        // {kind}"`) gets the scope class appended as a
-                        // trailing literal segment so scoped styles still
-                        // match. The interpolated segments are untouched.
+                        // {kind}"`): suffix each COMPLETE (whitespace-bounded)
+                        // literal class token with the scope, mirroring
+                        // `rewrite_class_value` for static classes. Tokens
+                        // glued to an `{expr}` (`toast-{kind}`) or produced by
+                        // an expr are runtime values that can't be scoped, so
+                        // they're left as-is. Originals stay in place; the
+                        // suffixed pure tokens are appended.
                         ExpandedAttr::MixedInterpolation { name, segments, .. }
                             if name == "class" =>
                         {
-                            segments.push(AttrValueSegment::Literal(format!(" {scope_class}")));
+                            let pure = pure_literal_class_tokens(segments);
+                            if !pure.is_empty() {
+                                let suffixed = pure
+                                    .iter()
+                                    .map(|t| format!("{t}-{scope_class}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                segments.push(AttrValueSegment::Literal(format!(" {suffixed}")));
+                            }
                         }
                         _ => {}
                     }
@@ -615,6 +627,55 @@ fn rewrite_class_attrs_in_template(nodes: &mut [ExpandedTemplateNode], scope_cla
 /// with single spaces; user-written double spaces or tabs
 /// normalise to single spaces, which matches how the browser
 /// tokenises `class` anyway.
+/// Extract the whitespace-bounded, purely-literal class tokens from a
+/// mixed attribute value's segments. A token glued to (or produced by) an
+/// `{expr}` segment is a runtime value that can't be scoped, so it's
+/// excluded. Used to suffix the static parts of a mixed `class` with the
+/// component's scope suffix (mirrors `rewrite_class_value` for the static
+/// path, but only over the segments that are genuinely literal tokens).
+fn pure_literal_class_tokens(segments: &[AttrValueSegment]) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut active = false;
+    let mut pure = true;
+    for seg in segments {
+        match seg {
+            AttrValueSegment::Literal(s) => {
+                for ch in s.chars() {
+                    if ch.is_whitespace() {
+                        // Token boundary: keep it only if it was purely
+                        // literal (no expr contributed).
+                        if active && pure && !cur.is_empty() {
+                            tokens.push(std::mem::take(&mut cur));
+                        } else {
+                            cur.clear();
+                        }
+                        active = false;
+                        pure = true;
+                    } else {
+                        if !active {
+                            active = true;
+                            pure = true;
+                            cur.clear();
+                        }
+                        cur.push(ch);
+                    }
+                }
+            }
+            // An expr glues into (or starts) the current token, making it a
+            // runtime value that can't carry the scope suffix.
+            AttrValueSegment::Expr(_) => {
+                active = true;
+                pure = false;
+            }
+        }
+    }
+    if active && pure && !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
 fn rewrite_class_value(original: &str, scope_class: &str) -> String {
     let tokens: Vec<&str> = original.split_ascii_whitespace().collect();
     if tokens.is_empty() {

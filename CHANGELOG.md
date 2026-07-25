@@ -9,6 +9,32 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.28.8] — 2026-07-25 — fix: scoped styling de un `class` mixto en `.fitzv`
+
+Cierra una deuda latente introducida por v0.28.7 (mixed attribute
+interpolation), descubierta al escribir el `<style scoped>` del Pager del
+Admin ABM.
+
+### Fixed — un `class` mixto en un componente con `<style scoped>`
+
+El rewrite de scope de v0.28.7 (`rewrite_class_attrs_in_template`) appendeaba
+la scope class a un `class` mixto (`class="badge badge-{kind}"`) como un token
+**separado** (` <scope>`), en vez de **sufijar** cada token de clase literal
+completo (`badge` → `badge-<scope>`) como hace `rewrite_class_value` para las
+clases estáticas. Resultado: en un componente con `<style scoped>`, la parte
+estática de un `class` mixto no recibía el estilo scopeado (la scope class
+suelta no matcheaba ningún selector). Latente — ningún componente combinaba
+`class` mixto con `<style scoped>` (el Pager scopeado usa clases estáticas; el
+Toast usa `class` mixto pero CSS global), así que no había síntoma visible.
+
+- Nuevo helper `pure_literal_class_tokens`: extrae los tokens de clase
+  puramente literales (bounded por whitespace) de los segmentos del valor
+  mixto. Un token pegado a un `{expr}` (`badge-{kind}`) o producido por un expr
+  es un valor runtime que no se puede scopear → se excluye. Los tokens puros se
+  sufijan con la scope y se appendean; los originales quedan en su lugar.
+- Test nuevo `mixed_class_in_scoped_component_suffixes_only_pure_tokens`.
+  Byte-a-byte para todo componente que no combine `class` mixto con scoped.
+
 ## [v0.28.7] — 2026-07-25 — mixed attribute interpolation en `.fitzv` + retry en la copia del binario
 
 Dos cambios de core surgidos del refactor a LiveComponents del Admin ABM de

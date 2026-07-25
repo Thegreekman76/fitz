@@ -4664,4 +4664,33 @@ component X { state { n: Int = 0 } <template><div class="row {cls(n)}">x</div></
             "static class must pass through verbatim:\n{out}"
         );
     }
+
+    #[test]
+    fn mixed_class_in_scoped_component_suffixes_only_pure_tokens() {
+        // A mixed `class` in a `<style scoped>` component: the COMPLETE
+        // literal token (`badge`) gets the scope suffix, but the token
+        // glued to the `{expr}` (`badge-{kind}`) is a runtime value and
+        // stays unscoped. Regression guard for v0.28.8 — v0.28.7 appended
+        // the bare scope class as a separate token instead of suffixing.
+        let file = parse_expand(
+            "component Badge {\n  state { kind: Str = \"ok\" }\n  <template><span class=\"badge badge-{kind}\">x</span></template>\n  <style scoped>.badge { color: red; }</style>\n}",
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        // The pure token `badge` is suffixed with the scope (`badge-badge-c-<hex>`).
+        assert!(
+            out.contains("badge-badge-c-"),
+            "pure literal token `badge` must be suffixed with the scope:\n{out}"
+        );
+        // The glued `badge-{kind}` stays as a runtime interpolation, not scoped.
+        assert!(
+            out.contains("badge-{state.kind}"),
+            "glued `badge-{{kind}}` must stay a runtime interpolation:\n{out}"
+        );
+        // The old bug appended a bare ` badge-c-<hex>` token (scope class on
+        // its own, not attached to a class name). It must not reappear.
+        assert!(
+            !out.contains(" badge-c-"),
+            "scope must be a suffix on a token, never a standalone class:\n{out}"
+        );
+    }
 }
