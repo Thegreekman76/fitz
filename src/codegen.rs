@@ -4252,10 +4252,25 @@ impl ModuleLoader {
     /// dep wins on conflict), same as in the evaluator. Behavior
     /// explicit by design.
     fn resolve_path(&self, segments: &[String]) -> PathBuf {
-        // Step 1 — dep registry shortcut.
-        if segments.len() == 1 {
-            if let Some(lib_entry) = self.dep_registry.get(&segments[0]) {
+        // Step 1 — dep registry resolution. A single segment loads the
+        // dep's lib entry; a dotted path (`from dep.sub.Mod import X`)
+        // resolves the rest under the dep's root (`.fitz`/`.fitzv`).
+        if let Some(lib_entry) = self.dep_registry.get(&segments[0]) {
+            if segments.len() == 1 {
                 return lib_entry.clone();
+            }
+            if let Some(found) = crate::view::resolve_dep_subpath_file(lib_entry, &segments[1..]) {
+                return found;
+            }
+            // Not found under the dep — cite the `.fitz` candidate so
+            // `load_module`'s `not found` error points at the dep.
+            if let Some(root) = lib_entry.parent() {
+                let mut classic = root.to_path_buf();
+                for seg in &segments[1..segments.len() - 1] {
+                    classic.push(seg);
+                }
+                classic.push(format!("{}.fitz", segments[segments.len() - 1]));
+                return classic;
             }
         }
 
@@ -4575,8 +4590,23 @@ impl ModuleLoader {
             }
         }
 
-        let mod_name = segments.last().cloned().unwrap_or_default();
-        let rel_path = mod_rel_path_from_segments(segments);
+        // A dotted dep sub-path (`from mylib.ui.math import X`) is a
+        // single flat Fitz module living under the DEPENDENCY, not a
+        // local subdir tree. Model it as a flat Rust module with a
+        // sanitized name so `mod`/`use`/file emission stay consistent
+        // (`mod mylib_ui_math;` + `use mylib_ui_math::X;` +
+        // `src/mylib_ui_math.rs`). Local nested imports keep their
+        // subdir tree (root `mod` + `mod.rs`).
+        let is_dep_subpath = segments.len() > 1 && self.dep_registry.contains_key(&segments[0]);
+        let (mod_name, rel_path) = if is_dep_subpath {
+            let flat = segments.join("_");
+            (flat.clone(), PathBuf::from(format!("{flat}.rs")))
+        } else {
+            (
+                segments.last().cloned().unwrap_or_default(),
+                mod_rel_path_from_segments(segments),
+            )
+        };
 
         // Extract sigs for importer use.
         let (type_sigs, fn_sigs, const_sigs, accessor_consts) =
@@ -5205,11 +5235,14 @@ fn resolve_loader_import_file_path(
     base_dir: &Path,
     dep_registry: &crate::manifest::DepRegistry,
 ) -> Option<PathBuf> {
-    if segments.len() == 1 {
-        if let Some(lib_entry) = dep_registry.get(&segments[0]) {
+    if let Some(lib_entry) = dep_registry.get(&segments[0]) {
+        if segments.len() == 1 {
             if lib_entry.exists() {
                 return Some(lib_entry.clone());
             }
+        } else {
+            // Dotted sub-path into the dep (`from dep.sub.Mod import X`).
+            return crate::view::resolve_dep_subpath_file(lib_entry, &segments[1..]);
         }
     }
     let mut dir = base_dir.to_path_buf();

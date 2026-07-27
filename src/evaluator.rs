@@ -2605,17 +2605,36 @@ impl Drop for LoaderGuard {
 /// Does not check existence — the caller does `canonicalize`, which
 /// fails with a useful message if the file is missing.
 fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
-    // Step 1 — dep registry shortcut (Phase 9.y.3.b). A single entry.
+    // Step 1 — dep registry resolution (Phase 9.y.3.b + dotted
+    // sub-path). If the FIRST segment names a dependency, the import
+    // resolves under that dep (shadowing a local file of the same
+    // name). A single segment loads the dep's lib entry; a dotted path
+    // (`from dep.sub.Mod import X`) resolves the rest under the dep's
+    // root directory, trying `.fitz` then `.fitzv`.
     let dep_hit = LOADER.with(|cell| {
         let borrow = cell.borrow();
         let loader = borrow.as_ref()?;
-        if segments.len() != 1 {
-            return None;
-        }
         loader.dep_registry.get(&segments[0]).cloned()
     });
     if let Some(lib_entry) = dep_hit {
-        return Ok(vec![lib_entry]);
+        if segments.len() == 1 {
+            return Ok(vec![lib_entry]);
+        }
+        // Dotted sub-path under the dep root. The shared helper picks
+        // the existing `.fitz`/`.fitzv` file; if it resolves, load it.
+        if let Some(found) = crate::view::resolve_dep_subpath_file(&lib_entry, &segments[1..]) {
+            return Ok(vec![found]);
+        }
+        // Not found under the dep — cite the `.fitz` candidate so the
+        // "module not found" error points at the expected location.
+        if let Some(root) = lib_entry.parent() {
+            let mut p = root.to_path_buf();
+            for seg in &segments[1..segments.len() - 1] {
+                p.push(seg);
+            }
+            p.push(format!("{}.fitz", segments[segments.len() - 1]));
+            return Ok(vec![p]);
+        }
     }
 
     // Step 2 — candidates in priority order: relative to `base_dir`

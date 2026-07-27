@@ -193,6 +193,30 @@ pub fn resolve_module_file_candidates(
     None
 }
 
+/// Resolve a dotted sub-path import into a dependency, e.g.
+/// `from fitz_liveviews.ui.Pager import X`. `dep_lib_entry` is the path
+/// to the dependency's lib entry file (from the `DepRegistry`);
+/// `sub_segments` is everything AFTER the dep name (`["ui", "Pager"]`).
+/// The remaining segments resolve as a path under the dependency's root
+/// directory (the directory containing its lib entry), trying `.fitz`
+/// then `.fitzv` on the last segment via
+/// [`resolve_module_file_candidates`]. Returns `None` when the target
+/// file does not exist under the dependency.
+///
+/// Shared by every loader path (interpreter / codegen / checker) so the
+/// dotted-dep resolution stays bit-for-bit consistent.
+pub fn resolve_dep_subpath_file(
+    dep_lib_entry: &std::path::Path,
+    sub_segments: &[String],
+) -> Option<std::path::PathBuf> {
+    let (last, dirs) = sub_segments.split_last()?;
+    let mut dir = dep_lib_entry.parent()?.to_path_buf();
+    for seg in dirs {
+        dir.push(seg);
+    }
+    resolve_module_file_candidates(&dir, last)
+}
+
 // ---------------------------------------------------------------------------
 // Phase 11.6.d — Loader bridge tests
 // ---------------------------------------------------------------------------
@@ -239,6 +263,35 @@ mod loader_bridge_tests {
     fn resolve_module_file_candidates_returns_none_when_neither_exists() {
         let tmp = tempfile::TempDir::new().unwrap();
         assert!(resolve_module_file_candidates(tmp.path(), "Missing").is_none());
+    }
+
+    #[test]
+    fn resolve_dep_subpath_file_resolves_under_dep_root() {
+        // A dependency laid out as `<pkg>/src/{lib.fitz, ui/Comp.fitzv}`.
+        // `from pkg.ui.Comp import X` → sub_segments `["ui", "Comp"]`
+        // resolve under the dep root (the lib entry's parent = `src/`).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("pkg").join("src");
+        std::fs::create_dir_all(src.join("ui")).unwrap();
+        let lib_entry = src.join("lib.fitz");
+        std::fs::write(&lib_entry, "// lib").unwrap();
+        std::fs::write(src.join("ui").join("Comp.fitzv"), "// view").unwrap();
+
+        let seg = ["ui".to_string(), "Comp".to_string()];
+        let hit = resolve_dep_subpath_file(&lib_entry, &seg).expect("resolves under dep root");
+        assert_eq!(hit, src.join("ui").join("Comp.fitzv"));
+
+        // `.fitz` wins when both exist (same precedence as the base helper).
+        std::fs::write(src.join("ui").join("Comp.fitz"), "// classic").unwrap();
+        let hit2 = resolve_dep_subpath_file(&lib_entry, &seg).unwrap();
+        assert_eq!(hit2.extension().and_then(|s| s.to_str()), Some("fitz"));
+
+        // Missing sub-path → None (caller emits "module not found").
+        let missing = ["ui".to_string(), "Nope".to_string()];
+        assert!(resolve_dep_subpath_file(&lib_entry, &missing).is_none());
+
+        // Empty sub-segments → None (defensive; never called that way).
+        assert!(resolve_dep_subpath_file(&lib_entry, &[]).is_none());
     }
 
     #[test]

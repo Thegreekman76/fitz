@@ -1952,11 +1952,14 @@ fn resolve_import_file_path(
     base_dir: &std::path::Path,
     dep_registry: &manifest::DepRegistry,
 ) -> Option<PathBuf> {
-    if segments.len() == 1 {
-        if let Some(lib_entry) = dep_registry.get(&segments[0]) {
+    if let Some(lib_entry) = dep_registry.get(&segments[0]) {
+        if segments.len() == 1 {
             if lib_entry.exists() {
                 return Some(lib_entry.clone());
             }
+        } else {
+            // Dotted sub-path into the dep (`from dep.sub.Mod import X`).
+            return fitz::view::resolve_dep_subpath_file(lib_entry, &segments[1..]);
         }
     }
     let mut dir = base_dir.to_path_buf();

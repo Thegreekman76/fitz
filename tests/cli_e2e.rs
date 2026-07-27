@@ -878,6 +878,77 @@ fn build_resolves_from_dep_import_via_dep_registry() {
     assert!(stdout.contains("d=42"), "stdout del binario: {stdout}");
 }
 
+/// Dotted sub-path import into a dep: `from mylib.ui.math import add`
+/// resolves `math.fitz` under the DEP's `src/ui/` (via the dep root),
+/// NOT a relative `<app>/src/mylib/ui/math.fitz`. The first segment
+/// names a dependency, so the rest is a path under that dependency.
+#[test]
+fn run_resolves_dotted_dep_subpath_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "mylib", "--no-git"], tmp.path());
+    let lib_dir = tmp.path().join("mylib");
+    convert_to_lib(&lib_dir, "mylib", "0.1.0");
+    write_file(&lib_dir, "src/lib.fitz", "let LIB_NAME = \"mylib\"\n");
+    write_file(
+        &lib_dir,
+        "src/ui/math.fitz",
+        "fn add(a: Int, b: Int) -> Int => a + b\n",
+    );
+
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    add_path_dep(&app_dir, "myapp", "mylib", "../mylib");
+    write_file(
+        &app_dir,
+        "src/main.fitz",
+        "from mylib.ui.math import add\nprint(\"s={add(20, 22)}\")\n",
+    );
+
+    let (stdout, stderr, code) = run_fitz(&["run"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("s=42"), "stdout: {stdout}");
+}
+
+/// Parity with `run_resolves_dotted_dep_subpath_import` on the codegen
+/// path: `fitz build` must resolve the dotted dep sub-path too and
+/// produce a binary that prints the same result.
+#[test]
+fn build_resolves_dotted_dep_subpath_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "mylib", "--no-git"], tmp.path());
+    let lib_dir = tmp.path().join("mylib");
+    convert_to_lib(&lib_dir, "mylib", "0.1.0");
+    write_file(&lib_dir, "src/lib.fitz", "let LIB_NAME = \"mylib\"\n");
+    write_file(
+        &lib_dir,
+        "src/ui/math.fitz",
+        "fn add(a: Int, b: Int) -> Int => a + b\n",
+    );
+
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    add_path_dep(&app_dir, "myapp", "mylib", "../mylib");
+    write_file(
+        &app_dir,
+        "src/main.fitz",
+        "from mylib.ui.math import add\nprint(\"s={add(20, 22)}\")\n",
+    );
+
+    let (_stdout, stderr, code) = run_fitz(&["build"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let bin_name = if cfg!(windows) { "myapp.exe" } else { "myapp" };
+    let bin_path = app_dir.join("target").join("release").join(bin_name);
+    assert!(
+        bin_path.is_file(),
+        "binary missing at {}",
+        bin_path.display()
+    );
+    let output = Command::new(&bin_path).output().expect("execute binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("s=42"), "binary stdout: {stdout}");
+}
+
 // ---- Fase 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ----
 
 #[test]
