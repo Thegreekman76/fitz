@@ -1417,6 +1417,78 @@ fn test_failure_returns_exit_1_with_left_right_detail() {
 }
 
 #[test]
+fn test_infinite_loop_aborts_cleanly_with_step_limit() {
+    // A `@test` with an infinite `loop {}`. Without the budget this
+    // would hang `fitz test` forever (and the test would time out).
+    // A low FITZ_MAX_STEPS trips fast, and the run must report a clean
+    // failure (exit 1) instead of hanging.
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "@test fn cuelga() { loop { let x = 1 } }\n",
+    );
+
+    let (stdout, _stderr, code) = run_fitz_with_env(
+        &["test", "--file", "t.fitz"],
+        tmp.path(),
+        &[("FITZ_MAX_STEPS", "10000")],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}");
+    assert!(
+        stdout.contains("test cuelga ... FAILED"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("step limit"), "stdout: {stdout}");
+    assert!(stdout.contains("1 failed"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_infinite_recursion_aborts_cleanly_with_depth_limit() {
+    // Infinite recursion inside a `@test`. A low FITZ_MAX_DEPTH trips
+    // the depth guard and reports a clean failure.
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "fn boom(n: Int) -> Int => boom(n + 1)\n@test fn recurse() { let r = boom(0) }\n",
+    );
+
+    let (stdout, _stderr, code) = run_fitz_with_env(
+        &["test", "--file", "t.fitz"],
+        tmp.path(),
+        &[("FITZ_MAX_DEPTH", "200")],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}");
+    assert!(
+        stdout.contains("test recurse ... FAILED"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("recursion depth"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_infinite_recursion_default_depth_does_not_crash() {
+    // Validates that the DEFAULT depth ceiling fires as a clean test
+    // failure on the large-stack evaluation thread, rather than
+    // overflowing the native stack and crashing the whole process. No
+    // env override — this exercises the production default.
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "fn boom(n: Int) -> Int => boom(n + 1)\n@test fn recurse() { let r = boom(0) }\n",
+    );
+
+    let (stdout, _stderr, code) = run_fitz(&["test", "--file", "t.fitz"], tmp.path());
+    assert_eq!(
+        code, 1,
+        "expected a clean test failure, not a stack-overflow crash. stdout: {stdout}"
+    );
+    assert!(stdout.contains("recursion depth"), "stdout: {stdout}");
+}
+
+#[test]
 fn test_filter_substring_matches_only_what_it_contains() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(

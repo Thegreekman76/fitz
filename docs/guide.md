@@ -10470,6 +10470,35 @@ from miproyecto import doble
   Refinamiento útil; necesita propagar el span del call site al
   builtin.
 
+### Límites de recursos (un test no te cuelga la suite)
+
+Un test con un `loop {}` sin salida o una recursión sin caso base es
+siempre un bug. Para que ese bug **falle limpio** en vez de colgar el
+runner o crashear el proceso, `fitz test` corre cada test con un
+presupuesto de recursos:
+
+- Un tope de **pasos** por iteración de loop (`while`/`loop`/`for`) —
+  ataja el `loop {}` CPU-bound.
+- Un tope de **profundidad de recursión** — ataja la recursión
+  infinita y la reporta como un fallo con mensaje claro.
+
+Cuando un test excede alguno de los dos, se reporta como `FAILED` con
+un error explicando qué límite se cruzó. **`fitz run` no tiene estos
+límites** — tus servidores, handlers `@ws` y jobs `@cron` corren con
+sus loops infinitos legítimos sin tocar.
+
+Los defaults son generosos (mucho más de lo que cualquier test honesto
+necesita). Si tenés un test legítimamente muy pesado o muy recursivo,
+subí los topes con variables de entorno:
+
+```bash
+FITZ_MAX_STEPS=200000000 fitz test    # más iteraciones de loop
+FITZ_MAX_DEPTH=8000 fitz test         # recursión más profunda
+```
+
+El REPL (`fitz repl`) aplica el mismo presupuesto por evaluación, con
+las mismas variables.
+
 ### Ejemplo ejecutable
 
 `examples/guide/24-tests.fitz` tiene un mini-set de tests sobre una
@@ -10757,6 +10786,13 @@ Las líneas que tipeás se guardan en `~/.fitz/history` (o
 - **Comandos `:save <archivo>` (volcar la sesión a un .fitz),
   `:undo` (deshacer última línea), `:debug` (modo verbose)**:
   sub-pasos futuros si entra demanda.
+
+### Límites de recursos
+
+Cada evaluación del REPL corre con el mismo presupuesto de recursos que
+`fitz test`: si tipeás un `loop {}` sin salida o una recursión infinita,
+la línea aborta con un error claro en vez de colgar la sesión. Ajustable
+con `FITZ_MAX_STEPS` / `FITZ_MAX_DEPTH` (ver el capítulo de `fitz test`).
 
 ### Cuándo usar `fitz repl` vs `fitz run`
 

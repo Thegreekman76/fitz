@@ -4219,6 +4219,26 @@ async fn eval_test_source(
         .map_err(|e| format!("{e}"))
 }
 
+/// Runs `f` on a dedicated large-stack thread and returns its
+/// result. Wraps the evaluation in `fitz test` and `fitz repl` (the
+/// two budgeted contexts) so deep-but-bounded recursion hits the
+/// depth budget cleanly instead of overflowing the native stack. The
+/// interpreter's async functions compile to large state machines
+/// (~100 KB+ of native stack per Fitz call frame), so the default OS
+/// thread stack overflows at a shallow depth; the stack size here is
+/// derived from the depth budget via `eval_thread_stack_size`.
+/// `std::thread::scope` lets `f` borrow from the caller.
+fn run_on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(evaluator::eval_thread_stack_size())
+            .spawn_scoped(scope, f)
+            .expect("could not spawn the evaluation thread")
+            .join()
+            .expect("the evaluation thread panicked")
+    })
+}
+
 /// Runs every test in the registry, applies the optional
 /// `filter`, reports cargo-style (`test <name> ... ok/FAILED`)
 /// with a final summary, and returns the number of failed tests.
@@ -4306,7 +4326,7 @@ fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> 
         print!("test {} ... ", full_name);
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
-        let outcome = runtime.block_on(invoke_one_test(test));
+        let outcome = run_on_big_stack(|| runtime.block_on(invoke_one_test(test)));
         match outcome {
             Ok(()) => println!("{}", green("ok")),
             Err(msg) => {
@@ -4351,9 +4371,16 @@ fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> 
 /// Any `FitzError` is returned as `Err(formatted_string)` — the
 /// runner records it in the `failures:` section of the output.
 async fn invoke_one_test(test: &testing::TestSpec) -> Result<(), String> {
-    evaluator::run_test_handler(test.handler.clone(), test.is_async, &test.name)
+    // Install a fresh resource budget for this test. An infinite loop
+    // or infinite recursion inside a test is always a bug, and we want
+    // it reported as a clean failure instead of hanging the runner.
+    // (`fitz run` never installs a budget — its loops are legitimate.)
+    evaluator::install_eval_budget();
+    let result = evaluator::run_test_handler(test.handler.clone(), test.is_async, &test.name)
         .await
-        .map_err(|e| format!("{e}"))
+        .map_err(|e| format!("{e}"));
+    evaluator::uninstall_eval_budget();
+    result
 }
 
 // ---- Phase 9.z.3 — `fitz dev` (hot reload) ----
@@ -4724,8 +4751,10 @@ fn repl_cmd() {
     }
 
     let runtime = evaluator::build_runtime();
-    runtime.block_on(async move {
-        repl_loop(&mut editor, history_path.as_deref()).await;
+    run_on_big_stack(move || {
+        runtime.block_on(async move {
+            repl_loop(&mut editor, history_path.as_deref()).await;
+        });
     });
 }
 
@@ -5091,14 +5120,18 @@ async fn load_into_repl_env(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| base_dir.to_path_buf());
-    match evaluator::eval_program_with_env(
+    // Same budget as an interactive line: a `:load`ed file that loops
+    // forever should abort cleanly instead of hanging the REPL.
+    evaluator::install_eval_budget();
+    let outcome = evaluator::eval_program_with_env(
         program,
         load_base,
         env.clone(),
         manifest::DepRegistry::new(),
     )
-    .await
-    {
+    .await;
+    evaluator::uninstall_eval_budget();
+    match outcome {
         Ok(_) => println!("✓ cargado {}", resolved.display()),
         Err(e) => println!("✗ {e}"),
     }
@@ -5155,14 +5188,19 @@ async fn eval_repl_input(source: &str, env: &mut fitz::env::EnvRef, base_dir: &s
     // from an expression and isn't Null (print/let/fn return
     // Null and we don't want visual noise).
     let last_is_expr = matches!(program.last(), Some(fitz::ast::Stmt::Expr(_, _)));
-    match evaluator::eval_program_with_env(
+    // Fresh resource budget per REPL evaluation: an infinite loop or
+    // infinite recursion typed at the prompt should abort with a clear
+    // error, not hang the session.
+    evaluator::install_eval_budget();
+    let outcome = evaluator::eval_program_with_env(
         program,
         base_dir.to_path_buf(),
         env.clone(),
         manifest::DepRegistry::new(),
     )
-    .await
-    {
+    .await;
+    evaluator::uninstall_eval_budget();
+    match outcome {
         Ok(value) => {
             if last_is_expr && !matches!(value, fitz::value::Value::Null) {
                 println!("= {}", value);

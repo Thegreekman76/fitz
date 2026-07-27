@@ -45,6 +45,11 @@ pub enum ErrorKind {
 
     // Static checker errors (Phase 5)
     TypeError,
+
+    // Evaluator resource limits (the budget installed by `fitz test`
+    // and `fitz repl`). Raised when a run exceeds the step or
+    // recursion-depth limit — an infinite loop or infinite recursion.
+    ResourceLimitExceeded,
 }
 
 impl FitzError {

@@ -2352,6 +2352,210 @@ where
     CLI_REGISTRY.with(|cell| f(cell.borrow().as_ref()))
 }
 
+// ---------------------------------------------------------------------------
+// Resource limits (evaluator budget)
+//
+// Fitz has LEGITIMATE infinite loops: the `loop {}` inside every
+// `@ws` handler, the HTTP server accept loop, cron schedulers. So the
+// budget can NOT be global — it would break every server. It is
+// installed selectively where an infinite loop is always a bug:
+// `fitz test` (fresh per test) and `fitz repl` (fresh per evaluation).
+// NEVER in `fitz run` / `fitz build`.
+//
+// Two counters, because the two failure modes are different:
+//   - STEP counter, ticked once per loop iteration (While/Loop/For).
+//     Catches a CPU-bound `loop {}` — a wall-clock timeout can't,
+//     since a tight loop never yields the thread for the timer to
+//     fire.
+//   - DEPTH counter, an RAII guard around each function body's
+//     execution. Catches infinite recursion, converting a native
+//     stack overflow (a hard process crash) into a clean FitzError.
+//
+// Both are thread-local and no-op when no budget is installed. Since
+// `fitz test` and `fitz repl` drive eval on a `new_current_thread`
+// runtime, the whole run (including `spawn`ed tasks) stays on one
+// thread, so the thread-local covers everything.
+
+/// Default step ceiling: ~sub-second of a tight loop, comfortably
+/// above any honest computation. Override with `FITZ_MAX_STEPS`.
+const DEFAULT_MAX_STEPS: u64 = 50_000_000;
+/// Default recursion-depth ceiling. Honest recursion sits far below
+/// this (3.5× CPython's default of 1000). It is deliberately NOT huge:
+/// each Fitz call frame costs a large amount of native stack (the
+/// interpreter's `#[async_recursion]` state machines are ~100 KB+ per
+/// frame), so the evaluation thread's stack is sized from this value
+/// (`eval_thread_stack_size`). Override with `FITZ_MAX_DEPTH`.
+const DEFAULT_MAX_DEPTH: u32 = 3_500;
+
+struct EvalBudget {
+    steps: u64,
+    max_steps: u64,
+    depth: u32,
+    max_depth: u32,
+}
+
+/// Reads the step ceiling from `FITZ_MAX_STEPS` (a positive integer),
+/// falling back to the default.
+fn resolved_max_steps() -> u64 {
+    std::env::var("FITZ_MAX_STEPS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_STEPS)
+}
+
+/// Reads the recursion-depth ceiling from `FITZ_MAX_DEPTH` (a positive
+/// integer), falling back to the default.
+fn resolved_max_depth() -> u32 {
+    std::env::var("FITZ_MAX_DEPTH")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_DEPTH)
+}
+
+/// Native stack size the `fitz test` / `fitz repl` evaluation thread
+/// should reserve, derived from the recursion-depth budget. Each Fitz
+/// call frame costs a large, roughly fixed amount of native stack, so
+/// we reserve enough that the depth budget — not the OS stack — is the
+/// limiting factor, even when `FITZ_MAX_DEPTH` is raised. The stack is
+/// reserved virtually and committed on demand, so a generous per-frame
+/// estimate is cheap for shallow runs and only fully commits on an
+/// actual runaway recursion (which the budget then aborts).
+pub fn eval_thread_stack_size() -> usize {
+    /// Conservative upper bound on native stack per Fitz call frame.
+    const PER_FRAME_BYTES: usize = 256 * 1024;
+    /// Headroom for the runtime, builtins, and non-recursive frames.
+    const BASE_BYTES: usize = 32 * 1024 * 1024;
+    BASE_BYTES + resolved_max_depth() as usize * PER_FRAME_BYTES
+}
+
+thread_local! {
+    /// The active evaluator budget. `None` = unlimited (the `fitz
+    /// run` case). Installed by `install_eval_budget`, consulted by
+    /// the loop branches and the function-call depth guard.
+    static EVAL_BUDGET: RefCell<Option<EvalBudget>> = const { RefCell::new(None) };
+}
+
+/// Installs a fresh budget on the current thread. Limits come from
+/// `FITZ_MAX_STEPS` / `FITZ_MAX_DEPTH` (positive integers), falling
+/// back to generous defaults. Call before evaluating a test or a
+/// REPL line; pair with `uninstall_eval_budget`. Re-installing always
+/// resets the counters, so each test/line starts fresh regardless of
+/// whether the previous uninstall ran.
+pub fn install_eval_budget() {
+    let max_steps = resolved_max_steps();
+    let max_depth = resolved_max_depth();
+    EVAL_BUDGET.with(|cell| {
+        *cell.borrow_mut() = Some(EvalBudget {
+            steps: 0,
+            max_steps,
+            depth: 0,
+            max_depth,
+        });
+    });
+}
+
+/// Removes the budget from the current thread (back to unlimited).
+pub fn uninstall_eval_budget() {
+    EVAL_BUDGET.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Test-only: installs a budget with explicit limits so tests can
+/// trip the ceilings without huge iteration counts. Production code
+/// uses `install_eval_budget` (env-var / default limits).
+#[cfg(test)]
+fn install_eval_budget_with(max_steps: u64, max_depth: u32) {
+    EVAL_BUDGET.with(|cell| {
+        *cell.borrow_mut() = Some(EvalBudget {
+            steps: 0,
+            max_steps,
+            depth: 0,
+            max_depth,
+        });
+    });
+}
+
+/// Ticks one evaluation step. Called once per loop iteration. No-op
+/// when no budget is installed. Returns an error signal when the step
+/// limit is exceeded.
+fn budget_tick_step() -> Result<(), EvalSignal> {
+    EVAL_BUDGET.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if let Some(budget) = guard.as_mut() {
+            budget.steps += 1;
+            if budget.steps > budget.max_steps {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::ResourceLimitExceeded,
+                    0,
+                    0,
+                    format!(
+                        "evaluation exceeded the step limit of {} iterations — \
+                         this looks like an infinite loop. If it is intentional, \
+                         raise the limit with the FITZ_MAX_STEPS env var.",
+                        budget.max_steps
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// RAII guard for recursion depth. `enter` increments the depth (and
+/// errors if it would exceed the limit); `Drop` decrements it. No-op
+/// when no budget is installed. Held for the duration of a function
+/// body's execution, so nested calls stack up and unwind cleanly on
+/// every return path.
+struct DepthGuard {
+    /// True only when a budget was installed at `enter` time and the
+    /// depth was actually incremented — so `Drop` decrements exactly
+    /// once, and never when there is nothing to unwind.
+    active: bool,
+}
+
+impl DepthGuard {
+    fn enter(span: Span) -> Result<Self, EvalSignal> {
+        EVAL_BUDGET.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            match guard.as_mut() {
+                None => Ok(DepthGuard { active: false }),
+                Some(budget) => {
+                    if budget.depth >= budget.max_depth {
+                        return Err(EvalSignal::Error(FitzError::new(
+                            ErrorKind::ResourceLimitExceeded,
+                            span.line,
+                            span.column,
+                            format!(
+                                "evaluation exceeded the recursion depth limit of {} — \
+                                 this looks like infinite recursion. If it is intentional, \
+                                 raise the limit with the FITZ_MAX_DEPTH env var.",
+                                budget.max_depth
+                            ),
+                        )));
+                    }
+                    budget.depth += 1;
+                    Ok(DepthGuard { active: true })
+                }
+            }
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        if self.active {
+            EVAL_BUDGET.with(|cell| {
+                if let Some(budget) = cell.borrow_mut().as_mut() {
+                    budget.depth = budget.depth.saturating_sub(1);
+                }
+            });
+        }
+    }
+}
+
 fn install_loader(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) {
     LOADER.with(|cell| {
         // Mini-phase loader-absolute (Step 4 post-boilerplates) — the
@@ -3315,6 +3519,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 ))),
             };
             for item in items {
+                budget_tick_step()?;
                 bind_for_pattern(var, item, &env)?;
                 match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
@@ -3334,6 +3539,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // while inside a function breaks both up to the function).
         Stmt::While { condition, body, label, span: _ } => {
             loop {
+                budget_tick_step()?;
                 let cond_v = eval_expr(condition, env.clone()).await?;
                 let cond_bool = match cond_v {
                     Value::Bool(b) => b,
@@ -3365,6 +3571,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // can get you out.
         Stmt::Loop { body, label, span: _ } => {
             loop {
+                budget_tick_step()?;
                 match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
                     LoopControl::Break(_) => break, // value discarded in statement-mode
@@ -4816,6 +5023,7 @@ async fn invoke_value_named(
                 let owned_body = body;
                 let display_owned = display_name.to_string();
                 let fut: crate::value::FitzFuture = Box::pin(async move {
+                    let _depth = DepthGuard::enter(span).map_err(signal_to_error)?;
                     for stmt in &owned_body {
                         match eval_stmt(stmt, call_env.clone()).await {
                             Ok(_) => {}
@@ -4828,6 +5036,7 @@ async fn invoke_value_named(
                 });
                 return Ok(Value::new_future(fut));
             }
+            let _depth = DepthGuard::enter(span)?;
             for stmt in &body {
                 match eval_stmt(stmt, call_env.clone()).await {
                     Ok(_) => {}
@@ -5664,6 +5873,7 @@ pub async fn invoke_value(
                 let owned_body = body;
                 let display_owned = display_name.to_string();
                 let fut: crate::value::FitzFuture = Box::pin(async move {
+                    let _depth = DepthGuard::enter(span).map_err(signal_to_error)?;
                     for stmt in &owned_body {
                         match eval_stmt(stmt, call_env.clone()).await {
                             Ok(_) => {}
@@ -5680,6 +5890,7 @@ pub async fn invoke_value(
                 return Ok(Value::new_future(fut));
             }
 
+            let _depth = DepthGuard::enter(span)?;
             for stmt in &body {
                 match eval_stmt(stmt, call_env.clone()).await {
                     Ok(_) => {}
@@ -7254,6 +7465,7 @@ async fn invoke_custom_method(
     if method.is_async {
         let owned_body = method.body;
         let fut: crate::value::FitzFuture = Box::pin(async move {
+            let _depth = DepthGuard::enter(span).map_err(signal_to_error)?;
             for stmt in &owned_body {
                 match eval_stmt(stmt, method_env.clone()).await {
                     Ok(_) => {}
@@ -7269,6 +7481,7 @@ async fn invoke_custom_method(
     // Sync: execute the body. `Stmt::Return` bounces as
     // EvalSignal::Return and we unwrap it to the value; any other
     // signal bubbles up.
+    let _depth = DepthGuard::enter(span)?;
     match eval_block(&method.body, method_env).await {
         Ok(v) => Ok(v),
         Err(EvalSignal::Return(v)) => Ok(v),
@@ -7332,6 +7545,7 @@ async fn invoke_static_method(
     if method.is_async {
         let owned_body = method.body;
         let fut: crate::value::FitzFuture = Box::pin(async move {
+            let _depth = DepthGuard::enter(span).map_err(signal_to_error)?;
             for stmt in &owned_body {
                 match eval_stmt(stmt, method_env.clone()).await {
                     Ok(_) => {}
@@ -7344,6 +7558,7 @@ async fn invoke_static_method(
         return Ok(Value::new_future(fut));
     }
 
+    let _depth = DepthGuard::enter(span)?;
     match eval_block(&method.body, method_env).await {
         Ok(v) => Ok(v),
         Err(EvalSignal::Return(v)) => Ok(v),
@@ -21452,6 +21667,116 @@ print(factorial(5))
         let tokens = crate::lexer::tokenize(src).expect("la fuente debe tokenizar");
         let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
         eval(program).await
+    }
+
+    // -------------------------------------------------------------------
+    // Resource limits — evaluator budget (steps + recursion depth).
+    // The budget is thread-local; `#[tokio::test(flavor =
+    // "current_thread")]` keeps the eval on the test thread, so a
+    // budget installed here is seen by the eval. We uninstall at the
+    // end of each test so a leaked budget cannot leak into a sibling
+    // test on the same worker thread.
+    // -------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_loop_infinito_aborta_con_limite_de_steps() {
+        install_eval_budget_with(1_000, 5_000);
+        let result = parse_and_eval("loop { let x = 1 }").await;
+        uninstall_eval_budget();
+        let err = result.expect_err("un `loop {}` bajo budget debe abortar");
+        assert!(matches!(err.kind, ErrorKind::ResourceLimitExceeded));
+        assert!(
+            err.message.contains("step limit") && err.message.contains("FITZ_MAX_STEPS"),
+            "message should point at the step limit and the override: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_while_true_aborta_con_limite_de_steps() {
+        install_eval_budget_with(1_000, 5_000);
+        let result = parse_and_eval("let i = 0\nwhile (true) { i = i + 1 }").await;
+        uninstall_eval_budget();
+        let err = result.expect_err("un `while (true)` bajo budget debe abortar");
+        assert!(matches!(err.kind, ErrorKind::ResourceLimitExceeded));
+    }
+
+    #[test]
+    fn budget_recursion_infinita_aborta_con_limite_de_depth() {
+        // Runs on a large-stack thread with its own current-thread
+        // runtime, exactly like `fitz test` / `fitz repl` do. A plain
+        // `#[tokio::test]` can't work here: each Fitz call frame costs
+        // ~100 KB+ of native stack, so infinite recursion overflows the
+        // ~2 MiB test-worker stack before any useful depth. On a big
+        // stack the DEPTH budget is what trips (generous step ceiling).
+        let err = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build runtime");
+                rt.block_on(async {
+                    install_eval_budget_with(50_000_000, 500);
+                    let result =
+                        parse_and_eval("fn boom(n: Int) -> Int => boom(n + 1)\nlet x = boom(0)")
+                            .await;
+                    uninstall_eval_budget();
+                    result.expect_err("recursión infinita bajo budget debe abortar")
+                })
+            })
+            .expect("spawn big-stack thread")
+            .join()
+            .expect("big-stack thread panicked");
+        assert!(matches!(err.kind, ErrorKind::ResourceLimitExceeded));
+        assert!(
+            err.message.contains("recursion depth") && err.message.contains("FITZ_MAX_DEPTH"),
+            "message should point at the depth limit and the override: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_programa_normal_no_dispara_el_limite() {
+        // A bounded loop plus honest calls well under the ceilings.
+        install_eval_budget_with(1_000_000, 1_000);
+        let result = parse_and_eval("let i = 0\nwhile (i < 100) { i = i + 1 }\nprint(i)").await;
+        uninstall_eval_budget();
+        assert!(
+            result.is_ok(),
+            "un programa normal no debe tripear el budget: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn budget_muchas_llamadas_secuenciales_no_acumulan_depth() {
+        // The depth guard must DECREMENT on return: 500 sequential
+        // (non-nested) calls with a depth limit of 20 must pass —
+        // each call returns before the next enters, so depth never
+        // grows past 1.
+        install_eval_budget_with(50_000_000, 20);
+        let result = parse_and_eval(
+            "fn id(n: Int) -> Int => n\nlet i = 0\nwhile (i < 500) { let x = id(i)\ni = i + 1 }",
+        )
+        .await;
+        uninstall_eval_budget();
+        assert!(
+            result.is_ok(),
+            "llamadas secuenciales no deben acumular profundidad: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sin_budget_los_contadores_son_noop() {
+        // No budget installed: a bounded loop just runs (this is the
+        // `fitz run` path — no limits). The point is that no
+        // ResourceLimitExceeded is raised when no budget is present.
+        uninstall_eval_budget();
+        let result = parse_and_eval("let i = 0\nwhile (i < 10000) { i = i + 1 }").await;
+        assert!(
+            result.is_ok(),
+            "sin budget no debe haber límite: {result:?}"
+        );
     }
 
     /// Like `parse_and_eval`, but keeps the env to inspect it.

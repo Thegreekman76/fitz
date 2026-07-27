@@ -4,6 +4,62 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 Límites de recursos en el evaluador (steps + depth) — fase 1 CERRADA (2026-07-27)
+
+**Contexto**: el evaluador NO tenía ningún límite — un `loop {}` CPU-bound
+colgaba el thread para siempre y una recursión infinita crasheaba el proceso
+con stack overflow. Fitz tiene loops infinitos **legítimos** (el `loop {}` de
+cada handler `@ws`, el accept loop del server HTTP, los schedulers de `@cron`),
+así que los límites NO pueden ser globales — romperían todo servidor. Se aplican
+**selectivamente** donde un loop/recursión infinito es siempre un bug: `fitz
+test` (fresh por test) y `fitz repl` (fresh por evaluación). **Nunca** en `fitz
+run`/`build`/servidor.
+
+**Mecanismo (fase 1)** — budget thread-local en el evaluador (`EVAL_BUDGET`,
+paralelo a `LOADER`/`CLI_REGISTRY`), `None` = ilimitado:
+
+- **STEP counter** (`budget_tick_step()?`): tickea una vez por iteración de
+  `Stmt::While`/`Stmt::Loop`/`Stmt::For`. Ataja el `loop {}` CPU-bound — un
+  timeout wall-clock NO puede, porque un loop tight nunca cede el thread para
+  que el timer dispare.
+- **DEPTH guard** (`DepthGuard::enter(span)?`, RAII con decremento en `Drop`):
+  envuelve la ejecución del body de función en los **4** puntos donde una llamada
+  de usuario corre un cuerpo — `invoke_value`, `invoke_value_named`,
+  `invoke_custom_method`, `invoke_static_method`, cada uno en su rama sync **y**
+  async (guard adentro del `Box::pin(async move {...})` para que la profundidad
+  se cuente al poll-time, correcto para recursión async). Convierte recursión
+  infinita en `FitzError` limpio (`ErrorKind::ResourceLimitExceeded`) en vez de
+  crash.
+- **Defaults + escape**: `FITZ_MAX_STEPS` (default 50M) y `FITZ_MAX_DEPTH`
+  (default 3500 — 3.5× el default de CPython) como env vars.
+- Cableado en `invoke_one_test` (por test) y en las dos rutas de eval del REPL
+  (`eval_repl_input` + `:load`), con `install_eval_budget`/`uninstall_eval_budget`.
+
+**Hallazgo clave — el stack overflow gana a cualquier guard "a secas"**:
+empíricamente cada frame de llamada Fitz cuesta **~100 KB+ de stack nativo** (las
+funciones `#[async_recursion]` compilan a máquinas de estado enormes). En un
+stack de 2 MB la recursión revienta a profundidad **~15-20** — antes de que el
+depth guard llegue a disparar. Por eso `fitz test`/`fitz repl` corren el eval en
+un **thread de stack grande** (`run_on_big_stack` en `main.rs`), con tamaño
+**derivado del budget de depth** (`eval_thread_stack_size` = 32 MB base +
+`max_depth`×256 KB). Así el budget —no el stack del SO— es el límite, y subir
+`FITZ_MAX_DEPTH` sigue siendo seguro porque el stack escala con él. Reserva
+virtual, commit on-demand (el runaway commitea transitoriamente y aborta).
+
+**Tests**: 6 unit (`evaluator::tests::budget_*` + `sin_budget_*`; el de recursión
+corre en su propio thread de stack grande porque no cabe en el stack de test de
+tokio) + 3 cli_e2e (`test_infinite_loop_aborts_cleanly_with_step_limit`,
+`test_infinite_recursion_aborts_cleanly_with_depth_limit`,
+`test_infinite_recursion_default_depth_does_not_crash` — este último valida que
+el default dispara limpio sobre el stack real sin crashear). Cero cambios a
+`fitz run`/`build`/codegen (los guards son no-op sin budget instalado).
+
+**Deuda residual — fase 2 (NO bloquea)**: **timeout wall-clock** complementario,
+para código que sí awaitea (I/O, `sleep`, `.await` sobre futures Python/HTTP) y
+por lo tanto no burna steps ni crece en depth. Es complementario a los
+contadores, no un reemplazo — `tokio::time::timeout` no corta un `loop {}`
+CPU-bound. Se ataca si aparece demanda real.
+
 ## 🟢 SSR emitter — mixed attribute interpolation en `.fitzv` — **CERRADO v0.28.7 (2026-07-25)**
 
 **Gap**: descubierto en el slice Toast del refactor a LiveComponents del Admin
