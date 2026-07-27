@@ -4480,6 +4480,16 @@ impl ModuleLoader {
         let module_python_imports = collect_python_imports(&module_program);
         validate_python_imports_for_codegen(&module_program)?;
         let mut local_bindings: HashMap<String, ResolvedBinding> = HashMap::new();
+        // Paridad run/build (2026-07-27) — resolve this module's OWN
+        // transitive relative imports against ITS directory, not the
+        // top-level project's `base_dir`. Without this, a dep sub-path
+        // module (`from mylib.ui.Pager import ...`) whose `.fitzv` does
+        // `from pager_helpers import ...` fails codegen because
+        // `pager_helpers` is searched under the importing project's src
+        // instead of the dependency's own dir. Mirrors the evaluator's
+        // `Loader`, which mutates `base_dir` to the importing module's
+        // parent while loading its nested imports, then restores it.
+        let saved_base_dir = std::mem::replace(&mut self.base_dir, module_base_dir.clone());
         for stmt in &module_program {
             match stmt {
                 Stmt::Import { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
@@ -4530,6 +4540,9 @@ impl ModuleLoader {
                 _ => {}
             }
         }
+        // Restore the project's base_dir now that this module's nested
+        // imports are resolved (see the swap above the loop).
+        self.base_dir = saved_base_dir;
 
         // Generate the module's Rust code (Module mode). In F15
         // codegen receives the local bindings + the sigs of all

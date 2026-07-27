@@ -4558,8 +4558,18 @@ pub fn serve(
     let draining_for_shutdown = registry.draining.clone();
     let shutdown_timeout_secs = resolved_config.shutdown_timeout_secs;
 
+    // Worker stack size — the Fitz evaluator is tree-walking and
+    // `#[async_recursion]`, so each Fitz-level call consumes a
+    // sizable Rust stack frame. Rendering a real-world page (a data
+    // grid with nested rows, forms, and composed LiveComponents) can
+    // reach hundreds of nested evaluator frames, which overflows
+    // tokio's default 2 MB worker stack — especially on the WS path,
+    // where the handler wrapper leaves less headroom than a plain GET.
+    // Bump to 16 MB so non-trivial server apps render reliably.
+    const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(WORKER_STACK_SIZE)
         .build()?;
     runtime.block_on(async move {
         let router = build_router_with_asyncapi(&metas, registry, openapi_schema, asyncapi_schema);

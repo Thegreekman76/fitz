@@ -949,6 +949,60 @@ fn build_resolves_dotted_dep_subpath_import() {
     assert!(stdout.contains("s=42"), "binary stdout: {stdout}");
 }
 
+/// Regression (2026-07-27) — a dotted dep sub-path module that itself
+/// imports a SIBLING (`math.fitz` does `from math_helpers import base`)
+/// must resolve that transitive import against the dep module's OWN
+/// directory (`mylib/src/ui/`), not the importing project's `base_dir`
+/// (`myapp/src/`). The codegen loader previously used a single global
+/// `base_dir` for every transitive import, so `fitz build` failed with
+/// `module 'math_helpers' not found`. `fitz run` always resolved it
+/// correctly (the evaluator's loader tracks the importer's dir), so this
+/// closes a run/build parity gap. Mirrors the fitz-liveviews UI library
+/// case (`Pager.fitzv` importing `pager_helpers`).
+#[test]
+fn build_resolves_dotted_dep_subpath_with_transitive_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "mylib", "--no-git"], tmp.path());
+    let lib_dir = tmp.path().join("mylib");
+    convert_to_lib(&lib_dir, "mylib", "0.1.0");
+    write_file(&lib_dir, "src/lib.fitz", "let LIB_NAME = \"mylib\"\n");
+    // The dep sub-path module imports a sibling in the SAME dir.
+    write_file(
+        &lib_dir,
+        "src/ui/math_helpers.fitz",
+        "fn base() -> Int => 100\n",
+    );
+    write_file(
+        &lib_dir,
+        "src/ui/math.fitz",
+        "from math_helpers import base\nfn add(a: Int, b: Int) -> Int => base() + a + b\n",
+    );
+
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    add_path_dep(&app_dir, "myapp", "mylib", "../mylib");
+    write_file(
+        &app_dir,
+        "src/main.fitz",
+        "from mylib.ui.math import add\nprint(\"s={add(20, 22)}\")\n",
+    );
+
+    let (_stdout, stderr, code) = run_fitz(&["build"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let bin_name = if cfg!(windows) { "myapp.exe" } else { "myapp" };
+    let bin_path = app_dir.join("target").join("release").join(bin_name);
+    assert!(
+        bin_path.is_file(),
+        "binary missing at {}",
+        bin_path.display()
+    );
+    let output = Command::new(&bin_path).output().expect("execute binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // base() = 100, so add(20, 22) = 100 + 20 + 22 = 142.
+    assert!(stdout.contains("s=142"), "binary stdout: {stdout}");
+}
+
 // ---- Fase 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ----
 
 #[test]

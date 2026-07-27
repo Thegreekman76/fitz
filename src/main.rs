@@ -2164,7 +2164,8 @@ fn build_file(
 
     // Checker in strict mode — there is no `--no-typecheck` in
     // build. 8-pyi.B: loads adjacent .pyi stubs before the check.
-    let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
+    let (env, types, _defs, type_errors) =
+        check_program_with_pyi_stubs_and_deps(&program, path, &dep_registry);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} type error(s):",
@@ -2190,7 +2191,8 @@ fn build_file(
     let (env, types) = if codegen::has_unannotated_fn_params(&program) {
         codegen::fill_inferred_param_types(&mut program, &types, &env);
         // 8-pyi.B: re-check also loads stubs (idempotent).
-        let (env2, types2, _defs2, errs2) = check_program_with_pyi_stubs(&program, path);
+        let (env2, types2, _defs2, errs2) =
+            check_program_with_pyi_stubs_and_deps(&program, path, &dep_registry);
         if !errs2.is_empty() {
             // If the re-check produces new errors with the
             // inferred types, surface them.
@@ -2515,7 +2517,8 @@ fn build_file_with_bundle(
 
     // --- Strict checker (no `--no-typecheck` in build) ---
     // 8-pyi.B: loads adjacent .pyi stubs before the check.
-    let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
+    let (env, types, _defs, type_errors) =
+        check_program_with_pyi_stubs_and_deps(&program, path, &dep_registry);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} type error(s):",
@@ -2532,7 +2535,8 @@ fn build_file_with_bundle(
     let (env, types) = if codegen::has_unannotated_fn_params(&program) {
         codegen::fill_inferred_param_types(&mut program, &types, &env);
         // 8-pyi.B: re-check also loads stubs (idempotent).
-        let (env2, types2, _defs2, errs2) = check_program_with_pyi_stubs(&program, path);
+        let (env2, types2, _defs2, errs2) =
+            check_program_with_pyi_stubs_and_deps(&program, path, &dep_registry);
         if !errs2.is_empty() {
             eprintln!(
                 "✗ {} — {} error(es) de tipo tras inferencia de params:",
@@ -3207,7 +3211,8 @@ fn run_file(
     // get reported but execution continues), intended for legacy
     // code or to diagnose checker bugs.
     // 8-pyi.B: loads adjacent .pyi stubs before the check.
-    let (type_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
+    let (type_env, _types, _defs, type_errors) =
+        check_program_with_pyi_stubs_and_deps(&program, path, &dep_registry);
     if !type_errors.is_empty() {
         if no_typecheck {
             eprintln!(
