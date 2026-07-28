@@ -9,6 +9,51 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.0] — 2026-07-28 — Librerías de componentes por dep-subpath: imports punteados + presupuesto de recursos + fixes de paridad
+
+Reúne el trabajo de core que habilita **librerías de componentes `.fitzv`
+distribuibles como dependencia** (la companion UI library de fitz-liveviews):
+imports por sub-path punteado, presupuesto de recursos para `fitz test`/`repl`,
+y tres fixes que cierran la paridad `fitz run` ↔ `fitz build` end-to-end.
+
+### Added — imports por sub-path punteado dentro de una dependencia
+
+`from <dep>.<sub>.<Mod> import X` resuelve `<Mod>` (`.fitz` o `.fitzv`) bajo la
+raíz de la dependencia, no relativo al importador. Habilita consumir una
+librería organizada en sub-módulos (`from fitz_liveviews.ui.Pager import
+pager`). Paridad `fitz run` ↔ `fitz build` (el codegen emite el módulo de
+dep-subpath como un módulo Rust flat saneado). (commit `0e58213`)
+
+### Added — presupuesto de recursos para `fitz test` / `fitz repl`
+
+`fitz test` y `fitz repl` cortan con un error claro al exceder un límite de
+pasos o de profundidad de recursión, en vez de colgar el proceso ante un loop
+o recursión infinita en código bajo test. (commit `f23777c`)
+
+### Fixed — paridad de las librerías de componentes por dep-subpath
+
+- **codegen** — los imports relativos **transitivos** de un módulo dep-subpath
+  ahora resuelven contra el directorio del propio módulo, no contra el
+  `base_dir` global del proyecto importador. Sin esto, un `Comp.fitzv` que hace
+  `from helpers import x` rompía `fitz build` con `module 'helpers' not found`
+  (buscaba `helpers` bajo el src del importador). `fitz run` ya resolvía bien —
+  cierra una brecha de paridad run/build. Test:
+  `cli_e2e::build_resolves_dotted_dep_subpath_with_transitive_import`.
+- **loader/checker** — `fitz run` y `fitz build` pasan el `dep_registry` al
+  checker, para que el pre-scan de `@live_component` resuelva imports
+  dep-subpath y la auto-registración (`flv_register` inyectado) funcione para
+  componentes importados de una dependencia. Sin esto el runtime fallaba con
+  `key not found in map: <componente>`.
+- **runtime** — el stack de los workers de tokio del servidor HTTP pasa a 16 MB.
+  El evaluador tree-walking `#[async_recursion]` consume un frame grande por
+  cada llamada Fitz; renderizar una página real (un data-grid con filas
+  anidadas + componentes compuestos por WebSocket) overfloweaba el default de
+  2 MB. Solo afecta al intérprete — el binario compilado usa frames mucho más
+  chicos y anda a 2 MB.
+
+Release de codegen/loader/runtime — sin cambios al LSP ni al grammar, así que la
+extensión VSCode del core no se rebuildeó.
+
 ## [v0.28.8] — 2026-07-25 — fix: scoped styling de un `class` mixto en `.fitzv`
 
 Cierra una deuda latente introducida por v0.28.7 (mixed attribute
