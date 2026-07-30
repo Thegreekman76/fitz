@@ -622,6 +622,83 @@ fn append_token_source(out: &mut String, tok: &Token) {
     }
 }
 
+/// Split a captured `{#for ... }` argument into the iterable
+/// expression and an optional `key=<expr>` clause. The `key` marker
+/// is the standalone identifier `key` at bracket/brace/paren depth 0,
+/// outside string literals, immediately followed (after optional
+/// whitespace) by a single `=` (not `==`). Everything before the
+/// marker is the iterable; everything after the `=` is the key
+/// expression. Both sides are trimmed. When no marker is found,
+/// returns `(raw.trim(), None)`.
+///
+/// Depth + string tracking keeps a `key=` that lives inside the iter
+/// expression from being mistaken for the clause — e.g.
+/// `items[key]` (bracket depth 1), `lookup(key)` (paren depth 1),
+/// `where("key=1")` (string literal), and `key_list` / `keyboard`
+/// (no word boundary after `key`) all stay part of the iterable.
+fn split_for_iter_key(raw: &str) -> (String, Option<String>) {
+    let chars: Vec<char> = raw.chars().collect();
+    let n = chars.len();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if in_str {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                i += 1;
+            }
+            '(' | '[' | '{' => {
+                depth += 1;
+                i += 1;
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                i += 1;
+            }
+            'k' if depth == 0
+                && (i == 0 || chars[i - 1].is_whitespace())
+                && chars.get(i + 1) == Some(&'e')
+                && chars.get(i + 2) == Some(&'y')
+                && matches!(
+                    chars.get(i + 3),
+                    None | Some(' ' | '\t' | '\r' | '\n' | '=')
+                ) =>
+            {
+                // `key` at a word boundary — skip whitespace to the
+                // `=`. A single `=` (not `==`) confirms the clause.
+                let mut j = i + 3;
+                while j < n && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if chars.get(j) == Some(&'=') && chars.get(j + 1) != Some(&'=') {
+                    let iter_part: String = chars[..i].iter().collect();
+                    let key_part: String = chars[j + 1..].iter().collect();
+                    return (
+                        iter_part.trim().to_string(),
+                        Some(key_part.trim().to_string()),
+                    );
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    (raw.trim().to_string(), None)
+}
+
 fn needs_space_before(prev_out: &str, tok: &Token) -> bool {
     let last = prev_out.chars().last().unwrap();
     if last == '\n' {
@@ -1044,8 +1121,13 @@ impl<'a> HtmlParser<'a> {
             });
         }
         self.skip_ws_inline();
-        let iter_raw = self.capture_directive_arg_raw(start_line, start_col)?;
-        let iter_trimmed = iter_raw.trim();
+        let raw_arg = self.capture_directive_arg_raw(start_line, start_col)?;
+        // Split off an optional `key=<expr>` clause (keyed-diffing
+        // sugar) from the iterable expression. The `key` marker is a
+        // standalone identifier at bracket/brace/paren depth 0 outside
+        // string literals, immediately followed (after optional
+        // whitespace) by a single `=`.
+        let (iter_trimmed, key_trimmed) = split_for_iter_key(&raw_arg);
         if iter_trimmed.is_empty() {
             return Err(ViewParseError {
                 message: format!(
@@ -1055,10 +1137,22 @@ impl<'a> HtmlParser<'a> {
                 column: start_col,
             });
         }
+        if let Some(ref k) = key_trimmed {
+            if k.is_empty() {
+                return Err(ViewParseError {
+                    message: format!(
+                        "expected key expression after `key=` in `{{#for {var} in {iter_trimmed} key=}}` — the `key=` clause is empty"
+                    ),
+                    line: start_line,
+                    column: start_col,
+                });
+            }
+        }
         let (children, _) = self.parse_nodes(None, Some("for"), false)?;
         Ok(TemplateNode::For {
             var,
-            iter_raw: iter_trimmed.to_string(),
+            iter_raw: iter_trimmed,
+            key_raw: key_trimmed,
             children,
             loc: Loc::new(start_line, start_col),
         })
@@ -3158,5 +3252,115 @@ component X {
         ));
         assert!(input.iter().any(|a| matches!(a, Attr::Static { name, value, .. } if name == "required" && value == "required")));
         assert!(input.iter().any(|a| matches!(a, Attr::Static { name, value, .. } if name == "data-flv-clear" && value == "true")));
+    }
+
+    // ---- keyed `{#for x in xs key=x.id}` sugar --------------------
+
+    #[test]
+    fn split_for_iter_key_no_clause_returns_iter_only() {
+        assert_eq!(split_for_iter_key("xs"), ("xs".into(), None));
+        assert_eq!(
+            split_for_iter_key("  items.filter(fn(x) => x.active)  "),
+            ("items.filter(fn(x) => x.active)".into(), None)
+        );
+    }
+
+    #[test]
+    fn split_for_iter_key_basic_clause() {
+        assert_eq!(
+            split_for_iter_key("xs key=x.id"),
+            ("xs".into(), Some("x.id".into()))
+        );
+        // No space before `=`, spaces around `key`.
+        assert_eq!(
+            split_for_iter_key("items  key = row.uuid"),
+            ("items".into(), Some("row.uuid".into()))
+        );
+    }
+
+    #[test]
+    fn split_for_iter_key_ignores_key_inside_brackets_parens_strings() {
+        // `key` inside `[]` / `()` / string literal is part of the iter.
+        assert_eq!(
+            split_for_iter_key("items[key]"),
+            ("items[key]".into(), None)
+        );
+        assert_eq!(
+            split_for_iter_key("lookup(key)"),
+            ("lookup(key)".into(), None)
+        );
+        assert_eq!(
+            split_for_iter_key(r#"where("key=1")"#),
+            (r#"where("key=1")"#.into(), None)
+        );
+    }
+
+    #[test]
+    fn split_for_iter_key_word_boundary_not_a_prefix() {
+        // `key_list` / `keyboard` are NOT the `key` marker.
+        assert_eq!(split_for_iter_key("key_list"), ("key_list".into(), None));
+        assert_eq!(split_for_iter_key("keyboards"), ("keyboards".into(), None));
+        // Iterating a variable literally named `key` (no `=`).
+        assert_eq!(split_for_iter_key("key"), ("key".into(), None));
+    }
+
+    #[test]
+    fn split_for_iter_key_preserves_comparison_in_key_expr() {
+        // A `==` inside the key expression survives; only the first
+        // single `=` after `key` is the marker.
+        assert_eq!(
+            split_for_iter_key(r#"xs key=x.name == "a""#),
+            ("xs".into(), Some(r#"x.name == "a""#.into()))
+        );
+    }
+
+    #[test]
+    fn parse_for_with_key_populates_key_raw() {
+        let src = r#"component X {
+  state { rows: List<Int> = [] }
+  <template>{#for r in rows key=r}<li>{r}</li>{/for}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::For {
+                var,
+                iter_raw,
+                key_raw,
+                ..
+            } => {
+                assert_eq!(var, "r");
+                assert_eq!(iter_raw, "rows");
+                assert_eq!(key_raw.as_deref(), Some("r"));
+            }
+            other => panic!("expected For root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_without_key_leaves_key_raw_none() {
+        let src = r#"component X {
+  state { rows: List<Int> = [] }
+  <template>{#for r in rows}<li>{r}</li>{/for}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::For { key_raw, .. } => {
+                assert_eq!(*key_raw, None);
+            }
+            other => panic!("expected For root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_empty_key_clause_is_error() {
+        let src = r#"component X {
+  state { rows: List<Int> = [] }
+  <template>{#for r in rows key=}<li>{r}</li>{/for}</template>
+}"#;
+        let err = parse(src).expect_err("empty key clause should error");
+        assert!(
+            err.to_string().contains("key="),
+            "error should mention the empty key clause: {err}"
+        );
     }
 }

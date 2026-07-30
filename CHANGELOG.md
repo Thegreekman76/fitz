@@ -9,6 +9,33 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.1] — 2026-07-30 — `.fitzv`: azúcar `{#for x in xs key=x.id}` para keyed diffing
+
+### Added — cláusula `key=<expr>` en `{#for}` de single-file components
+
+Un `{#for}` en un `.fitzv` acepta una cláusula opcional `key=<expr>`
+(`{#for row in rows key=row.id}`). Desugarea en `expand` a un atributo
+`data-flv-key="{<expr>}"` sobre el **único elemento raíz** del cuerpo del
+loop. El motor de keyed diffing de fitz-liveviews (v0.16.0) ya consume
+`data-flv-key` para reconciliar listas por identidad (LCS →
+`insert_keyed`/`move_keyed`/`remove_keyed`) en vez de por posición — el
+keyed diffing deja de necesitar el atributo escrito a mano.
+
+- El `<expr>` se evalúa con la variable del loop en scope, se type-chequea y
+  se emite como cualquier interpolación del cuerpo.
+- El cuerpo del loop debe tener exactamente un elemento raíz que cargue la
+  `key`; cero (solo texto/interpolación o un `<Child />`) o más de uno → error
+  claro del expander.
+- **Byte-for-byte** para un `{#for}` sin `key=` (los SFC existentes no cambian).
+- Target SSR emite `data-flv-key="{<expr>}"`; target WASM lo setea como
+  atributo DOM normal (paridad). Validado `fitz run` ↔ binario nativo
+  (`<li data-flv-key="...">` idéntico).
+- Parser: nuevo split `key=` (con tracking de brackets/paren/brace/strings para
+  no confundir un `key=` dentro del iterable). AST: `TemplateNode::For.key_raw:
+  Option<String>`. Sin cambios al grammar de la extensión VSCode (`.fitzv` no
+  está registrado — convención view-only). +17 tests (parser split + parse +
+  expand inject/errors + SSR emit + WASM parity).
+
 ## [v0.29.0] — 2026-07-28 — Librerías de componentes por dep-subpath: imports punteados + presupuesto de recursos + fixes de paridad
 
 Reúne el trabajo de core que habilita **librerías de componentes `.fitzv`

@@ -4693,4 +4693,40 @@ component X { state { n: Int = 0 } <template><div class="row {cls(n)}">x</div></
             "scope must be a suffix on a token, never a standalone class:\n{out}"
         );
     }
+
+    // ---- keyed `{#for x in xs key=x.id}` sugar (SSR emit) -----------
+
+    #[test]
+    fn ssr_for_with_key_emits_data_flv_key_interpolation() {
+        // `{#for r in rows key=r.id}<li>{r.name}</li>{/for}` lowers to
+        // `__fitz_view_str_join(state.rows.map(fn(r) => "<li data-flv-key=
+        // \"{r.id}\">{r.name}</li>"))`. The `r.id` interpolation renders
+        // per-item, so the client keyed-diff engine matches list items.
+        let file = parse_expand(
+            "component List {\n  state { rows: List<Str> = [] }\n  <template>{#for r in rows key=r}<li>{r}</li>{/for}</template>\n}",
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("__fitz_view_str_join(state.rows.map(fn(r) =>"),
+            "expected for-loop lowering:\n{out}"
+        );
+        assert!(
+            out.contains("data-flv-key=\"{r}\""),
+            "expected `data-flv-key` interpolation on the list item:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr_for_without_key_emits_no_data_flv_key() {
+        // Regression: a keyless `{#for}` is byte-for-byte unchanged (no
+        // `data-flv-key` leaks into the emitted body).
+        let file = parse_expand(
+            "component List {\n  state { rows: List<Str> = [] }\n  <template>{#for r in rows}<li>{r}</li>{/for}</template>\n}",
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            !out.contains("data-flv-key"),
+            "keyless for-loop must not emit data-flv-key:\n{out}"
+        );
+    }
 }

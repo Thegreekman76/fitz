@@ -5760,6 +5760,24 @@ component Card {
     }
 
     #[test]
+    fn keyed_for_emits_data_flv_key_set_attribute_for_parity() {
+        // `{#for r in rows key=r}` — the injected `data-flv-key="{r}"`
+        // interpolation attr rides through expand into the WASM target and
+        // emits a `set_attribute("data-flv-key", ...)` on the list item DOM
+        // node (parity with the SSR target, harmless for WASM).
+        let src = r#"component App {
+  state { rows: List<Str> = [] }
+  event noop() { rows = rows }
+  <template><ul>{#for r in rows key=r}<li>{r}</li>{/for}</ul></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("set_attribute(\"data-flv-key\""),
+            "keyed for must set data-flv-key on the item element:\n{out}"
+        );
+    }
+
+    #[test]
     fn phase_11_7_r3_5_a2_empty_registry_emits_no_fns() {
         // Byte-identical guard — with no imported fns, no `fn` is emitted.
         let file = single_component_file(

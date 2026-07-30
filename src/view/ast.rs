@@ -176,10 +176,15 @@ pub enum TemplateNode {
     /// scope with the element type of the iter (List<T> → T, Range →
     /// Int, Map<K,V> → Tuple[K,V]) as resolved by the classic
     /// `Stmt::For` checker. `iter_raw` is the raw source text between
-    /// `in` and the matching `}` (trimmed).
+    /// `in` and the matching `}` (trimmed). `key_raw` holds the raw
+    /// source of a `key=<expr>` clause (`{#for x in xs key=x.id}`),
+    /// trimmed, or `None` when absent — the keyed-diffing sugar that
+    /// desugars to a `data-flv-key="{<expr>}"` attribute on the loop
+    /// body's root element in `expand`.
     For {
         var: String,
         iter_raw: String,
+        key_raw: Option<String>,
         children: Vec<TemplateNode>,
         loc: Loc,
     },

@@ -747,6 +747,62 @@ fn expand_template(t: &RawTemplate, component_name: &str) -> ExpandResult<Expand
     Ok(ExpandedTemplate { roots, loc: t.loc })
 }
 
+/// Prepend a `data-flv-key="{<key_expr>}"` interpolation attribute to
+/// the single root `Element` of a `{#for ... key=...}` loop body. The
+/// client keyed-diff engine matches list items by this attribute, so
+/// the loop must produce exactly one element per iteration. Errors
+/// with a clear message when the body has no root element (e.g. only
+/// text/interpolation, or a `<Child />` composition) or more than one.
+fn inject_flv_key_attr(
+    children: &mut [ExpandedTemplateNode],
+    key_expr: fast::Expr,
+    var: &str,
+    component_name: &str,
+    loc: Loc,
+) -> ExpandResult<()> {
+    let element_positions: Vec<usize> = children
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| matches!(n, ExpandedTemplateNode::Element { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    match element_positions.as_slice() {
+        [pos] => {
+            if let ExpandedTemplateNode::Element { attrs, .. } = &mut children[*pos] {
+                attrs.insert(
+                    0,
+                    ExpandedAttr::Interpolation {
+                        name: "data-flv-key".to_string(),
+                        expr: key_expr,
+                        loc,
+                    },
+                );
+            }
+            Ok(())
+        }
+        [] => Err(ExpandError {
+            message: format!(
+                "component '{component_name}': `{{#for {var} in ... key=...}}` needs the loop \
+                 body to have exactly one root HTML element to carry `data-flv-key` — this loop \
+                 body has none (text/interpolation/`<Child />` alone can't be keyed). Wrap the \
+                 body in a single element, e.g. `<li>...</li>`."
+            ),
+            loc,
+            context: format!("component '{component_name}': `{{#for {var} in ... key=...}}` key"),
+        }),
+        _ => Err(ExpandError {
+            message: format!(
+                "component '{component_name}': `{{#for {var} in ... key=...}}` needs the loop \
+                 body to have exactly one root HTML element to carry `data-flv-key` — this loop \
+                 body has {}. Wrap them in a single element.",
+                element_positions.len()
+            ),
+            loc,
+            context: format!("component '{component_name}': `{{#for {var} in ... key=...}}` key"),
+        }),
+    }
+}
+
 fn expand_template_node(
     node: &RawTemplateNode,
     component_name: &str,
@@ -828,16 +884,32 @@ fn expand_template_node(
         RawTemplateNode::For {
             var,
             iter_raw,
+            key_raw,
             children,
             loc,
         } => {
             let ctx =
                 format!("component '{component_name}': template `{{#for {var} in ...}}` iter");
             let iter = parse_expr_at(iter_raw, *loc, ctx)?;
-            let children = children
+            let mut children = children
                 .iter()
                 .map(|n| expand_template_node(n, component_name))
                 .collect::<ExpandResult<Vec<_>>>()?;
+            // Keyed-diffing sugar: `{#for x in xs key=x.id}` desugars to a
+            // `data-flv-key="{<expr>}"` interpolation attribute on the loop
+            // body's single root element. The SSR emitter renders it via the
+            // existing attribute-interpolation path and the client diff engine
+            // matches list items by key (v0.16.0). The WASM target sets it as a
+            // plain DOM attribute for parity. The key expression is scoped with
+            // `var` in scope (it references the loop binding), so it is checked
+            // and emitted like any body interpolation.
+            if let Some(key_raw) = key_raw {
+                let key_ctx = format!(
+                    "component '{component_name}': template `{{#for {var} in ... key=...}}` key"
+                );
+                let key_expr = parse_expr_at(key_raw, *loc, key_ctx)?;
+                inject_flv_key_attr(&mut children, key_expr, var, component_name, *loc)?;
+            }
             Ok(ExpandedTemplateNode::For {
                 var: var.clone(),
                 iter,
@@ -1846,6 +1918,87 @@ component B {
             },
             other => panic!("expected For, got {:?}", other),
         }
+    }
+
+    // ---- keyed `{#for x in xs key=x.id}` sugar (expand) -------------
+
+    #[test]
+    fn expand_for_with_key_injects_data_flv_key_on_root_element() {
+        // `key=x.id` desugars to a `data-flv-key="{x.id}"` interpolation
+        // attr prepended to the loop body's single root element.
+        let src = r#"component X {
+  state { xs: List<Str> = [] }
+  <template>{#for x in xs key=x}<li>{x}</li>{/for}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::For { children, .. } => match &children[0] {
+                ExpandedTemplateNode::Element { attrs, .. } => match &attrs[0] {
+                    ExpandedAttr::Interpolation { name, expr, .. } => {
+                        assert_eq!(name, "data-flv-key");
+                        match expr {
+                            fast::Expr::Ident(n, _) => assert_eq!(n, "x"),
+                            other => panic!("expected Ident key expr, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Interpolation attr, got {:?}", other),
+                },
+                other => panic!("expected Element, got {:?}", other),
+            },
+            other => panic!("expected For, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_for_without_key_leaves_element_attrs_unchanged() {
+        // No `key=` → no injected attr (byte-for-byte for existing SFCs).
+        let src = r#"component X {
+  state { xs: List<Str> = [] }
+  <template>{#for x in xs}<li>{x}</li>{/for}</template>
+}"#;
+        let file = expand_str(src).unwrap();
+        let template = file.components[0].template.as_ref().unwrap();
+        match &template.roots[0] {
+            ExpandedTemplateNode::For { children, .. } => match &children[0] {
+                ExpandedTemplateNode::Element { attrs, .. } => assert!(
+                    attrs.is_empty(),
+                    "no key= means no injected attr, got {:?}",
+                    attrs
+                ),
+                other => panic!("expected Element, got {:?}", other),
+            },
+            other => panic!("expected For, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expand_for_key_with_no_root_element_errors() {
+        // Loop body is a bare interpolation — nothing to carry the key.
+        let src = r#"component X {
+  state { xs: List<Str> = [] }
+  <template>{#for x in xs key=x}{x}{/for}</template>
+}"#;
+        let err = expand_str(src).unwrap_err();
+        assert!(
+            err.message.contains("exactly one root HTML element"),
+            "message = {:?}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn expand_for_key_with_two_root_elements_errors() {
+        let src = r#"component X {
+  state { xs: List<Str> = [] }
+  <template>{#for x in xs key=x}<li>{x}</li><li>x2</li>{/for}</template>
+}"#;
+        let err = expand_str(src).unwrap_err();
+        assert!(
+            err.message.contains("exactly one root HTML element"),
+            "message = {:?}",
+            err.message
+        );
     }
 
     // ---- 11.2.c mini-commit 3: `<slot />` + `{#else}` expand tests ---

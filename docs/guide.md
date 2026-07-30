@@ -14657,6 +14657,45 @@ component Board {
 }
 ```
 
+### Listas con identidad estable — `{#for x in xs key=x.id}`
+
+Un `{#for}` acepta una cláusula opcional `key=<expr>` que le da a
+cada ítem una **identidad estable**:
+
+```fitzv
+{#for row in rows key=row.id}
+  <li>{row.name}</li>
+{/for}
+```
+
+Es azúcar: desugarea a un atributo `data-flv-key="{<expr>}"` sobre
+el elemento raíz del cuerpo del loop (arriba, el `<li>`). En el
+target SSR, cuando la lista cambia entre renders, el motor de diff
+del cliente (v0.16.0) **matchea los ítems por su `key`** en vez de
+por posición — un insert/remove/move en el medio de la lista se
+resuelve como una sola operación estructural (`insert_keyed` /
+`move_keyed` / `remove_keyed`) en lugar de una cascada de patches
+posicionales. En el target WASM el `data-flv-key` se emite como un
+atributo DOM normal (paridad, inocuo).
+
+Reglas:
+
+- El `<expr>` se evalúa con la variable del loop **en scope** (`row`
+  arriba), así que típicamente es `row.id` o el ítem mismo (`key=row`
+  para una `List<Str>`). Se type-chequea y se emite como cualquier
+  interpolación del cuerpo.
+- El cuerpo del loop debe tener **exactamente un elemento raíz** que
+  cargue la `key`. Cero elementos (solo texto/interpolación o un
+  `<Child />`) o más de uno → error claro del expander.
+- Sin `key=`, el `{#for}` es idéntico a antes (el diff sigue siendo
+  posicional; byte-for-byte para los SFC existentes).
+
+> **`key=` en `{#for}` vs `key="{expr}"` en `<Child />`** son cosas
+> distintas: el primero (esta sección) emite `data-flv-key` para el
+> diff del SSR; el segundo (más abajo, target WASM) le da identidad a
+> una instancia de componente hija en la keyed instance cache. No se
+> mezclan.
+
 ### Cross-file types
 
 Los tipos custom del componente vienen normalmente de un
