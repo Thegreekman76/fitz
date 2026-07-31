@@ -1758,10 +1758,12 @@ fn count_dynamic_child_sites(children: &[ExpandedTemplateNode]) -> usize {
 }
 
 /// Lower a `{#if}` condition to a Rust `bool` expression. Supports
-/// bool literals, bool state fields / loop vars used directly, numeric
-/// comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`), and `&&` / `||` / `!`
-/// over those. Str comparisons + method-call conditions defer to a
-/// later 11.7 slice or the SSR target.
+/// bool literals, bool state fields / loop vars used directly,
+/// comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`, on **numbers or strings** —
+/// both sides lower via `lower_expr`, so `variant == "error"` compiles as
+/// `String == String`), `payload.has(...)`, and `&&` / `||` / `!` over
+/// those. Other condition shapes (a bare method call, an index, …) defer
+/// to the SSR target.
 fn lower_cond_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitResult<String> {
     match expr {
         Expr::Bool(b, _) => Ok(b.to_string()),
@@ -1830,9 +1832,11 @@ fn lower_cond_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> Em
             }),
         },
         _ => Err(EmitError {
-            message: "`{#if}` condition — supported: bool state field / loop var, \
-                      numeric comparison, and &&/||/!. Str comparisons + method-call \
-                      conditions defer to a later 11.7 slice or the SSR target"
+            message: "`{#if}` condition — supported: a bool state field / loop var, a \
+                      comparison (==/!=/</<=/>/>=, on numbers or strings), \
+                      `payload.has(...)`, and &&/||/!. This condition shape isn't one of \
+                      those — compute a bool state field in an event body, or use the \
+                      SSR target"
                 .to_string(),
             context: "if condition".to_string(),
         }),
@@ -4809,6 +4813,25 @@ component Row {
         assert!(
             out.contains("} else {"),
             "the {{#else}} branch must emit a Rust else:\n{out}"
+        );
+    }
+
+    #[test]
+    fn str_comparison_if_condition_lowers_to_string_eq() {
+        // Str comparison in a `{#if}` is NOT a gap — both sides lower via
+        // `lower_expr`, so `variant == "error"` compiles as `String == String`.
+        // (Regression guard: it had been mis-documented as unsupported.)
+        let src = r#"component Foo {
+  state { variant: Str = "error" }
+
+  <template>
+    <div>{#if variant == "error"}<span>e</span>{#else}<span>o</span>{/if}</div>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(r#"if ((*self.variant.borrow()) == "error".to_string()) {"#),
+            "Str `{{#if}}` must lower to a String == String test:\n{out}"
         );
     }
 
