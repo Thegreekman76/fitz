@@ -9,6 +9,46 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.7] — 2026-07-31 — `.fitzv` → wasm: form-control events `@input` / `@change` (CW.9)
+
+### Added — live value binding on the client-WASM target
+
+`@input` / `@change` on a form control now compile with
+`fitz build --target wasm-client`. The emitted DOM listener reads the event
+target's live value (casting to `HtmlInputElement` / `HtmlSelectElement` /
+`HtmlTextAreaElement`) and calls the handler with a payload carrying it under
+the `"value"` key:
+
+```fitzv
+event on_name() { name = payload["value"] }
+...
+<input @input="on_name" value="{name}" />
+<select @change="on_color">…</select>
+```
+
+This closes the form family beyond file input — a text field echoing as you
+type, a `<select>` updating on change, a `<textarea>` binding. It matches the
+SSR emitter, which already lowers any `@event` to `data-flv-<event>`, so the
+same `.fitzv` targets both.
+
+### Notes
+
+- An `@input`/`@change` handler **must** read `payload["value"]` — the value
+  is all the event carries; ignoring it is a compile error with a clear
+  pointer. `@click` (with or without payload) is unchanged and byte-identical.
+- The emitter adds `HtmlInputElement` / `HtmlSelectElement` /
+  `HtmlTextAreaElement` to the generated `Cargo.toml` **only** when a
+  component uses `@input`/`@change` — value-free crates keep the base set.
+- **Caveat (naive re-render):** a state change rebuilds the whole component
+  DOM, so a live text `<input>` re-mounts each keystroke — the value re-binds
+  via `value="{name}"` but the caret jumps to the end. `<select> @change` is
+  unaffected. Fine-grained reactivity is the ROADMAP's next iteration.
+- Validated end-to-end in real headless Chrome: `<select> @change` → the
+  swatch updates to the picked colour; `<input> @input` → the greeting echoes
+  the typed char; no page errors. New example `examples/view/live-input/` +
+  smoke `tests/view_live_input_wasm_smoke.rs` (real `wasm-pack` build). 6 unit
+  tests; lib 3914 green; fmt + clippy clean; all 17 view smokes green.
+
 ## [v0.29.6] — 2026-07-31 — `.fitzv` → wasm: cross-dir / dependency imports (CW.8)
 
 ### Added — dep-aware view import resolution on the client-WASM target

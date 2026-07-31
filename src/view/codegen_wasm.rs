@@ -2383,22 +2383,30 @@ fn emit_event_attr(
     out: &mut String,
 ) -> EmitResult<()> {
     let component_name = ctx.component_name;
-    // POC only maps `@click` — other event names deferred to 11.4.c.
+    // `@click` maps directly. CW.9 adds `@input` / `@change`, which read the
+    // target element's live value into the handler's payload under the
+    // `"value"` key (parallel to the SSR emitter, which lowers any `@event`
+    // to `data-flv-<event>`). Other event names are still deferred.
     let dom_event = match event_name {
         "click" => "click",
+        "input" => "input",
+        "change" => "change",
         other => {
             return Err(EmitError {
                 message: format!(
-                    "event `@{}` — only `@click` supported in Phase 11.4.b (deferred to 11.4.c)",
-                    other
+                    "event `@{other}` is not supported on the client-WASM target — \
+                     only `@click`, `@input`, and `@change` are wired"
                 ),
                 context: format!(
-                    "event attribute on element in template of component `{}`",
-                    component_name
+                    "event attribute on element in template of component `{component_name}`"
                 ),
             });
         }
     };
+
+    // `@input` / `@change` deliver the element's live value — the handler
+    // must read it (there is nothing else the event carries).
+    let reads_value = matches!(event_name, "input" | "change");
 
     // Phase 11.7 R3.5b.1 — a `@click` handler that reads `payload` still
     // takes the param; with no `data-flv-value-*` attrs it receives an
@@ -2406,14 +2414,76 @@ fn emit_event_attr(
     // call, so the pre-R3.5b examples emit byte-for-byte unchanged.
     let takes_payload = handler_takes_payload(ctx, handler_name)?;
 
+    if reads_value && !takes_payload {
+        return Err(EmitError {
+            message: format!(
+                "event `@{event_name}` handler `{handler_name}` must read \
+                 `payload[\"value\"]` — an `@input`/`@change` handler receives the \
+                 element's current value as its payload"
+            ),
+            context: format!(
+                "event attribute on element in template of component `{component_name}`"
+            ),
+        });
+    }
+
+    // The `@click` path keeps the unused `_evt` param name so its emit stays
+    // byte-for-byte; the value-reading path uses `__evt`.
+    let evt_param = if reads_value { "__evt" } else { "_evt" };
     writeln!(out, "        {{").unwrap();
     writeln!(out, "            let __self_clone = self.clone();").unwrap();
     writeln!(
         out,
-        "            let __closure = Closure::wrap(Box::new(move |_evt: Event| {{"
+        "            let __closure = Closure::wrap(Box::new(move |{evt_param}: Event| {{"
     )
     .unwrap();
-    if takes_payload {
+    if reads_value {
+        // Read the live value off the event target — cover <input>, <select>,
+        // and <textarea>. The handler always takes payload (checked above).
+        writeln!(
+            out,
+            "                let mut __payload = std::collections::HashMap::<String, String>::new();"
+        )
+        .unwrap();
+        writeln!(out, "                if let Some(__t) = __evt.target() {{").unwrap();
+        writeln!(
+            out,
+            "                    if let Some(__el) = __t.dyn_ref::<web_sys::HtmlInputElement>() {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                        __payload.insert(\"value\".to_string(), __el.value());"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                    }} else if let Some(__el) = __t.dyn_ref::<web_sys::HtmlSelectElement>() {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                        __payload.insert(\"value\".to_string(), __el.value());"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                    }} else if let Some(__el) = __t.dyn_ref::<web_sys::HtmlTextAreaElement>() {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                        __payload.insert(\"value\".to_string(), __el.value());"
+        )
+        .unwrap();
+        writeln!(out, "                    }}").unwrap();
+        writeln!(out, "                }}").unwrap();
+        writeln!(
+            out,
+            "                {component_name}::{handler_name}(&__self_clone, &__payload);"
+        )
+        .unwrap();
+    } else if takes_payload {
         writeln!(
             out,
             "                let __payload = std::collections::HashMap::<String, String>::new();"
@@ -2725,6 +2795,19 @@ pub fn wasm_extra_web_sys_features(file: &ExpandedViewFile) -> Vec<&'static str>
         // `HtmlInputElement.files()` → `FileList.get()` → `FileReader`
         // (`read_as_data_url` takes a `&Blob`; `File` derefs to it).
         for f in ["HtmlInputElement", "FileReader", "File", "FileList", "Blob"] {
+            if !features.contains(&f) {
+                features.push(f);
+            }
+        }
+    }
+    if file.components.iter().any(component_uses_value_input) {
+        // CW.9 — `@input` / `@change` read the target's `.value()` by casting
+        // to the concrete element type (input / select / textarea).
+        for f in [
+            "HtmlInputElement",
+            "HtmlSelectElement",
+            "HtmlTextAreaElement",
+        ] {
             if !features.contains(&f) {
                 features.push(f);
             }
@@ -3077,6 +3160,44 @@ fn component_uses_form_submit(component: &ExpandedComponent) -> bool {
         .template
         .as_ref()
         .is_some_and(|t| t.roots.iter().any(node_has_submit))
+}
+
+/// CW.9 — true when the component wires an `@input` / `@change` handler,
+/// which reads the target element's live value. The emitted closure casts
+/// the event target to `HtmlInputElement` / `HtmlSelectElement` /
+/// `HtmlTextAreaElement`, so those web-sys features must be enabled.
+fn component_uses_value_input(component: &ExpandedComponent) -> bool {
+    fn node_has_value_event(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                attrs.iter().any(|a| {
+                    matches!(
+                        a,
+                        ExpandedAttr::Event { event_name, .. }
+                            if event_name == "input" || event_name == "change"
+                    )
+                }) || children.iter().any(node_has_value_event)
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().any(node_has_value_event)
+                    || else_children
+                        .as_ref()
+                        .is_some_and(|els| els.iter().any(node_has_value_event))
+            }
+            ExpandedTemplateNode::For { children, .. } => children.iter().any(node_has_value_event),
+            _ => false,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().any(node_has_value_event))
 }
 
 // ---------------------------------------------------------------------------
@@ -5237,22 +5358,146 @@ component Row {
     }
 
     #[test]
-    fn emit_rejects_non_click_event() {
+    fn emit_rejects_unsupported_event() {
+        // CW.9 wired `@input` / `@change`; a genuinely unsupported event
+        // (e.g. `@mouseover`) still rejects with a clear message.
         let src = r#"component Foo {
   state { x: Int = 0 }
   event bump() { x = 1 }
 
   <template>
-    <input @input="bump" />
+    <div @mouseover="bump"></div>
   </template>
 }"#;
         let expanded = parse_expand(src);
         let err = emit_component(&expanded.components[0]).unwrap_err();
-        assert!(err.message.contains("@input"), "event kind error:\n{}", err);
         assert!(
-            err.message.contains("11.4.c"),
-            "deferred citation:\n{}",
+            err.message.contains("@mouseover"),
+            "event kind error:\n{}",
             err
+        );
+        assert!(
+            err.message.contains("@click"),
+            "should name the supported events:\n{}",
+            err
+        );
+    }
+
+    #[test]
+    fn cw9_input_event_reads_value_into_payload() {
+        // CW.9 — `@input` on a text input wires an `input` listener that reads
+        // the target's live value into `payload["value"]` and calls the
+        // handler (which reads it back).
+        let src = r#"component Form {
+  state { name: Str = "" }
+  event on_type() { name = payload["value"] }
+
+  <template>
+    <input @input="on_type" value="{name}" />
+    <p>{name}</p>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("move |__evt: Event|"),
+            "input closure names the event:\n{out}"
+        );
+        assert!(
+            out.contains("__evt.target()")
+                && out.contains("dyn_ref::<web_sys::HtmlInputElement>()")
+                && out.contains("__el.value()"),
+            "input listener reads the target value:\n{out}"
+        );
+        assert!(
+            out.contains(r#"__payload.insert("value".to_string()"#),
+            "value goes into the payload under \"value\":\n{out}"
+        );
+        assert!(
+            out.contains("Form::on_type(&__self_clone, &__payload)"),
+            "handler called with payload:\n{out}"
+        );
+        assert!(
+            out.contains(r#".add_event_listener_with_callback("input""#),
+            "listener bound on the `input` event:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_change_event_covers_select_and_textarea() {
+        // `@change` on a <select> wires a `change` listener; the emitted
+        // closure covers select + textarea + input casts.
+        let src = r#"component Picker {
+  state { choice: Str = "a" }
+  event on_pick() { choice = payload["value"] }
+
+  <template>
+    <select @change="on_pick"><option>a</option><option>b</option></select>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(r#".add_event_listener_with_callback("change""#),
+            "listener bound on the `change` event:\n{out}"
+        );
+        assert!(
+            out.contains("dyn_ref::<web_sys::HtmlSelectElement>()")
+                && out.contains("dyn_ref::<web_sys::HtmlTextAreaElement>()"),
+            "select + textarea casts present:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_input_handler_must_read_payload() {
+        // An `@input` handler that ignores the value is a mistake — reject it
+        // with a pointer to `payload["value"]`.
+        let src = r#"component Bad {
+  state { n: Int = 0 }
+  event bump() { n = 1 }
+
+  <template>
+    <input @input="bump" />
+  </template>
+}"#;
+        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        assert!(
+            err.message.contains("payload[\"value\"]"),
+            "must point at payload[\"value\"]:\n{}",
+            err
+        );
+    }
+
+    #[test]
+    fn cw9_input_adds_html_input_web_sys_features() {
+        let src = r#"component Form {
+  state { name: Str = "" }
+  event on_type() { name = payload["value"] }
+  <template><input @input="on_type" /></template>
+}"#;
+        let file = parse_expand(src);
+        let feats = wasm_extra_web_sys_features(&file);
+        for f in [
+            "HtmlInputElement",
+            "HtmlSelectElement",
+            "HtmlTextAreaElement",
+        ] {
+            assert!(feats.contains(&f), "missing web-sys feature {f}: {feats:?}");
+        }
+    }
+
+    #[test]
+    fn cw9_click_only_component_keeps_no_input_features() {
+        // A component with only `@click` must NOT pull the input features —
+        // byte-for-byte with pre-CW.9 crates.
+        let src = r#"component Tap {
+  state { n: Int = 0 }
+  event bump() { n = n + 1 }
+  <template><button @click="bump">{n}</button></template>
+}"#;
+        let file = parse_expand(src);
+        let feats = wasm_extra_web_sys_features(&file);
+        assert!(
+            feats.is_empty(),
+            "click-only component needs no extra web-sys features: {feats:?}"
         );
     }
 

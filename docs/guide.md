@@ -14591,9 +14591,11 @@ K-4 shipped 2026-07-17).
   con parte estática + `{expr}` (`class="toast toast-{kind}"`,
   `style="width: {pct}%"`) rewrite-a cada segmento `{...}` a
   `state.<field>` igual que la interpolación de texto (v0.28.7).
-- **Event decorators** — `data-flv-click="handler_name"`,
-  `data-flv-submit="handler_name"` para wire eventos del DOM a
-  event handlers declared en el componente.
+- **Event decorators** — `@click="handler_name"` (o su forma
+  equivalente `data-flv-click="handler_name"`), `@submit` para
+  forms, y `@input` / `@change` para controles de formulario
+  (CW.9) — wire eventos del DOM a event handlers del componente.
+  Ver la sub-sección "Eventos de formulario" más abajo.
 - **Composición** — `<Child prop="value" />` o `<Child
   prop="{expr}" />` para componer components declarados en el
   MISMO archivo (K-3 remainder). Cross-file composition
@@ -14838,10 +14840,43 @@ Desde **v0.26.0** la composición cross-file soporta:
   child cross-file como desconocido: el LSP deriva el directorio del
   documento y resuelve los sibling components importados.
 
+Desde **v0.29.6 (CW.8)** el import cruza también el borde de
+**dependencia**: un `.fitzv` compilado al target WASM puede importar
+un componente de una dep declarada en `fitz.toml`, no solo de un
+sibling del mismo directorio. La sintaxis es el import punteado que
+ya usa el loader classic:
+
+```fitzv
+// El consumidor declara `fitz_liveviews` como dep en su fitz.toml.
+from fitz_liveviews.ui.Badge import badge as Badge
+
+component App {
+  state { n: Int = 0 }
+  <template>
+    <div><Badge label="live" variant="primary" /></div>
+  </template>
+}
+```
+
+El emitter resuelve `Badge.fitzv` bajo el root de la dep (el
+directorio del `[lib].entry`), lo inlinea en el crate WASM
+standalone, y — como cualquier componente de la companion UI usa
+`{flv(...)}` para escapar HTML — el `flv` baja a la identidad en
+WASM (un text node del DOM escapa intrínsecamente). Esto destraba
+**consumir la companion UI de `fitz-liveviews` como librería** desde
+una app WASM externa, sin copiar los componentes al directorio de la
+app. Nota: el componente real se llama `badge` (minúscula), y la
+heurística "tag capitalizado = componente" exige el alias
+(`badge as Badge`) para poder escribir `<Badge />`.
+
 Límites restantes: el component local gana ante uno importado del
-mismo nombre; la resolución es contra un único directorio plano. El
-path SSR usa el runtime API `component("ChildName", "instance-id")`
-del `fitz-liveviews` package para composición cross-file.
+mismo nombre; un componente de la dep que compone un sibling por
+**nombre pelado** (`from Icon import Icon`, no
+`from dep.ui.Icon import Icon`) no se resuelve contra el directorio
+de la dep — los primitivos presentacionales dual-target son hojas,
+así que no los toca. El path SSR usa el runtime API
+`component("ChildName", "instance-id")` del `fitz-liveviews` package
+para composición cross-file.
 
 **Keyed children dentro de `{#for}`** (target WASM, R2b shipped)
 — podés componer un child DENTRO de un loop, dándole una
@@ -14872,6 +14907,64 @@ por-key. Aplica a `List<primitive>` y — desde R3 (v0.21.8) — a
 + field access `{c.title}` + keyed `<Child key="{c.id}" />`.
 Ejemplos runnable: `examples/view/keyed-composition/` (primitivos)
 y `examples/view/nominal-list/` (nominales).
+
+### Eventos de formulario — `@input` / `@change`
+
+Además de `@click` (y `@submit` para forms), el target WASM wire
+**`@input`** y **`@change`** (CW.9, v0.29.7) sobre controles de
+formulario. La diferencia con `@click` es que estos **traen el
+valor**: el emitter lee el valor actual del elemento (`<input>`,
+`<select>` o `<textarea>`) y llama al handler con un `payload`
+que lleva ese valor bajo la key `"value"`. El handler lo lee con
+`payload["value"]` y lo escribe al state:
+
+```fitzv
+component LiveInput {
+  state {
+    name: Str = ""
+    color: Str = "red"
+  }
+
+  event on_name() { name = payload["value"] }
+  event on_color() { color = payload["value"] }
+
+  <template>
+    <select @change="on_color">
+      <option value="red">Red</option>
+      <option value="green">Green</option>
+    </select>
+    <p style="background: {color}">Picked: {color}</p>
+
+    <input @input="on_name" value="{name}" placeholder="Type here" />
+    <p>Hello, {name}!</p>
+  </template>
+}
+```
+
+- **`@input`** dispara en cada tecla; **`@change`** al seleccionar/
+  perder foco. Los dos entregan `payload["value"]`.
+- Un handler de `@input`/`@change` **debe** leer `payload["value"]`
+  (es lo único que el evento carga) — si lo ignora, es un error de
+  compilación con un puntero claro.
+- El emitter cubre `<input>`, `<select>` y `<textarea>` con el mismo
+  wiring, y agrega las features web-sys correspondientes al
+  `Cargo.toml` generado **solo** cuando el componente usa
+  `@input`/`@change` (paridad byte-a-byte para components que no
+  los usan).
+- Es la misma convención que el SSR emitter, que baja cualquier
+  `@event` a `data-flv-<event>` — así el MISMO `.fitzv` sirve a los
+  dos targets.
+
+> **Caveat (naive re-render).** Un cambio de state reconstruye el
+> DOM entero del componente (el modelo actual es dirty-flag + naive
+> re-render). Para un `<select> @change` esto es invisible; para un
+> `<input> @input` en vivo, cada tecla re-monta el campo — el valor
+> se re-bindea con `value="{name}"`, pero el caret salta al final.
+> La reactividad fine-grained (patch in-place) es la próxima
+> iteración del ROADMAP; la capacidad de CW.9 es el valor llegando
+> al handler de forma confiable.
+
+Ejemplo runnable: `examples/view/live-input/`.
 
 ### Estilos scoped
 
@@ -15172,6 +15265,18 @@ existen (`Card.fitz` y `Card.fitzv`), el classic **gana**
   slot default, y un slot que el parent no llena muestra su propio
   fallback. Ejemplo: `examples/view/named-slots/` (un `Card` con
   title/body/actions). WASM-only (el SSR rechaza todos los slots).
+- **Imports de componentes cross-directory / dependencia** —
+  **CERRADO en v0.29.6 (CW.8)** para el target WASM: un `.fitzv`
+  puede importar un componente de una dep de `fitz.toml`
+  (`from fitz_liveviews.ui.Badge import badge as Badge`), no solo de
+  un sibling. Ver la sub-sección "Composición de components" arriba.
+  Destraba consumir la companion UI de `fitz-liveviews` como librería
+  desde una app WASM externa.
+- **Eventos de formulario `@input` / `@change`** — **CERRADO en
+  v0.29.7 (CW.9)** para el target WASM: leen el valor del control
+  (`<input>`/`<select>`/`<textarea>`) al `payload["value"]` y llaman
+  al handler. Ver la sub-sección "Eventos de formulario" arriba.
+  Ejemplo: `examples/view/live-input/`.
 - **Signature help / rename / references** dentro de `.fitzv`
   — no implementados por el LSP MVP.
 

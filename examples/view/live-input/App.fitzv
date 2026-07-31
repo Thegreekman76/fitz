@@ -1,0 +1,49 @@
+// CW.9 — live value binding on the client-WASM target.
+//
+// `@input` / `@change` deliver the element's current value in the handler's
+// payload under the "value" key, matching the SSR emitter's data-flv-<event>
+// convention. The emitted listener reads the target (input / select /
+// textarea) and calls the handler, which reads `payload["value"]` and writes
+// it to state.
+//
+//   - `<select @change="on_color">`  — fires on selection; clean under the
+//     naive re-render model (no focus to lose).
+//   - `<input @input="on_name">`     — fires on every keystroke; echoes live.
+//
+// Caveat (naive re-render): a state change rebuilds the whole component DOM,
+// so a live text `<input>` re-mounts on each keystroke — the value is bound
+// back via `value="{name}"`, but the caret jumps to the end. Fine-grained
+// reactivity (which would patch in place) is the ROADMAP's next iteration;
+// the CW.9 capability here is the value flowing to the handler.
+
+component LiveInput {
+  state {
+    name: Str = ""
+    color: Str = "red"
+  }
+
+  event on_name() { name = payload["value"] }
+  event on_color() { color = payload["value"] }
+
+  <template>
+    <div class="live">
+      <h1>Live input on WASM</h1>
+
+      <label class="row">
+        <span>Favourite colour</span>
+        <select @change="on_color">
+          <option value="red">Red</option>
+          <option value="green">Green</option>
+          <option value="blue">Blue</option>
+        </select>
+      </label>
+      <p class="swatch" style="background: {color}">Picked: {color}</p>
+
+      <label class="row">
+        <span>Your name</span>
+        <input @input="on_name" value="{name}" placeholder="Type here" autocomplete="off" />
+      </label>
+      <p class="echo">Hello, {name}!</p>
+    </div>
+  </template>
+}

@@ -10037,6 +10037,29 @@ template. La sub-fase 11.7 se detalla a continuación:
   inlineados, `flv(label)` bajó a identidad). 8 unit tests; lib 3909 verde;
   fmt + clippy limpios.
 
+- ✅ **CW.9 — eventos de formulario `@input` / `@change` en wasm (v0.29.7,
+  2026-07-31)** — el target client-WASM ya wire `@input` / `@change` sobre
+  controles de formulario, cerrando la familia de forms más allá del file
+  input. El listener emitido lee el valor vivo del target (casteando a
+  `HtmlInputElement`/`HtmlSelectElement`/`HtmlTextAreaElement`) y llama al
+  handler con un `payload` que lleva ese valor bajo la key `"value"`; el
+  handler lo lee con `payload["value"]` y lo escribe al state. Paridad con el
+  SSR emitter, que ya baja cualquier `@event` a `data-flv-<event>` → el mismo
+  `.fitzv` sirve a los dos targets. Un handler de `@input`/`@change` **debe**
+  leer `payload["value"]` (es lo único que el evento carga; ignorarlo es error
+  de compilación). Features web-sys agregadas al `Cargo.toml` generado **solo**
+  cuando el componente usa `@input`/`@change` (byte-idéntico para los que no).
+  **Caveat naive re-render**: un `<input>` en vivo re-monta por tecla (el caret
+  salta al final; el valor se re-bindea con `value="{name}"`); `<select>
+  @change` no lo sufre. Validado end-to-end en Chrome headless real (select →
+  swatch cambia; input → greeting echoa la tecla; cero page errors). Ejemplo
+  nuevo `examples/view/live-input/` + smoke `tests/view_live_input_wasm_smoke.rs`
+  (build `wasm-pack` real). 6 unit tests; lib 3914 verde; fmt + clippy limpios;
+  17 view smokes verdes. **Gaps CW.9 restantes**: helper-fn con `?`/Result +
+  el problema del HTML-string-escape (helpers que devuelven markup como string
+  no renderizan en wasm); reactividad fine-grained (patch in-place) para que
+  el live text input no pierda el caret.
+
 ### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
 
 La superficie de composición client-WASM (props, event bubbling, slots,

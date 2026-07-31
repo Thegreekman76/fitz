@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — live value binding (CW.9)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+        color: #222;
+      }
+      h1 { font-size: 1.5rem; }
+      #app {
+        margin: 24px 0;
+        padding: 16px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      #app .row { display: flex; gap: 12px; align-items: center; margin: 10px 0; }
+      #app .swatch { padding: 8px 12px; border-radius: 6px; color: #fff; }
+      code {
+        background: #eee;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz live value binding — CW.9 smoke</h1>
+    <p>
+      A <code>LiveInput.fitzv</code> component compiled to WebAssembly. The
+      <code>&lt;select&gt;</code> fires <code>@change</code> and the text
+      <code>&lt;input&gt;</code> fires <code>@input</code>; each handler
+      reads <code>payload["value"]</code> and writes it to state — the same
+      <code>data-flv-&lt;event&gt;</code> convention the SSR runtime reads,
+      so one <code>.fitzv</code> targets both.
+    </p>
+    <div id="app"><!-- LiveInput mounts here --></div>
+    <p>
+      If you see this text but no widget above, the WASM bundle failed to
+      load (check the DevTools console) or the page was opened over
+      <code>file://</code>. ES modules require an HTTP origin — serve with
+      <code>python -m http.server 8000</code>.
+    </p>
+    <script type="module">
+      import init from './wasm-crate/pkg/live_input.js';
+      init().catch((err) => {
+        console.error('Failed to load live-input WASM:', err);
+        document.getElementById('app').textContent =
+          'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

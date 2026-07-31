@@ -1,0 +1,51 @@
+[package]
+name = "live-input"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Sizing knobs — el gate de Phase 11.4 es 40 KB gzipped sobre el
+# `.wasm` producido por `wasm-pack build --release`. `opt-level =
+# "z"` + `lto = true` es la config canónica del ecosistema
+# wasm-bindgen para minimizar el bundle. `wasm-pack` invoca
+# `wasm-opt` automáticamente en modo release.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+# wasm-opt (bundled with wasm-pack) uses an older binaryen that rejects
+# bulk-memory ops emitted by recent rustc. Pass `--enable-bulk-memory`
+# so the size-optimization pass still runs. Without this, `wasm-pack
+# build --release` fails at the wasm-opt step with a `wasm-validator
+# error ... Bulk memory operations require bulk memory` panic.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O', '--enable-bulk-memory']
+
+[dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+
+# `web-sys` con el subset EXACTO que el emitter de Fase 11.4.b usa
+# (ver `src/view/codegen_wasm.rs::emit_module_header` + los emit_*
+# helpers). Cualquier feature que sobre suma bytes al bundle final.
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlElement",
+    "HtmlHeadElement",
+    "Node",
+    "Text",
+    "Window",
+    "HtmlInputElement",
+    "HtmlSelectElement",
+    "HtmlTextAreaElement",
+]
