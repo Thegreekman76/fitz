@@ -9,6 +9,40 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.3] — 2026-07-31 — `.fitzv` → wasm: `data-flv-file` (client-side file/image upload)
+
+### Added — `<input type="file" data-flv-file="handler">` on the client-WASM target
+
+A `.fitzv` compiled with `fitz build --target wasm-client` can now read a
+picked file entirely client-side — no server, no network. The new
+`data-flv-file="handler"` directive on an `<input type="file">` wires a
+`change` listener that reads the first selected file via the browser's
+`FileReader` (`read_as_data_url`) and calls the event handler with a
+payload map:
+
+- `payload["data"]` — the file as a `data:` URL (drop it straight into an
+  `<img src="{img}">` for an instant preview),
+- `payload["name"]` — the filename,
+- `payload["type"]` — the MIME type.
+
+The handler stores what it needs in state and the template renders it. The
+emitter adds the `FileReader` / `File` / `FileList` / `Blob` web-sys
+features only when a component uses `data-flv-file`, so file-free crates
+stay byte-identical. This closes gap #4 (form/file inputs) of the
+client-WASM envelope for the read-a-local-file case.
+
+### Notes
+
+- Verified end-to-end in a real headless Chrome: uploading an image to the
+  input renders the preview `<img>` with the `data:` URL and the filename,
+  no page errors.
+- The handler must read `payload` (file selection always carries one); a
+  handler that ignores it is a signature mismatch at compile time.
+- Reading is async — the `FileReader.onload` closure is `.forget()`-leaked
+  to outlive the read, same discipline as the other event closures.
+- 2 unit tests (`data_flv_file_*`) in `src/view/codegen_wasm.rs`. Suite:
+  lib 3897/0, fmt + clippy `-D warnings` clean.
+
 ## [v0.29.2] — 2026-07-30 — `.fitzv` → wasm: `flv` passthrough (dual-target SSR↔client-WASM)
 
 ### Added — el emisor client-WASM tolera el helper de escaping `flv` de fitz-liveviews

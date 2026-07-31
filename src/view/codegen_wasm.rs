@@ -1862,6 +1862,7 @@ fn emit_element(
     // click listener reads them back to build the payload).
     let mut data_flv_click: Option<String> = None;
     let mut data_flv_submit: Option<String> = None;
+    let mut data_flv_file: Option<String> = None;
     let mut value_keys: Vec<String> = Vec::new();
 
     for attr in attrs {
@@ -1871,6 +1872,8 @@ fn emit_element(
                     data_flv_click = Some(value.clone());
                 } else if name == "data-flv-submit" {
                     data_flv_submit = Some(value.clone());
+                } else if name == "data-flv-file" {
+                    data_flv_file = Some(value.clone());
                 } else {
                     if let Some(key) = name.strip_prefix("data-flv-value-") {
                         value_keys.push(key.to_string());
@@ -1935,6 +1938,9 @@ fn emit_element(
     }
     if let Some(handler) = data_flv_click {
         emit_data_flv_click(&handler, &value_keys, &var, ctx, out)?;
+    }
+    if let Some(handler) = data_flv_file {
+        emit_data_flv_file(&handler, &var, ctx, out)?;
     }
 
     for child in children {
@@ -2673,11 +2679,21 @@ fn emit_data_flv_submit(
 /// an empty slice for form-free components, so the pre-R3.5b.2 examples'
 /// `Cargo.toml` is unchanged.
 pub fn wasm_extra_web_sys_features(file: &ExpandedViewFile) -> Vec<&'static str> {
+    let mut features: Vec<&'static str> = Vec::new();
     if file.components.iter().any(component_uses_form_submit) {
-        vec!["HtmlInputElement"]
-    } else {
-        Vec::new()
+        features.push("HtmlInputElement");
     }
+    if file.components.iter().any(component_uses_file_input) {
+        // `<input type="file">` + `data-flv-file`: read the picked file via
+        // `HtmlInputElement.files()` → `FileList.get()` → `FileReader`
+        // (`read_as_data_url` takes a `&Blob`; `File` derefs to it).
+        for f in ["HtmlInputElement", "FileReader", "File", "FileList", "Blob"] {
+            if !features.contains(&f) {
+                features.push(f);
+            }
+        }
+    }
+    features
 }
 
 /// Find a nested `<Child />` inside slot content (Phase 11.7.d) — such
@@ -2858,6 +2874,146 @@ fn strip_slot_attr(node: &ExpandedTemplateNode) -> ExpandedTemplateNode {
 /// slotted elements), which shouldn't force a default `<slot />`.
 fn is_whitespace_text(node: &ExpandedTemplateNode) -> bool {
     matches!(node, ExpandedTemplateNode::Text(t) if t.trim().is_empty())
+}
+
+/// Emit a `data-flv-file="handler"` change listener on an `<input type="file">`.
+/// On selection it reads the first file via `FileReader::read_as_data_url` and
+/// calls the handler with a payload map — `data` (the data-URL string), `name`
+/// (the filename), `type` (the MIME type). The handler stores what it needs in
+/// state (`state.img = payload["data"]`) and the template renders it
+/// (`<img src="{img}">`). Reading is async, so the `FileReader.onload` closure
+/// is `.forget()`-leaked to outlive the read (same discipline as the other
+/// event closures). The handler must read `payload` — client-WASM file
+/// selection always carries one; a handler that ignores it gets a signature
+/// mismatch at compile time.
+fn emit_data_flv_file(
+    handler_name: &str,
+    el_var: &str,
+    ctx: &RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let component_name = ctx.component_name;
+    writeln!(out, "        {{").unwrap();
+    writeln!(out, "            let __self_clone = self.clone();").unwrap();
+    writeln!(
+        out,
+        "            let __closure = Closure::wrap(Box::new(move |__evt: Event| {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                let __input = match __evt.target().and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok()) {{ Some(i) => i, None => return }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                let __file = match __input.files().and_then(|fs| fs.get(0)) {{ Some(f) => f, None => return }};"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                let __reader = match web_sys::FileReader::new() {{ Ok(r) => r, Err(_) => return }};"
+    )
+    .unwrap();
+    writeln!(out, "                let __reader2 = __reader.clone();").unwrap();
+    writeln!(out, "                let __name = __file.name();").unwrap();
+    writeln!(out, "                let __type = __file.type_();").unwrap();
+    writeln!(out, "                let __self2 = __self_clone.clone();").unwrap();
+    writeln!(
+        out,
+        "                let __onload = Closure::wrap(Box::new(move |_e: Event| {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                    let __data = __reader2.result().ok().and_then(|v| v.as_string()).unwrap_or_default();"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                    let mut __payload = std::collections::HashMap::<String, String>::new();"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                    __payload.insert(\"data\".to_string(), __data);"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                    __payload.insert(\"name\".to_string(), __name.clone());"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                    __payload.insert(\"type\".to_string(), __type.clone());"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                    {}::{}(&__self2, &__payload);",
+        component_name, handler_name
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                }}) as Box<dyn FnMut(Event)>);"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                __reader.set_onload(Some(__onload.as_ref().unchecked_ref()));"
+    )
+    .unwrap();
+    writeln!(out, "                __onload.forget();").unwrap();
+    writeln!(
+        out,
+        "                let _ = __reader.read_as_data_url(&__file);"
+    )
+    .unwrap();
+    writeln!(out, "            }}) as Box<dyn FnMut(Event)>);").unwrap();
+    writeln!(
+        out,
+        "            {}.add_event_listener_with_callback(\"change\", __closure.as_ref().unchecked_ref()).unwrap();",
+        el_var
+    )
+    .unwrap();
+    writeln!(out, "            __closure.forget();").unwrap();
+    writeln!(out, "        }}").unwrap();
+    Ok(())
+}
+
+/// True when any element in the component carries `data-flv-file` (needs the
+/// `FileReader` / `File` / `FileList` web-sys features — see
+/// [`wasm_extra_web_sys_features`]).
+fn component_uses_file_input(component: &ExpandedComponent) -> bool {
+    fn node_has_file(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                attrs.iter().any(
+                    |a| matches!(a, ExpandedAttr::Static { name, .. } if name == "data-flv-file"),
+                ) || children.iter().any(node_has_file)
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().any(node_has_file)
+                    || else_children
+                        .as_ref()
+                        .is_some_and(|els| els.iter().any(node_has_file))
+            }
+            ExpandedTemplateNode::For { children, .. } => children.iter().any(node_has_file),
+            _ => false,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().any(node_has_file))
 }
 
 fn component_uses_form_submit(component: &ExpandedComponent) -> bool {
@@ -6077,6 +6233,64 @@ component Card {
             wasm_extra_web_sys_features(&no_form).is_empty(),
             "a form-free component needs no extra features"
         );
+    }
+
+    // ---- CW.9 gap #4 — file input (`data-flv-file`) ----------------
+
+    #[test]
+    fn data_flv_file_wires_change_listener_and_filereader() {
+        let src = r#"component App {
+  state {
+    img: Str = ""
+    has: Bool = false
+  }
+  event on_file() {
+    img = payload["data"]
+    has = true
+  }
+  <template>
+    <input type="file" data-flv-file="on_file" />
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("web_sys::FileReader::new()") && out.contains("read_as_data_url(&__file)"),
+            "must create a FileReader and read the file as a data URL:\n{out}"
+        );
+        assert!(
+            out.contains("__payload.insert(\"data\".to_string()")
+                && out.contains("__payload.insert(\"name\".to_string()")
+                && out.contains("__payload.insert(\"type\".to_string()"),
+            "the payload must carry data / name / type:\n{out}"
+        );
+        assert!(
+            out.contains("App::on_file(&__self2, &__payload);"),
+            "the handler must be called with the payload:\n{out}"
+        );
+        assert!(
+            out.contains("add_event_listener_with_callback(\"change\""),
+            "the listener must attach to the change event:\n{out}"
+        );
+        // `data-flv-file` is a directive, not a DOM attribute.
+        assert!(
+            !out.contains(".set_attribute(\"data-flv-file\""),
+            "data-flv-file must not be emitted as a DOM attribute:\n{out}"
+        );
+    }
+
+    #[test]
+    fn data_flv_file_adds_filereader_web_sys_features() {
+        let file = parse_expand(
+            r#"component App {
+  state { img: Str = "" }
+  event on_file() { img = payload["data"] }
+  <template><input type="file" data-flv-file="on_file" /></template>
+}"#,
+        );
+        let feats = wasm_extra_web_sys_features(&file);
+        for f in ["HtmlInputElement", "FileReader", "File", "FileList", "Blob"] {
+            assert!(feats.contains(&f), "missing feature `{f}`: {feats:?}");
+        }
     }
 
     // ---- Phase 11.7 R3.5c — string interpolation -------------------

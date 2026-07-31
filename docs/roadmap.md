@@ -9960,6 +9960,18 @@ template. La sub-fase 11.7 se detalla a continuación:
   de framework es `flv`, ahora special-caseado. 2 unit tests `cw6_*` en
   `src/view/codegen_wasm.rs`. Research + envelope completo en el repo
   fitz-liveviews (`docs/client-wasm-plan.md` → CW.6 findings).
+- ✅ **`data-flv-file` — upload de archivo/imagen client-side (v0.29.3,
+  2026-07-31)** — nueva directiva `data-flv-file="handler"` sobre un
+  `<input type="file">` en el target client-WASM. El emisor cablea un
+  listener `change` que lee el primer archivo con `FileReader`
+  (`read_as_data_url`) y llama al handler con un payload
+  `{data, name, type}` (`payload["data"]` = data-URL, listo para
+  `<img src="{img}">`). Features web-sys `FileReader`/`File`/`FileList`/`Blob`
+  agregadas solo cuando el componente usa `data-flv-file` (crates sin file
+  quedan byte-a-byte). Cierra el gap #4 (form/file inputs) del envelope
+  client-WASM para el caso leer-archivo-local. Verificado end-to-end en
+  Chrome headless real (upload → preview con el data-URL + filename, cero
+  page errors). 2 unit tests `data_flv_file_*` en `src/view/codegen_wasm.rs`.
 
 ### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
 
