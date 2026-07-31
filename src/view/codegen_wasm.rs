@@ -2955,11 +2955,7 @@ fn emit_data_flv_file(
         component_name, handler_name
     )
     .unwrap();
-    writeln!(
-        out,
-        "                }}) as Box<dyn FnMut(Event)>);"
-    )
-    .unwrap();
+    writeln!(out, "                }}) as Box<dyn FnMut(Event)>);").unwrap();
     writeln!(
         out,
         "                __reader.set_onload(Some(__onload.as_ref().unchecked_ref()));"
