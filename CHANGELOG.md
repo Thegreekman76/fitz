@@ -9,6 +9,51 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.6] — 2026-07-31 — `.fitzv` → wasm: cross-dir / dependency imports (CW.8)
+
+### Added — dep-aware view import resolution on the client-WASM target
+
+A `.fitzv` compiled with `fitz build --target wasm-client` can now import a
+component from a `fitz.toml` **dependency**, not just a flat sibling:
+
+```
+from fitz_liveviews.ui.Badge import badge as Badge
+```
+
+resolves `Badge.fitzv` under the dependency's root (via the `DepRegistry` the
+classic loader already builds from the manifest) and inlines it into the
+standalone wasm crate. This unblocks an external wasm app consuming the
+companion UI as a library, instead of hand-copying components into the app's
+own directory.
+
+The four view loaders (`load_imported_components` / `load_imported_fns` /
+`load_imported_nominals` / `collect_transitive_view_imports`) gained
+`*_with_deps` variants that resolve each import through the new dep-aware
+`resolve_view_import`, mirroring the classic `codegen.rs` / `evaluator.rs`
+resolution bit-for-bit (single segment → the dep's lib entry; dotted →
+the shared `resolve_dep_subpath_file`). The old two-arg signatures stay as
+empty-registry wrappers, so the 16 `examples/view/` smokes are byte-identical.
+
+### Notes
+
+- **Framework builtins never trigger a dep load.** A `from fitz_liveviews
+  import flv` line (surfaced from inside a dep component) resolves to `None` —
+  `flv`/`html`/`raw_html`/`h_join`/`h_when`/`h_either` are emitter special-cases,
+  and loading the framework's lib entry would blow the wasm envelope.
+- De-dupe now keys on the **resolved file path** (not `path[0]`), so several
+  dep sub-path imports sharing a dep name (`dep.ui.Badge` + `dep.ui.Chip`) are
+  each scanned.
+- **MVP limit** (residual debt): resolution uses a single flat `base_dir` for
+  the sibling fallback, so a dep component composing a *bare-name* sibling
+  (`from Icon import Icon`, not `from dep.ui.Icon import Icon`) is not resolved
+  against the dep's own directory. The dual-target companion primitives are
+  leaves, so this doesn't block them.
+- Validated end-to-end: an external consumer with a `fitz_liveviews` path dep
+  importing `from fitz_liveviews.ui.Badge import badge as Badge` compiled to a
+  real `.wasm` (`wasm-pack` → `:-) Done`); the dep component's `Badge` struct +
+  scoped styles inlined, `flv(label)` lowered to identity. 8 unit tests; lib
+  3909 green; fmt + clippy clean; all 16 view smokes byte-identical.
+
 ## [v0.29.5] — 2026-07-31 — `.fitzv` → wasm: helper-style fn/event bodies (for + match + local reassign + string concat)
 
 ### Added — richer statement/expression lowering in wasm fn & event bodies

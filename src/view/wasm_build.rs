@@ -44,6 +44,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::manifest::DepRegistry;
+
 use super::codegen_wasm::{
     emit_module_with_components, merge_imported_components, EmitError, EmitResult,
     ImportedComponentRegistry, ImportedFnRegistry, NominalRegistry,
@@ -186,6 +188,65 @@ pub fn compose_lib_rs_with_components(
     Ok(out)
 }
 
+/// Framework helpers the WASM emitter special-cases in `lower_call`:
+/// `flv` is the identity passthrough, and `html`/`raw_html`/`h_join`/
+/// `h_when`/`h_either` hard-error as SSR-only. They are NOT loadable
+/// modules, so a `from <framework> import flv` line must never trigger a
+/// dep load — resolving it would pull the framework's whole lib entry
+/// into the transpile and blow the wasm envelope.
+fn is_framework_view_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "flv" | "html" | "raw_html" | "h_join" | "h_when" | "h_either"
+    )
+}
+
+/// Resolve a `.fitzv` view import to a file path — dep-aware (CW.8).
+///
+/// Resolution order, mirroring the classic loaders (`codegen.rs` /
+/// `evaluator.rs`) bit-for-bit:
+/// 1. **Framework-builtin-only imports** (`from fitz_liveviews import flv`)
+///    → `None`. The emitter special-cases these; they are never a file, and
+///    loading a dep for them would drag the framework's lib entry in.
+/// 2. **First path segment names a dependency** in `dep_registry` → resolve
+///    through the dep's lib entry: a single segment (`from dep import X`) →
+///    the lib entry itself; a dotted path (`from dep.ui.Badge import Badge`)
+///    → the shared [`crate::view::resolve_dep_subpath_file`] under the dep
+///    root (tries `.fitz` then `.fitzv`).
+/// 3. **Sibling fallback** (unchanged): a single-segment path joined onto
+///    `base_dir` with `sibling_ext`, if the file exists.
+/// 4. Anything else (multi-segment non-dep, missing sibling) → `None`.
+///
+/// Every loader treats `None` as a silent skip. `sibling_ext` selects the
+/// classic (`"fitz"`) vs view (`"fitzv"`) extension for the sibling
+/// fallback only — the dep sub-path resolver always tries both.
+fn resolve_view_import(
+    imp: &ExpandedViewImport,
+    base_dir: &Path,
+    dep_registry: &DepRegistry,
+    sibling_ext: &str,
+) -> Option<PathBuf> {
+    // (1) Framework builtins are emitter special-cases, not modules.
+    if !imp.names.is_empty() && imp.names.iter().all(|(n, _)| is_framework_view_builtin(n)) {
+        return None;
+    }
+    // (2) Dep-aware: first segment names a dependency.
+    if let Some(seg0) = imp.path.first() {
+        if let Some(lib_entry) = dep_registry.get(seg0) {
+            if imp.path.len() == 1 {
+                return Some(lib_entry.clone());
+            }
+            return crate::view::resolve_dep_subpath_file(lib_entry, &imp.path[1..]);
+        }
+    }
+    // (3) Sibling fallback: single-segment path in `base_dir`.
+    if imp.path.len() != 1 {
+        return None;
+    }
+    let sibling = base_dir.join(format!("{}.{}", imp.path[0], sibling_ext));
+    sibling.is_file().then_some(sibling)
+}
+
 /// Load the classic `type Foo { ... }` definitions that a `.fitzv`
 /// imports (`from foo import Foo`) into a [`NominalRegistry`], so the
 /// WASM emitter can synthesise a Rust `struct` for each (Phase 11.7
@@ -214,19 +275,28 @@ pub fn load_imported_nominals(
     imports: &[ExpandedViewImport],
     base_dir: &Path,
 ) -> EmitResult<NominalRegistry> {
+    load_imported_nominals_with_deps(imports, base_dir, &DepRegistry::new())
+}
+
+/// Dep-aware variant of [`load_imported_nominals`] (CW.8). Resolves each
+/// import through [`resolve_view_import`], so an import whose first path
+/// segment names a `fitz.toml` dependency (`from dep.ui.Types import Foo`)
+/// finds the nominal under the dependency's root instead of only in a flat
+/// sibling. The empty-registry wrapper above preserves the old two-arg
+/// signature the view smoke tests call.
+pub fn load_imported_nominals_with_deps(
+    imports: &[ExpandedViewImport],
+    base_dir: &Path,
+    dep_registry: &DepRegistry,
+) -> EmitResult<NominalRegistry> {
     use crate::ast::Stmt;
 
     let mut registry = NominalRegistry::new();
     for imp in imports {
-        // MVP: single-segment sibling modules only.
-        if imp.path.len() != 1 {
-            continue;
-        }
-        let stem = &imp.path[0];
-        let sibling = base_dir.join(format!("{stem}.fitz"));
-        if !sibling.is_file() {
-            continue;
-        }
+        let sibling = match resolve_view_import(imp, base_dir, dep_registry, "fitz") {
+            Some(f) => f,
+            None => continue,
+        };
         let source = match fs::read_to_string(&sibling) {
             Ok(s) => s,
             Err(_) => continue,
@@ -284,21 +354,31 @@ pub fn load_imported_fns(
     imports: &[ExpandedViewImport],
     base_dir: &Path,
 ) -> EmitResult<ImportedFnRegistry> {
+    load_imported_fns_with_deps(imports, base_dir, &DepRegistry::new())
+}
+
+/// Dep-aware variant of [`load_imported_fns`] (CW.8). Resolves each import
+/// through [`resolve_view_import`] and de-dupes on the RESOLVED file path
+/// (not `imp.path[0]`), so two dep imports that share a dep name but resolve
+/// to different modules (`from dep.a import X` + `from dep.b import Y`) are
+/// both scanned. The empty-registry wrapper above keeps the old two-arg
+/// signature the view smoke tests call.
+pub fn load_imported_fns_with_deps(
+    imports: &[ExpandedViewImport],
+    base_dir: &Path,
+    dep_registry: &DepRegistry,
+) -> EmitResult<ImportedFnRegistry> {
     use crate::ast::Stmt;
 
     let mut registry = ImportedFnRegistry::new();
     let mut scanned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for imp in imports {
-        if imp.path.len() != 1 {
-            continue;
-        }
-        let stem = imp.path[0].clone();
-        // Scan each sibling module at most once.
-        if !scanned.insert(stem.clone()) {
-            continue;
-        }
-        let sibling = base_dir.join(format!("{stem}.fitz"));
-        if !sibling.is_file() {
+        let sibling = match resolve_view_import(imp, base_dir, dep_registry, "fitz") {
+            Some(f) => f,
+            None => continue,
+        };
+        // Scan each resolved module at most once.
+        if !scanned.insert(sibling.to_string_lossy().into_owned()) {
             continue;
         }
         let source = match fs::read_to_string(&sibling) {
@@ -369,22 +449,31 @@ pub fn load_imported_components(
     imports: &[ExpandedViewImport],
     base_dir: &Path,
 ) -> EmitResult<ImportedComponentRegistry> {
+    load_imported_components_with_deps(imports, base_dir, &DepRegistry::new())
+}
+
+/// Dep-aware variant of [`load_imported_components`] (CW.8). Resolves each
+/// import through [`resolve_view_import`], so an import whose first path
+/// segment names a `fitz.toml` dependency (`from fitz_liveviews.ui.Badge
+/// import Badge`) inlines the dep's component instead of only a flat
+/// sibling — unblocking an external wasm app consuming the companion UI as
+/// a library. De-dupes on the RESOLVED file path so several dep sub-path
+/// imports sharing a dep name are each scanned. The empty-registry wrapper
+/// above keeps the old two-arg signature the view smoke tests call.
+pub fn load_imported_components_with_deps(
+    imports: &[ExpandedViewImport],
+    base_dir: &Path,
+    dep_registry: &DepRegistry,
+) -> EmitResult<ImportedComponentRegistry> {
     let mut registry = ImportedComponentRegistry::new();
     let mut scanned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for imp in imports {
-        // MVP: single-segment sibling modules only.
-        if imp.path.len() != 1 {
-            continue;
-        }
-        let stem = imp.path[0].clone();
-        // Scan each sibling `.fitzv` at most once.
-        if !scanned.insert(stem.clone()) {
-            continue;
-        }
-        let sibling = base_dir.join(format!("{stem}.fitzv"));
-        if !sibling.is_file() {
-            // Not a `.fitzv` sibling — probably a classic `.fitz` module
-            // (nominals / helpers), handled by the other loaders.
+        let sibling = match resolve_view_import(imp, base_dir, dep_registry, "fitzv") {
+            Some(f) => f,
+            None => continue,
+        };
+        // Scan each resolved `.fitzv` at most once.
+        if !scanned.insert(sibling.to_string_lossy().into_owned()) {
             continue;
         }
         let source = match fs::read_to_string(&sibling) {
@@ -453,6 +542,26 @@ pub fn collect_transitive_view_imports(
     entry: &[ExpandedViewImport],
     base_dir: &Path,
 ) -> Vec<ExpandedViewImport> {
+    collect_transitive_view_imports_with_deps(entry, base_dir, &DepRegistry::new())
+}
+
+/// Dep-aware variant of [`collect_transitive_view_imports`] (CW.8). Follows
+/// dependency `.fitzv` components (resolved via [`resolve_view_import`]) in
+/// addition to flat siblings, so a dep component's own imports (a sibling
+/// dep component, a dep nominal/helper) reach the union fed to the loaders.
+/// De-dupes expanded files on the RESOLVED path. The empty-registry wrapper
+/// above keeps the old two-arg signature the view smoke tests call.
+///
+/// **MVP limit**: resolution uses a single flat `base_dir` for the sibling
+/// fallback, so a dep component that composes a bare-name sibling (`from
+/// Icon import Icon`, not `from dep.ui.Icon import Icon`) does not resolve
+/// that sibling against the DEP's own directory. The dual-target companion
+/// primitives are leaves, so this is documented residual debt, not a blocker.
+pub fn collect_transitive_view_imports_with_deps(
+    entry: &[ExpandedViewImport],
+    base_dir: &Path,
+    dep_registry: &DepRegistry,
+) -> Vec<ExpandedViewImport> {
     use std::collections::{BTreeSet, VecDeque};
 
     let mut result: Vec<ExpandedViewImport> = Vec::new();
@@ -467,17 +576,14 @@ pub fn collect_transitive_view_imports(
         if seen_entries.insert(key) {
             result.push(imp.clone());
         }
-        // Follow only single-segment `.fitzv` siblings — those can compose
-        // further children. Each expanded at most once (cycle-safe).
-        if imp.path.len() != 1 {
-            continue;
-        }
-        let stem = imp.path[0].clone();
-        if !expanded_files.insert(stem.clone()) {
-            continue;
-        }
-        let sibling = base_dir.join(format!("{stem}.fitzv"));
-        if !sibling.is_file() {
+        // Follow a `.fitzv` component (sibling or dep) — those can compose
+        // further children. Each expanded at most once (cycle-safe), keyed on
+        // the RESOLVED path so dep sub-paths sharing a name are each followed.
+        let sibling = match resolve_view_import(&imp, base_dir, dep_registry, "fitzv") {
+            Some(f) => f,
+            None => continue,
+        };
+        if !expanded_files.insert(sibling.to_string_lossy().into_owned()) {
             continue;
         }
         let source = match fs::read_to_string(&sibling) {
@@ -1485,5 +1591,181 @@ component Card {
         let entry = vec![imp("Card", &[("Card", None)]), imp("util", &[("f", None)])];
         let union = collect_transitive_view_imports(&entry, tmp.path());
         assert_eq!(union.len(), 2, "nothing transitive → union == entry");
+    }
+
+    // ---- CW.8: dep-aware view import resolution -------------------------
+
+    /// Multi-segment import (`from dep.ui.Badge import Badge`).
+    fn imp_path(segs: &[&str], names: &[(&str, Option<&str>)]) -> ExpandedViewImport {
+        ExpandedViewImport {
+            path: segs.iter().map(|s| s.to_string()).collect(),
+            names: names
+                .iter()
+                .map(|(o, a)| (o.to_string(), a.map(|s| s.to_string())))
+                .collect(),
+            loc: Loc { line: 1, column: 1 },
+        }
+    }
+
+    /// Writes a minimal dependency layout under `root`:
+    /// `<root>/<dep>/src/{lib.fitz, ui/<Comp>.fitzv}`. Returns a
+    /// `DepRegistry` mapping the dep name to its `lib.fitz` entry.
+    fn write_dep(root: &Path, dep_name: &str, comps: &[(&str, &str)]) -> DepRegistry {
+        let src = root.join(dep_name).join("src");
+        std::fs::create_dir_all(src.join("ui")).unwrap();
+        let lib_entry = src.join("lib.fitz");
+        std::fs::write(&lib_entry, "// lib\n").unwrap();
+        for (name, body) in comps {
+            std::fs::write(src.join("ui").join(format!("{name}.fitzv")), body).unwrap();
+        }
+        let mut reg = DepRegistry::new();
+        reg.insert(dep_name.to_string(), lib_entry);
+        reg
+    }
+
+    const BADGE_FITZV: &str = "component Badge {\n  state { label: Str = \"\" }\n  \
+         <template><span class=\"badge\">{label}</span></template>\n}\n";
+    const CHIP_FITZV: &str = "component Chip {\n  state { text: Str = \"\" }\n  \
+         <template><span class=\"chip\">{text}</span></template>\n}\n";
+
+    #[test]
+    fn cw8_resolve_view_import_dep_single_segment_returns_lib_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = write_dep(tmp.path(), "mylib", &[]);
+        let hit = resolve_view_import(&imp("mylib", &[("X", None)]), tmp.path(), &reg, "fitz");
+        assert_eq!(hit.unwrap().file_name().unwrap(), "lib.fitz");
+    }
+
+    #[test]
+    fn cw8_resolve_view_import_dep_dotted_resolves_under_dep_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = write_dep(tmp.path(), "mylib", &[("Badge", BADGE_FITZV)]);
+        let hit = resolve_view_import(
+            &imp_path(&["mylib", "ui", "Badge"], &[("Badge", None)]),
+            tmp.path(),
+            &reg,
+            "fitzv",
+        )
+        .expect("dep sub-path resolves");
+        assert_eq!(hit.file_name().unwrap(), "Badge.fitzv");
+    }
+
+    #[test]
+    fn cw8_resolve_view_import_framework_builtin_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Even with the dep registered, a `flv`-only import must never load a
+        // file — the emitter special-cases it; loading would drag the whole
+        // framework lib entry into the transpile.
+        let reg = write_dep(tmp.path(), "fitz_liveviews", &[]);
+        let hit = resolve_view_import(
+            &imp("fitz_liveviews", &[("flv", None)]),
+            tmp.path(),
+            &reg,
+            "fitz",
+        );
+        assert!(hit.is_none(), "framework builtin import must not resolve");
+    }
+
+    #[test]
+    fn cw8_resolve_view_import_sibling_fallback_when_not_a_dep() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Card.fitzv"), BADGE_FITZV).unwrap();
+        let reg = DepRegistry::new(); // empty → sibling model
+        let hit = resolve_view_import(&imp("Card", &[("Badge", None)]), tmp.path(), &reg, "fitzv");
+        assert_eq!(hit.unwrap().file_name().unwrap(), "Card.fitzv");
+        // Multi-segment non-dep → None (unchanged skip).
+        let none = resolve_view_import(
+            &imp_path(&["a", "b"], &[("X", None)]),
+            tmp.path(),
+            &reg,
+            "fitzv",
+        );
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn cw8_load_imported_components_with_deps_resolves_dep_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = write_dep(tmp.path(), "mylib", &[("Badge", BADGE_FITZV)]);
+        let imports = vec![imp_path(&["mylib", "ui", "Badge"], &[("Badge", None)])];
+        let registry = load_imported_components_with_deps(&imports, tmp.path(), &reg).unwrap();
+        assert!(
+            registry.contains("Badge"),
+            "dep component Badge must be registered"
+        );
+    }
+
+    #[test]
+    fn cw8_dedupe_on_resolved_path_scans_both_dep_subpaths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = write_dep(
+            tmp.path(),
+            "mylib",
+            &[("Badge", BADGE_FITZV), ("Chip", CHIP_FITZV)],
+        );
+        // Two imports sharing the dep name `mylib` but different sub-paths.
+        // The old `path[0]` dedupe would drop the second; the resolved-path
+        // dedupe scans both.
+        let imports = vec![
+            imp_path(&["mylib", "ui", "Badge"], &[("Badge", None)]),
+            imp_path(&["mylib", "ui", "Chip"], &[("Chip", None)]),
+        ];
+        let registry = load_imported_components_with_deps(&imports, tmp.path(), &reg).unwrap();
+        assert!(registry.contains("Badge"), "Badge registered");
+        assert!(
+            registry.contains("Chip"),
+            "Chip registered (not deduped away by shared dep name)"
+        );
+    }
+
+    #[test]
+    fn cw8_dep_component_composes_into_lib_rs_end_to_end() {
+        // A consumer `.fitzv` imports a component from a `fitz.toml`
+        // dependency by dotted sub-path and composes `<Badge/>`. The full
+        // pipeline (transitive collect → load components → check → compose)
+        // must inline the dep component's struct into the standalone crate.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = write_dep(tmp.path(), "mylib", &[("Badge", BADGE_FITZV)]);
+        let src = "from mylib.ui.Badge import Badge\n\ncomponent App {\n  \
+             state { n: Int = 0 }\n  \
+             <template><div><Badge label=\"hi\" /></div></template>\n}\n";
+        let raw = view::parse(src).expect("parse consumer");
+        let expanded = view::expand(&raw).expect("expand consumer");
+        let all = collect_transitive_view_imports_with_deps(&expanded.imports, tmp.path(), &reg);
+        let components = load_imported_components_with_deps(&all, tmp.path(), &reg).unwrap();
+        let errs = view::check_with_imported_components(&expanded, components.components());
+        assert!(errs.is_empty(), "check errors: {errs:?}");
+        let nominals = load_imported_nominals_with_deps(&all, tmp.path(), &reg).unwrap();
+        let fns = load_imported_fns_with_deps(&all, tmp.path(), &reg).unwrap();
+        let out = compose_lib_rs_with_components(
+            &expanded,
+            &nominals,
+            &fns,
+            &components,
+            "#app",
+            Some("App.fitzv"),
+        )
+        .unwrap();
+        assert!(
+            out.contains("pub struct Badge"),
+            "dep component Badge must be inlined into lib.rs:\n{out}"
+        );
+        assert!(out.contains("pub struct App"), "root App present:\n{out}");
+    }
+
+    #[test]
+    fn cw8_empty_registry_is_byte_for_byte_sibling_only() {
+        // With an empty dep registry the wrapper path must behave exactly like
+        // the old sibling-only loader: a single-segment `.fitzv` sibling loads,
+        // a dep-style multi-segment import resolves to nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Card.fitzv"), BADGE_FITZV).unwrap();
+        let reg = DepRegistry::new();
+        let imports = vec![
+            imp("Card", &[("Badge", None)]),
+            imp_path(&["mylib", "ui", "Badge"], &[("Badge", None)]),
+        ];
+        let registry = load_imported_components_with_deps(&imports, tmp.path(), &reg).unwrap();
+        assert!(registry.contains("Badge"), "sibling Card.fitzv loads");
     }
 }

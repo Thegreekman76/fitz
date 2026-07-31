@@ -10009,6 +10009,34 @@ template. La sub-fase 11.7 se detalla a continuación:
   `examples/view/` regeneran + buildean (incl. `list-transform`, que reasigna
   un local).
 
+- ✅ **CW.8 — imports cross-dir/dep en el loader wasm (v0.29.6, 2026-07-31)** —
+  un `.fitzv` compilado con `fitz build --target wasm-client` ya puede importar
+  un componente de una **dependencia de `fitz.toml`**, no solo de un sibling
+  plano: `from fitz_liveviews.ui.Badge import badge as Badge` resuelve
+  `Badge.fitzv` bajo el root de la dep (vía el `DepRegistry` que el loader
+  classic ya arma del manifest) y lo inlinea en el crate wasm standalone.
+  Destraba una app wasm externa que consume la companion UI como librería. Los
+  4 loaders del pipeline view (`load_imported_components`/`_fns`/`_nominals` +
+  `collect_transitive_view_imports`) ganan variantes `*_with_deps` que resuelven
+  cada import vía el nuevo `resolve_view_import` dep-aware — paralelo bit-a-bit
+  a la resolución classic (`codegen.rs`/`evaluator.rs`): single-segment → el
+  lib entry de la dep; punteado → el `resolve_dep_subpath_file` compartido. Las
+  firmas viejas de 2 args quedan como wrappers con registry vacío → los 16
+  smokes de `examples/view/` byte-idénticos. **Framework builtins nunca
+  disparan un dep load** (`from fitz_liveviews import flv` → `None`; `flv`/`html`/
+  `raw_html`/`h_join`/`h_when`/`h_either` son special-cases del emisor). El
+  de-dupe pasa a keyear por **path resuelto** (no `path[0]`), así que varios
+  imports sub-path de la misma dep se escanean cada uno. **Deuda residual (MVP)**:
+  la resolución usa un único `base_dir` plano para el fallback de sibling, así
+  que un componente de dep que compone un sibling por **nombre pelado** (`from
+  Icon import Icon`, no `from dep.ui.Icon import Icon`) no lo resuelve contra el
+  dir de la dep; los primitivos presentacionales dual-target son hojas → no los
+  toca. Validado end-to-end: consumer externo con dep path a `fitz_liveviews`
+  importando `from fitz_liveviews.ui.Badge import badge as Badge` compiló a un
+  `.wasm` real (`wasm-pack` → `:-) Done`; struct `Badge` + estilos scoped
+  inlineados, `flv(label)` bajó a identidad). 8 unit tests; lib 3909 verde;
+  fmt + clippy limpios.
+
 ### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
 
 La superficie de composición client-WASM (props, event bubbling, slots,

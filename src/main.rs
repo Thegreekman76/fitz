@@ -1181,22 +1181,33 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // CW.8 — the dep registry (`dep-name → lib_entry`) from the manifest, so
+    // an import whose first path segment names a `fitz.toml` dependency
+    // (`from fitz_liveviews.ui.Badge import Badge`) resolves through the dep
+    // instead of only a flat sibling. Empty in single-file mode → the loaders
+    // fall back to sibling-only resolution (byte-for-byte with the old path).
+    let dep_registry = dep_registry_from(resolved);
     // Transitivity — walk the `.fitzv` import graph so a grandchild
     // component / nominal / helper `fn` that lives in a file the entry does
     // not import directly is still discovered. The three loaders below run
-    // over this union (each de-dupes by module stem). Byte-for-byte with the
+    // over this union (each de-dupes by resolved path). Byte-for-byte with the
     // one-level path when nothing is transitively reachable.
-    let all_imports = view::collect_transitive_view_imports(&expanded.imports, &base_dir);
-    let imported_components = match view::load_imported_components(&all_imports, &base_dir) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "✗ loading imported components for `{}`: {e}",
-                resolved.entry.display()
-            );
-            std::process::exit(1);
-        }
-    };
+    let all_imports = view::collect_transitive_view_imports_with_deps(
+        &expanded.imports,
+        &base_dir,
+        &dep_registry,
+    );
+    let imported_components =
+        match view::load_imported_components_with_deps(&all_imports, &base_dir, &dep_registry) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "✗ loading imported components for `{}`: {e}",
+                    resolved.entry.display()
+                );
+                std::process::exit(1);
+            }
+        };
 
     let check_errs =
         view::check_with_imported_components(&expanded, imported_components.components());
@@ -1216,30 +1227,32 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
     // `.fitzv` (e.g. `from card import Card`) from their sibling
     // `.fitz` files so the emitter can synthesise a Rust `struct` for
     // each. Empty when the file imports no nominals (the pre-R3 examples).
-    let nominals = match view::load_imported_nominals(&all_imports, &base_dir) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!(
-                "✗ loading imported nominals for `{}`: {e}",
-                resolved.entry.display()
-            );
-            std::process::exit(1);
-        }
-    };
+    let nominals =
+        match view::load_imported_nominals_with_deps(&all_imports, &base_dir, &dep_registry) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "✗ loading imported nominals for `{}`: {e}",
+                    resolved.entry.display()
+                );
+                std::process::exit(1);
+            }
+        };
 
     // Phase 11.7 R3.5a.2 — load the sibling `.fitz` helper functions the
     // `.fitzv` imports (`from board_helpers import cards_in, ...`) so the
     // emitter can transpile each into the bundle.
-    let imported_fns = match view::load_imported_fns(&all_imports, &base_dir) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "✗ loading imported functions for `{}`: {e}",
-                resolved.entry.display()
-            );
-            std::process::exit(1);
-        }
-    };
+    let imported_fns =
+        match view::load_imported_fns_with_deps(&all_imports, &base_dir, &dep_registry) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "✗ loading imported functions for `{}`: {e}",
+                    resolved.entry.display()
+                );
+                std::process::exit(1);
+            }
+        };
 
     // Materialise the scaffold. Path is Cargo-style —
     // `target/wasm-build/<bin>/` for the temporary crate,

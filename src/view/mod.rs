@@ -49,11 +49,12 @@ pub use expand::{
 };
 pub use parser::{parse, ViewParseError, ViewParseResult};
 pub use wasm_build::{
-    collect_transitive_view_imports, compose_cargo_toml, compose_cargo_toml_with_features,
-    compose_lib_rs, compose_lib_rs_with_components, compose_lib_rs_with_imports,
-    compose_lib_rs_with_nominals, load_imported_components, load_imported_fns,
-    load_imported_nominals, sanitise_wasm_pkg_name, write_wasm_crate_scaffold, ScaffoldError,
-    ScaffoldResult,
+    collect_transitive_view_imports, collect_transitive_view_imports_with_deps, compose_cargo_toml,
+    compose_cargo_toml_with_features, compose_lib_rs, compose_lib_rs_with_components,
+    compose_lib_rs_with_imports, compose_lib_rs_with_nominals, load_imported_components,
+    load_imported_components_with_deps, load_imported_fns, load_imported_fns_with_deps,
+    load_imported_nominals, load_imported_nominals_with_deps, sanitise_wasm_pkg_name,
+    write_wasm_crate_scaffold, ScaffoldError, ScaffoldResult,
 };
 
 // ---------------------------------------------------------------------------
