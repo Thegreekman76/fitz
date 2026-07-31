@@ -9944,6 +9944,22 @@ template. La sub-fase 11.7 se detalla a continuación:
   `examples/view/cross-file-transitive` (alias + transitivo, WASM real
   ~35 KB). Los 8 ejemplos view same-file regeneran byte-a-byte. Residual:
   local gana ante importado, sin manejo de colisión de aliasing, dir plano.
+- ✅ **CW.6 `flv` passthrough — dual-target SSR↔wasm (v0.29.2, 2026-07-30)** —
+  research + slice de core que destraba compartir UN source `.fitzv` entre el
+  target SSR (fitz-liveviews) y el client-WASM. El emisor client-WASM
+  (`lower_call`) trata `flv(x)` como IDENTIDAD (un DOM text/attr node escapa
+  intrínsecamente, así que el escaping HTML del SSR sobra) y hard-errorea en
+  los helpers raw-HTML `html`/`raw_html`/`h_join`/`h_when`/`h_either` (sin
+  equivalente wasm — identidad los renderizaría como texto escapado). Esto
+  deja que un componente presentacional SSR de fitz-liveviews autoreado con
+  `{flv(label)}` + `from fitz_liveviews import flv` compile a
+  `--target wasm-client` SIN cambios. Validado end-to-end: `Badge.fitzv` +
+  `Chip.fitzv` de la lib compañera compilan a `.wasm` real, con `{flv(label)}`
+  byte-idéntico a `{label}`. El `dep_registry` en el loader wasm (el "blocker
+  grande" que el plan estimaba) NO hizo falta para el subset — el único import
+  de framework es `flv`, ahora special-caseado. 2 unit tests `cw6_*` en
+  `src/view/codegen_wasm.rs`. Research + envelope completo en el repo
+  fitz-liveviews (`docs/client-wasm-plan.md` → CW.6 findings).
 
 ### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
 

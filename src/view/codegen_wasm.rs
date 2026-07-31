@@ -3283,6 +3283,42 @@ fn lower_call(
                 }),
             }
         }
+        // CW.6 (dual-target) — `flv(x)` is the fitz-liveviews HTML-escaping
+        // helper (`fn flv(s: Str) -> Str`). SSR needs it because it builds a
+        // raw HTML string; on the client-WASM target a `create_text_node` /
+        // `set_attribute` escapes intrinsically, so `flv` is the IDENTITY
+        // here — pass the single arg through. This lets an SSR companion
+        // component authored with `{flv(label)}` + `from fitz_liveviews
+        // import flv` compile to `--target wasm-client` UNCHANGED (the import
+        // line is already skipped by `load_imported_fns` — it is not a
+        // sibling `.fitzv`). Output is byte-identical to writing `{label}`.
+        Expr::Ident(name, _) if name == "flv" && args.len() == 1 => {
+            lower_expr(&args[0], state_names, locals)
+        }
+        // CW.6 (dual-target) — the raw-HTML / List<Html> framework helpers
+        // have NO client-WASM equivalent: `html`/`raw_html` inject
+        // deliberately-unescaped markup (a DOM text node cannot), and
+        // `h_join`/`h_when`/`h_either` fold `Html` values. Treating them as
+        // identity would silently render markup as escaped text (or fail to
+        // type-check), so a component using them stays SSR-only. Hard-error
+        // with a clear pointer rather than emitting a broken call.
+        Expr::Ident(name, _)
+            if matches!(
+                name.as_str(),
+                "html" | "raw_html" | "h_join" | "h_when" | "h_either"
+            ) =>
+        {
+            Err(EmitError {
+                message: format!(
+                    "`{name}(...)` is an SSR-only fitz-liveviews helper (raw/unescaped \
+                     HTML or List<Html> folding) with no client-WASM equivalent — a DOM \
+                     text node escapes intrinsically and cannot inject raw markup. Use \
+                     `{{expr}}` or `{{flv(expr)}}` for text content, or keep this \
+                     component on the SSR target."
+                ),
+                context: "expression".to_string(),
+            })
+        }
         // Phase 11.7 R3.5a.2 — a free-function call to an imported classic
         // helper (`cards_in(cards, "todo")`, `move_one(id, "right", c)`).
         // The helper is transpiled into the bundle by `emit_imported_fns`;
@@ -4215,6 +4251,55 @@ mod tests {
             "interpolation format! call:\n{}",
             out
         );
+    }
+
+    #[test]
+    fn cw6_flv_is_identity_passthrough_in_text_interpolation() {
+        // A component authored in the SSR companion style — `{flv(label)}`
+        // + `from fitz_liveviews import flv` — must emit byte-identically to
+        // plain `{label}` on the client-WASM target: a DOM text node escapes
+        // intrinsically, so `flv` (HTML escape) is the identity here. This is
+        // what lets an SSR component compile to `--target wasm-client`
+        // unchanged (CW.6 dual-target).
+        let flv_src = "component tag {\n  \
+             state {\n    label: Str = \"\"\n  }\n  \
+             <template><span>{flv(label)}</span></template>\n}\n";
+        let plain_src = "component tag {\n  \
+             state {\n    label: Str = \"\"\n  }\n  \
+             <template><span>{label}</span></template>\n}\n";
+        let flv_out = emit_component(&parse_expand(flv_src).components[0]).unwrap();
+        let plain_out = emit_component(&parse_expand(plain_src).components[0]).unwrap();
+        assert_eq!(
+            flv_out, plain_out,
+            "`{{flv(label)}}` must emit byte-identically to `{{label}}` on wasm"
+        );
+        // No Rust call to a `flv` fn survives (it would fail to link — the
+        // helper lives in the SSR lib, not the wasm bundle).
+        assert!(
+            !flv_out.contains("flv("),
+            "no `flv(...)` Rust call should survive:\n{flv_out}"
+        );
+    }
+
+    #[test]
+    fn cw6_raw_html_helpers_hard_error_as_ssr_only() {
+        // The raw-HTML / List<Html> framework helpers have no client-WASM
+        // equivalent — identity would silently render markup as escaped text
+        // (or fail to type-check). They must hard-error, naming themselves
+        // SSR-only, rather than emitting a broken call (CW.6 dual-target).
+        for helper in ["html", "raw_html", "h_join", "h_when", "h_either"] {
+            let src = format!(
+                "component tag {{\n  state {{\n    label: Str = \"\"\n  }}\n  \
+                 <template><span>{{{helper}(label)}}</span></template>\n}}\n"
+            );
+            let err = emit_component(&parse_expand(&src).components[0])
+                .expect_err("raw-HTML helper must reject on the wasm target");
+            assert!(
+                err.message.contains("SSR-only"),
+                "error for `{helper}` should name it SSR-only: {}",
+                err.message
+            );
+        }
     }
 
     #[test]

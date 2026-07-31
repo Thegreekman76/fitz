@@ -9,6 +9,44 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.2] — 2026-07-30 — `.fitzv` → wasm: `flv` passthrough (dual-target SSR↔client-WASM)
+
+### Added — el emisor client-WASM tolera el helper de escaping `flv` de fitz-liveviews
+
+Un componente `.fitzv` autoreado en el estilo SSR de fitz-liveviews
+—`{flv(label)}` + `from fitz_liveviews import flv`— ahora compila a
+`fitz build --target wasm-client` **sin modificarse**. `flv(s: Str) ->
+Str` escapa HTML para el string-builder del SSR; en el target
+client-WASM un `create_text_node` / `set_attribute` escapa
+intrínsecamente, así que `flv` es la **identidad**: el emisor
+(`src/view/codegen_wasm.rs`, `lower_call`) lowerea `flv(x)` → `x`, con
+salida byte-idéntica a `{x}`. Esto destraba compartir UN source `.fitzv`
+entre el target SSR y el client-WASM para el subset presentacional de la
+companion UI de fitz-liveviews (research CW.6 de ese repo).
+
+### Guardrail — los helpers raw-HTML hard-errorean como SSR-only
+
+`html` / `raw_html` / `h_join` / `h_when` / `h_either` inyectan markup
+deliberadamente sin escapar o pliegan `List<Html>`; tratarlos como
+identidad renderizaría el markup como texto escapado (bug silencioso).
+El emisor client-WASM ahora **rechaza** con un mensaje claro que los
+nombra SSR-only, en lugar de emitir una llamada rota.
+
+### Notas
+
+- **Validado end-to-end**: los componentes SSR `Badge.fitzv` y
+  `Chip.fitzv` de la lib fitz-liveviews compilan sin cambios a un
+  `.wasm` real (`wasm-pack` → `:-) Done`), con `{flv(label)}` bajando a
+  `format!("{}", (*self.label.borrow()))` — cero llamadas a `flv` en el
+  bundle.
+- **Sin sintaxis nueva, sin cambio de gramática ni LSP.** Cambio interno
+  del emisor view (`.fitzv` → wasm). Los ejemplos `examples/view/*`
+  (standalone, no usan `flv`) regeneran byte-a-byte. La extensión VSCode
+  no se rebuildeó (view-codegen-only, sin impacto en grammar/LSP —
+  convención v0.28.1+).
+- 2 unit tests nuevos `cw6_*` en `src/view/codegen_wasm.rs`. Suite: lib
+  3895/0 (default) + 4055/0 (`--features lsp`), fmt + clippy limpios.
+
 ## [v0.29.1] — 2026-07-30 — `.fitzv`: azúcar `{#for x in xs key=x.id}` para keyed diffing
 
 ### Added — cláusula `key=<expr>` en `{#for}` de single-file components
