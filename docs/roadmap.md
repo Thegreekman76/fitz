@@ -9972,6 +9972,20 @@ template. La sub-fase 11.7 se detalla a continuación:
   client-WASM para el caso leer-archivo-local. Verificado end-to-end en
   Chrome headless real (upload → preview con el data-URL + filename, cero
   page errors). 2 unit tests `data_flv_file_*` en `src/view/codegen_wasm.rs`.
+- ✅ **Mixed attribute interpolation + defaults numéricos negativos (v0.29.4,
+  2026-07-31)** — un atributo cuyo valor mezcla texto literal con segmentos
+  `{expr}` (`style="width: {pct}%"`, `class="toast toast-{kind}"`) ahora
+  compila en el target client-WASM (el SSR ya lo tenía desde v0.28.7). El
+  emisor lo lowerea a `set_attribute(name, &format!("…", …))` interleavando
+  los literales (escapados) con un `{}` por cada expr. Destraba ProgressBar,
+  Spinner y cualquier componente con estilo inline computado. Bonus: los
+  defaults numéricos negativos de state (`progress: Int = -1` →
+  `UnaryOp{Neg, lit}`) ahora compilan. Ambos verificados end-to-end en Chrome
+  headless real (el fill de ProgressBar renderiza `width: 72%`; Spinner monta
+  con su default `-1`). 3 unit tests nuevos. **Nota histórica**: durante esta
+  tanda se descubrió que Str-comparison `{#if}` (`{#if variant == "error"}`)
+  **ya funcionaba** en wasm — había sido mal categorizado como gap (nunca se
+  testeó); el arm de comparación es type-agnostic. Corregido el mensaje/doc.
 
 ### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
 

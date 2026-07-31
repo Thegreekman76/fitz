@@ -1892,23 +1892,50 @@ fn emit_element(
             } => {
                 emit_event_attr(event_name, handler_name, &var, ctx, out)?;
             }
-            // Mixed attribute interpolation (`class="toast toast-{kind}"`)
-            // is an SSR-target feature today. The client-WASM target
-            // mutates attributes via `set_attribute` and would need each
-            // `{expr}` segment lowered into a `format!` — deferred. Full
-            // interpolation (`class="{cls}"`) works here.
-            ExpandedAttr::MixedInterpolation { name, .. } => {
-                return Err(EmitError {
-                    message: format!(
-                        "mixed attribute interpolation (`{name}=\"...{{expr}}...\"`) is not \
-                         supported in the client-WASM target yet — use a full interpolation \
-                         (`{name}=\"{{expr}}\"`) or the SSR target"
-                    ),
-                    context: format!(
-                        "attribute `{}` of element `<{}>` in component `{}`",
-                        name, tag, ctx.component_name
-                    ),
-                });
+            // Mixed attribute interpolation (`style="width: {pct}%"`,
+            // `class="toast toast-{kind}"`). Build a `format!` that interleaves
+            // the literal segments (escaped for the format string) with a `{}`
+            // for each interpolated expr, then `set_attribute`. Full-value
+            // interpolation (`attr="{expr}"`) is the `Interpolation` arm below.
+            ExpandedAttr::MixedInterpolation { name, segments, .. } => {
+                if let Some(key) = name.strip_prefix("data-flv-value-") {
+                    value_keys.push(key.to_string());
+                }
+                let mut fmt = String::new();
+                let mut args: Vec<String> = Vec::new();
+                for seg in segments {
+                    match seg {
+                        super::expand::AttrValueSegment::Literal(lit) => {
+                            fmt.push_str(&escape_for_rust_format(lit));
+                        }
+                        super::expand::AttrValueSegment::Expr(expr) => {
+                            fmt.push_str("{}");
+                            let a =
+                                lower_expr(expr, ctx.state_names, &ctx.locals).map_err(|mut e| {
+                                    e.context = format!(
+                                        "mixed-interpolated attribute `{}` of element `<{}>` in component `{}`",
+                                        name, tag, ctx.component_name
+                                    );
+                                    e
+                                })?;
+                            args.push(a);
+                        }
+                    }
+                }
+                let args_str = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", args.join(", "))
+                };
+                writeln!(
+                    out,
+                    "        {}.set_attribute({}, &format!(\"{}\"{})).unwrap();",
+                    var,
+                    rust_string_literal(name),
+                    fmt,
+                    args_str
+                )
+                .unwrap();
             }
             // Phase 11.7 R3.5b.1 — an interpolated attribute
             // (`data-flv-value-card_id="{c.id}"`, `class="{cls}"`).
@@ -3970,6 +3997,27 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
         (Expr::Str(s, _), TypeExpr::Named(name)) if name == "Str" => {
             Ok(format!("{s:?}.to_string()"))
         }
+        // Negative numeric default: `-1` / `-3.5` parse as a `UnaryOp{Neg, …}`
+        // over an Int/Float literal, not a bare literal. Emit the negated Rust
+        // literal (e.g. `Spinner`'s `progress: Int = -1`).
+        (
+            Expr::UnaryOp {
+                op: crate::ast::UnaryOpKind::Neg,
+                operand,
+                ..
+            },
+            TypeExpr::Named(name),
+        ) => match (operand.as_ref(), name.as_str()) {
+            (Expr::Int(n, _), "Int") => Ok(format!("-{n}i64")),
+            (Expr::Float(f, _), "Float") => Ok(format!("-{f}f64")),
+            _ => Err(EmitError {
+                message: format!(
+                    "negated default is only supported for `Int` / `Float` literals \
+                     (field type `{name}`)"
+                ),
+                context: "state field default".to_string(),
+            }),
+        },
         // Nullable dispatch: `null` → None, else recurse into inner.
         (Expr::Null(_), TypeExpr::Nullable(_)) => Ok("None".to_string()),
         (_, TypeExpr::Nullable(inner)) => {
@@ -4040,6 +4088,28 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
 /// runtime level).
 fn rust_string_literal(s: &str) -> String {
     format!("{:?}", s)
+}
+
+/// Escape a literal string so it can be embedded verbatim inside the format
+/// string of a `format!("…")` call: backslash / double-quote for the Rust
+/// string literal, and `{` / `}` doubled so `format!` treats them as literal
+/// braces. Used by the mixed attribute interpolation emit (`style="width:
+/// {pct}%"` → `format!("width: {}%", …)`).
+fn escape_for_rust_format(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Sanitize a name so it becomes a valid Rust identifier. Replaces
@@ -5300,6 +5370,27 @@ component Card {
     }
 
     #[test]
+    fn negative_numeric_default_emits_negated_literal() {
+        // `-1` / `-0.5` parse as `UnaryOp{Neg, lit}`, not a bare literal.
+        let src = r#"component App {
+  state {
+    progress: Int = -1
+    ratio: Float = -0.5
+  }
+  <template><span>{progress}</span></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("RefCell::new(-1i64)"),
+            "negative Int default must emit the negated literal:\n{out}"
+        );
+        assert!(
+            out.contains("RefCell::new(-0.5f64)"),
+            "negative Float default must emit the negated literal:\n{out}"
+        );
+    }
+
+    #[test]
     fn k3_wasm_default_expr_to_rust_list_int_literal_produces_vec_macro() {
         use crate::ast::{Expr, Span, TypeExpr};
         let ty = TypeExpr::Generic {
@@ -6125,6 +6216,23 @@ component Card {
         assert!(
             out.contains(".set_attribute(\"data-x\", &format!(\"{}\", n)).unwrap();"),
             "an interpolated attr must be set from the lowered expr:\n{out}"
+        );
+    }
+
+    #[test]
+    fn mixed_attr_interpolation_lowers_to_format_set_attribute() {
+        // CW.9 — `style="width: {pct}%"` (literal + {expr} segments) lowers to a
+        // `format!` interleaving the literals with `{}` for the interpolated expr.
+        let src = r#"component App {
+  state { pct: Int = 40 }
+  <template><div class="bar"><div class="fill" style="width: {pct}%"></div></div></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(
+                r#".set_attribute("style", &format!("width: {}%", (*self.pct.borrow()))).unwrap();"#
+            ),
+            "mixed attr interp must lower to a format! set_attribute:\n{out}"
         );
     }
 

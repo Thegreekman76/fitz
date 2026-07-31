@@ -9,6 +9,36 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.4] — 2026-07-31 — `.fitzv` → wasm: mixed attribute interpolation + negative defaults
+
+### Added — mixed attribute interpolation on the client-WASM target
+
+`style="width: {pct}%"`, `class="toast toast-{kind}"` — an attribute whose
+value mixes literal text with `{expr}` interpolation segments — now compiles
+on `fitz build --target wasm-client` (the SSR target has had it since
+v0.28.7). The emitter lowers it to a `set_attribute(name, &format!("…", …))`
+that interleaves the literal segments with a `{}` for each interpolated
+expr. Full-value interpolation (`attr="{expr}"`) was already supported; this
+covers the mixed case. Unblocks `ProgressBar`, `Spinner`, and any component
+that computes an inline style.
+
+### Added — negative numeric state-field defaults
+
+`state { progress: Int = -1 }` / `ratio: Float = -0.5` now compile — a
+negated numeric default parses as `UnaryOp{Neg, literal}` (not a bare
+literal), which the wasm state-default emitter previously rejected.
+
+### Notes
+
+- Both verified end-to-end in a real headless Chrome (`ProgressBar`'s fill
+  renders `style="width: 72%"`; `Spinner` mounts with its `-1` default), no
+  page errors. Together they close the client-WASM envelope's
+  mixed-attribute-interpolation gap and grow the companion-UI showcase.
+- 3 unit tests (`mixed_attr_interpolation_lowers_to_format_set_attribute`,
+  `negative_numeric_default_emits_negated_literal`, plus the earlier
+  `str_comparison_if_condition_lowers_to_string_eq` regression guard). Suite:
+  lib 3900/0, fmt + clippy `-D warnings` clean. Bump 0.29.3 → 0.29.4.
+
 ## [v0.29.3] — 2026-07-31 — `.fitzv` → wasm: `data-flv-file` (client-side file/image upload)
 
 ### Added — `<input type="file" data-flv-file="handler">` on the client-WASM target
