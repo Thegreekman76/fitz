@@ -9,6 +9,41 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.5] — 2026-07-31 — `.fitzv` → wasm: helper-style fn/event bodies (for + match + local reassign + string concat)
+
+### Added — richer statement/expression lowering in wasm fn & event bodies
+
+The client-WASM emitter (`fitz build --target wasm-client`) now lowers four
+more constructs inside a `.fitzv` event handler or an imported helper `fn`
+body — matching what the SSR target already accepted:
+
+- **Range `for` loops** — `for n in 1..(max + 1) { … }` → a Rust
+  `for n in 1i64..(…) { … }`.
+- **`match` as a value** — `let x = match n == 2 { true => "a", false => "b" }`.
+  The scrutinee gets `.as_str()` when any arm pattern is a string literal;
+  arm patterns cover Int/Float/Str/Bool literals, an ident binding, and `_`.
+- **Local reassignment** — a `let`-then-reassigned local (`let acc = ""` … then
+  `acc = acc + x`) now emits `let mut acc` and a plain reassignment, instead of
+  a second shadowing `let`. Uses the AST's `is_let` flag; bodies that never
+  reassign a local stay byte-identical.
+- **String concatenation** — `a + b` where either side is stringy lowers to
+  `format!("{}{}", a, b)` (Rust `String + String` is invalid); numeric `+`
+  is unchanged.
+
+### Notes
+
+- **No new working showcase component.** This is a language-capability
+  addition, not a visual one: helpers that return **HTML as a string** (e.g. a
+  star-rating builder assembling `<input …>` markup) still can't render on the
+  wasm target — interpolating that string into the DOM produces a text node
+  that escapes the markup (the same intrinsic limit as the CW.6 raw-HTML
+  helpers). The constructs above work; a helper's *string* output does not
+  become live DOM. Rating stays SSR-only.
+- 1 unit test (`wasm_fn_body_for_match_reassign_and_string_concat`) exercises
+  all four in one event body. Suite: 3901 lib green; fmt + clippy
+  (`--all-targets -D warnings`) clean; all 16 `examples/view/` wasm smokes
+  regenerate + build (incl. `list-transform`, which reassigns a local).
+
 ## [v0.29.4] — 2026-07-31 — `.fitzv` → wasm: mixed attribute interpolation + negative defaults
 
 ### Added — mixed attribute interpolation on the client-WASM target

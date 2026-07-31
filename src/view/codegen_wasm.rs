@@ -710,11 +710,14 @@ fn emit_imported_fns(
             ret_rust
         )
         .unwrap();
+        let reassigned = collect_reassigned_locals(&f.body);
         for stmt in &f.body {
-            lower_stmt(stmt, &[], &mut local_scope, "    ", out).map_err(|mut e| {
-                e.context = format!("imported fn `{}` (body)", f.name);
-                e
-            })?;
+            lower_stmt(stmt, &[], &mut local_scope, "    ", &reassigned, out).map_err(
+                |mut e| {
+                    e.context = format!("imported fn `{}` (body)", f.name);
+                    e
+                },
+            )?;
         }
         writeln!(out, "}}\n").unwrap();
     }
@@ -1078,14 +1081,17 @@ fn emit_event_handler(
     // Locals introduced by `let`-style statements accumulate across the
     // body so later statements (and closures) can reference them.
     let mut locals: Vec<String> = Vec::new();
+    let reassigned = collect_reassigned_locals(&handler.body);
     for stmt in &handler.body {
-        lower_stmt(stmt, state_names, &mut locals, "        ", out).map_err(|mut e| {
-            e.context = format!(
-                "event handler `{}` of component `{}` (body)",
-                handler.name, component_name
-            );
-            e
-        })?;
+        lower_stmt(stmt, state_names, &mut locals, "        ", &reassigned, out).map_err(
+            |mut e| {
+                e.context = format!(
+                    "event handler `{}` of component `{}` (body)",
+                    handler.name, component_name
+                );
+                e
+            },
+        )?;
     }
     writeln!(out, "        self.render();").unwrap();
     // Phase 11.7.c — if a parent bound `@<name>` on this component, fire
@@ -3186,10 +3192,18 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
         Expr::BinOp {
             op, left, right, ..
         } => {
-            let op_str = lower_binop(op)?;
             let l = lower_expr(left, state_names, locals)?;
             let r = lower_expr(right, state_names, locals)?;
-            Ok(format!("({} {} {})", l, op_str, r))
+            // String concatenation: Fitz `+` on strings maps to Rust `String +
+            // &str`, but both sides here lower to owned `String`s (and a numeric
+            // `+` would be wrong). When either operand is clearly a string
+            // (a literal or an interpolation), emit a `format!` concat.
+            if matches!(op, BinOpKind::Add) && (expr_is_stringy(left) || expr_is_stringy(right)) {
+                Ok(format!("format!(\"{{}}{{}}\", {}, {})", l, r))
+            } else {
+                let op_str = lower_binop(op)?;
+                Ok(format!("({} {} {})", l, op_str, r))
+            }
         }
         // Phase 11.7 R3 — a Str literal, needed for nominal struct
         // construction (`Card { title: "New", .. }`) and interpolation.
@@ -3318,6 +3332,28 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
                 ))
             }
         }
+        // `match <value> { <pat> => <expr>, … }` as a value (e.g. `let checked =
+        // match val == selected { true => " checked", false => "" }`). Each arm
+        // body must be a single expression. If any pattern is a Str, match on
+        // `<value>.as_str()` so `"…"` patterns type-check against `&str`.
+        Expr::Match { value, arms, .. } => {
+            let scrutinee_base = lower_expr(value, state_names, locals)?;
+            let has_str_pat = arms
+                .iter()
+                .any(|a| matches!(a.pattern, crate::ast::Pattern::Str(_)));
+            let scrutinee = if has_str_pat {
+                format!("({scrutinee_base}).as_str()")
+            } else {
+                scrutinee_base
+            };
+            let mut arm_strs: Vec<String> = Vec::with_capacity(arms.len());
+            for arm in arms {
+                let pat = lower_pattern_wasm(&arm.pattern)?;
+                let val = lower_single_expr_block(&arm.body, state_names, locals)?;
+                arm_strs.push(format!("{pat} => {val}"));
+            }
+            Ok(format!("match {} {{ {} }}", scrutinee, arm_strs.join(", ")))
+        }
         Expr::Null(_)
         | Expr::Bytes(_, _)
         | Expr::UnaryOp { .. }
@@ -3333,6 +3369,22 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
             message: "unsupported expression kind — deferred to a later 11.7 slice".to_string(),
             context: "expression".to_string(),
         }),
+    }
+}
+
+/// Heuristic: does this expression clearly produce a `String`? Routes `+` to a
+/// `format!` concat (Fitz string concatenation) instead of a numeric `+`.
+/// Recognises string literals, interpolations, and a `+` that is itself stringy.
+fn expr_is_stringy(e: &Expr) -> bool {
+    match e {
+        Expr::Str(..) | Expr::StrInterp(..) => true,
+        Expr::BinOp {
+            op: BinOpKind::Add,
+            left,
+            right,
+            ..
+        } => expr_is_stringy(left) || expr_is_stringy(right),
+        _ => false,
     }
 }
 
@@ -3611,6 +3663,88 @@ fn lower_single_expr_block(
     })
 }
 
+/// Collect the names of locals that are REASSIGNED (`x = …` with `is_let =
+/// false`, target a bare ident) anywhere in a statement list — including nested
+/// `for` / `if` / `match` bodies. `lower_stmt` uses this to decide whether a
+/// local declaration needs `let mut` (a string accumulator like `let out = ""`
+/// reassigned inside a loop) vs a plain `let`, so bodies that never reassign
+/// stay byte-identical.
+fn collect_reassigned_locals(stmts: &[Stmt]) -> std::collections::HashSet<String> {
+    fn walk_stmt(s: &Stmt, set: &mut std::collections::HashSet<String>) {
+        match s {
+            Stmt::Assign {
+                target,
+                value,
+                is_let,
+                ..
+            } => {
+                if !*is_let {
+                    if let AssignTarget::Ident(name, _) = target {
+                        set.insert(name.clone());
+                    }
+                }
+                walk_expr(value, set);
+            }
+            Stmt::For { body, .. } => {
+                for st in body {
+                    walk_stmt(st, set);
+                }
+            }
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => walk_expr(e, set),
+            _ => {}
+        }
+    }
+    fn walk_expr(e: &Expr, set: &mut std::collections::HashSet<String>) {
+        match e {
+            Expr::If { then, else_, .. } => {
+                for s in then {
+                    walk_stmt(s, set);
+                }
+                if let Some(els) = else_ {
+                    for s in els {
+                        walk_stmt(s, set);
+                    }
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for arm in arms {
+                    for s in &arm.body {
+                        walk_stmt(s, set);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut set = std::collections::HashSet::new();
+    for s in stmts {
+        walk_stmt(s, &mut set);
+    }
+    set
+}
+
+/// Lower a `match` [`Pattern`] to a Rust pattern string. Supports the literal
+/// patterns (Int / Float / Str / Bool), an ident binding, and `_`. When a Str
+/// pattern is present the caller matches on `scrutinee.as_str()` so the `"…"`
+/// patterns type-check against `&str`.
+fn lower_pattern_wasm(pat: &crate::ast::Pattern) -> EmitResult<String> {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Int(n) => Ok(format!("{n}i64")),
+        Pattern::Float(f) => Ok(format!("{f}f64")),
+        Pattern::Str(s) => Ok(format!("{s:?}")),
+        Pattern::Bool(b) => Ok(b.to_string()),
+        Pattern::Ident(name, _) => Ok(name.clone()),
+        Pattern::Wildcard => Ok("_".to_string()),
+        _ => Err(EmitError {
+            message: "`match` pattern — the client-WASM target supports literal patterns \
+                      (Int/Float/Str/Bool), an ident binding, and `_`"
+                .to_string(),
+            context: "match pattern".to_string(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Interpolated child prop lowering (Phase 11.7.a)
 // ---------------------------------------------------------------------------
@@ -3742,10 +3876,16 @@ fn lower_stmt(
     state_names: &[String],
     locals: &mut Vec<String>,
     indent: &str,
+    reassigned: &std::collections::HashSet<String>,
     out: &mut String,
 ) -> EmitResult<()> {
     match stmt {
-        Stmt::Assign { target, value, .. } => match target {
+        Stmt::Assign {
+            target,
+            value,
+            is_let,
+            ..
+        } => match target {
             AssignTarget::Ident(name, _) => {
                 if state_names.iter().any(|s| s == name) {
                     // Reassign a state field. The RHS is fully evaluated
@@ -3755,16 +3895,25 @@ fn lower_stmt(
                     let rhs = lower_expr(value, state_names, locals)?;
                     writeln!(out, "{}let __rhs = {};", indent, rhs).unwrap();
                     writeln!(out, "{}*self.{}.borrow_mut() = __rhs;", indent, name).unwrap();
-                } else {
-                    // A local binding (`let target_id = ...`). Emit a Rust
-                    // `let`; re-binding the same name later shadows, which
-                    // matches Fitz's rebind semantics. Register the name so
-                    // subsequent statements / closures see it as in-scope.
+                } else if *is_let {
+                    // A local declaration (`let x = …`). Emit `let mut` when the
+                    // name is reassigned later in this body (a loop accumulator
+                    // like `let out = ""`), else a plain `let` — so bodies that
+                    // never reassign stay byte-identical.
                     let rhs = lower_expr(value, state_names, locals)?;
-                    writeln!(out, "{}let {} = {};", indent, name, rhs).unwrap();
+                    let mut_kw = if reassigned.contains(name) {
+                        "mut "
+                    } else {
+                        ""
+                    };
+                    writeln!(out, "{}let {}{} = {};", indent, mut_kw, name, rhs).unwrap();
                     if !locals.iter().any(|s| s == name) {
                         locals.push(name.clone());
                     }
+                } else {
+                    // Reassignment to an existing local (`out = out + …`).
+                    let rhs = lower_expr(value, state_names, locals)?;
+                    writeln!(out, "{}{} = {};", indent, name, rhs).unwrap();
                 }
                 Ok(())
             }
@@ -3780,6 +3929,61 @@ fn lower_stmt(
                 context: "statement".to_string(),
             }),
         },
+        // A range `for` loop (`for n in 1..(max+1) { … }`) — used by
+        // transpiled helper string builders. Only a bare loop var + a
+        // `Range` iterable on the wasm target.
+        Stmt::For {
+            var, iter, body, ..
+        } => {
+            let var_name = match var {
+                crate::ast::Pattern::Ident(n, _) => n.clone(),
+                _ => {
+                    return Err(EmitError {
+                        message: "`for` loop var — the client-WASM target supports a bare \
+                                  identifier (`for n in …`)"
+                            .to_string(),
+                        context: "statement".to_string(),
+                    })
+                }
+            };
+            let (start, end, inclusive) = match iter {
+                Expr::Range {
+                    start,
+                    end,
+                    inclusive,
+                    ..
+                } => (start.as_ref(), end.as_ref(), *inclusive),
+                _ => {
+                    return Err(EmitError {
+                        message: "`for` loop — the client-WASM target iterates a range \
+                                  (`for n in a..b`)"
+                            .to_string(),
+                        context: "statement".to_string(),
+                    })
+                }
+            };
+            let s = lower_expr(start, state_names, locals)?;
+            let e = lower_expr(end, state_names, locals)?;
+            let op = if inclusive { "..=" } else { ".." };
+            writeln!(out, "{}for {} in {}{}{} {{", indent, var_name, s, op, e).unwrap();
+            let inner_indent = format!("{indent}    ");
+            let mut body_locals = locals.clone();
+            if !body_locals.iter().any(|l| l == &var_name) {
+                body_locals.push(var_name.clone());
+            }
+            for st in body {
+                lower_stmt(
+                    st,
+                    state_names,
+                    &mut body_locals,
+                    &inner_indent,
+                    reassigned,
+                    out,
+                )?;
+            }
+            writeln!(out, "{}}}", indent).unwrap();
+            Ok(())
+        }
         // Phase 11.7 R3.5a.1 — `return <expr>` (transpiled helper bodies
         // in R3.5a.2 use it; event bodies never return, so this arm is
         // dormant there).
@@ -3788,11 +3992,13 @@ fn lower_stmt(
             writeln!(out, "{}return {};", indent, rhs).unwrap();
             Ok(())
         }
-        Stmt::Expr(inner, _) => lower_expr_stmt(inner, state_names, locals, indent, out),
+        Stmt::Expr(inner, _) => {
+            lower_expr_stmt(inner, state_names, locals, indent, reassigned, out)
+        }
         _ => Err(EmitError {
             message: "statement kind — supported on the client-WASM target: state-field \
-                      reassignment, local `let` binding, `if` guard, `<state_list>.push/\
-                      clear`, and `return`"
+                      reassignment, local `let` / reassignment, `for` range loop, `if` \
+                      guard, `<state_list>.push/clear`, and `return`"
                 .to_string(),
             context: "statement".to_string(),
         }),
@@ -3810,6 +4016,7 @@ fn lower_expr_stmt(
     state_names: &[String],
     locals: &[String],
     indent: &str,
+    reassigned: &std::collections::HashSet<String>,
     out: &mut String,
 ) -> EmitResult<()> {
     match expr {
@@ -3827,13 +4034,27 @@ fn lower_expr_stmt(
             let inner_indent = format!("{indent}    ");
             let mut then_locals = locals.to_vec();
             for s in then {
-                lower_stmt(s, state_names, &mut then_locals, &inner_indent, out)?;
+                lower_stmt(
+                    s,
+                    state_names,
+                    &mut then_locals,
+                    &inner_indent,
+                    reassigned,
+                    out,
+                )?;
             }
             if let Some(else_stmts) = else_ {
                 writeln!(out, "{}}} else {{", indent).unwrap();
                 let mut else_locals = locals.to_vec();
                 for s in else_stmts {
-                    lower_stmt(s, state_names, &mut else_locals, &inner_indent, out)?;
+                    lower_stmt(
+                        s,
+                        state_names,
+                        &mut else_locals,
+                        &inner_indent,
+                        reassigned,
+                        out,
+                    )?;
                 }
             }
             writeln!(out, "{}}}", indent).unwrap();
@@ -6233,6 +6454,50 @@ component Card {
                 r#".set_attribute("style", &format!("width: {}%", (*self.pct.borrow()))).unwrap();"#
             ),
             "mixed attr interp must lower to a format! set_attribute:\n{out}"
+        );
+    }
+
+    #[test]
+    fn wasm_fn_body_for_match_reassign_and_string_concat() {
+        // CW.9 — a helper-style body using a range `for`, a `match` expression,
+        // a reassigned local accumulator, and string concatenation. All four
+        // constructs lower on the client-WASM target (exercised via an event
+        // body, which shares the same `lower_stmt`/`lower_expr` path).
+        let src = r#"component App {
+  state { out: Str = "" }
+  event build() {
+    let acc = ""
+    for n in 1..4 {
+      let label = match n == 2 {
+        true => "two",
+        false => "x",
+      }
+      acc = acc + "{label}"
+    }
+    out = acc
+  }
+  <template><button @click="build">{out}</button></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        // range `for`
+        assert!(
+            out.contains("for n in 1i64..4i64 {"),
+            "for-range loop:\n{out}"
+        );
+        // accumulator declared `let mut` because it is reassigned later
+        assert!(
+            out.contains("let mut acc = "),
+            "reassigned local is let mut:\n{out}"
+        );
+        // reassignment (not a shadowing `let`) with a format! string concat
+        assert!(
+            out.contains("acc = format!(\"{}{}\", acc,"),
+            "string concat reassignment:\n{out}"
+        );
+        // match expression as a value
+        assert!(
+            out.contains("match (n == 2i64) { true => "),
+            "match expression:\n{out}"
         );
     }
 

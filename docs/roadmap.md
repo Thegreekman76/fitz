@@ -9987,6 +9987,28 @@ template. La sub-fase 11.7 se detalla a continuación:
   **ya funcionaba** en wasm — había sido mal categorizado como gap (nunca se
   testeó); el arm de comparación es type-agnostic. Corregido el mensaje/doc.
 
+- ✅ **Helper-style bodies en wasm: `for` + `match` + reasignación local +
+  concat de strings (v0.29.5, 2026-07-31)** — el emisor client-WASM ahora
+  lowerea cuatro constructos más dentro de un event handler o un `fn` helper
+  importado, igualando lo que el target SSR ya aceptaba: (a) `for n in
+  1..(max+1)` (range loop); (b) `match` como valor con `.as_str()` sobre el
+  scrutinee cuando algún patrón es Str literal (patrones Int/Float/Str/Bool/
+  ident/`_`); (c) reasignación de un local (`let acc = ""` … `acc = acc + x`)
+  → `let mut acc` + reasignación plana en vez de un `let` que shadowea (usa el
+  flag `is_let` del AST; bodies que nunca reasignan quedan byte-idénticos);
+  (d) concat de strings `a + b` con algún lado stringy → `format!("{}{}", a,
+  b)` (Rust `String + String` es inválido; `+` numérico sin cambio). **Sin
+  componente nuevo en el showcase** — es una capacidad del lenguaje, no
+  visual: un helper que devuelve **HTML como string** (ej. un builder de
+  estrellas armando `<input …>`) sigue sin renderizar en wasm porque
+  interpolar ese string en el DOM produce un text node que escapa el markup
+  (mismo límite intrínseco que los helpers raw-HTML de CW.6). Los constructos
+  andan; el *string* de salida de un helper no se vuelve DOM vivo. Rating
+  queda SSR-only. 1 unit test (`wasm_fn_body_for_match_reassign_and_string_
+  concat`). Suite 3901 verde; fmt + clippy limpios; 16 smokes de
+  `examples/view/` regeneran + buildean (incl. `list-transform`, que reasigna
+  un local).
+
 ### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
 
 La superficie de composición client-WASM (props, event bubbling, slots,
