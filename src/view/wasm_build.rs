@@ -184,7 +184,15 @@ pub fn compose_lib_rs_with_components(
     out.push_str("// the entry point so future targets (SSR, hybrid) can compose\n");
     out.push_str("// their own.\n\n");
     out.push_str(&emitted);
-    out.push_str(&compose_entry_wrapper(&root.name, mount_selector));
+    // Phase 11.12 — a root component is never bubbled (nothing composes it),
+    // so an empty bubbled set is the right context for its hydratability.
+    let root_hydratable =
+        super::codegen_wasm::component_is_hydratable(root, &std::collections::BTreeSet::new());
+    out.push_str(&compose_entry_wrapper(
+        &root.name,
+        mount_selector,
+        root_hydratable,
+    ));
     Ok(out)
 }
 
@@ -617,14 +625,50 @@ pub fn collect_transitive_view_imports_with_deps(
 }
 
 /// The `#[wasm_bindgen(start)]` wrapper appended to the emitter
-/// output. Instantiates `<Root>::new()` and calls
-/// `mount("<selector>")`.
-fn compose_entry_wrapper(root_component: &str, mount_selector: &str) -> String {
+/// output. Instantiates `<Root>::new()` and calls `mount("<selector>")`.
+///
+/// Phase 11.12 — when `root_hydratable` is `true`, the wrapper instead
+/// checks whether the mount root already holds server-painted DOM: if so
+/// it calls `root.hydrate(root_el)` (adopt the existing DOM, don't wipe);
+/// otherwise it falls back to `mount` (fresh client render into an empty
+/// root). A non-hydratable root emits the byte-identical `mount`-only
+/// wrapper, so pre-11.12 crates regenerate unchanged.
+fn compose_entry_wrapper(
+    root_component: &str,
+    mount_selector: &str,
+    root_hydratable: bool,
+) -> String {
     // Escape backslashes / quotes for the Rust string literal. In
     // practice `mount` is a CSS selector like `"#app"` — no such
     // chars appear — but doing the escape keeps the emitter honest
     // if someone declares `mount = "[data-app='x']"` later.
     let escaped_selector = mount_selector.replace('\\', "\\\\").replace('"', "\\\"");
+
+    if root_hydratable {
+        return format!(
+            "\n\n\
+             // Composed entry point — NOT part of emit_module output.\n\
+             // `fitz build --target wasm-client` appends this wrapper. Phase\n\
+             // 11.12: hydrate the server-painted DOM when the mount root\n\
+             // already has content, else fresh-mount into an empty root.\n\
+             #[wasm_bindgen(start)]\n\
+             pub fn start() -> Result<(), JsValue> {{\n\
+             \x20\x20\x20\x20console_error_panic_hook::set_once();\n\
+             \x20\x20\x20\x20let root = {root}::new();\n\
+             \x20\x20\x20\x20let __document = web_sys::window().unwrap().document().unwrap();\n\
+             \x20\x20\x20\x20if let Some(__mount) = __document.query_selector(\"{selector}\")? {{\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20if __mount.first_element_child().is_some() {{\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let __el = __mount.dyn_into::<web_sys::HtmlElement>()?;\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20return root.hydrate(__el);\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20}}\n\
+             \x20\x20\x20\x20}}\n\
+             \x20\x20\x20\x20root.mount(\"{selector}\")?;\n\
+             \x20\x20\x20\x20Ok(())\n\
+             }}\n",
+            root = root_component,
+            selector = escaped_selector,
+        );
+    }
 
     format!(
         "\n\n\
@@ -660,7 +704,7 @@ fn compose_entry_wrapper(root_component: &str, mount_selector: &str) -> String {
 /// bulk-memory ops modern rustc emits (see `docs/fase-11-plan.md`
 /// §9.o Debt residual).
 pub fn compose_cargo_toml(package_name: &str) -> String {
-    compose_cargo_toml_with_features(package_name, &[], false)
+    compose_cargo_toml_with_features(package_name, &[], false, false)
 }
 
 /// Like [`compose_cargo_toml`], but appends `extra_features` to the
@@ -674,6 +718,7 @@ pub fn compose_cargo_toml_with_features(
     package_name: &str,
     extra_features: &[&str],
     uses_rpc: bool,
+    uses_hydration: bool,
 ) -> String {
     // Base subset the emitter always uses (see codegen_wasm). Kept in the
     // same order as the committed baselines so the empty-extra case stays
@@ -720,6 +765,14 @@ pub fn compose_cargo_toml_with_features(
     } else {
         ""
     };
+    // Phase 11.12 — hydration restores serialized state via `serde_json`. Only
+    // when the crate hydrates AND `@rpc` didn't already pull it (so the deps
+    // stay byte-identical for non-hydration and rpc crates).
+    let hydration_deps = if uses_hydration && !uses_rpc {
+        "serde_json = \"1\"\n"
+    } else {
+        ""
+    };
     format!(
         r##"[package]
 name = "{name}"
@@ -752,7 +805,7 @@ wasm-opt = ['-O', '--enable-bulk-memory']
 [dependencies]
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
-{rpc_deps}
+{rpc_deps}{hydration_deps}
 # `web-sys` con el subset EXACTO que el emitter de Fase 11.4.b usa
 # (ver `src/view/codegen_wasm.rs::emit_module_header` + los emit_*
 # helpers). Cualquier feature que sobre suma bytes al bundle final.
@@ -763,6 +816,7 @@ features = [
 "##,
         name = package_name,
         rpc_deps = rpc_deps,
+        hydration_deps = hydration_deps,
         feature_lines = feature_lines,
     )
 }
@@ -898,11 +952,16 @@ pub fn write_wasm_crate_scaffold(
     // clone, so the Cargo.toml stays byte-identical for same-file crates.
     let feature_file = merge_imported_components(expanded, components);
     let extra_features = super::codegen_wasm::wasm_extra_web_sys_features(&feature_file);
+    // Phase 11.12 — a crate that hydrates any component restores serialized
+    // state via `serde_json`. Detect over the merged file so an imported
+    // hydratable component counts too (empty `components` → structural clone →
+    // byte-identical Cargo.toml for same-file crates).
+    let uses_hydration = super::codegen_wasm::file_uses_hydration(&feature_file);
     // Phase 11.11.c — when any imported fn is `@rpc`, the crate gets the
     // fetch runtime deps + web-sys features (see
     // `compose_cargo_toml_with_features`).
     let cargo_toml_text =
-        compose_cargo_toml_with_features(bin_name, &extra_features, fns.has_rpc());
+        compose_cargo_toml_with_features(bin_name, &extra_features, fns.has_rpc(), uses_hydration);
     let lib_rs_text = compose_lib_rs_with_components(
         expanded,
         nominals,
@@ -1090,7 +1149,7 @@ component Beta {
     #[test]
     fn compose_cargo_toml_adds_rpc_deps_and_features_when_uses_rpc() {
         // Phase 11.11.c — an `@rpc`-using crate gets the fetch runtime.
-        let toml = compose_cargo_toml_with_features("web", &[], true);
+        let toml = compose_cargo_toml_with_features("web", &[], true, false);
         for dep in &[
             "wasm-bindgen-futures = \"0.4\"",
             "js-sys = \"0.3\"",
@@ -1112,10 +1171,72 @@ component Beta {
         // The `uses_rpc = false` path must not perturb the non-rpc
         // baseline (the committed examples' Cargo.toml).
         let plain = compose_cargo_toml("counter");
-        let via_flag = compose_cargo_toml_with_features("counter", &[], false);
+        let via_flag = compose_cargo_toml_with_features("counter", &[], false, false);
         assert_eq!(plain, via_flag);
         assert!(!plain.contains("wasm-bindgen-futures"));
         assert!(!plain.contains("Request"));
+    }
+
+    #[test]
+    fn phase_11_12_compose_cargo_toml_adds_serde_json_when_hydration() {
+        // A hydrating crate (no `@rpc`) pulls only `serde_json` (state
+        // restore), not the full fetch runtime.
+        let toml = compose_cargo_toml_with_features("web", &[], false, true);
+        assert!(
+            toml.contains("serde_json = \"1\""),
+            "serde_json dep:\n{toml}"
+        );
+        assert!(
+            !toml.contains("wasm-bindgen-futures"),
+            "hydration must not drag in the fetch runtime:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_compose_cargo_toml_hydration_no_dup_when_rpc() {
+        // When `@rpc` already pulled serde_json, hydration must not duplicate
+        // the dep line.
+        let toml = compose_cargo_toml_with_features("web", &[], true, true);
+        assert_eq!(
+            toml.matches("serde_json = \"1\"").count(),
+            1,
+            "serde_json appears exactly once:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_compose_cargo_toml_without_hydration_is_byte_identical() {
+        let plain = compose_cargo_toml("counter");
+        let via_flag = compose_cargo_toml_with_features("counter", &[], false, false);
+        assert_eq!(
+            plain, via_flag,
+            "non-hydration Cargo.toml stays byte-identical"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_entry_wrapper_hydratable_branches_to_hydrate() {
+        let wrapper = compose_entry_wrapper("Greeter", "#app", true);
+        assert!(
+            wrapper.contains("query_selector(\"#app\")?")
+                && wrapper.contains("first_element_child().is_some()")
+                && wrapper.contains("return root.hydrate(__el);"),
+            "hydratable entry branches to hydrate:\n{wrapper}"
+        );
+        // Still falls back to a fresh mount into an empty root.
+        assert!(
+            wrapper.contains("root.mount(\"#app\")?;"),
+            "hydratable entry keeps the fresh-mount fallback:\n{wrapper}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_entry_wrapper_non_hydratable_is_mount_only() {
+        let wrapper = compose_entry_wrapper("Counter", "#app", false);
+        assert!(
+            wrapper.contains("root.mount(\"#app\")?;") && !wrapper.contains("hydrate"),
+            "non-hydratable entry is mount-only (byte-identical to pre-11.12):\n{wrapper}"
+        );
     }
 
     #[test]

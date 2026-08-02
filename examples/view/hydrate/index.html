@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — SSR → client hydration</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
+      .demo { display: flex; flex-direction: column; gap: 0.75rem; align-items: flex-start; }
+      .row { display: flex; flex-direction: column; gap: 0.25rem; }
+      input { padding: 0.4rem 0.6rem; font-size: 1rem; }
+      button { padding: 0.4rem 0.8rem; }
+      .greeting { font-size: 1.4rem; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Server-painted DOM. In a real deployment a Fitz HTTP server (or a
+      build-time prerender) emits this markup with the current state already
+      interpolated (name = "Ada", NOT the component default "world"), plus the
+      state <script> below. The wasm bundle adopts this DOM on boot.
+    -->
+    <div id="app">
+      <div class="demo">
+        <h1>SSR → client hydration</h1>
+        <p class="greeting">Hello, <span class="nm">Ada</span></p>
+
+        <label class="row">
+          <span>Your name</span>
+          <input value="Ada" placeholder="type here" autocomplete="off" />
+        </label>
+
+        <button>reset</button>
+      </div>
+    </div>
+
+    <!-- Serialized initial state — read by App::hydrate() at boot. -->
+    <script type="application/json" id="__flv_state_App">{"name":"Ada"}</script>
+
+    <script type="module">
+      // Tag the greeting node BEFORE hydration. If the wasm adopts the
+      // server-painted DOM (rather than recreating it), this JS property
+      // survives — the proof that hydration reused the existing node.
+      const span = document.querySelector('#app .nm');
+      if (span) span.__hydrationWitness = 'server-node';
+
+      import init from './wasm-crate/pkg/hydrate.js';
+      await init();
+
+      // For manual / automated inspection.
+      window.__flvHydrated = true;
+    </script>
+  </body>
+</html>

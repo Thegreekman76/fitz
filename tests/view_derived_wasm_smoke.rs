@@ -60,7 +60,12 @@ fn generate_lib_rs(expanded: &fitz::view::ExpandedViewFile) -> String {
 
 fn generate_cargo_toml(expanded: &fitz::view::ExpandedViewFile) -> String {
     let extra = fitz::view::wasm_extra_web_sys_features(expanded);
-    fitz::view::compose_cargo_toml_with_features("derived", &extra, false)
+    fitz::view::compose_cargo_toml_with_features(
+        "derived",
+        &extra,
+        false,
+        fitz::view::file_uses_hydration(expanded),
+    )
 }
 
 fn write_if_changed(path: &Path, new_content: &str) {

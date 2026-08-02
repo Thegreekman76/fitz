@@ -10195,14 +10195,67 @@ no por dependencia estricta.
     apilable `@authenticated`/`@admin` sobre el endpoint generado = refinamiento
     post-MVP.)
 
-- 🔜 **11.12 — Hidratación SSR → client.** Un mismo `.fitzv` rinde **SSR**
-  (first paint, SEO, funciona sin JS) y el runtime client-WASM **toma
-  control del DOM existente** en vez de re-crearlo: restaura el estado que
-  el server serializó (state inicial + resultados de `@server`) y mapea los
-  nodos del template a los nodos reales del DOM. Unifica los dos emitters
-  (SSR + WASM) que hoy son mundos separados con un solo check pass
-  compartido. Los IDs `data-flv-*` que ya emite el SSR emitter son la base
-  del mapeo. La visión grande que junta las dos mitades del frontend.
+- 🚧 **11.12 — Hidratación SSR → client** (slice 1 ✅ 2026-08-02, resto 🔜).
+  Un mismo `.fitzv` rinde **SSR** (first paint, SEO, funciona sin JS) y el
+  runtime client-WASM **toma control del DOM existente** en vez de
+  re-crearlo: restaura el estado que el server serializó (state inicial +
+  resultados de `@rpc`) y mapea los nodos del template a los nodos reales
+  del DOM. Los IDs `data-flv-*` que ya emite el SSR emitter, más el
+  modelo keep-node de 11.10, son la base del mapeo. La visión grande que
+  junta las dos mitades del frontend.
+
+  - ✅ **11.12 slice 1 — adopción del DOM en el target WASM** (2026-08-02).
+    Un componente **keep-node region-free** (control de formulario en vivo
+    `@input`/`@change` sobre template estático — el mismo gate que la
+    reconciliación keep-node de 11.10) ahora es **hidratable**: el
+    `start()` emitido detecta si el mount root ya trae DOM pintado por el
+    server y, si sí, llama a `hydrate(root)` en vez de `mount()` (fresh
+    wipe+build). `hydrate()` (a) restaura el state serializado desde un
+    `<script type="application/json" id="__flv_state_<Comp>">` (contrato
+    estilo `__NEXT_DATA__`); (b) recorre el DOM existente con un cursor
+    DFS (`__flv_next_element`/`__flv_next_text`, que saltean whitespace/
+    comentarios) **adoptando** cada nodo en los mismos handles
+    `__ktext_<n>`/`__kattr_<n>` que declaró el walk de `__build` — cero
+    `create_element`/`create_text_node`, sin wipe; (c) cablea los
+    listeners sobre los elementos adoptados; (d) marca `__built = true` así
+    los cambios de state posteriores parchean in-place. **Diseño clave:**
+    un segundo walk en "modo adopción" (`RenderCtx.hydrate`) reusa la
+    numeración `keep_index()` del build walk (misma estructura DFS → mismos
+    índices), así los handles adoptados coinciden bit-a-bit con los fields
+    del struct. **Sin cambio de runtime para deployments empty-mount**
+    (root vacío → fresh mount como antes); solo crece el código emitido de
+    los componentes keep-node. **Cargo.toml** suma `serde_json` solo cuando
+    el crate hidrata (y `@rpc` no lo trajo ya). **Contrato de estado:**
+    `<script type="application/json">` (elegido sobre `data-*` en el root).
+    **Verificado end-to-end en Chrome real** (puppeteer-core): la propiedad
+    JS puesta en el `<span>` del greeting ANTES de `init()` **sobrevive** la
+    hidratación (DOM adoptado, no recreado), el greeting muestra el valor
+    del server (`"Ada"`, no el default `"world"` — state restaurado), tipear
+    parchea el greeting en vivo reusando el nodo adoptado, y `reset`
+    restaura el default; cero page errors. El crate compiló a `.wasm` real
+    (`wasm-pack` → `:-) Done`, 54.1 KB). **Tests:** 12 unit en
+    `codegen_wasm` (hydrate + apply_state + adopt-no-create + cursor
+    helpers + state accessors + non-hydratable/regions → no hydrate +
+    `component_is_hydratable`) + 6 unit en `wasm_build` (entry wrapper
+    branching + cargo serde gating) + ejemplo runnable `examples/view/
+    hydrate/` (`App.fitzv` + `index.html` con DOM server-pintado + state
+    script + README) + smoke `tests/view_hydrate_wasm_smoke.rs` (regenera
+    lib.rs + build `#[ignore]` a WASM real). **Byte-compat:** de los 20
+    view smokes, solo `live-input` y `derived` (value-input region-free →
+    ahora hidratables) cambian su lib.rs (ganan `hydrate()` + `serde_json`);
+    el resto — incluido `search-filter` que tiene regiones — regenera
+    byte-idéntico. Suite: **3953 lib** + fmt + clippy (default + lsp)
+    `-D warnings` limpios + cli_e2e 121 + openapi 3.
+    **Constraint del slice 1** (documentada, → slice 2): las
+    interpolaciones de texto dinámico deben ser el **único hijo** de su
+    elemento (`<span>{name}</span>`); el texto mixto (`Hello, {name}!`) se
+    fusiona en UN text node en el server pero el adopt walk espera tres —
+    requiere marcadores de comentario para partirlo. **Deuda restante de
+    11.12** (slices siguientes): regiones `{#if}`/`{#for}` (adoptar entre
+    los comment anchors del SSR), composición `<Child />`, texto mixto con
+    markers, y un render-a-string isomórfico real del lado SSR para producir
+    el HTML del server (hoy el contrato se valida con HTML hand-authored,
+    como el plan del slice previó).
 
 - 🔜 **11.13 — Hot reload del template.** `fitz dev` re-parsea el
   `<template>` de un `.fitzv` y aplica el diff sin recompilar el crate WASM
@@ -10211,8 +10264,8 @@ no por dependencia estricta.
   diffs).
 
 **Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
-MVP por slices ✅) → **11.12 (hidratación — unifica backends, próximo)** →
-11.13 (hot reload — DX). Cada una es una sesión seria.
+MVP por slices ✅) → **11.12 (hidratación — slice 1 ✅, slices 2+ en curso)**
+→ 11.13 (hot reload — DX). Cada una es una sesión seria.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

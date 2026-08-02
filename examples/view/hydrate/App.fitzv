@@ -1,0 +1,42 @@
+// Phase 11.12 — SSR → client hydration.
+//
+// A component that renders identically on the server (first paint, works
+// without JS) and whose client-WASM runtime then ADOPTS the server-painted
+// DOM instead of re-creating it. On boot the generated `start()` sees the
+// mount root already has content, restores the serialized state from the
+// `<script type="application/json" id="__flv_state_App">` payload, walks the
+// existing DOM mapping each node onto the keep-node handles, and wires the
+// listeners — no wipe, no rebuild. From there a state change patches in place
+// (keep-node), so the live `<input>` keeps its caret.
+//
+// Slice-1 constraint: dynamic text interpolations must be the SOLE child of
+// their element (`<span>{name}</span>`), so the server-painted text nodes map
+// 1:1 onto the adopt walk. Mixed static+interpolated text (`Hello, {name}!`)
+// is a later slice (needs comment markers to split the merged text node).
+//
+// This is a hydratable component because it has a live form control
+// (`@input`) over a static, region-free template — the same gate as keep-node
+// reconciliation (Phase 11.10).
+
+component App {
+  state {
+    name: Str = "world"
+  }
+
+  event on_name() { name = payload["value"] }
+  event reset() { name = "world" }
+
+  <template>
+    <div class="demo">
+      <h1>SSR → client hydration</h1>
+      <p class="greeting">Hello, <span class="nm">{name}</span></p>
+
+      <label class="row">
+        <span>Your name</span>
+        <input @input="on_name" value="{name}" placeholder="type here" autocomplete="off" />
+      </label>
+
+      <button @click="reset">reset</button>
+    </div>
+  </template>
+}

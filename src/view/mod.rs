@@ -37,9 +37,10 @@ pub mod wasm_build;
 pub use check::{check, check_with_imported_components, CheckError};
 pub use codegen_ssr::{emit_component_ssr, emit_module_ssr, SsrEmitError, SsrEmitResult};
 pub use codegen_wasm::{
-    emit_component, emit_module, emit_module_with_components, emit_module_with_imports,
-    emit_module_with_nominals, merge_imported_components, wasm_extra_web_sys_features, EmitError,
-    EmitResult, ImportedComponentRegistry, ImportedFnRegistry, NominalRegistry,
+    component_is_hydratable, emit_component, emit_module, emit_module_with_components,
+    emit_module_with_imports, emit_module_with_nominals, file_uses_hydration,
+    merge_imported_components, wasm_extra_web_sys_features, EmitError, EmitResult,
+    ImportedComponentRegistry, ImportedFnRegistry, NominalRegistry,
 };
 pub use css_parser::{apply_scope, CssParseError};
 pub use expand::{

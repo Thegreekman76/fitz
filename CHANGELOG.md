@@ -9,6 +9,51 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.30.1] — 2026-08-02 — Phase 11.12 slice 1: SSR → client hydration (adopt the DOM)
+
+### Added — the client-WASM runtime adopts the server-painted DOM instead of re-creating it
+
+Phase 11.12 slice 1 lets a **keep-node, region-free** `.fitzv` component
+(a live `@input`/`@change` over a static template) **hydrate**: the
+generated `start()` detects that the mount root already holds
+server-painted DOM and calls `hydrate(root)` instead of `mount()` (which
+wipes + rebuilds). `hydrate()`:
+
+- restores the serialized state from a
+  `<script type="application/json" id="__flv_state_<Comp>">` payload (a
+  `__NEXT_DATA__`-style contract),
+- walks the existing DOM with a DFS cursor (`__flv_next_element` /
+  `__flv_next_text`, skipping whitespace/comment nodes) **adopting** each
+  node into the same `__ktext_<n>` / `__kattr_<n>` keep-node handles the
+  build walk declared — **no `create_element`, no wipe**,
+- wires the `@input`/`@click` listeners onto the adopted elements,
+- marks the component built so later state changes patch in place.
+
+An **empty** mount root still fresh-mounts (pre-11.12 behaviour), so the
+same bundle works as a standalone SPA. Only keep-node components' emitted
+code grows; the naive path is byte-identical. The crate pulls `serde_json`
+only when it hydrates (and `@rpc` didn't already).
+
+**Verified end-to-end in real Chrome** (puppeteer-core): a JS property set
+on the greeting node *before* `init()` survives hydration (DOM adopted,
+not recreated); the greeting shows the server value `"Ada"` (state
+restored, not the default `"world"`); typing patches it live over the
+adopted node; `reset` restores the default — zero page errors. The crate
+built to real `.wasm` (`wasm-pack` → `:-) Done`, 54.1 KB).
+
+New runnable example `examples/view/hydrate/` (`App.fitzv` + `index.html`
+with server-painted DOM + state script + README) + smoke
+`tests/view_hydrate_wasm_smoke.rs`. 18 unit tests (12 codegen_wasm + 6
+wasm_build). Of the 20 view smokes, only `live-input` and `derived`
+(now hydratable) change their emitted lib.rs; the rest — including
+`search-filter` (has regions) — regenerate byte-identical.
+
+**Slice-1 constraint** (→ slice 2): dynamic text interpolations must be
+the sole child of their element (`<span>{name}</span>`); mixed text
+(`Hello, {name}!`) needs comment markers. Regions (`{#if}`/`{#for}`),
+`<Child />` composition, and a real isomorphic server render-to-string
+are later slices.
+
 ## [v0.30.0] — 2026-08-02 — `@rpc` server functions (client-WASM ↔ server, fullstack)
 
 ### Added — call a server function from a `.fitzv` client, tipada, sin plumbing

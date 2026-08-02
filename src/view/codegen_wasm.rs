@@ -514,6 +514,11 @@ pub fn emit_module_with_components(
     emit_imported_fns(fns, nominals, &mut out)?;
     let merged = merge_imported_components(file, components);
     let bubbled = collect_bubbled_events(&merged);
+    // Phase 11.12 — cursor helpers for the hydration adopt walk, emitted once
+    // when any component is hydratable (byte-identical output otherwise).
+    if any_component_hydratable(&merged, &bubbled) {
+        emit_hydration_helpers(&mut out);
+    }
     for component in &merged.components {
         emit_component_impl(component, &merged, nominals, &bubbled, &mut out)?;
     }
@@ -1158,6 +1163,175 @@ fn component_uses_keep_regions(component: &ExpandedComponent) -> bool {
             .is_some_and(|t| t.roots.iter().any(has_control_flow))
 }
 
+/// Phase 11.12 — `true` when a component can be HYDRATED: it takes the
+/// keep-node path (so it carries `__ktext_<n>` / `__kattr_<n>` handles + a
+/// `__build`/`__patch` model) AND has no `{#if}`/`{#for}` regions. The adopt
+/// walk populates those handles from the server-painted DOM; regions (comment
+/// anchors + fragment rebuild) are deferred to a later slice, so a keep-node
+/// component with regions keeps its fresh-mount-only behaviour.
+///
+/// `this_bubbled` must be the component's real bubbled-event set (empty for a
+/// root component — nothing composes it).
+pub fn component_is_hydratable(
+    component: &ExpandedComponent,
+    this_bubbled: &std::collections::BTreeSet<String>,
+) -> bool {
+    use_keep_node_reconciliation(component, this_bubbled) && !component_uses_keep_regions(component)
+}
+
+/// Phase 11.12 — `true` when any component in `file` will emit a `hydrate()`
+/// method, so the module needs the `__flv_next_element` / `__flv_next_text`
+/// cursor helpers. Uses each component's real bubbled-event set.
+fn any_component_hydratable(
+    file: &ExpandedViewFile,
+    bubbled: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> bool {
+    let empty = std::collections::BTreeSet::new();
+    file.components.iter().any(|c| {
+        let tb = bubbled.get(&c.name).unwrap_or(&empty);
+        component_is_hydratable(c, tb)
+    })
+}
+
+/// Phase 11.12 — `true` when a `.fitzv` file compiles any hydratable
+/// component, so its wasm crate needs the `serde_json` dep (state restore).
+/// Used by `wasm_build::write_wasm_crate_scaffold` to gate the Cargo.toml dep.
+pub fn file_uses_hydration(file: &ExpandedViewFile) -> bool {
+    let bubbled = collect_bubbled_events(file);
+    any_component_hydratable(file, &bubbled)
+}
+
+/// Phase 11.12 — the shared cursor helpers the adopt walk calls. Emitted once
+/// per module, only when some component is hydratable (so non-hydration crates
+/// stay byte-identical). Each advances a sibling cursor to the next element /
+/// text node, skipping whitespace/comment nodes, so the adopt walk lines up
+/// with the build DFS regardless of insignificant server-side whitespace.
+fn emit_hydration_helpers(out: &mut String) {
+    out.push_str(
+        "// Phase 11.12 — hydration cursor helpers. Advance a sibling cursor to\n\
+         // the next element / text node so the adopt walk maps template nodes\n\
+         // onto the server-painted DOM in DFS order without re-creating them.\n\
+         fn __flv_next_element(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Element> {\n\
+         \x20   while let Some(__n) = __cursor.clone() {\n\
+         \x20       *__cursor = __n.next_sibling();\n\
+         \x20       if let Some(__el) = __n.dyn_ref::<web_sys::Element>() {\n\
+         \x20           return Some(__el.clone());\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   None\n\
+         }\n\
+         fn __flv_next_text(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Text> {\n\
+         \x20   while let Some(__n) = __cursor.clone() {\n\
+         \x20       *__cursor = __n.next_sibling();\n\
+         \x20       if let Some(__t) = __n.dyn_ref::<web_sys::Text>() {\n\
+         \x20           return Some(__t.clone());\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   None\n\
+         }\n\n",
+    );
+}
+
+/// Phase 11.12 — map a primitive state field's Rust type to the
+/// `serde_json::Value` accessor + the RHS expression used to restore it in
+/// `__apply_state_json`. `None` for non-primitive fields (they keep their
+/// default at hydration — documented limitation of slice 1).
+fn json_state_accessor(rust_ty: &str) -> Option<(&'static str, &'static str)> {
+    match rust_ty {
+        "String" => Some(("as_str()", "__x.to_string()")),
+        "i64" => Some(("as_i64()", "__x")),
+        "f64" => Some(("as_f64()", "__x")),
+        "bool" => Some(("as_bool()", "__x")),
+        _ => None,
+    }
+}
+
+/// Phase 11.12 — emit `__apply_state_json`, which restores the serialized
+/// state (the SSR `<script type="application/json">` payload) into the
+/// component's state cells. Only primitive fields are restored; non-primitive
+/// fields keep their default (documented slice-1 limitation).
+fn emit_apply_state_json(
+    component: &ExpandedComponent,
+    nominals: &NominalRegistry,
+    out: &mut String,
+) -> EmitResult<()> {
+    writeln!(
+        out,
+        "    fn __apply_state_json(self: &Rc<Self>, __json: &str) {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let __v: serde_json::Value = match serde_json::from_str(__json) {{ Ok(__j) => __j, Err(_) => return, }};"
+    )
+    .unwrap();
+    // Silence unused warnings when the component has no primitive state.
+    writeln!(out, "        let _ = (&__v, self);").unwrap();
+    for field in &component.state {
+        let rust_ty = type_expr_to_rust(&field.type_expr, nominals).map_err(|mut e| {
+            e.context = format!(
+                "state field `{}` of component `{}` (hydrate state apply)",
+                field.name, component.name
+            );
+            e
+        })?;
+        if let Some((accessor, rhs)) = json_state_accessor(&rust_ty) {
+            writeln!(
+                out,
+                "        if let Some(__x) = __v.get(\"{}\").and_then(|__j| __j.{}) {{ *self.{}.borrow_mut() = {}; }}",
+                field.name, accessor, field.name, rhs
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "    }}\n").unwrap();
+    Ok(())
+}
+
+/// Phase 11.12 — emit `hydrate(root)`: inject the scoped style, restore the
+/// serialized state from the SSR `<script>`, refresh derived cells, then run
+/// the adopt walk over the server-painted DOM (no wipe, no rebuild) and mark
+/// the component built so later state changes patch in place.
+fn emit_hydrate_method(
+    component: &ExpandedComponent,
+    name: &str,
+    hydrate_body: &str,
+    out: &mut String,
+) {
+    writeln!(
+        out,
+        "    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {{"
+    )
+    .unwrap();
+    if let Some(style) = &component.style {
+        let helper = style_helper_ident(name, style);
+        writeln!(out, "        {}();", helper).unwrap();
+    }
+    // Restore the serialized state from the SSR `<script type="application/
+    // json" id="__flv_state_<Component>">`, if present. Absent → keep defaults.
+    writeln!(
+        out,
+        "        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id(\"__flv_state_{}\") {{",
+        name
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            if let Some(__txt) = __sel.text_content() {{ self.__apply_state_json(&__txt); }}"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    if !component.derived.is_empty() {
+        writeln!(out, "        self.__recompute_derived();").unwrap();
+    }
+    writeln!(out, "        let mut __cur_root = root.first_child();").unwrap();
+    writeln!(out, "        *self.root.borrow_mut() = Some(root);").unwrap();
+    out.push_str(hydrate_body);
+    writeln!(out, "        *self.__built.borrow_mut() = true;").unwrap();
+    writeln!(out, "        Ok(())").unwrap();
+    writeln!(out, "    }}\n").unwrap();
+}
+
 /// Emit a component under the keep-node reconciliation model
 /// (Phase 11.10 slice 1). The render walk runs once into a `__build()`
 /// body that also stashes a handle per dynamic point into a struct field;
@@ -1201,6 +1375,36 @@ fn emit_component_keepnode(
         region_methods = accum.region_methods;
         // The keep-node gate guarantees no `<slot>`/`<Child />`, so the
         // ctx accumulated no slot_methods and no child-cache sites.
+    }
+
+    // Phase 11.12 — a region-free keep-node component is HYDRATABLE. Run the
+    // walk a second time in adopt mode to produce the `hydrate()` body: it
+    // acquires each node from the server-painted DOM into the same
+    // `__ktext_<n>` / `__kattr_<n>` handles the build walk declared (the walk
+    // is structurally identical, so `keep_index()` yields the same indices).
+    // A component with `{#if}`/`{#for}` regions keeps fresh-mount-only
+    // behaviour (region adoption is a later slice).
+    let hydratable = region_methods.is_empty();
+    let mut hydrate_body = String::new();
+    if hydratable {
+        if let Some(template) = &component.template {
+            let mut hctx = RenderCtx::new(
+                name,
+                &state_names,
+                &component.state,
+                file,
+                nominals,
+                &component.events,
+                this_bubbled,
+            );
+            hctx.keep = Some(KeepAccum::default());
+            hctx.hydrate = true;
+            for root_node in &template.roots {
+                emit_template_node(root_node, "__cur_root", &mut hctx, &mut hydrate_body)?;
+            }
+            // The adopt accum is discarded — the build walk already collected
+            // the handle fields + patch statements.
+        }
     }
 
     // 2. struct — state cells + keep-node handle fields + build flag + root.
@@ -1348,6 +1552,16 @@ fn emit_component_keepnode(
         writeln!(out, "{}", stmt).unwrap();
     }
     writeln!(out, "    }}").unwrap();
+
+    // Phase 11.12 — hydration: a `__apply_state_json` + `hydrate()` pair that
+    // restores the serialized state and adopts the server-painted DOM instead
+    // of rebuilding it. Only for region-free components; the entry wrapper
+    // calls `hydrate()` when the mount root already has server-painted DOM.
+    if hydratable {
+        writeln!(out).unwrap();
+        emit_apply_state_json(component, nominals, out)?;
+        emit_hydrate_method(component, name, &hydrate_body, out);
+    }
 
     // Phase 11.10 slice 3 — one `__mount_region_<n>` + `__patch_region_<n>`
     // pair per `{#if}`/`{#for}` dynamic region. A component with no regions
@@ -2105,6 +2319,17 @@ struct RenderCtx<'a> {
     /// a live `<input>` and drop the caret). `None` for the naive
     /// re-render path — the emitted code is then byte-identical to before.
     keep: Option<KeepAccum>,
+    /// Phase 11.12 — hydration adopt walk. When `true`, the node emitters
+    /// take over the server-painted DOM instead of creating it: an element
+    /// is acquired from a sibling cursor (`__flv_next_element`) rather than
+    /// `create_element`, a text node from `__flv_next_text` rather than
+    /// `create_text_node`, and neither is appended. Interpolation/attribute
+    /// keep-node handles are still stashed (from the adopted node), and event
+    /// listeners still attach — so a later state change patches in place. In
+    /// this mode `parent_var` holds the NAME of the parent's child cursor
+    /// (`Option<web_sys::Node>`), not the parent element var. `false` for the
+    /// build walk — that path stays byte-identical.
+    hydrate: bool,
 }
 
 /// Phase 11.10 slices 1 + 3 — accumulator threaded through the keep-node
@@ -2153,6 +2378,7 @@ impl<'a> RenderCtx<'a> {
             this_bubbled,
             slot_methods: Vec::new(),
             keep: None,
+            hydrate: false,
         }
     }
 
@@ -2208,6 +2434,35 @@ fn emit_template_node(
     ctx: &mut RenderCtx,
     out: &mut String,
 ) -> EmitResult<()> {
+    // Phase 11.12 — the hydration adopt walk reuses this dispatch but routes
+    // Text/Interpolation/Element to the adopt emitters (acquire the existing
+    // node from the cursor instead of creating it). The hydratable gate
+    // guarantees no regions/composition, so If/For/Slot/Child never appear
+    // here in `ctx.hydrate` mode.
+    if ctx.hydrate {
+        return match node {
+            ExpandedTemplateNode::Text(text) => {
+                emit_text_adopt(text, parent_var, out);
+                Ok(())
+            }
+            ExpandedTemplateNode::Interpolation { .. } => {
+                emit_interpolation_adopt(parent_var, ctx, out);
+                Ok(())
+            }
+            ExpandedTemplateNode::Element {
+                tag,
+                attrs,
+                children,
+                ..
+            } => emit_element_adopt(tag, attrs, children, parent_var, ctx, out),
+            _ => Err(EmitError {
+                message: "hydration adopt walk hit a control-flow / composition node \
+                     (Phase 11.12 slice 1 hydrates static templates only)"
+                    .to_string(),
+                context: format!("component `{}`", ctx.component_name),
+            }),
+        };
+    }
     match node {
         ExpandedTemplateNode::Text(text) => {
             emit_text(text, parent_var, ctx, out);
@@ -3023,6 +3278,150 @@ fn emit_element(
         parent_var, var
     )
     .unwrap();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.12 — hydration adopt walk
+// ---------------------------------------------------------------------------
+//
+// The adopt walk mirrors the keep-node `__build` DFS exactly, but instead of
+// `create_element`/`create_text_node` + `append_child` it ACQUIRES each node
+// from the server-painted DOM via a sibling cursor and stashes it into the
+// same `__ktext_<n>` / `__kattr_<n>` handle field. Because the walk is
+// structurally identical, `keep_index()` yields the same indices as the build
+// walk, so the adopted handles line up with the struct fields the build path
+// declared. Event listeners still attach; static / interpolated attributes are
+// NOT re-set (the server already rendered them). `cursor_var` names an
+// `Option<web_sys::Node>` over the parent's child nodes.
+
+fn emit_text_adopt(text: &str, cursor_var: &str, out: &mut String) {
+    // Whitespace-only text is skipped by the build walk (never created), so
+    // the server did not paint a node for it either — nothing to advance past.
+    if text.trim().is_empty() {
+        return;
+    }
+    // Static text occupies one server-painted text node; consume it so the
+    // cursor stays aligned with the build DFS order. Its content is static —
+    // no handle to keep.
+    writeln!(out, "        let _ = __flv_next_text(&mut {});", cursor_var).unwrap();
+}
+
+fn emit_interpolation_adopt(cursor_var: &str, ctx: &mut RenderCtx, out: &mut String) {
+    // Same keep index the build walk allocated for this interpolation (the
+    // adopt walk visits dynamic points in the same DFS order). Adopt the
+    // existing text node into the handle; the server already rendered its
+    // value, so no `set_data` — a later state change patches it via `__patch`.
+    let k = ctx.keep_index();
+    let field = format!("__ktext_{}", k);
+    writeln!(
+        out,
+        "        if let Some(__hn) = __flv_next_text(&mut {}) {{ *self.{}.borrow_mut() = Some(__hn); }}",
+        cursor_var, field
+    )
+    .unwrap();
+}
+
+fn emit_element_adopt(
+    tag: &str,
+    attrs: &[ExpandedAttr],
+    children: &[ExpandedTemplateNode],
+    cursor_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let _ = tag;
+    let el = ctx.fresh("hel");
+    let inner_cursor = ctx.fresh("hcur");
+    writeln!(
+        out,
+        "        if let Some({}) = __flv_next_element(&mut {}) {{",
+        el, cursor_var
+    )
+    .unwrap();
+
+    // Collect the `data-flv-*` directives + value keys exactly as the build
+    // walk does, but skip re-setting static / interpolated attributes (the
+    // server painted them). Event listeners attach; interpolated / mixed
+    // attributes stash their keep-node handle from the adopted element.
+    let mut data_flv_click: Option<String> = None;
+    let mut data_flv_submit: Option<String> = None;
+    let mut data_flv_file: Option<String> = None;
+    let mut value_keys: Vec<String> = Vec::new();
+
+    for attr in attrs {
+        match attr {
+            ExpandedAttr::Static { name, value, .. } => {
+                if name == "data-flv-click" {
+                    data_flv_click = Some(value.clone());
+                } else if name == "data-flv-submit" {
+                    data_flv_submit = Some(value.clone());
+                } else if name == "data-flv-file" {
+                    data_flv_file = Some(value.clone());
+                } else if let Some(key) = name.strip_prefix("data-flv-value-") {
+                    value_keys.push(key.to_string());
+                }
+                // Static attribute already on the server-painted element.
+            }
+            ExpandedAttr::Event {
+                event_name,
+                handler_name,
+                ..
+            } => {
+                emit_event_attr(event_name, handler_name, &el, ctx, out)?;
+            }
+            ExpandedAttr::MixedInterpolation { name, .. } => {
+                if let Some(key) = name.strip_prefix("data-flv-value-") {
+                    value_keys.push(key.to_string());
+                }
+                let k = ctx.keep_index();
+                writeln!(
+                    out,
+                    "        *self.__kattr_{}.borrow_mut() = Some({}.clone());",
+                    k, el
+                )
+                .unwrap();
+            }
+            ExpandedAttr::Interpolation { name, .. } => {
+                if let Some(key) = name.strip_prefix("data-flv-value-") {
+                    value_keys.push(key.to_string());
+                }
+                let k = ctx.keep_index();
+                writeln!(
+                    out,
+                    "        *self.__kattr_{}.borrow_mut() = Some({}.clone());",
+                    k, el
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    if let Some(handler) = data_flv_submit {
+        let fields = collect_form_fields(children);
+        emit_data_flv_submit(&handler, &fields, &el, ctx, out)?;
+    }
+    if let Some(handler) = data_flv_click {
+        emit_data_flv_click(&handler, &value_keys, &el, ctx, out)?;
+    }
+    if let Some(handler) = data_flv_file {
+        emit_data_flv_file(&handler, &el, ctx, out)?;
+    }
+
+    // Recurse into the adopted element's own children via a fresh cursor.
+    // A childless element (`<input />`) needs no cursor.
+    if !children.is_empty() {
+        writeln!(
+            out,
+            "        let mut {} = {}.first_child();",
+            inner_cursor, el
+        )
+        .unwrap();
+        for child in children {
+            emit_template_node(child, &inner_cursor, ctx, out)?;
+        }
+    }
+    writeln!(out, "        }}").unwrap();
     Ok(())
 }
 
@@ -6587,6 +6986,198 @@ component Row {
         assert!(
             feats.is_empty(),
             "click-only component needs no extra web-sys features: {feats:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 11.12 — SSR → client hydration (adopt the server-painted DOM)
+    // -------------------------------------------------------------------
+
+    fn hydratable_src() -> &'static str {
+        // Sole-child interpolations (`<span>{name}</span>`) so the server-
+        // painted text nodes map 1:1 onto the adopt walk (slice-1 constraint:
+        // no mixed static+interpolated text).
+        r#"component Greeter {
+  state { name: Str = "world" }
+  event on_name() { name = payload["value"] }
+  <template>
+    <div class="greeter">
+      <p><span class="nm">{name}</span></p>
+      <input @input="on_name" value="{name}" />
+    </div>
+  </template>
+}"#
+    }
+
+    #[test]
+    fn phase_11_12_hydratable_component_emits_hydrate_and_apply_state() {
+        let out = emit_component(&parse_expand(hydratable_src()).components[0]).unwrap();
+        assert!(
+            out.contains(
+                "pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue>"
+            ),
+            "hydrate method:\n{out}"
+        );
+        assert!(
+            out.contains("fn __apply_state_json(self: &Rc<Self>, __json: &str)"),
+            "apply-state method:\n{out}"
+        );
+        // Restores the serialized state from the `<script>` before adopting.
+        assert!(
+            out.contains("get_element_by_id(\"__flv_state_Greeter\")"),
+            "reads the state script by id:\n{out}"
+        );
+        assert!(
+            out.contains("if let Some(__x) = __v.get(\"name\").and_then(|__j| __j.as_str()) { *self.name.borrow_mut() = __x.to_string(); }"),
+            "restores the Str state field:\n{out}"
+        );
+        // Marks built so later state changes patch in place, not rebuild.
+        assert!(
+            out.contains("*self.__built.borrow_mut() = true;"),
+            "hydrate marks the component built:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_hydrate_adopts_not_creates() {
+        let out = emit_component(&parse_expand(hydratable_src()).components[0]).unwrap();
+        // Slice the hydrate() body and assert it ADOPTS (cursor helpers) and
+        // never CREATES nodes — that is the whole point.
+        let start = out.find("pub fn hydrate(").expect("hydrate present");
+        let body = &out[start..];
+        let end = body.find("*self.__built.borrow_mut() = true;").unwrap();
+        let hydrate_body = &body[..end];
+        assert!(
+            hydrate_body.contains("__flv_next_element(&mut")
+                && hydrate_body.contains("__flv_next_text(&mut"),
+            "hydrate adopts via cursor helpers:\n{hydrate_body}"
+        );
+        assert!(
+            !hydrate_body.contains("create_element") && !hydrate_body.contains("create_text_node"),
+            "hydrate must NOT create nodes:\n{hydrate_body}"
+        );
+        // The adopted nodes are stashed into the same keep-node handles the
+        // build walk declared (indices assigned in DFS order).
+        assert!(
+            hydrate_body.contains(".borrow_mut() = Some(__hn);"),
+            "hydrate stashes an adopted text handle:\n{hydrate_body}"
+        );
+        assert!(
+            hydrate_body.contains("*self.__kattr_") && hydrate_body.contains("*self.__ktext_"),
+            "hydrate stashes text + attr handles:\n{hydrate_body}"
+        );
+        // The live `@input` listener is wired onto the adopted element.
+        assert!(
+            hydrate_body.contains(".add_event_listener_with_callback(\"input\","),
+            "hydrate wires the @input listener:\n{hydrate_body}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_module_emits_cursor_helpers_when_hydratable() {
+        let out = emit_module(&parse_expand(hydratable_src())).unwrap();
+        assert!(
+            out.contains(
+                "fn __flv_next_element(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Element>"
+            ) && out.contains(
+                "fn __flv_next_text(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Text>"
+            ),
+            "cursor helpers present:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_state_apply_maps_each_primitive() {
+        // Str/Int/Float/Bool restore via the right serde_json accessor; the
+        // component is value-input (keeps it on the keep-node/hydrate path).
+        let src = r#"component Multi {
+  state {
+    s: Str = ""
+    n: Int = 0
+    f: Float = 0.0
+    b: Bool = false
+  }
+  event on_type() { s = payload["value"] }
+  <template>
+    <input @input="on_type" value="{s}" />
+    <p><span>{n}</span></p>
+    <p><span>{f}</span></p>
+    <p><span>{b}</span></p>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(out.contains("__v.get(\"s\").and_then(|__j| __j.as_str()) { *self.s.borrow_mut() = __x.to_string(); }"), "Str:\n{out}");
+        assert!(
+            out.contains(
+                "__v.get(\"n\").and_then(|__j| __j.as_i64()) { *self.n.borrow_mut() = __x; }"
+            ),
+            "Int:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "__v.get(\"f\").and_then(|__j| __j.as_f64()) { *self.f.borrow_mut() = __x; }"
+            ),
+            "Float:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "__v.get(\"b\").and_then(|__j| __j.as_bool()) { *self.b.borrow_mut() = __x; }"
+            ),
+            "Bool:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_non_hydratable_component_has_no_hydrate() {
+        // A naive (non-value-input) component keeps the byte-identical naive
+        // path: no hydrate method, no cursor helpers.
+        let out = emit_module(&parse_expand(counter_shape_src())).unwrap();
+        assert!(!out.contains("fn hydrate("), "no hydrate method:\n{out}");
+        assert!(
+            !out.contains("__flv_next_element"),
+            "no cursor helpers:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_regions_keep_fresh_mount_only() {
+        // A value-input component WITH a `{#if}` region is keep-node but NOT
+        // hydratable (region adoption is a later slice) → no hydrate method.
+        let src = r#"component Toggler {
+  state {
+    name: Str = ""
+    on: Bool = false
+  }
+  event on_type() { name = payload["value"] }
+  <template>
+    <input @input="on_type" value="{name}" />
+    {#if on}<p><span>{name}</span></p>{/if}
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("fn __patch(self: &Rc<Self>)"),
+            "still keep-node:\n{out}"
+        );
+        assert!(
+            !out.contains("fn hydrate("),
+            "regions defer hydration:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_component_is_hydratable_predicate() {
+        let empty = std::collections::BTreeSet::new();
+        let greeter = parse_expand(hydratable_src()).components[0].clone();
+        assert!(
+            component_is_hydratable(&greeter, &empty),
+            "value-input static"
+        );
+
+        let counter = parse_expand(counter_shape_src()).components[0].clone();
+        assert!(
+            !component_is_hydratable(&counter, &empty),
+            "non-value-input is not hydratable"
         );
     }
 

@@ -67,7 +67,12 @@ fn generate_lib_rs_and_cargo() -> (String, String) {
     }
 
     let extra = fitz::view::wasm_extra_web_sys_features(&expanded);
-    let cargo = fitz::view::compose_cargo_toml_with_features("rpc-demo", &extra, fns.has_rpc());
+    let cargo = fitz::view::compose_cargo_toml_with_features(
+        "rpc-demo",
+        &extra,
+        fns.has_rpc(),
+        fitz::view::file_uses_hydration(&expanded),
+    );
 
     let lib_rs = fitz::view::compose_lib_rs_with_components(
         &expanded,

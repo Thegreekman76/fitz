@@ -31,6 +31,28 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement};
 
+// Phase 11.12 — hydration cursor helpers. Advance a sibling cursor to
+// the next element / text node so the adopt walk maps template nodes
+// onto the server-painted DOM in DFS order without re-creating them.
+fn __flv_next_element(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Element> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__el) = __n.dyn_ref::<web_sys::Element>() {
+            return Some(__el.clone());
+        }
+    }
+    None
+}
+fn __flv_next_text(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Text> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__t) = __n.dyn_ref::<web_sys::Text>() {
+            return Some(__t.clone());
+        }
+    }
+    None
+}
+
 pub struct Greeter {
     first: RefCell<String>,
     last: RefCell<String>,
@@ -201,6 +223,94 @@ impl Greeter {
         if let Some(__n) = self.__ktext_2.borrow().as_ref() { __n.set_data(&format!("{}", (*self.full.borrow()))); }
         if let Some(__n) = self.__ktext_3.borrow().as_ref() { __n.set_data(&format!("{}", (*self.greeting.borrow()))); }
     }
+
+    fn __apply_state_json(self: &Rc<Self>, __json: &str) {
+        let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
+        let _ = (&__v, self);
+        if let Some(__x) = __v.get("first").and_then(|__j| __j.as_str()) { *self.first.borrow_mut() = __x.to_string(); }
+        if let Some(__x) = __v.get("last").and_then(|__j| __j.as_str()) { *self.last.borrow_mut() = __x.to_string(); }
+    }
+
+    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_Greeter_greeter_c_f0dd7508();
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_Greeter") {
+            if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
+        }
+        self.__recompute_derived();
+        let mut __cur_root = root.first_child();
+        *self.root.borrow_mut() = Some(root);
+        if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
+        let mut __hcur1 = __hel0.first_child();
+        if let Some(__hel2) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur3 = __hel2.first_child();
+        if let Some(__hel4) = __flv_next_element(&mut __hcur3) {
+        let mut __hcur5 = __hel4.first_child();
+        let _ = __flv_next_text(&mut __hcur5);
+        }
+        if let Some(__hel6) = __flv_next_element(&mut __hcur3) {
+        {
+            let __self_clone = self.clone();
+            let __closure = Closure::wrap(Box::new(move |__evt: Event| {
+                let mut __payload = std::collections::HashMap::<String, String>::new();
+                if let Some(__t) = __evt.target() {
+                    if let Some(__el) = __t.dyn_ref::<web_sys::HtmlInputElement>() {
+                        __payload.insert("value".to_string(), __el.value());
+                    } else if let Some(__el) = __t.dyn_ref::<web_sys::HtmlSelectElement>() {
+                        __payload.insert("value".to_string(), __el.value());
+                    } else if let Some(__el) = __t.dyn_ref::<web_sys::HtmlTextAreaElement>() {
+                        __payload.insert("value".to_string(), __el.value());
+                    }
+                }
+                Greeter::on_first(&__self_clone, &__payload);
+            }) as Box<dyn FnMut(Event)>);
+            __hel6.add_event_listener_with_callback("input", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        *self.__kattr_0.borrow_mut() = Some(__hel6.clone());
+        }
+        }
+        if let Some(__hel8) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur9 = __hel8.first_child();
+        if let Some(__hel10) = __flv_next_element(&mut __hcur9) {
+        let mut __hcur11 = __hel10.first_child();
+        let _ = __flv_next_text(&mut __hcur11);
+        }
+        if let Some(__hel12) = __flv_next_element(&mut __hcur9) {
+        {
+            let __self_clone = self.clone();
+            let __closure = Closure::wrap(Box::new(move |__evt: Event| {
+                let mut __payload = std::collections::HashMap::<String, String>::new();
+                if let Some(__t) = __evt.target() {
+                    if let Some(__el) = __t.dyn_ref::<web_sys::HtmlInputElement>() {
+                        __payload.insert("value".to_string(), __el.value());
+                    } else if let Some(__el) = __t.dyn_ref::<web_sys::HtmlSelectElement>() {
+                        __payload.insert("value".to_string(), __el.value());
+                    } else if let Some(__el) = __t.dyn_ref::<web_sys::HtmlTextAreaElement>() {
+                        __payload.insert("value".to_string(), __el.value());
+                    }
+                }
+                Greeter::on_last(&__self_clone, &__payload);
+            }) as Box<dyn FnMut(Event)>);
+            __hel12.add_event_listener_with_callback("input", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        *self.__kattr_1.borrow_mut() = Some(__hel12.clone());
+        }
+        }
+        if let Some(__hel14) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur15 = __hel14.first_child();
+        let _ = __flv_next_text(&mut __hcur15);
+        if let Some(__hn) = __flv_next_text(&mut __hcur15) { *self.__ktext_2.borrow_mut() = Some(__hn); }
+        }
+        if let Some(__hel16) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur17 = __hel16.first_child();
+        if let Some(__hn) = __flv_next_text(&mut __hcur17) { *self.__ktext_3.borrow_mut() = Some(__hn); }
+        }
+        }
+        *self.__built.borrow_mut() = true;
+        Ok(())
+    }
+
 }
 
 fn __inject_style_Greeter_greeter_c_f0dd7508() {
@@ -216,13 +326,20 @@ fn __inject_style_Greeter_greeter_c_f0dd7508() {
 
 
 // Composed entry point — NOT part of emit_module output.
-// `fitz build --target wasm-client` (Phase 11.5.c) appends this
-// wrapper so the bundle mounts the root component when the
-// browser calls the `start` export.
+// `fitz build --target wasm-client` appends this wrapper. Phase
+// 11.12: hydrate the server-painted DOM when the mount root
+// already has content, else fresh-mount into an empty root.
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     let root = Greeter::new();
+    let __document = web_sys::window().unwrap().document().unwrap();
+    if let Some(__mount) = __document.query_selector("#app")? {
+        if __mount.first_element_child().is_some() {
+            let __el = __mount.dyn_into::<web_sys::HtmlElement>()?;
+            return root.hydrate(__el);
+        }
+    }
     root.mount("#app")?;
     Ok(())
 }
