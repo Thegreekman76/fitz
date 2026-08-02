@@ -318,6 +318,7 @@ impl ViewParser {
         self.expect(Token::LBrace)?;
 
         let mut state = Vec::new();
+        let mut derived = Vec::new();
         let mut events = Vec::new();
         let mut template: Option<Template> = None;
         let mut style: Option<Style> = None;
@@ -332,6 +333,10 @@ impl ViewParser {
                 Token::State => {
                     let block = self.parse_state_block()?;
                     state.extend(block);
+                }
+                Token::Derived => {
+                    let block = self.parse_derived_block()?;
+                    derived.extend(block);
                 }
                 Token::Event => {
                     events.push(self.parse_event_handler()?);
@@ -382,8 +387,8 @@ impl ViewParser {
                     let cur = self.peek().clone();
                     return Err(ViewParseError {
                         message: format!(
-                            "expected `state`, `event`, `<template>`, `<style scoped>` or \
-                             `<style global>` inside component body, got {}",
+                            "expected `state`, `derived`, `event`, `<template>`, `<style scoped>` \
+                             or `<style global>` inside component body, got {}",
                             cur.token
                         ),
                         line: cur.line,
@@ -397,6 +402,7 @@ impl ViewParser {
             name,
             loc,
             state,
+            derived,
             events,
             template,
             style,
@@ -405,6 +411,24 @@ impl ViewParser {
 
     fn parse_state_block(&mut self) -> ViewParseResult<Vec<StateField>> {
         self.expect(Token::State)?;
+        self.expect(Token::LBrace)?;
+        let mut fields = Vec::new();
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek().token, Token::RBrace) {
+                self.advance();
+                break;
+            }
+            fields.push(self.parse_state_field()?);
+        }
+        Ok(fields)
+    }
+
+    /// Phase 11.10 slice 4 — `derived { name: T = expr }`. Same entry shape
+    /// as a state field (reuses [`Self::parse_state_field`]); the `default`
+    /// slot holds the derived expression.
+    fn parse_derived_block(&mut self) -> ViewParseResult<Vec<StateField>> {
+        self.expect(Token::Derived)?;
         self.expect(Token::LBrace)?;
         let mut fields = Vec::new();
         loop {
@@ -573,6 +597,7 @@ fn append_token_source(out: &mut String, tok: &Token) {
         Token::Component => out.push_str("component"),
         Token::State => out.push_str("state"),
         Token::Event => out.push_str("event"),
+        Token::Derived => out.push_str("derived"),
         Token::From => out.push_str("from"),
         Token::Import => out.push_str("import"),
         Token::As => out.push_str("as"),

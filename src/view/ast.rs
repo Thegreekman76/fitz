@@ -61,6 +61,10 @@ pub struct Component {
     /// Position of the `component` keyword. 1-based (line, column).
     pub loc: Loc,
     pub state: Vec<StateField>,
+    /// Phase 11.10 slice 4 — read-only derived values (`derived { name: T =
+    /// expr }`). Same shape as a state field, but recomputed from state (+
+    /// other derived) instead of stored + mutated.
+    pub derived: Vec<StateField>,
     pub events: Vec<EventHandler>,
     pub template: Option<Template>,
     pub style: Option<Style>,

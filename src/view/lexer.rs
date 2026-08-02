@@ -44,6 +44,9 @@ pub enum Token {
     Component,
     State,
     Event,
+    /// Phase 11.10 slice 4 — `derived { name: T = expr }` block declaring
+    /// read-only values computed from state (+ other derived).
+    Derived,
     /// §9.dd (2026-07-16) — `from` keyword for `from X import Y1, Y2`
     /// at top of `.fitzv` (Vue/Svelte convention). Enables cross-file
     /// nominal type refs (V-3 + V-5 debts from chat migration probe).
@@ -144,6 +147,7 @@ impl fmt::Display for Token {
             Token::Component => write!(f, "`component`"),
             Token::State => write!(f, "`state`"),
             Token::Event => write!(f, "`event`"),
+            Token::Derived => write!(f, "`derived`"),
             Token::From => write!(f, "`from`"),
             Token::Import => write!(f, "`import`"),
             Token::As => write!(f, "`as`"),
@@ -584,6 +588,7 @@ impl ViewLexer {
                         "component" => Token::Component,
                         "state" => Token::State,
                         "event" => Token::Event,
+                        "derived" => Token::Derived,
                         "from" => Token::From,
                         "import" => Token::Import,
                         "as" => Token::As,

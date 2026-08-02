@@ -942,7 +942,9 @@ fn emit_component_impl(
     bubbled: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     out: &mut String,
 ) -> EmitResult<()> {
-    let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
+    // Phase 11.10 slice 4 — derived names read like state (`(*self.d.borrow())`),
+    // backed by a cached `RefCell` field refreshed by `__recompute_derived()`.
+    let state_names: Vec<String> = read_names(component);
 
     // Phase 11.7.c — this component's event names that some parent binds
     // via `<ThisComponent @event="..." />`. Each gets a callback slot +
@@ -986,10 +988,91 @@ fn emit_component_impl(
         out,
     )?;
     emit_event_handlers(component, &state_names, this_bubbled, out)?;
+    emit_recompute_derived(component, &state_names, out)?;
     emit_mount_and_render(component, &state_names, file, nominals, this_bubbled, out)?;
     if let Some(style) = &component.style {
         emit_style_helper(&component.name, style, out);
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.10 slice 4 — derived values (`derived { name: T = expr }`)
+// ---------------------------------------------------------------------------
+
+/// State field names + derived names. Derived read exactly like state
+/// (`(*self.<name>.borrow())`) — they are cached `RefCell` fields kept fresh
+/// by `__recompute_derived()`, so `lower_expr` needs no separate resolution.
+fn read_names(component: &ExpandedComponent) -> Vec<String> {
+    component
+        .state
+        .iter()
+        .chain(component.derived.iter())
+        .map(|f| f.name.clone())
+        .collect()
+}
+
+/// The zero value a derived `RefCell<T>` field is constructed with. It is
+/// never read (mount runs `__recompute_derived()` before any render), so it
+/// only needs to be a valid value of the derived's declared type. Primitive
+/// types only in this slice; compound derived (List/Map/nominal) defer.
+fn zero_value_for_type(type_expr: &TypeExpr, ctx: &str) -> EmitResult<String> {
+    let v = match type_expr {
+        TypeExpr::Named(n) => match n.as_str() {
+            "Str" => "String::new()",
+            "Int" => "0i64",
+            "Float" => "0.0f64",
+            "Bool" => "false",
+            _ => {
+                return Err(EmitError {
+                    message: format!(
+                        "derived of type `{}` — only Str / Int / Float / Bool derived are \
+                         supported in this slice",
+                        n
+                    ),
+                    context: ctx.to_string(),
+                })
+            }
+        },
+        _ => {
+            return Err(EmitError {
+                message: "compound derived type (List / Map / nominal) — only primitive \
+                          derived are supported in this slice"
+                    .to_string(),
+                context: ctx.to_string(),
+            })
+        }
+    };
+    Ok(v.to_string())
+}
+
+/// Emit the `__recompute_derived()` method: assign each derived field its
+/// freshly-computed value, in declaration order (so a derived may read an
+/// earlier derived's just-set field). Emits nothing when the component has no
+/// derived (byte-identical output for components that don't use the feature).
+/// `render()` calls this once before build/patch.
+fn emit_recompute_derived(
+    component: &ExpandedComponent,
+    read: &[String],
+    out: &mut String,
+) -> EmitResult<()> {
+    if component.derived.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "    fn __recompute_derived(self: &Rc<Self>) {{").unwrap();
+    for d in &component.derived {
+        let expr_rust = lower_expr(&d.default, read, &[]).map_err(|mut e| {
+            e.context = format!("derived `{}` of component `{}`", d.name, component.name);
+            e
+        })?;
+        writeln!(
+            out,
+            "        *self.{}.borrow_mut() = {};",
+            d.name, expr_rust
+        )
+        .unwrap();
+    }
+    writeln!(out, "    }}\n").unwrap();
     Ok(())
 }
 
@@ -1000,14 +1083,15 @@ fn emit_component_impl(
 /// Decide whether `component` uses the keep-node reconciliation model
 /// (Phase 11.10) instead of the naive re-render.
 ///
-/// Gated to the exact case it fixes — a live form control
-/// (`@input`/`@change`) whose surrounding text/attributes interpolate
-/// state — and restricted so the first slice stays sound:
+/// Gated to the case it fixes — a live form control (`@input`/`@change`)
+/// whose surrounding text/attributes interpolate state (the caret case) —
+/// and restricted so the model stays sound:
 ///
-/// - **static structure** (no `{#if}`/`{#for}`/`<slot>`/`<Child />`):
-///   those need their own reconciliation of inserted/removed subtrees,
-///   which later slices add. A static template's DOM shape never
-///   changes, so patching the handful of interpolation points is enough.
+/// - **no composition** (no `<slot>`/`<Child />` anywhere): child instance
+///   caches + slot callbacks are a separate mechanism the keep-node path
+///   doesn't drive yet, so a component that composes stays naive.
+///   `{#if}`/`{#for}` ARE allowed — slice 3 rebuilds each as an anchored
+///   dynamic region while a live sibling `<input>` keeps its caret.
 /// - **not a bubbled child** (`this_bubbled` empty): a component whose
 ///   events a parent binds is re-mounted by that parent's naive render,
 ///   which would reset `__built`; keeping it naive avoids a stale-handle
@@ -1020,27 +1104,58 @@ fn use_keep_node_reconciliation(
 ) -> bool {
     this_bubbled.is_empty()
         && component_uses_value_input(component)
-        && template_is_static_structure(component)
+        && template_has_no_composition(component)
 }
 
-/// `true` when the template has no `{#if}`/`{#for}`/`<slot>`/`<Child />`
-/// anywhere — a fixed DOM shape whose only render-to-render change is the
-/// value of interpolation points (Phase 11.10 keep-node prerequisite).
-fn template_is_static_structure(component: &ExpandedComponent) -> bool {
-    fn node_is_static(node: &ExpandedTemplateNode) -> bool {
+/// `true` when the template composes no other component and declares no
+/// `<slot>` anywhere (`{#if}`/`{#for}`/`Element` are fine). Composition
+/// drives the child instance cache + slot callbacks, which the keep-node
+/// path does not manage — such components stay on the naive re-render.
+fn template_has_no_composition(component: &ExpandedComponent) -> bool {
+    fn node_ok(node: &ExpandedTemplateNode) -> bool {
         match node {
-            ExpandedTemplateNode::If { .. }
-            | ExpandedTemplateNode::For { .. }
-            | ExpandedTemplateNode::Slot { .. }
-            | ExpandedTemplateNode::ChildComponent { .. } => false,
-            ExpandedTemplateNode::Element { children, .. } => children.iter().all(node_is_static),
+            ExpandedTemplateNode::Slot { .. } | ExpandedTemplateNode::ChildComponent { .. } => {
+                false
+            }
+            ExpandedTemplateNode::Element { children, .. } => children.iter().all(node_ok),
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().all(node_ok)
+                    && else_children
+                        .as_ref()
+                        .is_none_or(|els| els.iter().all(node_ok))
+            }
+            ExpandedTemplateNode::For { children, .. } => children.iter().all(node_ok),
             _ => true,
         }
     }
     component
         .template
         .as_ref()
-        .is_some_and(|t| t.roots.iter().all(node_is_static))
+        .is_some_and(|t| t.roots.iter().all(node_ok))
+}
+
+/// `true` when a keep-node component has at least one `{#if}`/`{#for}`, so
+/// the emitter needs `Comment` + `DocumentFragment` web-sys features for the
+/// dynamic-region anchors + fragment (Phase 11.10 slice 3). Only consulted
+/// for value-input components, so caret-free crates keep their feature set.
+fn component_uses_keep_regions(component: &ExpandedComponent) -> bool {
+    fn has_control_flow(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::If { .. } | ExpandedTemplateNode::For { .. } => true,
+            ExpandedTemplateNode::Element { children, .. } => children.iter().any(has_control_flow),
+            _ => false,
+        }
+    }
+    component_uses_value_input(component)
+        && template_has_no_composition(component)
+        && component
+            .template
+            .as_ref()
+            .is_some_and(|t| t.roots.iter().any(has_control_flow))
 }
 
 /// Emit a component under the keep-node reconciliation model
@@ -1057,13 +1172,15 @@ fn emit_component_keepnode(
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
-    let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
+    // Phase 11.10 slice 4 — derived read like state (cached `RefCell` fields).
+    let state_names: Vec<String> = read_names(component);
 
     // 1. Run the build walk into a buffer, collecting keep-node handle
     //    fields + patch statements as a side effect (see `RenderCtx.keep`).
     let mut build_body = String::new();
     let mut keep_fields: Vec<(String, String)> = Vec::new();
     let mut patch_stmts: Vec<String> = Vec::new();
+    let mut region_methods: Vec<String> = Vec::new();
     if let Some(template) = &component.template {
         let mut ctx = RenderCtx::new(
             name,
@@ -1081,6 +1198,7 @@ fn emit_component_keepnode(
         let accum = ctx.keep.take().unwrap();
         keep_fields = accum.fields;
         patch_stmts = accum.patch;
+        region_methods = accum.region_methods;
         // The keep-node gate guarantees no `<slot>`/`<Child />`, so the
         // ctx accumulated no slot_methods and no child-cache sites.
     }
@@ -1093,6 +1211,14 @@ fn emit_component_keepnode(
                 "state field `{}` of component `{}` (type)",
                 field.name, name
             );
+            e
+        })?;
+        writeln!(out, "    {}: RefCell<{}>,", field.name, rust_ty).unwrap();
+    }
+    // Phase 11.10 slice 4 — cached derived cells.
+    for field in &component.derived {
+        let rust_ty = type_expr_to_rust(&field.type_expr, nominals).map_err(|mut e| {
+            e.context = format!("derived `{}` of component `{}` (type)", field.name, name);
             e
         })?;
         writeln!(out, "    {}: RefCell<{}>,", field.name, rust_ty).unwrap();
@@ -1124,6 +1250,15 @@ fn emit_component_keepnode(
         )
         .unwrap();
     }
+    // Phase 11.10 slice 4 — derived cells zero-init; `__recompute_derived()`
+    // fills them before the first render.
+    for field in &component.derived {
+        let zero = zero_value_for_type(
+            &field.type_expr,
+            &format!("derived `{}` of component `{}`", field.name, name),
+        )?;
+        writeln!(out, "            {}: RefCell::new({}),", field.name, zero).unwrap();
+    }
     for (fname, _) in &keep_fields {
         writeln!(out, "            {}: RefCell::new(None),", fname).unwrap();
     }
@@ -1135,6 +1270,7 @@ fn emit_component_keepnode(
     // 4. event handlers — unchanged; each mutates a state cell then calls
     //    `self.render()`, which now dispatches to `__patch()`.
     emit_event_handlers(component, &state_names, this_bubbled, out)?;
+    emit_recompute_derived(component, &state_names, out)?;
 
     // 5. mount / mount_into / render dispatch / __build / __patch.
     writeln!(
@@ -1175,6 +1311,10 @@ fn emit_component_keepnode(
     writeln!(out, "    }}\n").unwrap();
 
     writeln!(out, "    fn render(self: &Rc<Self>) {{").unwrap();
+    // Phase 11.10 slice 4 — refresh derived cells before build/patch read them.
+    if !component.derived.is_empty() {
+        writeln!(out, "        self.__recompute_derived();").unwrap();
+    }
     writeln!(out, "        if *self.__built.borrow() {{").unwrap();
     writeln!(out, "            self.__patch();").unwrap();
     writeln!(out, "        }} else {{").unwrap();
@@ -1208,6 +1348,14 @@ fn emit_component_keepnode(
         writeln!(out, "{}", stmt).unwrap();
     }
     writeln!(out, "    }}").unwrap();
+
+    // Phase 11.10 slice 3 — one `__mount_region_<n>` + `__patch_region_<n>`
+    // pair per `{#if}`/`{#for}` dynamic region. A component with no regions
+    // emits nothing here, byte-identical to the slice-1 keep-node output.
+    for m in &region_methods {
+        writeln!(out).unwrap();
+        out.push_str(m);
+    }
 
     writeln!(out, "}}\n").unwrap();
 
@@ -1308,6 +1456,15 @@ fn emit_struct_and_new(
         })?;
         writeln!(out, "    {}: RefCell<{}>,", field.name, rust_ty).unwrap();
     }
+    // Phase 11.10 slice 4 — one cached `RefCell<T>` field per derived value,
+    // refreshed by `__recompute_derived()` (read like state).
+    for field in &component.derived {
+        let rust_ty = type_expr_to_rust(&field.type_expr, nominals).map_err(|mut e| {
+            e.context = format!("derived `{}` of component `{}` (type)", field.name, name);
+            e
+        })?;
+        writeln!(out, "    {}: RefCell<{}>,", field.name, rust_ty).unwrap();
+    }
     // Phase 11.7.e / R2b — one instance-cache field per `<Child />`
     // site. STATIC sites hold a single optional instance so the child
     // survives parent re-renders (its state persists — the DOM is
@@ -1390,6 +1547,15 @@ fn emit_struct_and_new(
             field.name, default_rust
         )
         .unwrap();
+    }
+    // Phase 11.10 slice 4 — derived cells start at a type-appropriate zero;
+    // `__recompute_derived()` fills them before the first render reads them.
+    for field in &component.derived {
+        let zero = zero_value_for_type(
+            &field.type_expr,
+            &format!("derived `{}` of component `{}`", field.name, name),
+        )?;
+        writeln!(out, "            {}: RefCell::new({}),", field.name, zero).unwrap();
     }
     let mut static_idx = 0usize;
     let mut dyn_idx = 0usize;
@@ -1534,7 +1700,18 @@ fn emit_event_handler(
         .unwrap();
         let mut locals: Vec<String> = Vec::new();
         let reassigned = collect_reassigned_locals(&handler.body);
+        // Phase 11.10 slice 2 — mid-flight render. When a statement writes
+        // state and a later statement suspends on `.await`, flush a render
+        // right before that suspension so a "loading" state set before the
+        // await is painted while the async work is in flight. Handlers with
+        // no state write before their await (the plain fetch-then-assign
+        // pattern) emit byte-identically — no extra render is inserted.
+        let mut pending_state_write = false;
         for stmt in &handler.body {
+            if pending_state_write && stmt_uses_await(stmt) {
+                writeln!(out, "        self.render();").unwrap();
+                pending_state_write = false;
+            }
             lower_stmt(stmt, state_names, &mut locals, "        ", &reassigned, out).map_err(
                 |mut e| {
                     e.context = format!(
@@ -1544,6 +1721,9 @@ fn emit_event_handler(
                     e
                 },
             )?;
+            if stmt_assigns_state(stmt, state_names) {
+                pending_state_write = true;
+            }
         }
         writeln!(out, "        self.render();").unwrap();
         if bubbles {
@@ -1617,6 +1797,21 @@ fn stmt_uses_await(stmt: &Stmt) -> bool {
         Stmt::For { iter, body, .. } => expr_uses_await(iter) || body.iter().any(stmt_uses_await),
         _ => false,
     }
+}
+
+/// Phase 11.10 slice 2 — `true` when `stmt` is a top-level reassignment of a
+/// state field (`loading = true`), the writes an async worker must paint
+/// before it suspends on an `.await`. Nested writes (inside `{#if}`/`{#for}`)
+/// are conservatively ignored — the loading pattern is a top-level write.
+fn stmt_assigns_state(stmt: &Stmt, state_names: &[String]) -> bool {
+    matches!(
+        stmt,
+        Stmt::Assign {
+            target: AssignTarget::Ident(name, _),
+            is_let: false,
+            ..
+        } if state_names.iter().any(|s| s == name)
+    )
 }
 
 fn expr_uses_await(expr: &Expr) -> bool {
@@ -1771,6 +1966,11 @@ fn emit_mount_and_render(
 
     // ---- render() ------------------------------------------------
     writeln!(out, "    fn render(self: &Rc<Self>) {{").unwrap();
+    // Phase 11.10 slice 4 — refresh derived cells from current state before
+    // the render reads them.
+    if !component.derived.is_empty() {
+        writeln!(out, "        self.__recompute_derived();").unwrap();
+    }
     writeln!(out, "        let root_ref = self.root.borrow();").unwrap();
     writeln!(out, "        let root = match root_ref.as_ref() {{").unwrap();
     writeln!(out, "            Some(r) => r,").unwrap();
@@ -1907,16 +2107,25 @@ struct RenderCtx<'a> {
     keep: Option<KeepAccum>,
 }
 
-/// Phase 11.10 slice 1 — accumulator threaded through the keep-node build
-/// walk. `next` numbers each dynamic point in DFS order; `fields` are the
-/// `RefCell<Option<web_sys::Text|Element>>` handle fields the component
-/// struct carries; `patch` are the statements of the component's
-/// `__patch()` body (one per dynamic point).
+/// Phase 11.10 slices 1 + 3 — accumulator threaded through the keep-node
+/// build walk. `next` numbers each dynamic point in DFS order; `fields` are
+/// the `RefCell<Option<web_sys::Text|Element|Node>>` handle fields the
+/// component struct carries; `patch` are the statements of the component's
+/// `__patch()` body (one per dynamic point + one per dynamic region).
+///
+/// Slice 3 adds **dynamic regions** for `{#if}`/`{#for}`: `region_next`
+/// numbers each region, and `region_methods` holds the emitted
+/// `__mount_region_<n>` / `__patch_region_<n>` methods (a region rebuilds
+/// wholesale between two comment anchors, reusing the naive `{#if}`/`{#for}`
+/// emit into a `DocumentFragment`, so a live sibling `<input>` keeps its
+/// caret while the region's content changes).
 #[derive(Default)]
 struct KeepAccum {
     next: usize,
     fields: Vec<(String, String)>,
     patch: Vec<String>,
+    region_next: usize,
+    region_methods: Vec<String>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -1957,6 +2166,17 @@ impl<'a> RenderCtx<'a> {
         let k = accum.next;
         accum.next += 1;
         k
+    }
+
+    /// Phase 11.10 slice 3 — allocate the next dynamic-region index.
+    fn keep_region_index(&mut self) -> usize {
+        let accum = self
+            .keep
+            .as_mut()
+            .expect("keep_region_index called outside keep-node mode");
+        let r = accum.region_next;
+        accum.region_next += 1;
+        r
     }
 
     fn fresh(&mut self, prefix: &str) -> String {
@@ -2007,20 +2227,35 @@ fn emit_template_node(
             children,
             else_children,
             ..
-        } => emit_if(
-            cond,
-            children,
-            else_children.as_deref(),
-            parent_var,
-            ctx,
-            out,
-        ),
+        } => {
+            // Phase 11.10 slice 3 — under keep-node, a `{#if}` becomes a
+            // dynamic region rebuilt in place between anchors; otherwise the
+            // naive inline `if`.
+            if ctx.keep.is_some() {
+                emit_keep_region(node, parent_var, ctx, out)
+            } else {
+                emit_if(
+                    cond,
+                    children,
+                    else_children.as_deref(),
+                    parent_var,
+                    ctx,
+                    out,
+                )
+            }
+        }
         ExpandedTemplateNode::For {
             var,
             iter,
             children,
             ..
-        } => emit_for(var, iter, children, parent_var, ctx, out),
+        } => {
+            if ctx.keep.is_some() {
+                emit_keep_region(node, parent_var, ctx, out)
+            } else {
+                emit_for(var, iter, children, parent_var, ctx, out)
+            }
+        }
         ExpandedTemplateNode::Slot { name, fallback, .. } => {
             emit_slot(name.as_deref(), fallback, parent_var, ctx, out)
         }
@@ -2147,6 +2382,154 @@ fn emit_interpolation(
             field, expr_rust
         ));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.10 slice 3 — dynamic regions ({#if}/{#for} under keep-node)
+// ---------------------------------------------------------------------------
+
+/// Emit a `{#if}`/`{#for}` as a keep-node **dynamic region** (Phase 11.10
+/// slice 3). The region is bounded by two comment anchors; its content is
+/// (re)built by `__mount_region_<n>`, which runs the naive `{#if}`/`{#for}`
+/// emit into a `DocumentFragment` and inserts it before the end anchor.
+/// `__patch_region_<n>` clears the nodes between the anchors and re-mounts.
+///
+/// Because the region rebuilds wholesale — but only the region — a live
+/// sibling `<input>` outside it is never touched, so its caret survives a
+/// state change that also updates the region (search/filter as you type).
+/// Nodes inside the region ARE re-created on each change (no per-item state
+/// or caret is preserved inside a region — that is a later, finer slice).
+fn emit_keep_region(
+    node: &ExpandedTemplateNode,
+    parent_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let r = ctx.keep_region_index();
+    let start_field = format!("__astart_{}", r);
+    let end_field = format!("__aend_{}", r);
+    let rs = ctx.fresh("rs");
+    let re = ctx.fresh("re");
+
+    // Build: two comment anchors bounding the region, stashed as handles,
+    // then mount the region's content between them.
+    writeln!(
+        out,
+        "        let {}: web_sys::Node = document.create_comment(\"\").into();",
+        rs
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        {}.append_child(&{}).unwrap();",
+        parent_var, rs
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        *self.{}.borrow_mut() = Some({}.clone());",
+        start_field, rs
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let {}: web_sys::Node = document.create_comment(\"\").into();",
+        re
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        {}.append_child(&{}).unwrap();",
+        parent_var, re
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        *self.{}.borrow_mut() = Some({}.clone());",
+        end_field, re
+    )
+    .unwrap();
+    writeln!(out, "        self.__mount_region_{}();", r).unwrap();
+
+    {
+        let accum = ctx.keep.as_mut().unwrap();
+        accum
+            .fields
+            .push((start_field.clone(), "web_sys::Node".to_string()));
+        accum
+            .fields
+            .push((end_field.clone(), "web_sys::Node".to_string()));
+        accum
+            .patch
+            .push(format!("        self.__patch_region_{}();", r));
+    }
+
+    // The region's mount + patch methods, emitted after the build/patch fns.
+    let mut m = String::new();
+    writeln!(m, "    fn __mount_region_{}(self: &Rc<Self>) {{", r).unwrap();
+    writeln!(
+        m,
+        "        let document = web_sys::window().unwrap().document().unwrap();"
+    )
+    .unwrap();
+    writeln!(
+        m,
+        "        let __frag = document.create_document_fragment();"
+    )
+    .unwrap();
+    // Naive `{#if}`/`{#for}` emit into the fragment (keep = None → the region
+    // content is rebuilt each time; a fresh ctx gives it its own var names).
+    let mut sub = RenderCtx::new(
+        ctx.component_name,
+        ctx.state_names,
+        ctx.state_fields,
+        ctx.file,
+        ctx.nominals,
+        ctx.events,
+        ctx.this_bubbled,
+    );
+    emit_template_node(node, "__frag", &mut sub, &mut m)?;
+    writeln!(
+        m,
+        "        if let Some(__e) = self.{}.borrow().as_ref() {{",
+        end_field
+    )
+    .unwrap();
+    writeln!(m, "            if let Some(__p) = __e.parent_node() {{").unwrap();
+    writeln!(
+        m,
+        "                let _ = __p.insert_before(&__frag, Some(__e));"
+    )
+    .unwrap();
+    writeln!(m, "            }}").unwrap();
+    writeln!(m, "        }}").unwrap();
+    writeln!(m, "    }}\n").unwrap();
+
+    writeln!(m, "    fn __patch_region_{}(self: &Rc<Self>) {{", r).unwrap();
+    writeln!(
+        m,
+        "        if let (Some(__s), Some(__e)) = (self.{}.borrow().clone(), self.{}.borrow().clone()) {{",
+        start_field, end_field
+    )
+    .unwrap();
+    writeln!(m, "            while let Some(__n) = __s.next_sibling() {{").unwrap();
+    writeln!(
+        m,
+        "                if __n.is_same_node(Some(&__e)) {{ break; }}"
+    )
+    .unwrap();
+    writeln!(
+        m,
+        "                if let Some(__p) = __n.parent_node() {{ let _ = __p.remove_child(&__n); }}"
+    )
+    .unwrap();
+    writeln!(m, "            }}").unwrap();
+    writeln!(m, "        }}").unwrap();
+    writeln!(m, "        self.__mount_region_{}();", r).unwrap();
+    writeln!(m, "    }}\n").unwrap();
+
+    ctx.keep.as_mut().unwrap().region_methods.push(m);
     Ok(())
 }
 
@@ -3458,6 +3841,16 @@ pub fn wasm_extra_web_sys_features(file: &ExpandedViewFile) -> Vec<&'static str>
             "HtmlSelectElement",
             "HtmlTextAreaElement",
         ] {
+            if !features.contains(&f) {
+                features.push(f);
+            }
+        }
+    }
+    if file.components.iter().any(component_uses_keep_regions) {
+        // Phase 11.10 slice 3 — keep-node `{#if}`/`{#for}` dynamic regions:
+        // comment anchors (`create_comment`) bound each region, and its
+        // content is (re)built into a `DocumentFragment`.
+        for f in ["Comment", "DocumentFragment"] {
             if !features.contains(&f) {
                 features.push(f);
             }
@@ -5318,6 +5711,7 @@ mod tests {
                 default: Expr::Int(0, Span::default()),
                 loc,
             }],
+            derived: Vec::new(),
             events: vec![ExpandedEventHandler {
                 name: "increment".to_string(),
                 params: vec![],
@@ -5404,6 +5798,7 @@ mod tests {
                 default: Expr::Int(0, Span::default()),
                 loc,
             }],
+            derived: Vec::new(),
             events: vec![ExpandedEventHandler {
                 name: "decrement".to_string(),
                 params: vec![],
@@ -6245,27 +6640,132 @@ component Row {
     }
 
     #[test]
-    fn phase_11_10_keepnode_falls_back_to_naive_with_if() {
-        // A value-input component whose template has a `{#if}` is NOT static
-        // structure, so it keeps the naive re-render (no keep-node scaffolding)
-        // until a later slice reconciles control flow.
+    fn phase_11_10_keepnode_region_for_control_flow() {
+        // Slice 3 — a value-input component with `{#if}`/`{#for}` now stays on
+        // keep-node: each control-flow directive becomes an anchored dynamic
+        // region (comment anchors + a DocumentFragment rebuild), while the
+        // live `<input>` is still patched in place.
         let src = r#"component Guarded {
-  state { name: Str = "" }
+  state { name: Str = ""
+          xs: List<Str> = [] }
   event on_type() { name = payload["value"] }
   <template>
     <input @input="on_type" value="{name}" />
     {#if name == ""}<p>empty</p>{#else}<p>{name}</p>{/if}
+    <ul>{#for x in xs}<li>{x}</li>{/for}</ul>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        // Still keep-node (build/patch dispatch, input patched in place).
+        assert!(
+            out.contains("fn __build(") && out.contains("fn __patch(") && out.contains("__built"),
+            "value-input with control flow stays keep-node:\n{out}"
+        );
+        // Two regions: the `{#if}` and the `{#for}`, each with anchors +
+        // mount/patch methods + a fragment, and both invoked from __patch.
+        for needle in [
+            "create_comment(\"\").into();",
+            "fn __mount_region_0(",
+            "fn __patch_region_0(",
+            "fn __mount_region_1(",
+            "fn __patch_region_1(",
+            "create_document_fragment()",
+            "self.__patch_region_0();",
+            "self.__patch_region_1();",
+            "insert_before(&__frag, Some(__e))",
+        ] {
+            assert!(
+                out.contains(needle),
+                "region scaffolding `{needle}`:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase_11_10_derived_emits_cached_cells_and_recompute() {
+        // Slice 4 — a `derived` block emits a cached `RefCell` field per value
+        // + a `__recompute_derived` method (in declaration order, so a derived
+        // reads an earlier one's fresh cell), called from render before the
+        // build/patch reads. `{full}` resolves like state.
+        let src = r#"component Greeter {
+  state { first: Str = "Ada"
+          last: Str = "L" }
+  derived { full: Str = "{first} {last}"
+            greeting: Str = "Hi {full}" }
+  event on_first() { first = payload["value"] }
+  <template>
+    <input @input="on_first" value="{first}" />
+    <p>{full}</p>
+    <p>{greeting}</p>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains("full: RefCell<String>") && out.contains("greeting: RefCell<String>"),
+            "derived cached cells:\n{out}"
+        );
+        // Zero-init + recompute in declaration order.
+        assert!(
+            out.contains("full: RefCell::new(String::new())"),
+            "derived zero-init:\n{out}"
+        );
+        let recompute = &out[out
+            .find("fn __recompute_derived")
+            .expect("recompute method")..];
+        let full_at = recompute.find("*self.full.borrow_mut() =").unwrap();
+        let greeting_at = recompute.find("*self.greeting.borrow_mut() =").unwrap();
+        assert!(
+            full_at < greeting_at,
+            "full recomputed before greeting (derived-of-derived order):\n{recompute}"
+        );
+        assert!(
+            recompute[greeting_at..].contains("(*self.full.borrow())"),
+            "greeting reads the full cell:\n{recompute}"
+        );
+        // render refreshes derived; {full} reads the cell like state.
+        assert!(
+            out.contains("self.__recompute_derived();"),
+            "render calls recompute:\n{out}"
+        );
+        assert!(
+            out.contains("(*self.full.borrow())"),
+            "{{full}} resolves to the cached cell:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_10_derived_rejects_compound_type() {
+        // Only primitive derived (Str/Int/Float/Bool) are supported this slice.
+        let src = r#"component X {
+  state { xs: List<Int> = [] }
+  derived { copy: List<Int> = xs }
+  <template><p>done</p></template>
+}"#;
+        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        assert!(
+            err.message.contains("compound derived") || err.message.contains("only primitive"),
+            "compound derived is rejected with a clear message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn phase_11_10_keepnode_composition_stays_naive() {
+        // A value-input component that composes (`<slot />` here) still uses
+        // the naive re-render — the keep-node path does not drive the child
+        // instance cache / slot callbacks.
+        let src = r#"component Wrap {
+  state { name: Str = "" }
+  event on_type() { name = payload["value"] }
+  <template>
+    <input @input="on_type" value="{name}" />
+    <slot />
   </template>
 }"#;
         let out = emit_component(&parse_expand(src).components[0]).unwrap();
         assert!(
             !out.contains("fn __patch(") && !out.contains("__built"),
-            "control-flow value-input stays naive (no keep-node):\n{out}"
-        );
-        // Naive render rebuilds under root each time.
-        assert!(
-            out.contains("while let Some(child) = root.first_child()"),
-            "naive render wipes and rebuilds:\n{out}"
+            "composing value-input stays naive:\n{out}"
         );
     }
 
@@ -6286,6 +6786,68 @@ component Row {
     }
 
     #[test]
+    fn phase_11_10_async_worker_renders_before_await_after_state_write() {
+        // A state write before an `.await` (the loading pattern) makes the
+        // async worker flush a render right before it suspends, so the
+        // loading state paints while the request is in flight.
+        let src = r#"component Fetcher {
+  state { loading: Bool = false
+          msg: Str = "" }
+  event go() {
+    loading = true
+    let m = fetch_it().await?
+    msg = m
+    loading = false
+  }
+  <template><p>{msg}</p></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        // The worker sets loading then renders BEFORE awaiting fetch_it.
+        let worker = async_worker_body(&out, "__go_async");
+        let set_loading = worker.find("*self.loading.borrow_mut() = __rhs;").unwrap();
+        let mid_render = worker.find("self.render();").unwrap();
+        let await_call = worker.find("fetch_it(").unwrap();
+        assert!(
+            set_loading < mid_render && mid_render < await_call,
+            "render() must sit between the state write and the await:\n{worker}"
+        );
+    }
+
+    #[test]
+    fn phase_11_10_async_worker_no_extra_render_without_pre_await_write() {
+        // A handler that awaits first (no state write before the await) emits
+        // byte-identically: exactly one render, at the end. Guards the
+        // byte-compat of the existing rpc example.
+        let src = r#"component Plain {
+  state { msg: Str = "" }
+  event go() {
+    let m = fetch_it().await?
+    msg = m
+  }
+  <template><p>{msg}</p></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        let worker = async_worker_body(&out, "__go_async");
+        assert_eq!(
+            worker.matches("self.render();").count(),
+            1,
+            "no mid-flight render when nothing is written before the await:\n{worker}"
+        );
+    }
+
+    /// Slice the emitted `async fn <suffix>(...)` worker body out of a full
+    /// module string, bounded to the next method, so render-count assertions
+    /// don't spill into `mount_into`/`render`.
+    fn async_worker_body<'a>(out: &'a str, suffix: &str) -> &'a str {
+        let def = out
+            .find(&format!("async fn {}", suffix))
+            .expect("async worker definition present");
+        let after = &out[def..];
+        let end = after.find("\n    pub fn ").unwrap_or(after.len());
+        &after[..end]
+    }
+
+    #[test]
     fn emit_rejects_handler_with_params() {
         // Direct construction — the surface parser rejects `event
         // f(x) { ... }` syntax before we can test it via source, but
@@ -6297,6 +6859,7 @@ component Row {
             name: "Foo".to_string(),
             loc: Loc { line: 1, column: 1 },
             state: vec![],
+            derived: Vec::new(),
             events: vec![ExpandedEventHandler {
                 name: "handle".to_string(),
                 params: vec![Param {

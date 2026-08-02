@@ -158,13 +158,21 @@ pub fn check_with_imported_components(
         // when the state is clean, so consequential errors don't
         // pile up on top of the actual bug.
         if !state_errored {
-            for handler in &component.events {
-                check_event_handler(component, handler, &import_stmts, &mut errors);
-            }
-            if let Some(template) = &component.template {
-                check_template_for_iters(component, template, &import_stmts, &mut errors);
-                check_template_interpolations(component, template, &import_stmts, &mut errors);
-                check_template_if_conds(component, template, &import_stmts, &mut errors);
+            // Phase 11.10 slice 4 — validate derived exprs (against their
+            // declared type, in the state-seeded env) before the passes that
+            // reference `{derived}`. A broken derived also gates those passes:
+            // they seed derived via `build_env_program` and would otherwise
+            // re-report the derived's error at every interpolation.
+            let derived_errored = check_derived_fields(component, &import_stmts, &mut errors);
+            if !derived_errored {
+                for handler in &component.events {
+                    check_event_handler(component, handler, &import_stmts, &mut errors);
+                }
+                if let Some(template) = &component.template {
+                    check_template_for_iters(component, template, &import_stmts, &mut errors);
+                    check_template_interpolations(component, template, &import_stmts, &mut errors);
+                    check_template_if_conds(component, template, &import_stmts, &mut errors);
+                }
             }
         }
     }
@@ -208,6 +216,40 @@ fn check_state_field(
             ),
         });
     }
+}
+
+/// Phase 11.10 slice 4 — type-check the `derived { ... }` block. Runs after
+/// state is validated (a derived expr reads state), in the full state +
+/// derived env built by [`build_env_program`]. Any classic error is a
+/// derived-expr problem (unknown var, type mismatch against the declared
+/// type); it's reported at the derived block's start. Returns whether any
+/// error was added, so the caller can gate the `{derived}`-referencing passes.
+fn check_derived_fields(
+    component: &ExpandedComponent,
+    imports: &[Stmt],
+    errors: &mut Vec<CheckError>,
+) -> bool {
+    if component.derived.is_empty() {
+        return false;
+    }
+    let before = errors.len();
+    // State is already validated (cascade gate), so the only fresh errors
+    // this program produces come from the derived expressions.
+    let program = build_env_program(component, imports, None, None, &[]);
+    let (_env, _info, _defs, classic_errors) = check_program(&program);
+    let block_loc = component
+        .derived
+        .first()
+        .map(|d| d.loc)
+        .unwrap_or(component.loc);
+    for e in classic_errors {
+        errors.push(CheckError {
+            message: e.message,
+            loc: block_loc,
+            context: format!("component '{}': derived block", component.name),
+        });
+    }
+    errors.len() > before
 }
 
 /// Check an event handler body. Synthesises a program of the shape:
@@ -650,6 +692,18 @@ fn build_env_program(
         program.push(imp.clone());
     }
     for field in &component.state {
+        program.push(Stmt::Assign {
+            target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
+            type_: Some(field.type_expr.clone()),
+            value: field.default.clone(),
+            is_let: true,
+            span: Span::ZERO,
+        });
+    }
+    // Phase 11.10 slice 4 — derived values follow the state bindings, so a
+    // derived expr sees state (+ earlier derived) in scope and every
+    // interpolation / cond / handler-body check can reference `{derived}`.
+    for field in &component.derived {
         program.push(Stmt::Assign {
             target: AssignTarget::Ident(field.name.clone(), Span::ZERO),
             type_: Some(field.type_expr.clone()),
@@ -1725,6 +1779,7 @@ mod tests {
                 name: component_name.into(),
                 loc: Loc::new(1, 1),
                 state: fields,
+                derived: Vec::new(),
                 events: Vec::new(),
                 template: None,
                 style: None,
@@ -1739,6 +1794,53 @@ mod tests {
             default,
             loc: Loc::new(1, 1),
         }
+    }
+
+    // ---- Phase 11.10 slice 4: derived values ------------------------------
+
+    #[test]
+    fn derived_reading_state_and_earlier_derived_checks_clean() {
+        let src = r#"component G {
+  state { first: Str = "Ada"
+          last: Str = "L" }
+  derived { full: Str = "{first} {last}"
+            greeting: Str = "Hi {full}" }
+  <template><p>{full}</p><p>{greeting}</p></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.is_empty(),
+            "valid derived + refs should check clean: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn derived_referencing_unknown_var_is_reported() {
+        let src = r#"component G {
+  state { first: Str = "Ada" }
+  derived { full: Str = "{first} {nope}" }
+  <template><p>{full}</p></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter().any(|e| e.context.contains("derived block")),
+            "an unknown var in a derived is reported at the derived block: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn derived_type_mismatch_is_reported() {
+        // `count` declared Int but the expr is a Str literal.
+        let src = r#"component G {
+  state { name: Str = "Ada" }
+  derived { count: Int = name }
+  <template><p>{count}</p></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            !errs.is_empty(),
+            "a derived whose expr doesn't match its declared type must error"
+        );
     }
 
     // ---- Mini-commit 1: state field defaults ------------------------------
@@ -2276,6 +2378,7 @@ component B {
                     TypeExpr::Named("Float".into()),
                     Expr::Float(0.5, Span::ZERO),
                 )],
+                derived: Vec::new(),
                 events: Vec::new(),
                 template: Some(crate::view::expand::ExpandedTemplate {
                     roots: vec![crate::view::expand::ExpandedTemplateNode::Interpolation {
@@ -2810,6 +2913,7 @@ component B {
                     TypeExpr::Nullable(Box::new(TypeExpr::Named("Bool".into()))),
                     Expr::Null(Span::ZERO),
                 )],
+                derived: Vec::new(),
                 events: Vec::new(),
                 template: Some(crate::view::expand::ExpandedTemplate {
                     roots: vec![crate::view::expand::ExpandedTemplateNode::If {

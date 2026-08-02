@@ -381,6 +381,16 @@ fn emit_component_ssr_into(
     imported_names: &[&str],
     out: &mut String,
 ) -> SsrEmitResult<()> {
+    // Phase 11.10 slice 4 — `derived` blocks are a client-WASM capability so
+    // far; the SSR emitter doesn't lower them yet.
+    if !component.derived.is_empty() {
+        return Err(SsrEmitError {
+            message: "`derived { ... }` blocks are supported on the client-WASM target \
+                      (`fitz build --target wasm-client`); SSR support is a later slice"
+                .to_string(),
+            context: format!("component `{}`", component.name),
+        });
+    }
     emit_state_type(component, out)?;
     emit_render_fn(component, siblings, imported_names, out)?;
     for event in &component.events {

@@ -10084,20 +10084,52 @@ re-render**. Esta iteración ataca los cuatro saltos que faltan para que un
 `.fitzv` sea una app fullstack de primera clase. Orden por costo/beneficio,
 no por dependencia estricta.
 
-- 🔜 **11.10 — Reactividad fine-grained.** Reemplaza el naive re-render
-  (parent muta → re-renderiza todo su subtree) por un grafo reactivo con
-  **subscripciones locales**: al mutar un campo de `state`, solo se
-  recomputan los nodos del template que *leen* ese campo. Sin API nueva en
-  el caso base — el dev sigue escribiendo `{count}` pelado y el compilador
-  cablea la subscripción automática al bajar el `.fitzv` a WASM. Suma
-  **derivados** (`memo` — valor calculado que se recomputa solo cuando
-  cambia una dependencia) y **derivados async** (se re-disparan cuando
-  cambian sus deps). Cierra el límite conocido de 11.7.a/R1 ("el child se
-  recrea en cada re-render → pierde state local"): con subscripciones, el
-  child sobrevive porque se subscribe a lo que lee. Es el estándar moderno
-  de reactividad frontend. Toca `src/view/codegen_wasm.rs` (runtime
-  emitido: celdas reactivas + grafo de subscripción en lugar del
-  re-render top-down).
+- 🟡 **11.10 — Reactividad: keep-node + regiones + loading + derivados
+  (MVP CERRADO por slices; fine-grained/async como iteración futura).**
+  Reemplaza el naive re-render (parent muta → re-renderiza todo su subtree,
+  re-montando un `<input>` vivo y perdiendo el caret) por **keep-node
+  reconciliation**: build-once + patch-in-place. Cerrado en 4 slices, cada
+  uno verificado en Chrome real + con byte-compat de los smokes que no usan
+  la feature. Toca `src/view/codegen_wasm.rs` (+ `check.rs`/`expand.rs`/
+  `parser.rs`/`lexer.rs`/`ast.rs`/`codegen_ssr.rs` para el slice 4).
+  - ✅ **Slice 1 — keep-node (caret).** Un componente value-input
+    (`@input`/`@change`) sobre template estático deja de reconstruir el
+    DOM: `render()` construye una vez (`__build`) guardando un handle por
+    punto dinámico, y luego despacha a `__patch` que actualiza sólo esos
+    nodos (`set_data`/`set_attribute`). El `<input>` nunca se re-crea → el
+    caret sobrevive. Gated a value-input + estructura estática + no
+    burbujeante; el resto queda naive byte-idéntico. Ejemplo `live-input`
+    (verificado: caret tras `He` + `XY` → `HeXYllo`).
+  - ✅ **Slice 2 — loading mid-flight en `@rpc` async.** Un handler async
+    que escribe state antes de un `.await` emite un `render()` justo antes
+    de suspender, así un `loading = true` se pinta durante el request.
+    Handlers sin escritura antes del await quedan byte-idénticos. Ejemplo
+    `rpc` con `{#if loading}` (verificado: `Loading…` en vuelo con `/__rpc`
+    demorado).
+  - ✅ **Slice 3 — `{#if}`/`{#for}` como regiones ancladas.** Bajo
+    keep-node, cada `{#if}`/`{#for}` es una región entre dos comment
+    anchors, reconstruida entera en `__patch` vía `DocumentFragment`,
+    mientras el `<input>` y los puntos estáticos se parchean in-place.
+    Cierra el gap estático-only del slice 1 (search/filter-as-you-type).
+    Gated a value-input sin composición (`<slot>`/`<Child>`). Ejemplo
+    `search-filter` (verificado: caret `chXYerry` + lista rebuild).
+    **Límite:** los nodos *dentro* de una región se re-crean (sin
+    reconciliación keyed / state per-item).
+  - ✅ **Slice 4 — `derived { name: T = expr }`.** Bloque hermano de
+    `state`: valores read-only computados del state (+ otros derivados,
+    en orden de declaración), referenciados como `{full}`, recalculados
+    cada render/patch (celda `RefCell` cacheada + `__recompute_derived()`).
+    Lexer/parser/expand/checker/emit del `.fitzv`. WASM-only (SSR rechaza
+    con puntero). Ejemplo `derived` (verificado: derivado + derivado-de-
+    derivado, caret preservado). **Alcance:** tipos primitivos, read-only,
+    recompute-cada-render.
+  - 🔜 **Iteración futura (fine-grained real).** Grafo de subscripción
+    lectura→nodo (recomputar SOLO los nodos que leen el campo mutado),
+    **derivados async** (se re-disparan cuando cambian sus deps), keyed
+    reconciliation dentro de regiones (state/caret per-item), derivados de
+    tipo compuesto, y `derived` en el target SSR. Es el estándar SolidJS
+    completo; queda para cuando aparezca la demanda de perf real (el
+    modelo coarse cubre el 90% del caso hoy).
 
 - ✅ **11.11 — Funciones de servidor (`@rpc`) (CERRADA, v0.30.0, 2026-08-02).**
   Decorator sobre `async fn` (en `.fitz` classic) que la vuelve **invocable
@@ -10178,9 +10210,9 @@ no por dependencia estricta.
   técnicamente (requiere un runtime del template en el cliente que acepte
   diffs).
 
-**Orden sugerido:** 11.11 (server fns — piezas listas) → 11.10 (señales —
-desbloquea child state) → 11.12 (hidratación — unifica backends) → 11.13
-(hot reload — DX). Cada una es una sesión seria.
+**Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
+MVP por slices ✅) → **11.12 (hidratación — unifica backends, próximo)** →
+11.13 (hot reload — DX). Cada una es una sesión seria.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

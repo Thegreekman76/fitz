@@ -12,20 +12,29 @@ component App {
     who: Str = "world"
     message: Str = "(click to fetch)"
     user_name: Str = "(none)"
+    loading: Bool = false
   }
 
+  // Phase 11.10 slice 2 — a "loading" state set BEFORE the `.await` is
+  // painted while the request is in flight: the async worker flushes a
+  // render right before it suspends, then renders again when it resumes.
   event load_greeting() {
+    loading = true
     let m = greet(who).await?
     message = m
+    loading = false
   }
 
   event load_user() {
+    loading = true
     let u = get_user(42).await?
     user_name = u.name
+    loading = false
   }
 
   <template>
     <div class="rpc-demo">
+      {#if loading}<p class="status">Loading…</p>{/if}
       <p>{message}</p>
       <p>User: {user_name}</p>
       <button @click="load_greeting">Greet</button>

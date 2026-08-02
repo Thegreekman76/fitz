@@ -14955,16 +14955,67 @@ component LiveInput {
   `@event` a `data-flv-<event>` — así el MISMO `.fitzv` sirve a los
   dos targets.
 
-> **Caveat (naive re-render).** Un cambio de state reconstruye el
-> DOM entero del componente (el modelo actual es dirty-flag + naive
-> re-render). Para un `<select> @change` esto es invisible; para un
-> `<input> @input` en vivo, cada tecla re-monta el campo — el valor
-> se re-bindea con `value="{name}"`, pero el caret salta al final.
-> La reactividad fine-grained (patch in-place) es la próxima
-> iteración del ROADMAP; la capacidad de CW.9 es el valor llegando
-> al handler de forma confiable.
+> **El caret vive (keep-node, Fase 11.10).** Un componente con un
+> control de formulario vivo (`@input`/`@change`) sobre un template
+> estático **construye el DOM una vez y parchea in-place** en cada
+> cambio de state: sólo se actualizan los nodos de interpolación
+> (`set_data` en un text node, `set_attribute` en un elemento). El
+> `<input>` nunca se re-crea, así el caret se queda donde lo pusiste
+> mientras tipeás — verificado en Chrome (caret tras `He`, tipear
+> `XY` da `HeXYllo`, no `HeXlloY`). El modelo keep-node es opt-in
+> automático (gated a value-input); todo otro componente conserva el
+> naive re-render byte-idéntico.
 
 Ejemplo runnable: `examples/view/live-input/`.
+
+### Reactividad (Fase 11.10)
+
+Sobre el modelo keep-node del `<input>` vivo, tres capacidades más:
+
+**`{#if}`/`{#for}` con inputs vivos** — un componente value-input que
+además tiene control-flow (`{#if}`/`{#for}`) sigue en keep-node: cada
+`{#if}`/`{#for}` es una **región anclada** (dos comment anchors) que se
+reconstruye entera en cada cambio, mientras el `<input>` (fuera de la
+región) se parchea in-place. Destraba el caso **search/filter as you
+type**: tipeás en el input, la lista filtra, y el caret no salta. Los
+nodos *dentro* de una región se re-crean (sin identidad per-item);
+el caret se preserva para el `<input>` que vive *fuera* de las regiones.
+Ejemplo: `examples/view/search-filter/`.
+
+**Loading a mitad de un `@rpc`** — un handler async que escribe state
+**antes** de un `.await` (típico `loading = true`) pinta ese estado
+mientras el request está en vuelo: el compilador emite un render justo
+antes de suspender. Un handler sin escritura antes del await (el patrón
+fetch-then-assign) queda byte-idéntico. Ejemplo: `examples/view/rpc/`
+usa `{#if loading}Loading…{/if}`.
+
+**`derived { ... }`** — valores read-only computados del state (y de
+otros derivados), referenciados como `{full}`:
+
+```fitzv
+component Greeter {
+  state {
+    first: Str = "Ada"
+    last: Str = "Lovelace"
+  }
+  derived {
+    full: Str = "{first} {last}"       // lee state
+    greeting: Str = "Hello, {full}!"   // derivado-de-derivado
+  }
+  <template>
+    <input @input="on_first" value="{first}" />
+    <p>{greeting}</p>
+  </template>
+}
+```
+
+Bloque hermano de `state`, mismo shape `name: T = expr`. Los derivados
+se computan en orden de declaración (uno puede leer otro anterior) y se
+recalculan en cada render/patch. Alcance de este slice: tipos primitivos
+(`Str`/`Int`/`Float`/`Bool`), read-only, recomputados-cada-render (no
+"solo-cuando-cambia-la-dep"), target WASM. La reactividad fine-grained
+real y los derivados async quedan como iteración futura. Ejemplo:
+`examples/view/derived/`.
 
 ### Estilos scoped
 

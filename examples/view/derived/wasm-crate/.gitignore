@@ -1,0 +1,12 @@
+# wasm-pack output — regenerated on every build, do not commit.
+/pkg/
+
+# Cargo build cache.
+/target/
+
+# Cargo lockfile for the demo crate. Kept out of the repo because
+# the top-level `fitz/Cargo.lock` is the canonical source of truth
+# for reproducibility across the workspace, and this crate is
+# treated as a POC scaffold that anyone should be able to blow
+# away + rebuild.
+/Cargo.lock

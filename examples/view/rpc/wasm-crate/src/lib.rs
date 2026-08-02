@@ -95,6 +95,7 @@ pub struct App {
     who: RefCell<String>,
     message: RefCell<String>,
     user_name: RefCell<String>,
+    loading: RefCell<bool>,
     root: RefCell<Option<HtmlElement>>,
 }
 
@@ -104,6 +105,7 @@ impl App {
             who: RefCell::new("world".to_string()),
             message: RefCell::new("(click to fetch)".to_string()),
             user_name: RefCell::new("(none)".to_string()),
+            loading: RefCell::new(false),
             root: RefCell::new(None),
         })
     }
@@ -118,9 +120,14 @@ impl App {
     }
 
     async fn __load_greeting_async(self: Rc<Self>) -> Result<(), String> {
+        let __rhs = true;
+        *self.loading.borrow_mut() = __rhs;
+        self.render();
         let m = greet((*self.who.borrow()).clone()).await?;
         let __rhs = m;
         *self.message.borrow_mut() = __rhs;
+        let __rhs = false;
+        *self.loading.borrow_mut() = __rhs;
         self.render();
         Ok(())
     }
@@ -135,9 +142,14 @@ impl App {
     }
 
     async fn __load_user_async(self: Rc<Self>) -> Result<(), String> {
+        let __rhs = true;
+        *self.loading.borrow_mut() = __rhs;
+        self.render();
         let u = get_user(42i64).await?;
         let __rhs = u.name.clone();
         *self.user_name.borrow_mut() = __rhs;
+        let __rhs = false;
+        *self.loading.borrow_mut() = __rhs;
         self.render();
         Ok(())
     }
@@ -170,42 +182,49 @@ impl App {
         let document = web_sys::window().unwrap().document().unwrap();
         let __el0 = document.create_element("div").unwrap();
         __el0.set_attribute("class", "rpc-demo rpc-demo-app-c-9862dd7d").unwrap();
+        if (*self.loading.borrow()) {
         let __el1 = document.create_element("p").unwrap();
-        let __interp2 = format!("{}", (*self.message.borrow()));
-        let __t3 = document.create_text_node(&__interp2);
-        __el1.append_child(&__t3).unwrap();
+        __el1.set_attribute("class", "status status-app-c-9862dd7d").unwrap();
+        let __t2 = document.create_text_node("Loading…");
+        __el1.append_child(&__t2).unwrap();
         __el0.append_child(&__el1).unwrap();
-        let __el4 = document.create_element("p").unwrap();
-        let __t5 = document.create_text_node("User: ");
-        __el4.append_child(&__t5).unwrap();
-        let __interp6 = format!("{}", (*self.user_name.borrow()));
-        let __t7 = document.create_text_node(&__interp6);
-        __el4.append_child(&__t7).unwrap();
-        __el0.append_child(&__el4).unwrap();
-        let __el8 = document.create_element("button").unwrap();
+        }
+        let __el3 = document.create_element("p").unwrap();
+        let __interp4 = format!("{}", (*self.message.borrow()));
+        let __t5 = document.create_text_node(&__interp4);
+        __el3.append_child(&__t5).unwrap();
+        __el0.append_child(&__el3).unwrap();
+        let __el6 = document.create_element("p").unwrap();
+        let __t7 = document.create_text_node("User: ");
+        __el6.append_child(&__t7).unwrap();
+        let __interp8 = format!("{}", (*self.user_name.borrow()));
+        let __t9 = document.create_text_node(&__interp8);
+        __el6.append_child(&__t9).unwrap();
+        __el0.append_child(&__el6).unwrap();
+        let __el10 = document.create_element("button").unwrap();
         {
             let __self_clone = self.clone();
             let __closure = Closure::wrap(Box::new(move |_evt: Event| {
                 App::load_greeting(&__self_clone);
             }) as Box<dyn FnMut(Event)>);
-            __el8.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __el10.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
             __closure.forget();
         }
-        let __t9 = document.create_text_node("Greet");
-        __el8.append_child(&__t9).unwrap();
-        __el0.append_child(&__el8).unwrap();
-        let __el10 = document.create_element("button").unwrap();
+        let __t11 = document.create_text_node("Greet");
+        __el10.append_child(&__t11).unwrap();
+        __el0.append_child(&__el10).unwrap();
+        let __el12 = document.create_element("button").unwrap();
         {
             let __self_clone = self.clone();
             let __closure = Closure::wrap(Box::new(move |_evt: Event| {
                 App::load_user(&__self_clone);
             }) as Box<dyn FnMut(Event)>);
-            __el10.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __el12.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
             __closure.forget();
         }
-        let __t11 = document.create_text_node("Load user 42");
-        __el10.append_child(&__t11).unwrap();
-        __el0.append_child(&__el10).unwrap();
+        let __t13 = document.create_text_node("Load user 42");
+        __el12.append_child(&__t13).unwrap();
+        __el0.append_child(&__el12).unwrap();
         root.append_child(&__el0).unwrap();
     }
 }

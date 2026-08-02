@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — derived values (Phase 11.10 slice 4)</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #222; }
+      #app { margin: 24px 0; padding: 16px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+      #app input { padding: 6px 8px; }
+      code { background: #eee; padding: 2px 6px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Fitz derived values — Phase 11.10 slice 4</h1>
+    <p>
+      A <code>Greeter.fitzv</code> with a <code>derived { ... }</code> block:
+      <code>full</code> is computed from the two inputs, and
+      <code>greeting</code> is computed from <code>full</code>
+      (derived-of-derived). Type in either field — the derived text updates,
+      and the input keeps its caret (keep-node).
+    </p>
+    <div id="app"><!-- Greeter mounts here --></div>
+    <script type="module">
+      import init from './wasm-crate/pkg/derived.js';
+      init().catch((err) => {
+        console.error('Failed to load derived WASM:', err);
+        document.getElementById('app').textContent = 'WASM failed to load. Check the DevTools console.';
+      });
+    </script>
+  </body>
+</html>

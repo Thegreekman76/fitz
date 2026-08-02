@@ -77,6 +77,10 @@ pub struct ExpandedComponent {
     pub name: String,
     pub loc: Loc,
     pub state: Vec<ExpandedStateField>,
+    /// Phase 11.10 slice 4 — read-only derived values. Same shape as a state
+    /// field; `default` holds the derived expression (recomputed from state +
+    /// other derived, never stored).
+    pub derived: Vec<ExpandedStateField>,
     pub events: Vec<ExpandedEventHandler>,
     pub template: Option<ExpandedTemplate>,
     /// The component's `<style scoped>` or `<style global>` block
@@ -404,6 +408,13 @@ fn expand_component(c: &RawComponent) -> ExpandResult<ExpandedComponent> {
         .iter()
         .map(|f| expand_state_field(f, &c.name))
         .collect::<ExpandResult<Vec<_>>>()?;
+    // Phase 11.10 slice 4 — derived values reuse the state-field expand (same
+    // `name: T = expr` shape); `default` carries the derived expression.
+    let derived = c
+        .derived
+        .iter()
+        .map(|f| expand_state_field(f, &c.name))
+        .collect::<ExpandResult<Vec<_>>>()?;
     let events = c
         .events
         .iter()
@@ -423,6 +434,7 @@ fn expand_component(c: &RawComponent) -> ExpandResult<ExpandedComponent> {
         name: c.name.clone(),
         loc: c.loc,
         state,
+        derived,
         events,
         template,
         style,

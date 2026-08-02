@@ -1,0 +1,40 @@
+// Phase 11.10 slice 3 — keep-node dynamic regions ({#if}/{#for}).
+//
+// A live `<input>` (@input, caret preserved by slice 1) coexisting with
+// `{#if}`/`{#for}` regions that update as you type. Under keep-node, each
+// `{#if}`/`{#for}` is an anchored region rebuilt wholesale on a state
+// change, while the `<input>` (a static sibling) is patched in place — so
+// the list updates without the search box losing its caret.
+//
+// This closes the slice-1 gate limitation (static structure only): a
+// value-input component with control flow now stays on keep-node instead
+// of falling back to the naive re-render.
+
+component Filter {
+  state {
+    query: Str = ""
+    items: List<Str> = ["apple", "banana", "cherry", "grape", "lemon", "mango"]
+  }
+
+  event on_query() { query = payload["value"] }
+
+  <template>
+    <div class="filter">
+      <h1>Type a fruit to hide it</h1>
+
+      <input @input="on_query" value="{query}" placeholder="type here…" autocomplete="off" />
+
+      {#if query != ""}<p class="hint">Hiding: {query}</p>{/if}
+
+      <ul class="items">
+        {#for it in items}{#if it != query}<li>{it}</li>{/if}{/for}
+      </ul>
+    </div>
+  </template>
+
+  <style scoped>
+    .filter { font-family: system-ui, sans-serif; display: grid; gap: 8px; max-width: 360px; }
+    .hint { color: #b45309; font-size: 0.9em; }
+    .items { margin: 0; padding-left: 1.2em; }
+  </style>
+}

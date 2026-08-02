@@ -1,0 +1,42 @@
+// Phase 11.10 slice 4 — derived values (`derived { name: T = expr }`).
+//
+// A `derived` block declares read-only values computed from state (and from
+// earlier derived). They're referenced like state — `{full}` — and recomputed
+// on every render/patch. Here two live `<input>`s feed a derived `full` name,
+// and a second derived `greeting` builds on `full` (derived-of-derived).
+//
+// Because this is a value-input component over a static template, it runs on
+// keep-node: the inputs are patched in place (caret preserved) while the
+// derived text updates.
+
+component Greeter {
+  state {
+    first: Str = "Ada"
+    last: Str = "Lovelace"
+  }
+
+  // `full` reads state; `greeting` reads the `full` derived declared above it
+  // (derived are computed in declaration order).
+  derived {
+    full: Str = "{first} {last}"
+    greeting: Str = "Hello, {full}!"
+  }
+
+  event on_first() { first = payload["value"] }
+  event on_last() { last = payload["value"] }
+
+  <template>
+    <div class="greeter">
+      <label class="row"><span>First</span><input @input="on_first" value="{first}" autocomplete="off" /></label>
+      <label class="row"><span>Last</span><input @input="on_last" value="{last}" autocomplete="off" /></label>
+      <p class="full">Full name: {full}</p>
+      <p class="greeting">{greeting}</p>
+    </div>
+  </template>
+
+  <style scoped>
+    .greeter { font-family: system-ui, sans-serif; display: grid; gap: 8px; max-width: 360px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .greeting { font-weight: bold; }
+  </style>
+}

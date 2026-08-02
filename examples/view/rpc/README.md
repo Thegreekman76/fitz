@@ -34,6 +34,15 @@ async fn greet(name: Str) -> Result<Str> {
   compiler wraps its body in `spawn_local` so state updates + a
   re-render fire when the reply arrives.
 
+## Loading state — mid-flight render (Phase 11.10)
+
+The handlers set `loading = true` **before** the `.await` and
+`loading = false` after. The async worker flushes a render right before
+it suspends, so `{#if loading}Loading…{/if}` paints while the request is
+in flight, then clears when the reply resolves. A handler with no state
+write before its `.await` (the plain fetch-then-assign pattern) emits
+byte-identically — no extra render is inserted.
+
 ## Run it
 
 ```bash
