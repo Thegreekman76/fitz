@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — SSR → hydration: regions + mixed text</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 3rem auto; padding: 0 1rem; }
+      .demo { display: flex; flex-direction: column; gap: 0.75rem; align-items: flex-start; }
+      .row { display: flex; flex-direction: column; gap: 0.25rem; width: 100%; }
+      input { padding: 0.4rem 0.6rem; font-size: 1rem; width: 100%; box-sizing: border-box; }
+      button { padding: 0.4rem 0.8rem; }
+      .greeting { font-size: 1.4rem; }
+      .hint { color: #b45309; font-size: 0.9em; }
+      .items { margin: 0; padding-left: 1.2em; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Server-painted DOM. In a real deployment a Fitz HTTP server (or a
+      build-time prerender) emits this markup with the current state already
+      interpolated (name = "Ada", NOT the component default "world"), plus the
+      state <script> below. The wasm bundle adopts this DOM on boot.
+
+      Two contract details slice 2 adds on top of slice 1:
+
+        * MIXED text (`Hello, {name}!`) is emitted with comment markers around
+          the dynamic run — `Hello, <!--fi-->Ada<!--/fi-->!` — so the browser
+          keeps three distinct text nodes and the adopt walk maps 1:1.
+
+        * `{#if}` / `{#for}` REGIONS are bounded by tagged comment anchors,
+          `<!--fr-->` … <content> … `<!--/fr-->`. The client adopts the anchors
+          and leaves the content in place; a later state change rebuilds only
+          between the anchors.
+
+      The runs are kept tight (no whitespace between an element's open tag and
+      its first significant text) so the adopt cursor lines up.
+    -->
+    <div id="app">
+      <div class="demo">
+        <h1>SSR → hydration: regions + mixed text</h1>
+
+        <p class="greeting">Hello, <!--fi-->Ada<!--/fi-->!</p>
+
+        <label class="row">
+          <span>Type a name to hide the matching item</span>
+          <input value="Ada" placeholder="type here" autocomplete="off" />
+        </label>
+
+        <!--fr--><p class="hint">Hiding items equal to: Ada</p><!--/fr-->
+
+        <ul class="items"><!--fr--><li>alpha</li><li>beta</li><li>gamma</li><!--/fr--></ul>
+
+        <button>reset</button>
+      </div>
+    </div>
+
+    <!-- Serialized initial state — read by App::hydrate() at boot. Only
+         primitive fields restore (name); `items` is kept for realism but the
+         client keeps its List default (documented restore limitation). -->
+    <script type="application/json" id="__flv_state_App">{"name":"Ada","items":["alpha","beta","gamma"]}</script>
+
+    <script type="module">
+      // Tag two STABLE adopted elements BEFORE hydration. If the wasm adopts
+      // the server-painted DOM (rather than recreating it), these JS
+      // properties survive — the proof that hydration reused the nodes. Both
+      // are outside the rebuilt region content, so they persist across patches.
+      const greeting = document.querySelector('#app .greeting');
+      if (greeting) greeting.__hydrationWitness = 'server-greeting';
+      const list = document.querySelector('#app .items');
+      if (list) list.__hydrationWitness = 'server-list';
+
+      import init from './wasm-crate/pkg/hydrate_regions.js';
+      await init();
+
+      // For manual / automated inspection.
+      window.__flvHydrated = true;
+    </script>
+  </body>
+</html>

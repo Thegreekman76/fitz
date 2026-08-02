@@ -10195,7 +10195,7 @@ no por dependencia estricta.
     apilable `@authenticated`/`@admin` sobre el endpoint generado = refinamiento
     post-MVP.)
 
-- 🚧 **11.12 — Hidratación SSR → client** (slice 1 ✅ 2026-08-02, resto 🔜).
+- 🚧 **11.12 — Hidratación SSR → client** (slices 1+2 ✅ 2026-08-02, resto 🔜).
   Un mismo `.fitzv` rinde **SSR** (first paint, SEO, funciona sin JS) y el
   runtime client-WASM **toma control del DOM existente** en vez de
   re-crearlo: restaura el estado que el server serializó (state inicial +
@@ -10256,6 +10256,51 @@ no por dependencia estricta.
     markers, y un render-a-string isomórfico real del lado SSR para producir
     el HTML del server (hoy el contrato se valida con HTML hand-authored,
     como el plan del slice previó).
+
+  - ✅ **11.12 slice 2 — hidratación de regiones `{#if}`/`{#for}` +
+    texto mixto** (2026-08-02). Levanta las dos restricciones del slice 1.
+    **(a) Regiones:** un componente keep-node CON regiones ahora es
+    hidratable. El server pinta el contenido de cada región acotado por
+    comment anchors **tageados** (`<!--fr-->` … `<!--/fr-->`); en boot el
+    client-WASM adopta esos anchors en los mismos handles
+    `__astart_<r>`/`__aend_<r>` que declara el build walk y **deja el
+    contenido en su lugar** — sin wipe. Un cambio de state posterior parchea
+    solo la región (rebuild entre los anchors adoptados vía
+    `__patch_region_<r>`), así el `<input>` vivo afuera conserva el caret.
+    Helper nuevo `__flv_next_comment` adopta los anchors por data del
+    comentario (`text_content()` + `COMMENT_NODE`, sin feature `Comment`),
+    salteando el contenido de la región y sus markers de interpolación.
+    **(b) Texto mixto** (`Hello, {name}!`): el server separa las corridas con
+    markers de comentario (`<!--fi-->` … `<!--/fi-->`) para que el browser
+    pinte text nodes distintos; el adopt walk skip-based los saltea y mapea
+    1:1 — sin wrapper sole-child. **Diseño:** el build walk queda
+    byte-idéntico (comments vacíos, text nodes planos); solo el adopt walk
+    lee el contrato de comments tageados del server; la separación build/adopt
+    es limpia (fresh mount nunca adopta). **Gate:** `component_is_hydratable`
+    ya no excluye regiones (sigue excluyendo composición). El helper de
+    región se emite solo cuando algún componente hidratable tiene regiones, así
+    los crates region-free quedan byte-idénticos. **Verificado end-to-end en
+    Chrome real** (puppeteer-core): state restore + adopción (witnesses JS
+    sobreviven en `.greeting` y `.items`) + regiones adoptadas
+    (`{#if}` + `{#for}`) + patch en vivo del texto mixto + rebuild de las
+    regiones al tipear (esconde el item que matchea) + reset; cero page
+    errors. El crate compiló a `.wasm` real (`wasm-pack` → `:-) Done`).
+    **Tests:** +2 unit en `codegen_wasm` (`phase_11_12_regions_are_hydratable`
+    reemplaza al viejo `..._keep_fresh_mount_only`; `phase_11_12_mixed_text_
+    adopts_static_runs_and_the_interp_node`; el predicate suma un caso de
+    región) + ejemplo runnable `examples/view/hydrate-regions/` (`App.fitzv`
+    con `{#if}` + `{#for}` + texto mixto + `index.html` con DOM server-pintado
+    y markers) + smoke `tests/view_hydrate_regions_wasm_smoke.rs`.
+    **Byte-compat:** de los 20+ view smokes solo `search-filter` (value-input
+    con regiones → ahora hidratable) cambia su lib.rs + Cargo.toml (gana
+    `hydrate()` + `serde_json`); los region-free `derived`/`hydrate`/
+    `live-input` regeneran byte-idéntico. Suite: **3954 lib** + fmt + clippy
+    `-D warnings` limpios + 20+ view smokes. **Sin sintaxis nueva, sin cambio
+    de gramática/LSP** — extensión VSCode sigue 0.27.0. Bump 0.30.1 → 0.30.2.
+    **Restante de 11.12:** composición `<Child />` en hidratación; texto mixto
+    con corrida dinámica vacía (`name = ""` fusiona en el server); solo state
+    primitivo se restaura del payload; y el render-a-string isomórfico real del
+    lado SSR (hoy el contrato se valida con HTML hand-authored).
 
 - 🔜 **11.13 — Hot reload del template.** `fitz dev` re-parsea el
   `<template>` de un `.fitzv` y aplica el diff sin recompilar el crate WASM

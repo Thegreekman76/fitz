@@ -9,6 +9,56 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.30.2] — 2026-08-02 — Phase 11.12 slice 2: hydrate `{#if}`/`{#for}` regions + mixed text
+
+### Added — hydration now adopts control-flow regions and mixed static/interpolated text
+
+Slice 1 hydrated a **region-free** keep-node component whose interpolations
+were each the **sole child** of their element. Slice 2 lifts both restrictions,
+so the hydration surface covers the common template shapes:
+
+- **`{#if}` / `{#for}` regions.** A keep-node component with regions is now
+  hydratable. The server paints each region's content bounded by tagged comment
+  anchors (`<!--fr-->` … `<!--/fr-->`); on boot the client-WASM adopts those
+  anchors into the same keep-node region handles (`__astart_<r>` / `__aend_<r>`)
+  the build walk declares and **leaves the content in place** — no wipe, no
+  rebuild. A later state change patches only the region (rebuild between the
+  adopted anchors, `__patch_region_<r>`), so the live `<input>` outside it keeps
+  its caret. A new `__flv_next_comment` cursor helper adopts the anchors by
+  comment data, stepping over the region content (and any interpolation markers
+  inside it).
+
+- **Mixed static + interpolated text** (`Hello, {name}!`). The server separates
+  the runs with comment markers (`<!--fi-->` … `<!--/fi-->`) so the browser
+  paints distinct text nodes; the skip-based adopt walk steps over the markers
+  and maps 1:1 — no sole-child wrapper needed.
+
+There is still no isomorphic SSR string renderer, so the marker contract is
+validated with hand-authored HTML (as the slice plan intended). Verified
+end-to-end in real Chrome (puppeteer): state restore, DOM adoption (JS-property
+witnesses survive), region adoption, live mixed-text patch, region rebuild on
+change, and reset — zero page errors. The wasm crate compiled with `wasm-pack`.
+
+**Byte-compat:** of the 20+ view smokes only `search-filter` changes (a
+value-input component with regions — now hydratable, so it gains the `hydrate()`
+surface + the `serde_json` dep); region-free hydratable crates
+(`derived` / `hydrate` / `live-input`) regenerate byte-identical (the
+region-anchor helper is gated so they carry no unused function). New example
+`examples/view/hydrate-regions/` (regions + mixed text over hand-authored server
+HTML) + smoke `tests/view_hydrate_regions_wasm_smoke.rs`. No syntax / grammar /
+LSP change — the VSCode extension stays at 0.27.0 (bump deferred to the 11.12
+close). Bump 0.30.1 → 0.30.2.
+
+### Remaining slice limitations
+
+- Only **keep-node** components hydrate; composition (`<slot>` / `<Child />`) is
+  a later slice.
+- Only **primitive** state fields restore from the `<script>` payload; a
+  `List`/`Map`/nominal keeps its default.
+- An **empty** dynamic run in mixed text (`Hi, {name}!` with `name = ""`) merges
+  with its neighbours at the server and is not robustly separated — keep dynamic
+  runs non-empty, or wait for the isomorphic renderer that will emit the split.
+
 ## [v0.30.1] — 2026-08-02 — Phase 11.12 slice 1: SSR → client hydration (adopt the DOM)
 
 ### Added — the client-WASM runtime adopts the server-painted DOM instead of re-creating it

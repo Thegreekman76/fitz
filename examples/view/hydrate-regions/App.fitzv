@@ -1,0 +1,52 @@
+// Phase 11.12 slice 2 — SSR → client hydration with regions + mixed text.
+//
+// Extends the slice-1 `hydrate` example with the two shapes slice 1 could not
+// adopt:
+//
+//   * MIXED static + interpolated text — `Hello, {name}!` (slice 1 required a
+//     sole-child wrapper: `Hello, <span>{name}</span>`). The server separates
+//     the runs with comment markers (`<!--fi-->` … `<!--/fi-->`) so the browser
+//     paints distinct text nodes; the skip-based adopt walk steps over the
+//     markers and maps 1:1.
+//
+//   * `{#if}` / `{#for}` REGIONS. The server paints each region's content
+//     bounded by tagged comment anchors (`<!--fr-->` … `<!--/fr-->`). On boot
+//     the client-WASM adopts those anchors into the keep-node region handles
+//     (`__astart_<r>` / `__aend_<r>`) and LEAVES the content in place — no wipe.
+//     From there a state change patches only the region (rebuild between the
+//     adopted anchors), so the live `<input>` outside it keeps its caret.
+//
+// This is a hydratable component because it is keep-node (a live `@input` over
+// a template with no `<slot>` / `<Child />`); slice 2 lifted the region
+// restriction, so `{#if}` / `{#for}` no longer disqualify it.
+
+component App {
+  state {
+    name: Str = "world"
+    items: List<Str> = ["alpha", "beta", "gamma"]
+  }
+
+  event on_name() { name = payload["value"] }
+  event reset() { name = "world" }
+
+  <template>
+    <div class="demo">
+      <h1>SSR → hydration: regions + mixed text</h1>
+
+      <p class="greeting">Hello, {name}!</p>
+
+      <label class="row">
+        <span>Type a name to hide the matching item</span>
+        <input @input="on_name" value="{name}" placeholder="type here" autocomplete="off" />
+      </label>
+
+      {#if name != ""}<p class="hint">Hiding items equal to: {name}</p>{/if}
+
+      <ul class="items">
+        {#for it in items}{#if it != name}<li>{it}</li>{/if}{/for}
+      </ul>
+
+      <button @click="reset">reset</button>
+    </div>
+  </template>
+}

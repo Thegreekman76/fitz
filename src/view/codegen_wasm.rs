@@ -515,9 +515,15 @@ pub fn emit_module_with_components(
     let merged = merge_imported_components(file, components);
     let bubbled = collect_bubbled_events(&merged);
     // Phase 11.12 — cursor helpers for the hydration adopt walk, emitted once
-    // when any component is hydratable (byte-identical output otherwise).
+    // when any component is hydratable (byte-identical output otherwise). The
+    // region-anchor comment cursor is only pulled in when a hydratable
+    // component actually has `{#if}`/`{#for}` regions (slice 2), so region-free
+    // hydratable crates carry no unused helper.
     if any_component_hydratable(&merged, &bubbled) {
-        emit_hydration_helpers(&mut out);
+        emit_hydration_helpers(
+            &mut out,
+            any_component_hydratable_with_regions(&merged, &bubbled),
+        );
     }
     for component in &merged.components {
         emit_component_impl(component, &merged, nominals, &bubbled, &mut out)?;
@@ -1165,10 +1171,12 @@ fn component_uses_keep_regions(component: &ExpandedComponent) -> bool {
 
 /// Phase 11.12 — `true` when a component can be HYDRATED: it takes the
 /// keep-node path (so it carries `__ktext_<n>` / `__kattr_<n>` handles + a
-/// `__build`/`__patch` model) AND has no `{#if}`/`{#for}` regions. The adopt
-/// walk populates those handles from the server-painted DOM; regions (comment
-/// anchors + fragment rebuild) are deferred to a later slice, so a keep-node
-/// component with regions keeps its fresh-mount-only behaviour.
+/// `__build`/`__patch` model). The adopt walk populates those handles from the
+/// server-painted DOM. Slice 2 also adopts `{#if}`/`{#for}` regions — their
+/// server anchors (`<!--fr-->` / `<!--/fr-->`) are acquired into the
+/// `__astart_<r>` / `__aend_<r>` handles and the content is left in place — so
+/// regions no longer disqualify a component. Composition (`<slot>` /
+/// `<Child />`) is still excluded by the keep-node gate.
 ///
 /// `this_bubbled` must be the component's real bubbled-event set (empty for a
 /// root component — nothing composes it).
@@ -1176,7 +1184,11 @@ pub fn component_is_hydratable(
     component: &ExpandedComponent,
     this_bubbled: &std::collections::BTreeSet<String>,
 ) -> bool {
-    use_keep_node_reconciliation(component, this_bubbled) && !component_uses_keep_regions(component)
+    // Phase 11.12 slice 2 — `{#if}`/`{#for}` regions are now adopted too (their
+    // server-painted anchors are acquired; the content is left in place). So any
+    // keep-node component is hydratable; composition (`<slot>`/`<Child />`) is
+    // still excluded by the keep-node gate itself.
+    use_keep_node_reconciliation(component, this_bubbled)
 }
 
 /// Phase 11.12 — `true` when any component in `file` will emit a `hydrate()`
@@ -1193,6 +1205,21 @@ fn any_component_hydratable(
     })
 }
 
+/// Phase 11.12 slice 2 — `true` when some hydratable component in `file` has a
+/// `{#if}`/`{#for}` region, so its adopt walk calls `__flv_next_comment`. Gates
+/// the region-anchor cursor helper so a region-free hydratable crate carries no
+/// unused function.
+fn any_component_hydratable_with_regions(
+    file: &ExpandedViewFile,
+    bubbled: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> bool {
+    let empty = std::collections::BTreeSet::new();
+    file.components.iter().any(|c| {
+        let tb = bubbled.get(&c.name).unwrap_or(&empty);
+        component_is_hydratable(c, tb) && component_uses_keep_regions(c)
+    })
+}
+
 /// Phase 11.12 — `true` when a `.fitzv` file compiles any hydratable
 /// component, so its wasm crate needs the `serde_json` dep (state restore).
 /// Used by `wasm_build::write_wasm_crate_scaffold` to gate the Cargo.toml dep.
@@ -1206,7 +1233,10 @@ pub fn file_uses_hydration(file: &ExpandedViewFile) -> bool {
 /// stay byte-identical). Each advances a sibling cursor to the next element /
 /// text node, skipping whitespace/comment nodes, so the adopt walk lines up
 /// with the build DFS regardless of insignificant server-side whitespace.
-fn emit_hydration_helpers(out: &mut String) {
+/// Slice 2 adds `__flv_next_comment`, which advances to a tagged comment (a
+/// `{#if}`/`{#for}` region anchor); it is only emitted when `with_regions`, so
+/// a region-free hydratable crate carries no unused helper.
+fn emit_hydration_helpers(out: &mut String, with_regions: bool) {
     out.push_str(
         "// Phase 11.12 — hydration cursor helpers. Advance a sibling cursor to\n\
          // the next element / text node so the adopt walk maps template nodes\n\
@@ -1228,8 +1258,30 @@ fn emit_hydration_helpers(out: &mut String) {
          \x20       }\n\
          \x20   }\n\
          \x20   None\n\
-         }\n\n",
+         }\n",
     );
+    if with_regions {
+        out.push_str(
+            "// Phase 11.12 slice 2 — advance the cursor to the next comment node\n\
+             // whose text matches `__data`, skipping everything else (elements,\n\
+             // text, and comments with other tags). Used to adopt a `{#if}`/`{#for}`\n\
+             // region's server-painted anchors (`<!--fr-->` / `<!--/fr-->`) while\n\
+             // stepping over the region content and any interpolation markers it\n\
+             // contains. `text_content()` reads the comment data without needing the\n\
+             // `web_sys::Comment` feature.\n\
+             fn __flv_next_comment(__cursor: &mut Option<web_sys::Node>, __data: &str) -> Option<web_sys::Node> {\n\
+             \x20   while let Some(__n) = __cursor.clone() {\n\
+             \x20       *__cursor = __n.next_sibling();\n\
+             \x20       if __n.node_type() == web_sys::Node::COMMENT_NODE\n\
+             \x20           && __n.text_content().as_deref() == Some(__data) {\n\
+             \x20           return Some(__n);\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   None\n\
+             }\n",
+        );
+    }
+    out.push('\n');
 }
 
 /// Phase 11.12 — map a primitive state field's Rust type to the
@@ -1377,34 +1429,33 @@ fn emit_component_keepnode(
         // ctx accumulated no slot_methods and no child-cache sites.
     }
 
-    // Phase 11.12 — a region-free keep-node component is HYDRATABLE. Run the
-    // walk a second time in adopt mode to produce the `hydrate()` body: it
-    // acquires each node from the server-painted DOM into the same
-    // `__ktext_<n>` / `__kattr_<n>` handles the build walk declared (the walk
-    // is structurally identical, so `keep_index()` yields the same indices).
-    // A component with `{#if}`/`{#for}` regions keeps fresh-mount-only
-    // behaviour (region adoption is a later slice).
-    let hydratable = region_methods.is_empty();
+    // Phase 11.12 — every keep-node component is HYDRATABLE (slice 2 lifted the
+    // region restriction). Run the walk a second time in adopt mode to produce
+    // the `hydrate()` body: it acquires each node from the server-painted DOM
+    // into the same `__ktext_<n>` / `__kattr_<n>` handles the build walk
+    // declared, and adopts each `{#if}`/`{#for}` region's server anchors into
+    // the same `__astart_<r>` / `__aend_<r>` handles. The walk is structurally
+    // identical, so `keep_index()` / `keep_region_index()` yield the same
+    // indices; the region's `__mount_region` / `__patch_region` methods (built
+    // by the first walk) still drive later state changes.
     let mut hydrate_body = String::new();
-    if hydratable {
-        if let Some(template) = &component.template {
-            let mut hctx = RenderCtx::new(
-                name,
-                &state_names,
-                &component.state,
-                file,
-                nominals,
-                &component.events,
-                this_bubbled,
-            );
-            hctx.keep = Some(KeepAccum::default());
-            hctx.hydrate = true;
-            for root_node in &template.roots {
-                emit_template_node(root_node, "__cur_root", &mut hctx, &mut hydrate_body)?;
-            }
-            // The adopt accum is discarded — the build walk already collected
-            // the handle fields + patch statements.
+    if let Some(template) = &component.template {
+        let mut hctx = RenderCtx::new(
+            name,
+            &state_names,
+            &component.state,
+            file,
+            nominals,
+            &component.events,
+            this_bubbled,
+        );
+        hctx.keep = Some(KeepAccum::default());
+        hctx.hydrate = true;
+        for root_node in &template.roots {
+            emit_template_node(root_node, "__cur_root", &mut hctx, &mut hydrate_body)?;
         }
+        // The adopt accum is discarded — the build walk already collected the
+        // handle fields + patch statements + region methods.
     }
 
     // 2. struct — state cells + keep-node handle fields + build flag + root.
@@ -1555,13 +1606,12 @@ fn emit_component_keepnode(
 
     // Phase 11.12 — hydration: a `__apply_state_json` + `hydrate()` pair that
     // restores the serialized state and adopts the server-painted DOM instead
-    // of rebuilding it. Only for region-free components; the entry wrapper
-    // calls `hydrate()` when the mount root already has server-painted DOM.
-    if hydratable {
-        writeln!(out).unwrap();
-        emit_apply_state_json(component, nominals, out)?;
-        emit_hydrate_method(component, name, &hydrate_body, out);
-    }
+    // of rebuilding it. Every keep-node component gets it (slice 2 lifted the
+    // region restriction); the entry wrapper calls `hydrate()` when the mount
+    // root already has server-painted DOM.
+    writeln!(out).unwrap();
+    emit_apply_state_json(component, nominals, out)?;
+    emit_hydrate_method(component, name, &hydrate_body, out);
 
     // Phase 11.10 slice 3 — one `__mount_region_<n>` + `__patch_region_<n>`
     // pair per `{#if}`/`{#for}` dynamic region. A component with no regions
@@ -2325,10 +2375,12 @@ struct RenderCtx<'a> {
     /// `create_element`, a text node from `__flv_next_text` rather than
     /// `create_text_node`, and neither is appended. Interpolation/attribute
     /// keep-node handles are still stashed (from the adopted node), and event
-    /// listeners still attach — so a later state change patches in place. In
-    /// this mode `parent_var` holds the NAME of the parent's child cursor
-    /// (`Option<web_sys::Node>`), not the parent element var. `false` for the
-    /// build walk — that path stays byte-identical.
+    /// listeners still attach — so a later state change patches in place. A
+    /// `{#if}`/`{#for}` region (slice 2) adopts its server anchors into the
+    /// same `__astart_<r>` / `__aend_<r>` handles the build walk declared and
+    /// leaves the content in place. In this mode `parent_var` holds the NAME of
+    /// the parent's child cursor (`Option<web_sys::Node>`), not the parent
+    /// element var. `false` for the build walk — that path stays byte-identical.
     hydrate: bool,
 }
 
@@ -2436,9 +2488,9 @@ fn emit_template_node(
 ) -> EmitResult<()> {
     // Phase 11.12 — the hydration adopt walk reuses this dispatch but routes
     // Text/Interpolation/Element to the adopt emitters (acquire the existing
-    // node from the cursor instead of creating it). The hydratable gate
-    // guarantees no regions/composition, so If/For/Slot/Child never appear
-    // here in `ctx.hydrate` mode.
+    // node from the cursor instead of creating it). Slice 2 also adopts
+    // `{#if}`/`{#for}` regions (acquire their server-painted anchors). The
+    // hydratable gate still forbids composition, so Slot/Child never appear.
     if ctx.hydrate {
         return match node {
             ExpandedTemplateNode::Text(text) => {
@@ -2455,9 +2507,14 @@ fn emit_template_node(
                 children,
                 ..
             } => emit_element_adopt(tag, attrs, children, parent_var, ctx, out),
+            ExpandedTemplateNode::If { .. } | ExpandedTemplateNode::For { .. } => {
+                emit_keep_region_adopt(ctx, parent_var, out)
+            }
             _ => Err(EmitError {
-                message: "hydration adopt walk hit a control-flow / composition node \
-                     (Phase 11.12 slice 1 hydrates static templates only)"
+                message: "hydration adopt walk hit a composition node \
+                     (Phase 11.12 hydrates keep-node templates: elements, text, \
+                     interpolation, and `{#if}`/`{#for}` regions — no `<slot>` / \
+                     `<Child />`)"
                     .to_string(),
                 context: format!("component `{}`", ctx.component_name),
             }),
@@ -2785,6 +2842,44 @@ fn emit_keep_region(
     writeln!(m, "    }}\n").unwrap();
 
     ctx.keep.as_mut().unwrap().region_methods.push(m);
+    Ok(())
+}
+
+/// Phase 11.12 slice 2 — hydration adopt of a `{#if}`/`{#for}` **dynamic
+/// region**. The build walk (`emit_keep_region`) creates two comment anchors
+/// and mounts the region content between them; the SERVER paints the same
+/// shape with *tagged* anchors (`<!--fr-->` … `<!--/fr-->`) around the
+/// already-rendered content. This adopt acquires those two anchors into the
+/// same `__astart_<r>` / `__aend_<r>` handles the build walk declared, and
+/// does NOT re-mount — the content is already in the DOM. A later state change
+/// patches it via the `__patch_region_<r>` the build walk emitted (which
+/// clears between the anchors and rebuilds).
+///
+/// The anchors are matched by comment DATA so the scan steps over the region's
+/// server-painted content — including any interpolation markers (`<!--fi-->`)
+/// inside it — landing on the region's own `<!--fr-->` / `<!--/fr-->`. Uses the
+/// same `keep_region_index()` the build walk did, so (visiting regions in the
+/// same DFS order) the field names line up.
+fn emit_keep_region_adopt(
+    ctx: &mut RenderCtx,
+    cursor_var: &str,
+    out: &mut String,
+) -> EmitResult<()> {
+    let r = ctx.keep_region_index();
+    let start_field = format!("__astart_{}", r);
+    let end_field = format!("__aend_{}", r);
+    writeln!(
+        out,
+        "        if let Some(__rs) = __flv_next_comment(&mut {}, \"fr\") {{ *self.{}.borrow_mut() = Some(__rs); }}",
+        cursor_var, start_field
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        if let Some(__re) = __flv_next_comment(&mut {}, \"/fr\") {{ *self.{}.borrow_mut() = Some(__re); }}",
+        cursor_var, end_field
+    )
+    .unwrap();
     Ok(())
 }
 
@@ -7140,9 +7235,12 @@ component Row {
     }
 
     #[test]
-    fn phase_11_12_regions_keep_fresh_mount_only() {
-        // A value-input component WITH a `{#if}` region is keep-node but NOT
-        // hydratable (region adoption is a later slice) → no hydrate method.
+    fn phase_11_12_regions_are_hydratable() {
+        // Phase 11.12 slice 2 — a value-input component WITH a `{#if}` region is
+        // keep-node AND hydratable: it emits a `hydrate()` whose body adopts the
+        // region's server anchors (`<!--fr-->` / `<!--/fr-->`) instead of
+        // rebuilding, while keeping the `__patch_region_0` method for later
+        // state changes.
         let src = r#"component Toggler {
   state {
     name: Str = ""
@@ -7160,8 +7258,36 @@ component Row {
             "still keep-node:\n{out}"
         );
         assert!(
-            !out.contains("fn hydrate("),
-            "regions defer hydration:\n{out}"
+            out.contains("pub fn hydrate("),
+            "regions now hydrate:\n{out}"
+        );
+        assert!(
+            out.contains("fn __patch_region_0(self: &Rc<Self>)"),
+            "region patch method retained:\n{out}"
+        );
+        // The hydrate body adopts the region anchors by tagged comment.
+        let hstart = out.find("pub fn hydrate(").expect("hydrate present");
+        let htail = out[hstart..]
+            .find("*self.__built.borrow_mut() = true;")
+            .expect("hydrate tail present");
+        let hbody = &out[hstart..hstart + htail];
+        assert!(
+            hbody.contains("__flv_next_comment(&mut __cur_root, \"fr\")")
+                && hbody.contains("\"/fr\""),
+            "hydrate adopts region anchors by tagged comment:\n{hbody}"
+        );
+        assert!(
+            hbody.contains("*self.__astart_0.borrow_mut() = Some(__rs);")
+                && hbody.contains("*self.__aend_0.borrow_mut() = Some(__re);"),
+            "hydrate stashes into the same region handle fields:\n{hbody}"
+        );
+        // Adopt only — the region content is server-painted, so `hydrate()`
+        // must not create nodes or mount the region.
+        assert!(
+            !hbody.contains("create_element")
+                && !hbody.contains("create_comment")
+                && !hbody.contains("__mount_region_0()"),
+            "hydrate must adopt, not build the region:\n{hbody}"
         );
     }
 
@@ -7178,6 +7304,65 @@ component Row {
         assert!(
             !component_is_hydratable(&counter, &empty),
             "non-value-input is not hydratable"
+        );
+
+        // Slice 2 — a value-input component with a `{#if}` region IS hydratable.
+        let region_src = r#"component Toggler {
+  state {
+    name: Str = ""
+    on: Bool = false
+  }
+  event on_type() { name = payload["value"] }
+  <template>
+    <input @input="on_type" value="{name}" />
+    {#if on}<p>{name}</p>{/if}
+  </template>
+}"#;
+        let toggler = parse_expand(region_src).components[0].clone();
+        assert!(
+            component_is_hydratable(&toggler, &empty),
+            "value-input with region is hydratable in slice 2"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_mixed_text_adopts_static_runs_and_the_interp_node() {
+        // Phase 11.12 slice 2 — mixed static+interpolated text (`Hi, {name}!`)
+        // hydrates: the static runs advance the cursor (discarded), the dynamic
+        // run adopts its text node into the keep handle. The server separates
+        // the runs with comment markers (`<!--fi-->` … `<!--/fi-->`), which the
+        // skip-based `__flv_next_text` steps over, so the walk lines up without
+        // a sole-child wrapper.
+        let src = r#"component Greet {
+  state { name: Str = "" }
+  event on_type() { name = payload["value"] }
+  <template>
+    <input @input="on_type" value="{name}" />
+    <p>Hi, {name}!</p>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        let hstart = out.find("pub fn hydrate(").expect("hydrate present");
+        let htail = out[hstart..]
+            .find("*self.__built.borrow_mut() = true;")
+            .expect("hydrate tail present");
+        let hbody = &out[hstart..hstart + htail];
+        // Two static runs ("Hi, " and "!") advance the cursor and discard.
+        assert_eq!(
+            hbody.matches("let _ = __flv_next_text(&mut").count(),
+            2,
+            "two static text runs advance the cursor:\n{hbody}"
+        );
+        // The dynamic run adopts its text node into a keep handle.
+        assert!(
+            hbody.contains("if let Some(__hn) = __flv_next_text(&mut")
+                && hbody.contains(".borrow_mut() = Some(__hn);"),
+            "the interpolation adopts its text node:\n{hbody}"
+        );
+        // Adopt only — no node creation for the mixed text.
+        assert!(
+            !hbody.contains("create_text_node"),
+            "mixed text adopts, never creates:\n{hbody}"
         );
     }
 

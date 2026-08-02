@@ -70,10 +70,11 @@ fn __flv_next_comment(__cursor: &mut Option<web_sys::Node>, __data: &str) -> Opt
     None
 }
 
-pub struct Filter {
-    query: RefCell<String>,
+pub struct App {
+    name: RefCell<String>,
     items: RefCell<Vec<String>>,
-    __kattr_0: RefCell<Option<web_sys::Element>>,
+    __ktext_0: RefCell<Option<web_sys::Text>>,
+    __kattr_1: RefCell<Option<web_sys::Element>>,
     __astart_0: RefCell<Option<web_sys::Node>>,
     __aend_0: RefCell<Option<web_sys::Node>>,
     __astart_1: RefCell<Option<web_sys::Node>>,
@@ -82,12 +83,13 @@ pub struct Filter {
     root: RefCell<Option<HtmlElement>>,
 }
 
-impl Filter {
+impl App {
     pub fn new() -> Rc<Self> {
-        Rc::new(Filter {
-            query: RefCell::new("".to_string()),
-            items: RefCell::new(vec!["apple".to_string(), "banana".to_string(), "cherry".to_string(), "grape".to_string(), "lemon".to_string(), "mango".to_string()]),
-            __kattr_0: RefCell::new(None),
+        Rc::new(App {
+            name: RefCell::new("world".to_string()),
+            items: RefCell::new(vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]),
+            __ktext_0: RefCell::new(None),
+            __kattr_1: RefCell::new(None),
             __astart_0: RefCell::new(None),
             __aend_0: RefCell::new(None),
             __astart_1: RefCell::new(None),
@@ -97,9 +99,15 @@ impl Filter {
         })
     }
 
-    fn on_query(self: &Rc<Self>, payload: &std::collections::HashMap<String, String>) {
+    fn on_name(self: &Rc<Self>, payload: &std::collections::HashMap<String, String>) {
         let __rhs = payload.get(&("value".to_string())).cloned().unwrap_or_default();
-        *self.query.borrow_mut() = __rhs;
+        *self.name.borrow_mut() = __rhs;
+        self.render();
+    }
+
+    fn reset(self: &Rc<Self>) {
+        let __rhs = "world".to_string();
+        *self.name.borrow_mut() = __rhs;
         self.render();
     }
 
@@ -113,7 +121,6 @@ impl Filter {
     }
 
     pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
-        __inject_style_Filter_filter_c_9a264632();
         *self.__built.borrow_mut() = false;
         *self.root.borrow_mut() = Some(root);
         self.render();
@@ -140,12 +147,29 @@ impl Filter {
         }
         let document = web_sys::window().unwrap().document().unwrap();
         let __el0 = document.create_element("div").unwrap();
-        __el0.set_attribute("class", "filter filter-filter-c-9a264632").unwrap();
+        __el0.set_attribute("class", "demo").unwrap();
         let __el1 = document.create_element("h1").unwrap();
-        let __t2 = document.create_text_node("Type a fruit to hide it");
+        let __t2 = document.create_text_node("SSR → hydration: regions + mixed text");
         __el1.append_child(&__t2).unwrap();
         __el0.append_child(&__el1).unwrap();
-        let __el3 = document.create_element("input").unwrap();
+        let __el3 = document.create_element("p").unwrap();
+        __el3.set_attribute("class", "greeting").unwrap();
+        let __t4 = document.create_text_node("Hello, ");
+        __el3.append_child(&__t4).unwrap();
+        let __interp5 = format!("{}", (*self.name.borrow()));
+        let __t6 = document.create_text_node(&__interp5);
+        __el3.append_child(&__t6).unwrap();
+        *self.__ktext_0.borrow_mut() = Some(__t6.clone());
+        let __t7 = document.create_text_node("!");
+        __el3.append_child(&__t7).unwrap();
+        __el0.append_child(&__el3).unwrap();
+        let __el8 = document.create_element("label").unwrap();
+        __el8.set_attribute("class", "row").unwrap();
+        let __el9 = document.create_element("span").unwrap();
+        let __t10 = document.create_text_node("Type a name to hide the matching item");
+        __el9.append_child(&__t10).unwrap();
+        __el8.append_child(&__el9).unwrap();
+        let __el11 = document.create_element("input").unwrap();
         {
             let __self_clone = self.clone();
             let __closure = Closure::wrap(Box::new(move |__evt: Event| {
@@ -159,38 +183,52 @@ impl Filter {
                         __payload.insert("value".to_string(), __el.value());
                     }
                 }
-                Filter::on_query(&__self_clone, &__payload);
+                App::on_name(&__self_clone, &__payload);
             }) as Box<dyn FnMut(Event)>);
-            __el3.add_event_listener_with_callback("input", __closure.as_ref().unchecked_ref()).unwrap();
+            __el11.add_event_listener_with_callback("input", __closure.as_ref().unchecked_ref()).unwrap();
             __closure.forget();
         }
-        __el3.set_attribute("value", &format!("{}", (*self.query.borrow()))).unwrap();
-        *self.__kattr_0.borrow_mut() = Some(__el3.clone());
-        __el3.set_attribute("placeholder", "type here…").unwrap();
-        __el3.set_attribute("autocomplete", "off").unwrap();
-        __el0.append_child(&__el3).unwrap();
-        let __rs4: web_sys::Node = document.create_comment("").into();
-        __el0.append_child(&__rs4).unwrap();
-        *self.__astart_0.borrow_mut() = Some(__rs4.clone());
-        let __re5: web_sys::Node = document.create_comment("").into();
-        __el0.append_child(&__re5).unwrap();
-        *self.__aend_0.borrow_mut() = Some(__re5.clone());
+        __el11.set_attribute("value", &format!("{}", (*self.name.borrow()))).unwrap();
+        *self.__kattr_1.borrow_mut() = Some(__el11.clone());
+        __el11.set_attribute("placeholder", "type here").unwrap();
+        __el11.set_attribute("autocomplete", "off").unwrap();
+        __el8.append_child(&__el11).unwrap();
+        __el0.append_child(&__el8).unwrap();
+        let __rs12: web_sys::Node = document.create_comment("").into();
+        __el0.append_child(&__rs12).unwrap();
+        *self.__astart_0.borrow_mut() = Some(__rs12.clone());
+        let __re13: web_sys::Node = document.create_comment("").into();
+        __el0.append_child(&__re13).unwrap();
+        *self.__aend_0.borrow_mut() = Some(__re13.clone());
         self.__mount_region_0();
-        let __el6 = document.create_element("ul").unwrap();
-        __el6.set_attribute("class", "items items-filter-c-9a264632").unwrap();
-        let __rs7: web_sys::Node = document.create_comment("").into();
-        __el6.append_child(&__rs7).unwrap();
-        *self.__astart_1.borrow_mut() = Some(__rs7.clone());
-        let __re8: web_sys::Node = document.create_comment("").into();
-        __el6.append_child(&__re8).unwrap();
-        *self.__aend_1.borrow_mut() = Some(__re8.clone());
+        let __el14 = document.create_element("ul").unwrap();
+        __el14.set_attribute("class", "items").unwrap();
+        let __rs15: web_sys::Node = document.create_comment("").into();
+        __el14.append_child(&__rs15).unwrap();
+        *self.__astart_1.borrow_mut() = Some(__rs15.clone());
+        let __re16: web_sys::Node = document.create_comment("").into();
+        __el14.append_child(&__re16).unwrap();
+        *self.__aend_1.borrow_mut() = Some(__re16.clone());
         self.__mount_region_1();
-        __el0.append_child(&__el6).unwrap();
+        __el0.append_child(&__el14).unwrap();
+        let __el17 = document.create_element("button").unwrap();
+        {
+            let __self_clone = self.clone();
+            let __closure = Closure::wrap(Box::new(move |_evt: Event| {
+                App::reset(&__self_clone);
+            }) as Box<dyn FnMut(Event)>);
+            __el17.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        let __t18 = document.create_text_node("reset");
+        __el17.append_child(&__t18).unwrap();
+        __el0.append_child(&__el17).unwrap();
         root.append_child(&__el0).unwrap();
     }
 
     fn __patch(self: &Rc<Self>) {
-        if let Some(__el) = self.__kattr_0.borrow().as_ref() { let _ = __el.set_attribute("value", &format!("{}", (*self.query.borrow()))); }
+        if let Some(__n) = self.__ktext_0.borrow().as_ref() { __n.set_data(&format!("{}", (*self.name.borrow()))); }
+        if let Some(__el) = self.__kattr_1.borrow().as_ref() { let _ = __el.set_attribute("value", &format!("{}", (*self.name.borrow()))); }
         self.__patch_region_0();
         self.__patch_region_1();
     }
@@ -198,12 +236,11 @@ impl Filter {
     fn __apply_state_json(self: &Rc<Self>, __json: &str) {
         let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
         let _ = (&__v, self);
-        if let Some(__x) = __v.get("query").and_then(|__j| __j.as_str()) { *self.query.borrow_mut() = __x.to_string(); }
+        if let Some(__x) = __v.get("name").and_then(|__j| __j.as_str()) { *self.name.borrow_mut() = __x.to_string(); }
     }
 
     pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
-        __inject_style_Filter_filter_c_9a264632();
-        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_Filter") {
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_App") {
             if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
         }
         let mut __cur_root = root.first_child();
@@ -215,6 +252,18 @@ impl Filter {
         let _ = __flv_next_text(&mut __hcur3);
         }
         if let Some(__hel4) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur5 = __hel4.first_child();
+        let _ = __flv_next_text(&mut __hcur5);
+        if let Some(__hn) = __flv_next_text(&mut __hcur5) { *self.__ktext_0.borrow_mut() = Some(__hn); }
+        let _ = __flv_next_text(&mut __hcur5);
+        }
+        if let Some(__hel6) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur7 = __hel6.first_child();
+        if let Some(__hel8) = __flv_next_element(&mut __hcur7) {
+        let mut __hcur9 = __hel8.first_child();
+        let _ = __flv_next_text(&mut __hcur9);
+        }
+        if let Some(__hel10) = __flv_next_element(&mut __hcur7) {
         {
             let __self_clone = self.clone();
             let __closure = Closure::wrap(Box::new(move |__evt: Event| {
@@ -228,19 +277,32 @@ impl Filter {
                         __payload.insert("value".to_string(), __el.value());
                     }
                 }
-                Filter::on_query(&__self_clone, &__payload);
+                App::on_name(&__self_clone, &__payload);
             }) as Box<dyn FnMut(Event)>);
-            __hel4.add_event_listener_with_callback("input", __closure.as_ref().unchecked_ref()).unwrap();
+            __hel10.add_event_listener_with_callback("input", __closure.as_ref().unchecked_ref()).unwrap();
             __closure.forget();
         }
-        *self.__kattr_0.borrow_mut() = Some(__hel4.clone());
+        *self.__kattr_1.borrow_mut() = Some(__hel10.clone());
+        }
         }
         if let Some(__rs) = __flv_next_comment(&mut __hcur1, "fr") { *self.__astart_0.borrow_mut() = Some(__rs); }
         if let Some(__re) = __flv_next_comment(&mut __hcur1, "/fr") { *self.__aend_0.borrow_mut() = Some(__re); }
-        if let Some(__hel6) = __flv_next_element(&mut __hcur1) {
-        let mut __hcur7 = __hel6.first_child();
-        if let Some(__rs) = __flv_next_comment(&mut __hcur7, "fr") { *self.__astart_1.borrow_mut() = Some(__rs); }
-        if let Some(__re) = __flv_next_comment(&mut __hcur7, "/fr") { *self.__aend_1.borrow_mut() = Some(__re); }
+        if let Some(__hel12) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur13 = __hel12.first_child();
+        if let Some(__rs) = __flv_next_comment(&mut __hcur13, "fr") { *self.__astart_1.borrow_mut() = Some(__rs); }
+        if let Some(__re) = __flv_next_comment(&mut __hcur13, "/fr") { *self.__aend_1.borrow_mut() = Some(__re); }
+        }
+        if let Some(__hel14) = __flv_next_element(&mut __hcur1) {
+        {
+            let __self_clone = self.clone();
+            let __closure = Closure::wrap(Box::new(move |_evt: Event| {
+                App::reset(&__self_clone);
+            }) as Box<dyn FnMut(Event)>);
+            __hel14.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        let mut __hcur15 = __hel14.first_child();
+        let _ = __flv_next_text(&mut __hcur15);
         }
         }
         *self.__built.borrow_mut() = true;
@@ -251,12 +313,12 @@ impl Filter {
     fn __mount_region_0(self: &Rc<Self>) {
         let document = web_sys::window().unwrap().document().unwrap();
         let __frag = document.create_document_fragment();
-        if ((*self.query.borrow()) != "".to_string()) {
+        if ((*self.name.borrow()) != "".to_string()) {
         let __el0 = document.create_element("p").unwrap();
-        __el0.set_attribute("class", "hint hint-filter-c-9a264632").unwrap();
-        let __t1 = document.create_text_node("Hiding: ");
+        __el0.set_attribute("class", "hint").unwrap();
+        let __t1 = document.create_text_node("Hiding items equal to: ");
         __el0.append_child(&__t1).unwrap();
-        let __interp2 = format!("{}", (*self.query.borrow()));
+        let __interp2 = format!("{}", (*self.name.borrow()));
         let __t3 = document.create_text_node(&__interp2);
         __el0.append_child(&__t3).unwrap();
         __frag.append_child(&__el0).unwrap();
@@ -284,7 +346,7 @@ impl Filter {
         let __frag = document.create_document_fragment();
         let __for0 = (*self.items.borrow()).clone();
         for it in __for0.iter().cloned() {
-        if (it != (*self.query.borrow())) {
+        if (it != (*self.name.borrow())) {
         let __el1 = document.create_element("li").unwrap();
         let __interp2 = format!("{}", it);
         let __t3 = document.create_text_node(&__interp2);
@@ -311,16 +373,6 @@ impl Filter {
 
 }
 
-fn __inject_style_Filter_filter_c_9a264632() {
-    static INJECTED: AtomicBool = AtomicBool::new(false);
-    if INJECTED.swap(true, Ordering::SeqCst) { return; }
-    let document = web_sys::window().unwrap().document().unwrap();
-    let head = document.head().unwrap();
-    let style_el = document.create_element("style").unwrap();
-    style_el.set_text_content(Some("\n    .filter-filter-c-9a264632 { font-family: system-ui, sans-serif; display: grid; gap: 8px; max-width: 360px; }\n    .hint-filter-c-9a264632 { color: #b45309; font-size: 0.9em; }\n    .items-filter-c-9a264632 { margin: 0; padding-left: 1.2em; }\n  "));
-    let _ = head.append_child(&style_el);
-}
-
 
 
 // Composed entry point — NOT part of emit_module output.
@@ -330,7 +382,7 @@ fn __inject_style_Filter_filter_c_9a264632() {
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
-    let root = Filter::new();
+    let root = App::new();
     let __document = web_sys::window().unwrap().document().unwrap();
     if let Some(__mount) = __document.query_selector("#app")? {
         if __mount.first_element_child().is_some() {
