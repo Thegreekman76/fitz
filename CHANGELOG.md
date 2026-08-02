@@ -9,6 +9,37 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.29.8] — 2026-08-01 — `.fitzv` → wasm: string methods + logical `and`/`or`
+
+### Added — string methods and logical operators on the client-WASM target
+
+The client-WASM emitter now lowers the common `Str` methods and logical
+`and`/`or` in general expression position — closing a CW.9 envelope gap.
+
+- **Str methods** (parity with classic Fitz / the SSR target): `.upper()` →
+  `to_uppercase()`, `.lower()` → `to_lowercase()`, `.trim()`, `.contains(x)`,
+  `.starts_with(x)`, `.ends_with(x)` (all → `bool`), and `.replace(a, b)`. The
+  receiver lowers to an owned `String`, so each maps to a `str` method via
+  `Deref`. (`.split` / `.to_int`, which return `List` / `Result`, still defer.)
+- **Logical `and` / `or`** in expression position (e.g. a `.filter` closure
+  body) lower to Rust `&&` / `||`. Condition position (`{#if}` / `if`-expr) was
+  already covered by `lower_cond_expr`.
+
+### Notes
+
+- **Unblocks case-insensitive filters** on client-WASM: a
+  `names.filter(fn(x) => q == "" or x.lower().contains(q.lower()))` — the exact
+  pattern that was SSR-only — now compiles and runs offline. Verified
+  end-to-end: a live filter component compiled to a real `.wasm` (`wasm-pack`
+  → `:-) Done`), the generated `lib.rs` carrying `.to_lowercase()` /
+  `.contains(...)` / `||`. (The live *text* filter input still re-mounts per
+  keystroke under naive re-render — the caret caveat from CW.9 — but the filter
+  logic itself now runs client-side.)
+- 2 unit tests (`wasm_str_methods_lower`, `wasm_case_insensitive_filter_lowers`).
+  Suite: lib 3916 green; fmt + clippy clean; all 17 `examples/view/` smokes
+  byte-compatible (the change only *adds* support for previously-rejected
+  constructs). Bump 0.29.7 → 0.29.8.
+
 ## [v0.29.7] — 2026-07-31 — `.fitzv` → wasm: form-control events `@input` / `@change` (CW.9)
 
 ### Added — live value binding on the client-WASM target

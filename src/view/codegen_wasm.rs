@@ -3551,17 +3551,21 @@ fn lower_binop(op: &BinOpKind) -> EmitResult<&'static str> {
         BinOpKind::LtEq => Ok("<="),
         BinOpKind::Gt => Ok(">"),
         BinOpKind::GtEq => Ok(">="),
-        BinOpKind::And
-        | BinOpKind::Or
-        | BinOpKind::Xor
+        // Logical `and`/`or` in general expression position (e.g. a `.filter`
+        // closure body: `fn(x) => q == "" or x.lower().contains(q)`). Both
+        // operands must lower to `bool`; rustc enforces that. Condition
+        // position (`{#if}` / `if`-expr) is handled separately by
+        // `lower_cond_expr`, which also does `!`.
+        BinOpKind::And => Ok("&&"),
+        BinOpKind::Or => Ok("||"),
+        BinOpKind::Xor
         | BinOpKind::BitAnd
         | BinOpKind::BitOr
         | BinOpKind::BitXor
         | BinOpKind::Shl => Err(EmitError {
-            message: "binary op — arithmetic (+/-/*//%) and comparisons \
-                      (==/!=/</<=/>/>=) supported on the client-WASM target; \
-                      logical (&&/||) belong in condition position (`{#if}` / \
-                      `if`-expr) and bitwise ops are deferred"
+            message: "binary op — arithmetic (+/-/*//%), comparisons \
+                      (==/!=/</<=/>/>=), and logical (and/or) supported on the \
+                      client-WASM target; bitwise ops are deferred"
                 .to_string(),
             context: "expression".to_string(),
         }),
@@ -3628,12 +3632,38 @@ fn lower_call(
                         "({obj}).clone().into_iter().filter(|__it| {{ let {param} = __it.clone(); {body_rust} }}).collect::<Vec<_>>()"
                     ))
                 }
+                // Str methods (parity with classic Fitz / the SSR target). The
+                // receiver lowers to an owned `String`, so each maps to a `str`
+                // method via Deref. Unblocks case-insensitive filters
+                // (`x.lower().contains(q.lower())`) and similar on client-WASM.
+                ("upper", 0) => Ok(format!("({obj}).to_uppercase()")),
+                ("lower", 0) => Ok(format!("({obj}).to_lowercase()")),
+                ("trim", 0) => Ok(format!("({obj}).trim().to_string()")),
+                ("contains", 1) => {
+                    let a = lower_expr(&args[0], state_names, locals)?;
+                    Ok(format!("({obj}).contains(({a}).as_str())"))
+                }
+                ("starts_with", 1) => {
+                    let a = lower_expr(&args[0], state_names, locals)?;
+                    Ok(format!("({obj}).starts_with(({a}).as_str())"))
+                }
+                ("ends_with", 1) => {
+                    let a = lower_expr(&args[0], state_names, locals)?;
+                    Ok(format!("({obj}).ends_with(({a}).as_str())"))
+                }
+                ("replace", 2) => {
+                    let a = lower_expr(&args[0], state_names, locals)?;
+                    let b = lower_expr(&args[1], state_names, locals)?;
+                    Ok(format!("({obj}).replace(({a}).as_str(), ({b}).as_str())"))
+                }
                 (other, n) => Err(EmitError {
                     message: format!(
                         "method `.{other}()` ({n} arg(s)) — the client-WASM target \
-                         supports `.map`/`.filter`/`.len` on lists (Phase 11.7 \
-                         R3.5a.1); other methods defer to a later 11.7 slice or the \
-                         SSR target"
+                         supports `.map`/`.filter`/`.len` on lists and \
+                         `.upper`/`.lower`/`.trim`/`.contains`/`.starts_with`/\
+                         `.ends_with`/`.replace` on strings; other methods \
+                         (`.split`/`.to_int`, which return List/Result) defer to a \
+                         later slice or the SSR target"
                     ),
                     context: "expression".to_string(),
                 }),
@@ -6744,6 +6774,53 @@ component Card {
             out.contains("match (n == 2i64) { true => "),
             "match expression:\n{out}"
         );
+    }
+
+    #[test]
+    fn wasm_str_methods_lower() {
+        // Str methods (parity with classic Fitz / SSR) lower on the wasm
+        // target: upper/lower/trim → String, contains/starts_with/ends_with →
+        // bool, replace → String.
+        let src = r#"component S {
+  state { name: Str = "ada" }
+  <template>
+    <p>{name.upper()}</p>
+    <p>{name.lower()}</p>
+    <p>{name.trim()}</p>
+    <p>{name.replace("a", "b")}</p>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(out.contains(".to_uppercase()"), "upper:\n{out}");
+        assert!(out.contains(".to_lowercase()"), "lower:\n{out}");
+        assert!(out.contains(".trim().to_string()"), "trim:\n{out}");
+        assert!(out.contains(".replace("), "replace:\n{out}");
+    }
+
+    #[test]
+    fn wasm_case_insensitive_filter_lowers() {
+        // The previously-blocked case: a `.filter` closure with `.lower()`,
+        // `.contains()`, and a logical `or` — now compiles on the wasm target.
+        let src = r#"component FilterList {
+  state {
+    names: List<Str> = ["Ada"]
+    q: Str = ""
+  }
+  event on_filter() { q = payload["value"] }
+  <template>
+    <input @input="on_filter" value="{q}" />
+    <ul>
+      {#for it in names.filter(fn(x) => q == "" or x.lower().contains(q.lower()))}
+        <li>{it}</li>
+      {/for}
+    </ul>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        // `.lower()` on both sides + `.contains(...)` + `or` → `||`.
+        assert!(out.contains(".to_lowercase()"), "lower in filter:\n{out}");
+        assert!(out.contains(".contains("), "contains in filter:\n{out}");
+        assert!(out.contains(" || "), "logical or lowers to ||:\n{out}");
     }
 
     #[test]

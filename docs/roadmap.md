@@ -10055,10 +10055,26 @@ template. La sub-fase 11.7 se detalla a continuación:
   swatch cambia; input → greeting echoa la tecla; cero page errors). Ejemplo
   nuevo `examples/view/live-input/` + smoke `tests/view_live_input_wasm_smoke.rs`
   (build `wasm-pack` real). 6 unit tests; lib 3914 verde; fmt + clippy limpios;
-  17 view smokes verdes. **Gaps CW.9 restantes**: helper-fn con `?`/Result +
-  el problema del HTML-string-escape (helpers que devuelven markup como string
-  no renderizan en wasm); reactividad fine-grained (patch in-place) para que
-  el live text input no pierda el caret.
+  17 view smokes verdes.
+
+- ✅ **String methods + logical `and`/`or` en wasm (v0.29.8, 2026-08-01)** —
+  el emisor client-WASM lowerea los métodos de `Str` comunes (`.upper`/`.lower`/
+  `.trim` → String, `.contains`/`.starts_with`/`.ends_with` → bool, `.replace`)
+  y `and`/`or` en posición de expresión general (ej. el body de un `.filter`
+  closure) → `&&`/`||`. Cierra un gap del envelope de CW.9. **Destraba el filtro
+  case-insensitive** en client-WASM (`names.filter(fn(x) => q == "" or
+  x.lower().contains(q.lower()))` — el patrón que era SSR-only — ahora compila y
+  corre offline). Validado end-to-end (`.wasm` real vía wasm-pack; el `lib.rs`
+  generado lleva `.to_lowercase()`/`.contains(...)`/`||`). El live *text* filter
+  input sigue re-montándose por tecla bajo naive re-render (el caret caveat),
+  pero la lógica del filtro corre client-side. `.split`/`.to_int` (devuelven
+  List/Result) difieren. 2 unit tests; lib 3916 verde; 17 view smokes
+  byte-compatibles.
+
+- 🔜 **Gaps CW.9 restantes** (post-v0.29.8): helper-fn con `?`/Result + el
+  problema del HTML-string-escape (helpers que devuelven markup como string no
+  renderizan en wasm); reactividad fine-grained (patch in-place) para que el
+  live text input no pierda el caret (→ 11.10).
 
 ### Fase 11 — próxima iteración: reactividad fine-grained + fullstack 🔜 (planificada)
 
