@@ -15154,6 +15154,77 @@ fitz run
 #   emite un diff, el cliente aplica el patch.
 ```
 
+### Funciones de servidor — `@rpc` (Fase 11.11)
+
+Un `.fitzv` corre en el navegador (WASM), pero muchas cosas
+—consultar la DB, verificar auth, leer un secret— **tienen** que
+pasar en el server. El puente clásico es escribir un handler HTTP,
+un `fetch` a mano, y el marshaling JSON de ida y de vuelta. Fitz
+elimina las tres cosas: marcás una `async fn` classic con `@rpc` y
+la llamás desde el `.fitzv` **como si fuera local**.
+
+**El panorama vecino.** Es el patrón "server functions" que
+popularizaron Next.js Server Actions, Remix loaders/actions,
+SvelteKit `+page.server`, tRPC y Phoenix. En todos ellos hay un
+paso de infraestructura (un `"use server"`, un router tRPC, un
+generador). En Fitz el compilador emite **las dos mitades** desde
+una sola declaración, con tipos de punta a punta y sin dependencias
+externas.
+
+```fitz
+// api.fitz (classic — tiene db, auth, secrets)
+@rpc
+async fn get_user(id: Int) -> Result<User> {
+  let conn = db.connect(db_url()).await?
+  return User.where(fn(u) => u.id == id).first(conn).await
+}
+```
+
+```fitz
+// App.fitzv (client-WASM)
+from api import get_user, User
+
+component App {
+  state { name: Str = "" }
+
+  event load() {
+    let u = get_user(42).await?   // ← round-trip tipado, como si fuera local
+    name = u.name
+  }
+
+  <template>
+    <p>{name}</p>
+    <button @click="load">Cargar usuario 42</button>
+  </template>
+}
+```
+
+**Qué genera el compilador:**
+
+- **Del lado server** (`fitz build --bin server`): la `@rpc` fn se
+  monta como `POST /__rpc/<name>`. El body es un objeto JSON con un
+  campo por parámetro (`{"id": 42}`); cada param se deserializa de su
+  campo, la fn corre, y su `Result<T>` se vuelve `200` + JSON (Ok) o
+  `500` + `{"error": ...}` (Err). Reusa toda la cadena de `@post`
+  (observability, panic-catch, etc.).
+- **Del lado client** (`fitz build --bin web --target wasm-client`):
+  la `@rpc` fn importada se emite como un stub `fetch` async — su
+  cuerpo (server-side) **no** se transpila. Serializa los args,
+  POSTea al mismo origen (la cookie de sesión viaja sola), y mapea
+  la respuesta a `Result<T>`. Un event handler que la `.await`ea se
+  parte automáticamente en un wrapper sync + un worker async
+  (`spawn_local`), así que el estado se actualiza y el componente
+  re-renderiza cuando llega la respuesta.
+
+**Reglas** (validadas por el checker): `@rpc` es un decorator
+pelado (sin args/kwargs), la fn debe ser `async` y devolver
+`Result<T>`, y no se combina con `@get`/`@post`/`@ws`/`@cron`/
+`@background`/`@auth_provider`. Un tipo nominal que cruza el cable
+(acá `User`) se importa también en el `.fitzv`
+(`from api import ..., User`) para que el cliente tenga su struct.
+
+Ejemplo runnable completo (server + client): `examples/view/rpc/`.
+
 ### Compatibilidad con classic Fitz
 
 Un mismo proyecto puede mezclar `.fitz` (classic) y `.fitzv`

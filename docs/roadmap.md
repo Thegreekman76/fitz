@@ -10099,11 +10099,17 @@ no por dependencia estricta.
   emitido: celdas reactivas + grafo de subscripción en lugar del
   re-render top-down).
 
-- 🚧 **11.11 — Funciones de servidor (`@rpc`) (EN CURSO).** Decorator sobre
-  `async fn` (en `.fitz` classic) que la vuelve **invocable directo desde el
-  `.fitzv` client-WASM** como si fuera local: el compilador emite (a) un
-  handler HTTP POST auto-generado del lado server y (b) un stub `fetch` del
-  lado client. Una `@rpc async fn foo() -> Result<T>` ya tipa bien al
+- ✅ **11.11 — Funciones de servidor (`@rpc`) (CERRADA, v0.30.0, 2026-08-02).**
+  Decorator sobre `async fn` (en `.fitz` classic) que la vuelve **invocable
+  directo desde el `.fitzv` client-WASM** como si fuera local: el compilador
+  emite (a) un handler HTTP POST auto-generado del lado server y (b) un stub
+  `fetch` del lado client. Verificado end-to-end en Chrome real (round-trip
+  primitivo + nominal, cero page errors) + curl (200/500/400). Ejemplo
+  runnable `examples/view/rpc/` + smoke `tests/view_rpc_wasm_smoke.rs`. 14
+  unit tests nuevos; suite lib 3930 verde, fmt + clippy (default + `lsp`)
+  limpios, los 17 smokes `examples/view/` byte-compatibles (crates sin `@rpc`
+  sin cambios). **Cierre de las dos piezas grandes de codegen** (server-half
+  + client-half). Una `@rpc async fn foo() -> Result<T>` ya tipa bien al
   llamarla (un `async fn` devuelve `Future<Result<T>>`, y `foo(id).await →
   Result<T>`), así que el checker casi no cambia — toda la magia es codegen.
   - **Naming (decisión):** el roadmap decía `@server`, pero **`@server` ya
@@ -10124,15 +10130,32 @@ no por dependencia estricta.
     JSON → response text → update del DOM: **round-trip OK**. El crux
     ("no existe hoy") quedó resuelto; falta wirearlo al emisor (junto a su
     primer consumidor, el stub, para no dejar dead code).
-  - **11.11.b — server-half.** `@rpc async fn` → handler POST en
+  - **11.11.b — server-half (HECHO).** `@rpc async fn` → handler POST en
     `/__rpc/<name>` (reusa 100% la cadena de `@post`: extractors →
-    `__FromFitzJson` → dispatch → `Result<U>`→200/err). ~8 sitios de
-    partición de decorators HTTP en `codegen.rs`.
-  - **11.11.c — client-stub.** Agregar deps/features validadas a
-    `compose_cargo_toml_with_features` + emitir el helper `__fitz_fetch` +
-    emitir la fn `@rpc` importada como `async fn <name>(...) -> Result<T>`
-    (serializa args → fetch → deserializa) + envolver los event handlers que
-    la `.await`ean en `spawn_local` → set state → re-render.
+    `__FromFitzJson` → dispatch → `Result<U>`→200/err). `has_http_routes` +
+    partición + `module_http_fn_stmts` + `http_fns_in_module` suman `"rpc"`;
+    `resolve_handler_signature` tiene una rama focalizada (POST,
+    `/__rpc/<name>`, todos los params desde un objeto JSON, `is_rpc: true`);
+    `emit_axum_extractors`/`emit_param_coercions` extraen el body crudo y
+    deserializan cada param de `obj["<param>"]`; las dos loops de ruta
+    (local + cross-module) montan `POST /__rpc/<name>`. Validado con curl
+    (single-file `add`/`get_user` + cross-module `greet`/`get_user`).
+  - **11.11.c — client-stub (HECHO).** `ImportedFn.is_rpc` (leído del
+    decorator en `load_imported_fns`); `emit_imported_fns` emite un stub
+    async por fn `@rpc` (NO transpila el body) + el helper compartido
+    `__fitz_fetch_post(url, body) -> Result<(u16, String), String>`; el stub
+    serializa args a un objeto JSON, POSTea a `/__rpc/<name>`, y mapea la
+    respuesta a `Result<T, String>` (200 → `serde_json::from_str::<T>`, otro
+    → `{"error"}`); deps `wasm-bindgen-futures`/`js-sys`/`serde`/`serde_json`
+    + features web-sys `Request`/`RequestInit`/`RequestMode`/`Response`/
+    `Headers`/`console` + derives `serde` en los nominales, todo gated en
+    `fns.has_rpc()` (crates sin `@rpc` byte-idénticos). `lower_expr` suma
+    arms `Expr::Await`/`Expr::Try`; un event handler que `.await`ea se parte
+    en un wrapper sync que `spawn_local`ea un worker async con receptor
+    `self: Rc<Self>` (owned, sin threading de self) que retorna
+    `Result<(), String>` — así `.await?` propaga y el re-render corre al
+    llegar la respuesta. `type_expr_to_rust` no necesitó rama `Result` (el
+    stub extrae `T` del `Result<T>` declarado).
   - **11.11.d — checker (HECHO).** `check_rpc_decorator` en `src/types.rs`:
     valida bare decorator (sin args/kwargs MVP), `async` requerido, exclusión
     mutua con `@get`/`@post`/`@ws`/`@cron`/`@background`/`@auth_provider`/

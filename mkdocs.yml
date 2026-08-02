@@ -185,6 +185,7 @@ nav:
           - 'C1 — Tu primer .fitzv (Counter)': curso/m9-fitzv-frontend/c1-primer-fitzv.md
           - 'C2 — Template DSL (interpolación + directivas + composición)': curso/m9-fitzv-frontend/c2-template-dsl.md
           - 'C3 — Full-page SFC (Board.fitzv kanban)': curso/m9-fitzv-frontend/c3-full-page-sfc.md
+          - 'C4 — @rpc (funciones de servidor fullstack)': curso/m9-fitzv-frontend/c4-server-functions-rpc.md
   - 'Construyendo TaskHub':
       - taskhub/index.md
       - 'C1 — Setup Docker-first': taskhub/c1-setup-docker-first.md

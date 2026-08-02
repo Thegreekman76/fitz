@@ -1,0 +1,22 @@
+// Phase 11.11 — server functions. Each `@rpc async fn` is callable
+// directly from the `.fitzv` client (over a generated POST endpoint at
+// `/__rpc/<name>`) as if it were a local async call. The body runs on
+// the server, so it can touch the DB, auth, secrets — anything.
+
+type User {
+  id: Int
+  name: Str
+}
+
+@rpc
+async fn greet(name: Str) -> Result<Str> {
+  return Ok("Hello, {name}!")
+}
+
+@rpc
+async fn get_user(id: Int) -> Result<User> {
+  if (id == 42) {
+    return Ok(User { id: 42, name: "Ada" })
+  }
+  return Err("no user with id {id}")
+}

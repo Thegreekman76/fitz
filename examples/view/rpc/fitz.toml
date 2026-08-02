@@ -1,0 +1,14 @@
+[package]
+name = "rpc-demo"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "server"
+main = "server.fitz"
+
+[[bin]]
+name = "web"
+main = "App.fitzv"
+target = "wasm-client"
+mount = "#app"

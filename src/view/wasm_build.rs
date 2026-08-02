@@ -399,6 +399,7 @@ pub fn load_imported_fns_with_deps(
                 params,
                 return_type,
                 body,
+                decorators,
                 ..
             } = stmt
             {
@@ -406,7 +407,17 @@ pub fn load_imported_fns_with_deps(
                     .iter()
                     .map(|p| (p.name.clone(), p.type_.clone()))
                     .collect();
-                registry.insert(name.clone(), param_list, return_type.clone(), body.clone());
+                // Phase 11.11.c — an `@rpc` fn is a server function: its
+                // body stays on the server; the wasm emitter produces a
+                // `fetch` stub instead of transpiling it.
+                let is_rpc = decorators.iter().any(|d| d.name == "rpc");
+                registry.insert(
+                    name.clone(),
+                    param_list,
+                    return_type.clone(),
+                    body.clone(),
+                    is_rpc,
+                );
             }
         }
     }
@@ -649,7 +660,7 @@ fn compose_entry_wrapper(root_component: &str, mount_selector: &str) -> String {
 /// bulk-memory ops modern rustc emits (see `docs/fase-11-plan.md`
 /// §9.o Debt residual).
 pub fn compose_cargo_toml(package_name: &str) -> String {
-    compose_cargo_toml_with_features(package_name, &[])
+    compose_cargo_toml_with_features(package_name, &[], false)
 }
 
 /// Like [`compose_cargo_toml`], but appends `extra_features` to the
@@ -659,7 +670,11 @@ pub fn compose_cargo_toml(package_name: &str) -> String {
 /// [`compose_cargo_toml`], so form-free examples' `Cargo.toml` is
 /// unchanged. Callers derive the extra set via
 /// [`super::codegen_wasm::wasm_extra_web_sys_features`].
-pub fn compose_cargo_toml_with_features(package_name: &str, extra_features: &[&str]) -> String {
+pub fn compose_cargo_toml_with_features(
+    package_name: &str,
+    extra_features: &[&str],
+    uses_rpc: bool,
+) -> String {
     // Base subset the emitter always uses (see codegen_wasm). Kept in the
     // same order as the committed baselines so the empty-extra case stays
     // byte-identical.
@@ -674,10 +689,37 @@ pub fn compose_cargo_toml_with_features(package_name: &str, extra_features: &[&s
         "Text",
         "Window",
     ];
+    // Phase 11.11.c — `@rpc` needs the fetch APIs + a console for
+    // error reporting. Appended after `extra_features` so non-rpc crates
+    // stay byte-identical.
+    const RPC_FEATURES: &[&str] = &[
+        "Request",
+        "RequestInit",
+        "RequestMode",
+        "Response",
+        "Headers",
+        "console",
+    ];
     let mut feature_lines = String::new();
-    for f in BASE_FEATURES.iter().chain(extra_features.iter()) {
+    let rpc_features: &[&str] = if uses_rpc { RPC_FEATURES } else { &[] };
+    for f in BASE_FEATURES
+        .iter()
+        .chain(extra_features.iter())
+        .chain(rpc_features.iter())
+    {
         feature_lines.push_str(&format!("    \"{f}\",\n"));
     }
+    // Phase 11.11.c — extra crate deps for the fetch stub + JSON
+    // marshaling. Injected into `[dependencies]` only when the crate
+    // uses `@rpc`.
+    let rpc_deps = if uses_rpc {
+        "wasm-bindgen-futures = \"0.4\"\n\
+         js-sys = \"0.3\"\n\
+         serde = { version = \"1\", features = [\"derive\"] }\n\
+         serde_json = \"1\"\n"
+    } else {
+        ""
+    };
     format!(
         r##"[package]
 name = "{name}"
@@ -710,7 +752,7 @@ wasm-opt = ['-O', '--enable-bulk-memory']
 [dependencies]
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
-
+{rpc_deps}
 # `web-sys` con el subset EXACTO que el emitter de Fase 11.4.b usa
 # (ver `src/view/codegen_wasm.rs::emit_module_header` + los emit_*
 # helpers). Cualquier feature que sobre suma bytes al bundle final.
@@ -720,6 +762,7 @@ features = [
 {feature_lines}]
 "##,
         name = package_name,
+        rpc_deps = rpc_deps,
         feature_lines = feature_lines,
     )
 }
@@ -855,7 +898,11 @@ pub fn write_wasm_crate_scaffold(
     // clone, so the Cargo.toml stays byte-identical for same-file crates.
     let feature_file = merge_imported_components(expanded, components);
     let extra_features = super::codegen_wasm::wasm_extra_web_sys_features(&feature_file);
-    let cargo_toml_text = compose_cargo_toml_with_features(bin_name, &extra_features);
+    // Phase 11.11.c — when any imported fn is `@rpc`, the crate gets the
+    // fetch runtime deps + web-sys features (see
+    // `compose_cargo_toml_with_features`).
+    let cargo_toml_text =
+        compose_cargo_toml_with_features(bin_name, &extra_features, fns.has_rpc());
     let lib_rs_text = compose_lib_rs_with_components(
         expanded,
         nominals,
@@ -1038,6 +1085,37 @@ component Beta {
             toml.contains(r#"crate-type = ["cdylib"]"#),
             "crate-type = [\"cdylib\"] missing:\n{toml}"
         );
+    }
+
+    #[test]
+    fn compose_cargo_toml_adds_rpc_deps_and_features_when_uses_rpc() {
+        // Phase 11.11.c — an `@rpc`-using crate gets the fetch runtime.
+        let toml = compose_cargo_toml_with_features("web", &[], true);
+        for dep in &[
+            "wasm-bindgen-futures = \"0.4\"",
+            "js-sys = \"0.3\"",
+            "serde = { version = \"1\", features = [\"derive\"] }",
+            "serde_json = \"1\"",
+        ] {
+            assert!(toml.contains(dep), "rpc dep `{dep}` missing:\n{toml}");
+        }
+        for feat in &["Request", "RequestInit", "Response", "Headers", "console"] {
+            assert!(
+                toml.contains(&format!("\"{feat}\"")),
+                "rpc web-sys feature `{feat}` missing:\n{toml}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_cargo_toml_without_rpc_is_byte_identical_to_plain() {
+        // The `uses_rpc = false` path must not perturb the non-rpc
+        // baseline (the committed examples' Cargo.toml).
+        let plain = compose_cargo_toml("counter");
+        let via_flag = compose_cargo_toml_with_features("counter", &[], false);
+        assert_eq!(plain, via_flag);
+        assert!(!plain.contains("wasm-bindgen-futures"));
+        assert!(!plain.contains("Request"));
     }
 
     #[test]

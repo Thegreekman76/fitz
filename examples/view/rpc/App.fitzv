@@ -1,0 +1,40 @@
+// The client SPA: `fitz build --bin web --target wasm-client`.
+// It imports the `@rpc` fns from the sibling `api.fitz` and calls them
+// with `.await?` inside event handlers — the compiler emits a `fetch`
+// stub for each and wraps the awaiting handler in `spawn_local`.
+//
+// Note: nominal return types used across the wire (here `User`) must be
+// imported too, so the client gets their struct.
+from api import greet, get_user, User
+
+component App {
+  state {
+    who: Str = "world"
+    message: Str = "(click to fetch)"
+    user_name: Str = "(none)"
+  }
+
+  event load_greeting() {
+    let m = greet(who).await?
+    message = m
+  }
+
+  event load_user() {
+    let u = get_user(42).await?
+    user_name = u.name
+  }
+
+  <template>
+    <div class="rpc-demo">
+      <p>{message}</p>
+      <p>User: {user_name}</p>
+      <button @click="load_greeting">Greet</button>
+      <button @click="load_user">Load user 42</button>
+    </div>
+  </template>
+
+  <style scoped>
+    .rpc-demo { font-family: system-ui, sans-serif; display: grid; gap: 8px; }
+    button { cursor: pointer; }
+  </style>
+}

@@ -44,7 +44,7 @@ asume VSCode para los screenshots ASCII.
 | M6 — Capstone Postgres + ORM nativo | 7 | ✅ cerrado (C1-C7) |
 | M7 — Interop Python | 3 | ✅ cerrado (C1-C3) |
 | M8 — Producción y deployment | 5 | ✅ cerrado (C1-C5) |
-| M9 — Frontend nativo con `.fitzv` | 3 | ✅ MVP (C1-C3, v0.21.4) |
+| M9 — Frontend nativo con `.fitzv` | 4 | ✅ MVP (C1-C3, v0.21.4) + C4 `@rpc` (v0.30.0) |
 
 Total: **8 módulos, 43 capítulos**. Cada módulo es **unidad releasable
 independiente** — no hace falta esperar que esté todo para empezar.
@@ -221,15 +221,19 @@ go-to-def.
 - **[C1 — Tu primer `.fitzv` (Counter component)](m9-fitzv-frontend/c1-primer-fitzv.md)**
 - **[C2 — Template DSL: interpolación, directivas, composición](m9-fitzv-frontend/c2-template-dsl.md)**
 - **[C3 — Full-page SFC: Board.fitzv migration del kanban](m9-fitzv-frontend/c3-full-page-sfc.md)**
+- **[C4 — `@rpc`: funciones de servidor fullstack](m9-fitzv-frontend/c4-server-functions-rpc.md)**
 
 **Entregable del módulo**: tenés un componente `.fitzv`
 corriendo end-to-end con el runtime `fitz-liveviews` (WebSocket
 + diff/patch), sabés escribir templates con directivas
 (`{#if}`/`{#for}`) + interpolaciones + composición (`<Child
-prop="v" />`), y viste la Board.fitzv full-page migration del
-kanban como acceptance criterion — el pattern de architecture
-`.fitz` (types + helpers) + `.fitzv` (SFC) + `main.fitz`
-(HTTP+WS thin wire-up) queda en tu toolkit.
+prop="v" />`), viste la Board.fitzv full-page migration del
+kanban como acceptance criterion, y cerraste el loop **fullstack**
+con `@rpc` — llamar una función del server (DB/auth) directo desde
+el `.fitzv` como si fuera local, con el mismo `type` compartido
+back/front. El pattern de architecture `.fitz` (types + helpers) +
+`.fitzv` (SFC) + `main.fitz` (HTTP+WS thin wire-up) queda en tu
+toolkit.
 
 Este módulo introduce la **superficie más nueva del lenguaje**
 (post-v0.21.0). Las Phase 11.7 (client-side dynamic

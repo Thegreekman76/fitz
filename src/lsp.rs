@@ -2237,6 +2237,15 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "@test — registers as a unit test (fitz test)",
             "No params. Bodies may use assert/assert_eq/assert_ne/assert_throws builtins.",
         ),
+        // Phase 11.11 — server functions (client-WASM ↔ server RPC).
+        (
+            "rpc",
+            "rpc",
+            "@rpc — server function callable from a .fitzv client",
+            "Bare decorator, must be `async`, must return `Result<T>`. Mounted as `POST /__rpc/<name>` \
+             on the server; a `.fitzv` that imports it calls it with `.await?` and the compiler emits a \
+             fetch stub. Not combinable with @get/@post/@ws/@cron/@background/@auth_provider.",
+        ),
         // Fase 12.1 (v0.12.0) — Health checks K8s.
         (
             "healthz",

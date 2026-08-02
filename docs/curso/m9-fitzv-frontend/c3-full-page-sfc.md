@@ -372,16 +372,20 @@ Docs" — colaboración multi-usuario sin cliente-side state.
 
 ---
 
-## Validación del módulo
+## Validación del cap
 
-Este cap C3 es el **entregable final del M9**. Al terminarlo
-deberías poder:
+Al terminar C3 deberías poder:
 
 - Explicar por qué el kanban split-eó en 4 archivos.
 - Reconocer el pattern "types en `.fitz` + helpers puros en
   `.fitz` + SFC en `.fitzv` + wire-up thin en `main.fitz`" y
   aplicarlo a otras apps.
 - Correr Board.fitzv en dos ventanas + ver el broadcast WS.
+
+Con esto tenés un `.fitzv` full-page real. El siguiente cap
+([C4 — `@rpc`](c4-server-functions-rpc.md)) cierra el loop
+**fullstack**: llamar una función del server directo desde el
+`.fitzv`, sin plomería.
 
 ## Qué sigue
 

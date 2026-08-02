@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>Fitz @rpc demo</title></head>
+  <body>
+    <div id="app"></div>
+    <!-- point this at the wasm bundle produced by
+         `fitz build --bin web` (target/wasm/web/web.js) -->
+    <script type="module">
+      import init from './web.js';
+      init();
+    </script>
+  </body>
+</html>

@@ -528,7 +528,15 @@ fn has_http_routes(program: &Program) -> bool {
                     // Phase 12.1.c — `@healthz`/`@readyz` too: the
                     // probes are auto-mounted routes (`GET /healthz`,
                     // `GET /readyz`) and need axum/tokio just the same.
+                    //
+                    // Phase 11.11.b — `@rpc` too: a server function is
+                    // mounted as `POST /__rpc/<name>` and needs the
+                    // full HTTP infrastructure (axum + tokio + serde +
+                    // `__FromFitzJson`/`__ToFitzJson`). A program whose
+                    // only HTTP surface is `@rpc` fns still starts the
+                    // server.
                     "get" | "post" | "put" | "delete" | "server" | "ws" | "healthz" | "readyz"
+                        | "rpc"
                 ))
         )
     })
@@ -4727,9 +4735,12 @@ impl ModuleLoader {
         let mut module_cron_fn_stmts: Vec<Stmt> = Vec::new();
         for stmt in &module_program {
             if let Stmt::FnDef { decorators, .. } = stmt {
+                // Phase 11.11.b — `@rpc` counts as HTTP for the
+                // cross-module route registration (mounted at
+                // `POST /__rpc/<name>` in `gen_http_main`).
                 let is_http = decorators
                     .iter()
-                    .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete"));
+                    .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete" | "rpc"));
                 if is_http {
                     module_http_fn_stmts.push(stmt.clone());
                 }
@@ -5774,13 +5785,16 @@ fn generate_module_rs_with_bindings(
     // wrappers live in the module (same scope as the original fn);
     // main only registers the routes with
     // `.route("/path", crate::<mod>::__handler_<name>)`.
+    // Phase 11.11.b — `@rpc` counts too: its `__handler_<name>`
+    // wrapper is emitted in the module and main mounts it at
+    // `POST /__rpc/<name>` (cross-module route loop in `gen_http_main`).
     let http_fns_in_module: Vec<&Stmt> = top_fns
         .iter()
         .copied()
         .filter(|s| match s {
             Stmt::FnDef { decorators, .. } => decorators
                 .iter()
-                .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete")),
+                .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete" | "rpc")),
             _ => false,
         })
         .collect();
@@ -6709,6 +6723,17 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                         }
                         match d.name.as_str() {
                             "get" | "post" | "put" | "delete" => http_decos = true,
+                            // Phase 11.11.b — `@rpc` server function.
+                            // Mounted as `POST /__rpc/<name>` and flows
+                            // through the same HTTP wrapper path as a
+                            // `@post` handler (goes to `http_fns`).
+                            // `resolve_handler_signature` special-cases
+                            // it: no path/query/header params — all
+                            // params come from a single JSON object body.
+                            // The checker (`check_rpc_decorator`) already
+                            // validated that it is bare + async + not
+                            // combined with the other handler decorators.
+                            "rpc" => http_decos = true,
                             "server" => {
                                 server_config = Some(parse_server_decorator(&d.args, &d.kwargs)?);
                             }
@@ -8607,6 +8632,15 @@ struct HandlerSig {
     /// (the MW.3 path of `return <status> { ... }` →
     /// `__FitzResponse`), which is a different mechanism.
     response_builtin_kind: ResponseBuiltinKind,
+    /// Phase 11.11.b — `true` if this is a `@rpc` server function.
+    /// An rpc handler is mounted as `POST /__rpc/<name>` and all its
+    /// params come from a single JSON object body (versus a `@post`
+    /// handler with at most one nominal body param). When set:
+    /// `path_params`/`query_params`/`header_params`/`body_param` are
+    /// empty and `resolved_params` holds every param; the wrapper
+    /// extracts the raw body bytes once and deserializes each param
+    /// from `obj["<param>"]` in `emit_param_coercions`.
+    is_rpc: bool,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -30072,6 +30106,77 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err("expected Stmt::FnDef in resolve_handler_signature"));
         };
 
+        // Phase 11.11.b — `@rpc` server function. Focused path:
+        // method POST, route `/__rpc/<name>`, and every param comes
+        // from a single JSON object body (not path/query/header).
+        // Not combinable with the other handler decorators
+        // (checker-enforced by `check_rpc_decorator`), so there is
+        // no auth/middleware/cors/flag/header to resolve here. The
+        // dispatch reuses the same `Result<T>` / plain-T response
+        // path as `@post` — the difference is only how params bind
+        // (see `emit_param_coercions`, gated on `sig.is_rpc`).
+        if decorators.iter().any(|d| d.name == "rpc") {
+            let mut resolved_params: Vec<(String, Type)> = Vec::with_capacity(params.len());
+            for p in params {
+                let te = p.type_.as_ref().ok_or_else(|| {
+                    self.err_at(
+                        fn_span,
+                        format!(
+                            "@rpc fn `{}`: parameter `{}` needs a type annotation",
+                            name, p.name
+                        ),
+                    )
+                })?;
+                let t = resolve_type_expr(te, self.env).map_err(|e| {
+                    self.err_at(
+                        fn_span,
+                        format!("@rpc fn `{}`: parameter `{}`: {}", name, p.name, e.message),
+                    )
+                })?;
+                resolved_params.push((p.name.clone(), t));
+            }
+            let resolved_ret = match return_type {
+                Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
+                    self.err_at(
+                        fn_span,
+                        format!("@rpc fn `{}`: return type: {}", name, e.message),
+                    )
+                })?,
+                None => Type::Null,
+            };
+            let returns_result = matches!(resolved_ret, Type::Result { .. });
+            let err_has_status_field = match &resolved_ret {
+                Type::Result { err, .. } => err_type_has_status_field(err, self.env),
+                _ => false,
+            };
+            return Ok(HandlerSig {
+                name: name.clone(),
+                is_async: *is_async,
+                http_method: "POST",
+                path: format!("/__rpc/{}", name),
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                header_params: Vec::new(),
+                body_param: None,
+                resolved_params,
+                returns_result,
+                err_has_status_field,
+                mw_user_fns: Vec::new(),
+                mw_user_fns_post: Vec::new(),
+                mw_cors: None,
+                has_middleware: false,
+                has_cors: false,
+                auth: crate::http::AuthSpec::None,
+                required_roles: Vec::new(),
+                auth_user_param_name: None,
+                flag_name: None,
+                // rpc responses are always JSON of the Result — the
+                // `Response` built-in path is not used here.
+                response_builtin_kind: ResponseBuiltinKind::None,
+                is_rpc: true,
+            });
+        }
+
         // Find this fn's HTTP decorator (there may be others;
         // we ignore them — filtering was done by
         // `generate_main_rs`).
@@ -30419,6 +30524,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             auth_user_param_name,
             flag_name,
             response_builtin_kind,
+            is_rpc: false,
         })
     }
 
@@ -30505,6 +30611,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 bn,
             )
             .unwrap();
+        }
+        // Phase 11.11.b — `@rpc`: a single raw body containing the
+        // JSON object `{param1: v1, param2: v2, ...}`. Each param is
+        // deserialized from a field of this object in
+        // `emit_param_coercions`. rpc always sends `application/json`,
+        // so no HeaderMap / content-type dispatch is extracted.
+        if sig.is_rpc {
+            self.emit("    __rpc_body_bytes: axum::body::Bytes,\n");
         }
         self.emit(") -> axum::response::Response {\n");
         self.emit("    use axum::response::IntoResponse;\n");
@@ -30625,6 +30739,57 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     /// block is a "pre-call setup" only emitted if the handler
     /// declares it.
     fn emit_param_coercions(&mut self, sig: &HandlerSig) -> Result<(), FitzError> {
+        // Phase 11.11.b — `@rpc`: the whole body is a single JSON
+        // object `{param1: v1, ...}`. Parse it once, then deserialize
+        // each param from its field via `__FromFitzJson` (parallel to
+        // the per-field reader in a nominal's `__from_fitz_json`).
+        // A missing field is passed as JSON `null`: `Option<T>` params
+        // become `None`, non-nullable params error with a clear msg.
+        if sig.is_rpc {
+            self.emit("    let __rpc_raw: serde_json::Value = if __rpc_body_bytes.is_empty() {\n");
+            self.emit("        serde_json::Value::Object(serde_json::Map::new())\n");
+            self.emit("    } else {\n");
+            self.emit("        match serde_json::from_slice(&__rpc_body_bytes) {\n");
+            self.emit("            Ok(v) => v,\n");
+            self.emit("            Err(e) => return (\n");
+            self.emit("                axum::http::StatusCode::BAD_REQUEST,\n");
+            self.emit("                axum::Json(serde_json::json!({\"error\": format!(\"invalid JSON body: {}\", e)})),\n");
+            self.emit("            ).into_response(),\n");
+            self.emit("        }\n");
+            self.emit("    };\n");
+            self.emit("    let __rpc_obj = match __rpc_raw.as_object() {\n");
+            self.emit("        Some(o) => o,\n");
+            self.emit("        None => return (\n");
+            self.emit("            axum::http::StatusCode::BAD_REQUEST,\n");
+            self.emit("            axum::Json(serde_json::json!({\"error\": \"rpc body must be a JSON object\"})),\n");
+            self.emit("        ).into_response(),\n");
+            self.emit("    };\n");
+            for (pn, pt) in &sig.resolved_params {
+                let rust_ty = rust_type_for(pt, self.env)?;
+                writeln!(
+                    &mut self.output,
+                    "    let __rpc_val_{pn} = __rpc_obj.get(\"{pn}\").cloned().unwrap_or(serde_json::Value::Null);",
+                )
+                .unwrap();
+                writeln!(
+                    &mut self.output,
+                    "    let {pn} = match <{rust_ty} as __FromFitzJson>::__from_fitz_json(&__rpc_val_{pn}) {{",
+                )
+                .unwrap();
+                self.emit("        Ok(v) => v,\n");
+                self.emit("        Err(e) => return (\n");
+                self.emit("            axum::http::StatusCode::BAD_REQUEST,\n");
+                writeln!(
+                    &mut self.output,
+                    "            axum::Json(serde_json::json!({{\"error\": format!(\"rpc param '{pn}': {{}}\", e)}})),",
+                )
+                .unwrap();
+                self.emit("        ).into_response(),\n");
+                self.emit("    };\n");
+            }
+            return Ok(());
+        }
+
         // Query params: for each, emit the binding with
         // coercion from the HashMap. If the type is nullable
         // (`Int?`), missing → None; if required, missing → 400.
@@ -31873,6 +32038,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             else {
                 continue;
             };
+            // Phase 11.11.b — `@rpc` server function: mount at
+            // `POST /__rpc/<name>` (no path arg, no CORS preflight).
+            if decorators.iter().any(|d| d.name == "rpc") {
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "    .route(\"/__rpc/{}\", axum::routing::post(__handler_{}))",
+                    name, name,
+                )
+                .unwrap();
+                continue;
+            }
             for d in decorators {
                 let method = match d.name.as_str() {
                     "get" => "get",
@@ -31941,6 +32118,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 else {
                     continue;
                 };
+                // Phase 11.11.b — cross-module `@rpc`: mount at
+                // `POST /__rpc/<name>` pointing at the module's wrapper.
+                if decorators.iter().any(|d| d.name == "rpc") {
+                    self.emit_indent();
+                    writeln!(
+                        &mut self.output,
+                        "    .route(\"/__rpc/{}\", axum::routing::post(crate::{}::__handler_{}))",
+                        name, mod_qualifier, name,
+                    )
+                    .unwrap();
+                    continue;
+                }
                 for d in decorators {
                     let method = match d.name.as_str() {
                         "get" => "get",
@@ -39019,6 +39208,77 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 11.11.b — `@rpc` server functions
+    // ---------------------------------------------------------------
+
+    const RPC_SRC: &str = "\
+type U { id: Int }
+@rpc
+async fn add(a: Int, b: Int) -> Result<Int> {
+  return Ok(a + b)
+}
+@rpc
+async fn get_u(id: Int) -> Result<U> {
+  return Ok(U { id: id })
+}
+@server(3000) fn main() => 0
+";
+
+    #[test]
+    fn rpc_emits_post_route_at_slash_rpc_name() {
+        let code = gen(RPC_SRC).expect("codegen ok");
+        assert!(
+            code.contains(".route(\"/__rpc/add\", axum::routing::post(__handler_add))"),
+            "missing /__rpc/add POST route:\n{}",
+            code
+        );
+        assert!(
+            code.contains(".route(\"/__rpc/get_u\", axum::routing::post(__handler_get_u))"),
+            "missing /__rpc/get_u POST route:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rpc_wrapper_deserializes_each_param_from_the_json_object() {
+        let code = gen(RPC_SRC).expect("codegen ok");
+        // The whole body is a single JSON object; each param comes
+        // from its own field (not a single body param).
+        assert!(
+            code.contains("__rpc_body_bytes: axum::body::Bytes"),
+            "rpc wrapper should extract raw body bytes:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__rpc_obj.get(\"a\")") && code.contains("__rpc_obj.get(\"b\")"),
+            "both params should be read from the JSON object:\n{}",
+            code
+        );
+        assert!(
+            code.contains("<i64 as __FromFitzJson>::__from_fitz_json"),
+            "params should deserialize via __FromFitzJson:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rpc_result_dispatches_ok_200_err_500() {
+        let code = gen(RPC_SRC).expect("codegen ok");
+        // `@rpc` reuses the plain-Result dispatch: Ok→200 JSON,
+        // Err→500 {"error": ...}.
+        assert!(
+            code.contains("axum::Json(__v.__to_fitz_json())"),
+            "Ok path should serialize the value:\n{}",
+            code
+        );
+        assert!(
+            code.contains("axum::http::StatusCode::INTERNAL_SERVER_ERROR"),
+            "Err path should map to 500:\n{}",
+            code
+        );
     }
 
     /// Calls `generate_rust` ignoring checker errors. Only for

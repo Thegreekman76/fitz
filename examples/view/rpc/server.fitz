@@ -1,0 +1,8 @@
+// The server binary: `fitz build --bin server`. Importing the `@rpc`
+// module mounts `POST /__rpc/greet` and `POST /__rpc/get_user`
+// automatically (same origin as the SPA, so the session cookie rides
+// along on the client's fetch).
+
+from api import greet, get_user
+
+@server(3838) fn main() => 0

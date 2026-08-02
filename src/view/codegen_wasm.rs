@@ -186,6 +186,12 @@ pub struct ImportedFn {
     params: Vec<(String, Option<TypeExpr>)>,
     ret: Option<TypeExpr>,
     body: Vec<Stmt>,
+    /// Phase 11.11.c — `true` if this fn carries `@rpc` (a server
+    /// function). Its body is NOT transpiled to the wasm crate (it
+    /// runs on the server); instead the emitter produces an async
+    /// `fetch`-based stub that POSTs the JSON args to
+    /// `/__rpc/<name>` and deserializes the `Result<T>` reply.
+    is_rpc: bool,
 }
 
 /// The classic `fn`s reachable through a `.fitzv`'s imports, loaded so
@@ -218,6 +224,7 @@ impl ImportedFnRegistry {
         params: Vec<(String, Option<TypeExpr>)>,
         ret: Option<TypeExpr>,
         body: Vec<Stmt>,
+        is_rpc: bool,
     ) {
         self.fns.insert(
             name.clone(),
@@ -226,6 +233,7 @@ impl ImportedFnRegistry {
                 params,
                 ret,
                 body,
+                is_rpc,
             },
         );
     }
@@ -234,6 +242,16 @@ impl ImportedFnRegistry {
     /// the output stays byte-identical to the pre-R3.5a.2 path.
     pub fn is_empty(&self) -> bool {
         self.fns.is_empty()
+    }
+
+    /// Phase 11.11.c — `true` when at least one registered fn is
+    /// `@rpc`. Drives whether the wasm crate gets the fetch runtime:
+    /// the `__fitz_fetch_post` helper, `serde`/`serde_json`/
+    /// `wasm-bindgen-futures`/`js-sys` deps, the web-sys
+    /// `Request`/`Response`/`Headers` features, and `serde` derives on
+    /// the nominal structs.
+    pub fn has_rpc(&self) -> bool {
+        self.fns.values().any(|f| f.is_rpc)
     }
 
     /// True when a function named `name` is registered.
@@ -492,7 +510,7 @@ pub fn emit_module_with_components(
 ) -> EmitResult<String> {
     let mut out = String::new();
     emit_module_header(&mut out);
-    emit_nominal_structs(nominals, &mut out)?;
+    emit_nominal_structs(nominals, fns.has_rpc(), &mut out)?;
     emit_imported_fns(fns, nominals, &mut out)?;
     let merged = merge_imported_components(file, components);
     let bubbled = collect_bubbled_events(&merged);
@@ -628,13 +646,31 @@ fn collect_child_names(component: &ExpandedComponent, out: &mut Vec<String>) {
 /// not a bug. The allow is item-level (not crate-level) so the four
 /// primitive-only pre-R3 examples' output stays byte-for-byte
 /// unchanged (no nominal struct → no allow emitted).
-fn emit_nominal_structs(nominals: &NominalRegistry, out: &mut String) -> EmitResult<()> {
+fn emit_nominal_structs(
+    nominals: &NominalRegistry,
+    uses_rpc: bool,
+    out: &mut String,
+) -> EmitResult<()> {
     if nominals.is_empty() {
         return Ok(());
     }
     for (name, fields) in nominals.iter() {
         writeln!(out, "#[allow(dead_code)]").unwrap();
-        writeln!(out, "#[derive(Clone)]").unwrap();
+        // Phase 11.11.c — when the crate uses `@rpc`, nominals cross the
+        // wire (as args and/or `Result<T>` replies), so they gain
+        // `serde` derives. Without rpc the derive is omitted so the
+        // output stays byte-identical to the pre-11.11 path. (Map fields
+        // `Vec<(K,V)>` serialize as pair arrays, not JSON objects — a
+        // documented limitation for rpc payloads.)
+        if uses_rpc {
+            writeln!(
+                out,
+                "#[derive(Clone, serde::Serialize, serde::Deserialize)]"
+            )
+            .unwrap();
+        } else {
+            writeln!(out, "#[derive(Clone)]").unwrap();
+        }
         writeln!(out, "pub struct {} {{", name).unwrap();
         for (fname, fty) in fields {
             let rust_ty = type_expr_to_rust(fty, nominals).map_err(|mut e| {
@@ -669,7 +705,18 @@ fn emit_imported_fns(
     if fns.is_empty() {
         return Ok(());
     }
+    // Phase 11.11.c — emit the shared `fetch` runtime once when any
+    // imported fn is `@rpc`.
+    if fns.has_rpc() {
+        emit_rpc_fetch_helper(out);
+    }
     for f in fns.iter() {
+        // Phase 11.11.c — an `@rpc` fn is a server function: emit an
+        // async `fetch` stub instead of transpiling its body.
+        if f.is_rpc {
+            emit_rpc_stub(f, nominals, out)?;
+            continue;
+        }
         let mut param_sig: Vec<String> = Vec::with_capacity(f.params.len());
         let mut local_scope: Vec<String> = Vec::with_capacity(f.params.len());
         for (pname, pty) in &f.params {
@@ -721,6 +768,135 @@ fn emit_imported_fns(
         }
         writeln!(out, "}}\n").unwrap();
     }
+    Ok(())
+}
+
+/// Phase 11.11.c — the shared client-side `fetch` runtime. POSTs a
+/// JSON body to a same-origin URL and returns `(status, text)`. The
+/// session cookie rides along automatically on a same-origin request
+/// (auth on the `@rpc` endpoint is a post-MVP refinement). Emitted
+/// once per crate when any imported fn is `@rpc`. Mirrors the spike
+/// validated in Chrome (web-sys 0.3.x `set_*` API).
+fn emit_rpc_fetch_helper(out: &mut String) {
+    out.push_str(
+        "#[allow(dead_code)]\n\
+         async fn __fitz_fetch_post(url: &str, body: &str) -> Result<(u16, String), String> {\n\
+         \x20   use wasm_bindgen::JsCast;\n\
+         \x20   use wasm_bindgen_futures::JsFuture;\n\
+         \x20   use web_sys::{Headers, Request, RequestInit, Response};\n\
+         \x20   let opts = RequestInit::new();\n\
+         \x20   opts.set_method(\"POST\");\n\
+         \x20   let headers = Headers::new().map_err(|_| \"rpc: headers\".to_string())?;\n\
+         \x20   headers\n\
+         \x20       .set(\"Content-Type\", \"application/json\")\n\
+         \x20       .map_err(|_| \"rpc: content-type\".to_string())?;\n\
+         \x20   opts.set_headers(&headers);\n\
+         \x20   opts.set_body(&wasm_bindgen::JsValue::from_str(body));\n\
+         \x20   let req = Request::new_with_str_and_init(url, &opts).map_err(|e| format!(\"rpc: {:?}\", e))?;\n\
+         \x20   let win = web_sys::window().ok_or_else(|| \"rpc: no window\".to_string())?;\n\
+         \x20   let rv = JsFuture::from(win.fetch_with_request(&req))\n\
+         \x20       .await\n\
+         \x20       .map_err(|e| format!(\"rpc: fetch failed: {:?}\", e))?;\n\
+         \x20   let resp: Response = rv.dyn_into().map_err(|_| \"rpc: not a Response\".to_string())?;\n\
+         \x20   let status = resp.status();\n\
+         \x20   let tp = resp.text().map_err(|e| format!(\"rpc: {:?}\", e))?;\n\
+         \x20   let t = JsFuture::from(tp).await.map_err(|e| format!(\"rpc: {:?}\", e))?;\n\
+         \x20   Ok((status, t.as_string().unwrap_or_default()))\n\
+         }\n\n",
+    );
+}
+
+/// Phase 11.11.c — emit the client stub for an `@rpc async fn`. The
+/// stub serializes the args into a JSON object, POSTs to
+/// `/__rpc/<name>`, and maps the reply back to `Result<T, String>`:
+/// HTTP 200 → deserialize `T` from the body; any other status → read
+/// `{"error": ...}` into the `Err`. `T` is the inner type of the
+/// declared `Result<T>` (bit-by-bit with the server's response
+/// convention). Nominal params/returns rely on `serde` derives added
+/// to the wasm structs when the crate uses rpc.
+fn emit_rpc_stub(f: &ImportedFn, nominals: &NominalRegistry, out: &mut String) -> EmitResult<()> {
+    let mut param_sig: Vec<String> = Vec::with_capacity(f.params.len());
+    for (pname, pty) in &f.params {
+        let ty = pty.as_ref().ok_or_else(|| EmitError {
+            message: format!(
+                "@rpc fn `{}` param `{pname}` needs a type annotation for the \
+                 client-WASM target",
+                f.name
+            ),
+            context: format!("@rpc fn `{}`", f.name),
+        })?;
+        let rust_ty = type_expr_to_rust(ty, nominals).map_err(|mut e| {
+            e.context = format!("@rpc fn `{}` param `{pname}`", f.name);
+            e
+        })?;
+        param_sig.push(format!("{pname}: {rust_ty}"));
+    }
+    // The return must be `Result<T>`; the stub returns
+    // `Result<T_rust, String>`.
+    let ret = f.ret.as_ref().ok_or_else(|| EmitError {
+        message: format!(
+            "@rpc fn `{}` must declare a `Result<T>` return type",
+            f.name
+        ),
+        context: format!("@rpc fn `{}`", f.name),
+    })?;
+    let inner = match ret {
+        TypeExpr::Generic { name, args, .. } if name == "Result" && args.len() == 1 => &args[0],
+        _ => {
+            return Err(EmitError {
+                message: format!(
+                    "@rpc fn `{}` must return `Result<T>` for the client-WASM target",
+                    f.name
+                ),
+                context: format!("@rpc fn `{}`", f.name),
+            })
+        }
+    };
+    let ret_rust = type_expr_to_rust(inner, nominals).map_err(|mut e| {
+        e.context = format!("@rpc fn `{}` return type", f.name);
+        e
+    })?;
+
+    writeln!(out, "#[allow(dead_code)]").unwrap();
+    writeln!(
+        out,
+        "async fn {}({}) -> Result<{}, String> {{",
+        f.name,
+        param_sig.join(", "),
+        ret_rust
+    )
+    .unwrap();
+    out.push_str("    let mut __args = serde_json::Map::new();\n");
+    for (pname, _) in &f.params {
+        writeln!(
+            out,
+            "    __args.insert(\"{pname}\".to_string(), serde_json::to_value(&{pname}).map_err(|e| e.to_string())?);",
+        )
+        .unwrap();
+    }
+    out.push_str("    let __body = serde_json::Value::Object(__args).to_string();\n");
+    writeln!(
+        out,
+        "    let (__status, __text) = __fitz_fetch_post(\"/__rpc/{}\", &__body).await?;",
+        f.name
+    )
+    .unwrap();
+    out.push_str("    if __status == 200 {\n");
+    writeln!(
+        out,
+        "        serde_json::from_str::<{}>(&__text).map_err(|e| format!(\"rpc {}: bad response: {{}}\", e))",
+        ret_rust, f.name
+    )
+    .unwrap();
+    out.push_str("    } else {\n");
+    out.push_str(
+        "        let __err: serde_json::Value = serde_json::from_str(&__text).unwrap_or(serde_json::Value::Null);\n",
+    );
+    out.push_str(
+        "        Err(__err.get(\"error\").and_then(|e| e.as_str()).map(|s| s.to_string()).unwrap_or(__text))\n",
+    );
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
     Ok(())
 }
 
@@ -1068,6 +1244,88 @@ fn emit_event_handler(
     // `payload` param (even with a body that never reads it), so it can
     // forward the payload it received up to the parent via `__cb(payload)`.
     let uses_payload = handler_uses_payload(handler) || this_bubbled.contains(&handler.name);
+    let bubbles = this_bubbled.contains(&handler.name);
+    // Phase 11.11.c — a handler whose body `.await`s (a call to an
+    // `@rpc` stub) can't run in the sync DOM-event closure. Emit a sync
+    // wrapper that clones `self` (and `payload`) and hands the work to
+    // an owned-`Rc<Self>` async worker via `spawn_local`. The worker
+    // returns `Result<(), String>` so the source `.await?` propagates;
+    // on success it mutates state and re-renders, on error it logs to
+    // the console. The naive re-render fires ONCE at the end of the
+    // worker (a mid-body "loading" flash is a later signals slice).
+    if handler_uses_await(handler) {
+        let (sync_params, worker_params, call_args) = if uses_payload {
+            (
+                ", payload: &std::collections::HashMap<String, String>",
+                ", payload: std::collections::HashMap<String, String>",
+                "__c, __pl",
+            )
+        } else {
+            ("", "", "__c")
+        };
+        writeln!(
+            out,
+            "    fn {}(self: &Rc<Self>{}) {{",
+            handler.name, sync_params
+        )
+        .unwrap();
+        writeln!(out, "        let __c = self.clone();").unwrap();
+        if uses_payload {
+            writeln!(out, "        let __pl = payload.clone();").unwrap();
+        }
+        writeln!(
+            out,
+            "        wasm_bindgen_futures::spawn_local(async move {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            if let Err(__e) = Self::__{}_async({}).await {{",
+            handler.name, call_args
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "                web_sys::console::error_1(&format!(\"rpc: {{}}\", __e).into());"
+        )
+        .unwrap();
+        writeln!(out, "            }}").unwrap();
+        writeln!(out, "        }});").unwrap();
+        writeln!(out, "    }}\n").unwrap();
+
+        writeln!(
+            out,
+            "    async fn __{}_async(self: Rc<Self>{}) -> Result<(), String> {{",
+            handler.name, worker_params
+        )
+        .unwrap();
+        let mut locals: Vec<String> = Vec::new();
+        let reassigned = collect_reassigned_locals(&handler.body);
+        for stmt in &handler.body {
+            lower_stmt(stmt, state_names, &mut locals, "        ", &reassigned, out).map_err(
+                |mut e| {
+                    e.context = format!(
+                        "async event handler `{}` of component `{}` (body)",
+                        handler.name, component_name
+                    );
+                    e
+                },
+            )?;
+        }
+        writeln!(out, "        self.render();").unwrap();
+        if bubbles {
+            writeln!(
+                out,
+                "        if let Some(__cb) = self.__on_{}.borrow().as_ref() {{ __cb(&payload); }}",
+                handler.name
+            )
+            .unwrap();
+        }
+        writeln!(out, "        Ok(())").unwrap();
+        writeln!(out, "    }}\n").unwrap();
+        return Ok(());
+    }
+
     if uses_payload {
         writeln!(
             out,
@@ -1108,6 +1366,62 @@ fn emit_event_handler(
     }
     writeln!(out, "    }}\n").unwrap();
     Ok(())
+}
+
+/// Phase 11.11.c — `true` when an event handler `.await`s anywhere in
+/// its body (a call to an `@rpc` stub). Such handlers are emitted as a
+/// sync wrapper + an async worker (see `emit_event_handler`). Mirrors
+/// the `handler_uses_payload` walk.
+fn handler_uses_await(handler: &ExpandedEventHandler) -> bool {
+    handler.body.iter().any(stmt_uses_await)
+}
+
+fn stmt_uses_await(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Assign { value, .. } => expr_uses_await(value),
+        Stmt::Return(e, _) => expr_uses_await(e),
+        Stmt::Expr(e, _) => expr_uses_await(e),
+        Stmt::For { iter, body, .. } => expr_uses_await(iter) || body.iter().any(stmt_uses_await),
+        _ => false,
+    }
+}
+
+fn expr_uses_await(expr: &Expr) -> bool {
+    match expr {
+        Expr::Await(_, _) => true,
+        Expr::Try(inner, _) => expr_uses_await(inner),
+        Expr::BinOp { left, right, .. } => expr_uses_await(left) || expr_uses_await(right),
+        Expr::UnaryOp { operand, .. } => expr_uses_await(operand),
+        Expr::Call { callee, args, .. } => {
+            expr_uses_await(callee) || args.iter().any(expr_uses_await)
+        }
+        Expr::Field { object, .. } => expr_uses_await(object),
+        Expr::Index { object, index, .. } => expr_uses_await(object) || expr_uses_await(index),
+        Expr::List(items, _) => items.iter().any(expr_uses_await),
+        Expr::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_uses_await(e)),
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            expr_uses_await(condition)
+                || then.iter().any(stmt_uses_await)
+                || else_
+                    .as_ref()
+                    .is_some_and(|els| els.iter().any(stmt_uses_await))
+        }
+        Expr::Match { value, arms, .. } => {
+            expr_uses_await(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_await))
+        }
+        Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_await),
+        Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+            StrPart::Expr(e, _) => expr_uses_await(e),
+            StrPart::Lit(_) => false,
+        }),
+        Expr::Range { start, end, .. } => expr_uses_await(start) || expr_uses_await(end),
+        _ => false,
+    }
 }
 
 /// True when an event handler references `payload` anywhere in its body
@@ -3474,6 +3788,20 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
                 arm_strs.push(format!("{pat} => {val}"));
             }
             Ok(format!("match {} {{ {} }}", scrutinee, arm_strs.join(", ")))
+        }
+        // Phase 11.11.c — `<expr>.await` inside an async event handler
+        // (a call to an `@rpc` stub). Legal only in the async fn the
+        // handler emits when its body contains an await.
+        Expr::Await(inner, _) => {
+            let base = lower_expr(inner, state_names, locals)?;
+            Ok(format!("{base}.await"))
+        }
+        // Phase 11.11.c — `<expr>?`. The async handler fn returns
+        // `Result<(), String>`, so `?` on the `Result<T, String>` of an
+        // `@rpc` stub propagates its error string and unwraps `T`.
+        Expr::Try(inner, _) => {
+            let base = lower_expr(inner, state_names, locals)?;
+            Ok(format!("{base}?"))
         }
         Expr::Null(_)
         | Expr::Bytes(_, _)
@@ -6488,6 +6816,7 @@ component Card {
                 params,
                 return_type,
                 body,
+                decorators,
                 ..
             } = stmt
             {
@@ -6495,7 +6824,14 @@ component Card {
                     .iter()
                     .map(|p| (p.name.clone(), p.type_.clone()))
                     .collect();
-                reg.insert(name.clone(), params, return_type.clone(), body.clone());
+                let is_rpc = decorators.iter().any(|d| d.name == "rpc");
+                reg.insert(
+                    name.clone(),
+                    params,
+                    return_type.clone(),
+                    body.clone(),
+                    is_rpc,
+                );
             }
         }
         reg
@@ -6554,6 +6890,147 @@ component Card {
         assert!(
             err.message.contains("needs a return-type annotation"),
             "a missing return type must reject:\n{err}"
+        );
+    }
+
+    // ---- Phase 11.11.c — `@rpc` client stubs + async handlers -------
+
+    #[test]
+    fn phase_11_11_rpc_fn_emits_async_fetch_stub_and_helper() {
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic(
+            "@rpc\nasync fn greet(name: Str) -> Result<Str> { return Ok(\"hi\") }",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        // The shared fetch runtime is emitted once.
+        assert_eq!(
+            out.matches("async fn __fitz_fetch_post(").count(),
+            1,
+            "the fetch helper must be emitted exactly once:\n{out}"
+        );
+        // The stub is an async fn returning Result<T, String>, NOT a
+        // transpiled body.
+        assert!(
+            out.contains("async fn greet(name: String) -> Result<String, String> {"),
+            "the rpc stub signature:\n{out}"
+        );
+        assert!(
+            out.contains("__fitz_fetch_post(\"/__rpc/greet\", &__body).await?"),
+            "the stub must POST to /__rpc/greet:\n{out}"
+        );
+        assert!(
+            out.contains("serde_json::from_str::<String>(&__text)"),
+            "the 200 branch must deserialize T:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_11_non_rpc_fn_still_transpiles_and_no_fetch_helper() {
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic("fn double(n: Int) -> Int { return n * 2 }");
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            out.contains("fn double(n: i64) -> i64 {") && out.contains("return (n * 2i64);"),
+            "a non-rpc fn must still transpile its body:\n{out}"
+        );
+        assert!(
+            !out.contains("__fitz_fetch_post"),
+            "no rpc → no fetch helper:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_11_async_event_handler_wraps_in_spawn_local() {
+        let src = r#"component App {
+  state { who: Str = "world", msg: Str = "" }
+  event go() {
+    let m = greet(who).await?
+    msg = m
+  }
+  <template><span>{msg}</span><button @click="go">go</button></template>
+}"#;
+        let file = single_component_file(src);
+        let fns = fns_from_classic(
+            "@rpc\nasync fn greet(name: Str) -> Result<Str> { return Ok(\"hi\") }",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        // Sync wrapper spawns the async worker.
+        assert!(
+            out.contains("wasm_bindgen_futures::spawn_local(async move {"),
+            "an awaiting handler must spawn_local:\n{out}"
+        );
+        assert!(
+            out.contains("async fn __go_async(self: Rc<Self>) -> Result<(), String> {"),
+            "the async worker takes an owned Rc<Self> and returns Result:\n{out}"
+        );
+        assert!(
+            out.contains(".await?"),
+            "the awaited call keeps its .await?:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_11_nominal_gets_serde_derives_when_rpc() {
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let mut nominals = NominalRegistry::new();
+        nominals.insert(
+            "User".to_string(),
+            vec![
+                (
+                    "id".to_string(),
+                    crate::ast::TypeExpr::Named("Int".to_string()),
+                ),
+                (
+                    "name".to_string(),
+                    crate::ast::TypeExpr::Named("Str".to_string()),
+                ),
+            ],
+        );
+        let fns = fns_from_classic(
+            "@rpc\nasync fn get_user(id: Int) -> Result<User> { return Err(\"x\") }",
+        );
+        let out = emit_module_with_imports(&file, &nominals, &fns).unwrap();
+        assert!(
+            out.contains("#[derive(Clone, serde::Serialize, serde::Deserialize)]"),
+            "nominals cross the wire under rpc, so they get serde derives:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_11_nominal_no_serde_derive_without_rpc() {
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let mut nominals = NominalRegistry::new();
+        nominals.insert(
+            "User".to_string(),
+            vec![(
+                "id".to_string(),
+                crate::ast::TypeExpr::Named("Int".to_string()),
+            )],
+        );
+        let out = emit_module_with_nominals(&file, &nominals).unwrap();
+        assert!(
+            out.contains("#[derive(Clone)]") && !out.contains("serde::Serialize"),
+            "without rpc the nominal stays a plain Clone struct:\n{out}"
         );
     }
 

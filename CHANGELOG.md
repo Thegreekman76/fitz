@@ -9,6 +9,77 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.30.0] — 2026-08-02 — `@rpc` server functions (client-WASM ↔ server, fullstack)
+
+### Added — call a server function from a `.fitzv` client, tipada, sin plumbing
+
+Phase 11.11 closes the fullstack loop: a `@rpc async fn` declared in a
+classic `.fitz` module is callable **directly** from a client-WASM
+`.fitzv` component — `let u = get_user(42).await?` — as if it were a
+local async call. The compiler generates **both halves** from one
+declaration: a `POST /__rpc/<name>` endpoint on the server and a
+`fetch`-based stub on the client. No hand-written HTTP handler, no
+`fetch`, no JSON glue, no route strings.
+
+```fitz
+// api.fitz (classic — has db + auth)
+@rpc
+async fn get_user(id: Int) -> Result<User> {
+  let conn = db.connect(db_url()).await?
+  return User.where(fn(u) => u.id == id).first(conn).await
+}
+
+// App.fitzv (client-WASM)
+from api import get_user, User
+event load() {
+  let u = get_user(42).await?   // ← round-trip tipado
+  user = u
+}
+```
+
+- **Server half (`11.11.b`, codegen):** an `@rpc` fn is mounted as
+  `POST /__rpc/<name>` (single-file and cross-module). The request body
+  is a JSON **object** `{param1: v1, ...}`; each param is deserialized
+  from its own field via `__FromFitzJson`, the fn runs, and its
+  `Result<T>` becomes `200` + JSON (Ok) or `500` + `{"error": ...}`
+  (Err) — reusing the whole `@post` wrapper chain (observability,
+  panic-catch, etc.).
+- **Client half (`11.11.c`, wasm codegen):** an imported `@rpc` fn is
+  emitted as an async `fetch` stub (its server-side body is **not**
+  transpiled) that serializes the args, POSTs same-origin (the session
+  cookie rides along), and maps the reply back to `Result<T, String>`.
+  A shared `__fitz_fetch_post` runtime + `serde` derives on the
+  wire-crossing nominals are added only when a crate uses `@rpc`.
+- **Async event handlers:** a handler whose body `.await`s an `@rpc`
+  stub is split into a sync wrapper that `spawn_local`s an owned-`Rc<Self>`
+  async worker returning `Result<(), String>` — so `.await?` propagates
+  and state updates + a re-render fire when the reply arrives.
+
+### Notes
+
+- **Verified end-to-end in real Chrome** (puppeteer + a same-origin
+  static+proxy server): a two-button SPA fetched a primitive
+  (`greet` → "Hello, world!") and a nominal (`get_user(42)` → "Ada")
+  from the server binary, updated state, and re-rendered — zero page
+  errors. The `web` crate compiled to a real `.wasm` via `wasm-pack`
+  (`:-) Done`); the server binary answered the exact `/__rpc/*`
+  endpoints (curl: 200 / 500 / 400 all correct).
+- Runnable example `examples/view/rpc/` (`api.fitz` + `server.fitz` +
+  `App.fitzv`) + smoke `tests/view_rpc_wasm_smoke.rs`.
+- The checker piece (`11.11.d`) shipped earlier: bare `@rpc`, `async`
+  required, `Result<T>` return, mutually exclusive with the other
+  handler decorators.
+- **MVP scope:** nominals used across the wire must be imported into the
+  `.fitzv` (`from api import ..., User`); stacked auth on the generated
+  endpoint (`@authenticated`/`@admin`) is a post-MVP refinement; the
+  re-render fires once (a mid-request "loading…" flash is a later
+  fine-grained-reactivity slice); `Map<K,V>` payloads serialize as pair
+  arrays (documented limitation).
+- 14 unit tests (server route/coercion/dispatch, client stub/helper/
+  spawn_local/serde/Cargo deps) + the example smoke. Suite: lib 3930
+  green; fmt + clippy (default + `lsp`) clean; all 17 prior
+  `examples/view/` smokes byte-compatible (non-rpc crates unchanged).
+
 ## [v0.29.8] — 2026-08-01 — `.fitzv` → wasm: string methods + logical `and`/`or`
 
 ### Added — string methods and logical operators on the client-WASM target
