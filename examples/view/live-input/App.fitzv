@@ -10,11 +10,12 @@
 //     naive re-render model (no focus to lose).
 //   - `<input @input="on_name">`     — fires on every keystroke; echoes live.
 //
-// Caveat (naive re-render): a state change rebuilds the whole component DOM,
-// so a live text `<input>` re-mounts on each keystroke — the value is bound
-// back via `value="{name}"`, but the caret jumps to the end. Fine-grained
-// reactivity (which would patch in place) is the ROADMAP's next iteration;
-// the CW.9 capability here is the value flowing to the handler.
+// Reactivity (Phase 11.10 keep-node): a component with a live form control
+// over a static template builds its DOM once and PATCHES the interpolation
+// points in place on a state change (`set_data` / `set_attribute` over stashed
+// node handles) instead of rebuilding the subtree. The `<input>` element is
+// never re-created, so the caret stays put mid-string as you type. Verified in
+// Chrome: with the caret after "He", typing "XY" yields "HeXYllo".
 
 component LiveInput {
   state {

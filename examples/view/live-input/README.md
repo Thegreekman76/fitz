@@ -30,15 +30,20 @@ The event wiring matches the SSR emitter, which lowers any `@event` to
   generated `Cargo.toml` **only when a component uses `@input`/`@change`**
   (value-free crates keep the base feature set).
 
-## Caveat — naive re-render + live text inputs
+## Reactivity — keep-node reconciliation (Phase 11.10)
 
-A state change rebuilds the whole component DOM (the current model is
-dirty-flag + naive re-render). For a `<select> @change` this is invisible
-(there's no caret to lose). For a live text `<input> @input`, each
-keystroke re-mounts the field: the value is bound back via `value="{name}"`,
-but the caret jumps to the end. Fine-grained reactivity (patching in place)
-is the ROADMAP's next iteration; the CW.9 capability here is the value
-reliably flowing to the handler.
+A component with a live form control (`@input`/`@change`) over a **static
+template** builds its DOM once and then **patches in place** on a state
+change: the emitter stashes a handle per interpolation point and, on a
+keystroke, updates only those nodes (`set_data` on a text node,
+`set_attribute` on an element). The `<input>` element itself is never
+re-created, so the caret stays where you put it mid-string — verified in
+Chrome (caret after `He`, typing `XY` yields `HeXYllo`, not `HeXlloY`).
+
+Every other component keeps the byte-identical naive re-render; keep-node is
+gated to the live-input + static-structure case it fixes. Reconciling
+control flow (`{#if}`/`{#for}`) and derived values (`memo`) are later
+slices of Phase 11.10.
 
 ## Build + view
 

@@ -950,6 +950,15 @@ fn emit_component_impl(
     let empty = std::collections::BTreeSet::new();
     let this_bubbled = bubbled.get(&component.name).unwrap_or(&empty);
 
+    // Phase 11.10 slice 1 — keep-node reconciliation. When a component
+    // has a live form control (`@input`/`@change`) over a static template,
+    // emit the build-once + patch-in-place model instead of the naive
+    // re-render, so a keystroke doesn't re-mount the `<input>` and drop the
+    // caret. Every other component keeps the byte-identical naive path.
+    if use_keep_node_reconciliation(component, this_bubbled) {
+        return emit_component_keepnode(component, file, nominals, this_bubbled, out);
+    }
+
     // Phase 11.7.e / R2b — collect every `<Child />` composition site
     // (in DFS order) so the struct can carry a typed instance-cache
     // slot per site. Each site is classified STATIC (fixed position,
@@ -980,6 +989,230 @@ fn emit_component_impl(
     emit_mount_and_render(component, &state_names, file, nominals, this_bubbled, out)?;
     if let Some(style) = &component.style {
         emit_style_helper(&component.name, style, out);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.10 slice 1 — keep-node reconciliation (build once, patch in place)
+// ---------------------------------------------------------------------------
+
+/// Decide whether `component` uses the keep-node reconciliation model
+/// (Phase 11.10) instead of the naive re-render.
+///
+/// Gated to the exact case it fixes — a live form control
+/// (`@input`/`@change`) whose surrounding text/attributes interpolate
+/// state — and restricted so the first slice stays sound:
+///
+/// - **static structure** (no `{#if}`/`{#for}`/`<slot>`/`<Child />`):
+///   those need their own reconciliation of inserted/removed subtrees,
+///   which later slices add. A static template's DOM shape never
+///   changes, so patching the handful of interpolation points is enough.
+/// - **not a bubbled child** (`this_bubbled` empty): a component whose
+///   events a parent binds is re-mounted by that parent's naive render,
+///   which would reset `__built`; keeping it naive avoids a stale-handle
+///   patch. A root/standalone component (the live-input case) mounts once.
+///
+/// Every other component keeps the byte-identical naive re-render.
+fn use_keep_node_reconciliation(
+    component: &ExpandedComponent,
+    this_bubbled: &std::collections::BTreeSet<String>,
+) -> bool {
+    this_bubbled.is_empty()
+        && component_uses_value_input(component)
+        && template_is_static_structure(component)
+}
+
+/// `true` when the template has no `{#if}`/`{#for}`/`<slot>`/`<Child />`
+/// anywhere — a fixed DOM shape whose only render-to-render change is the
+/// value of interpolation points (Phase 11.10 keep-node prerequisite).
+fn template_is_static_structure(component: &ExpandedComponent) -> bool {
+    fn node_is_static(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::If { .. }
+            | ExpandedTemplateNode::For { .. }
+            | ExpandedTemplateNode::Slot { .. }
+            | ExpandedTemplateNode::ChildComponent { .. } => false,
+            ExpandedTemplateNode::Element { children, .. } => children.iter().all(node_is_static),
+            _ => true,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().all(node_is_static))
+}
+
+/// Emit a component under the keep-node reconciliation model
+/// (Phase 11.10 slice 1). The render walk runs once into a `__build()`
+/// body that also stashes a handle per dynamic point into a struct field;
+/// `render()` builds on first mount then dispatches to `__patch()`, which
+/// updates only those handles. The `<input>` element itself is never
+/// re-created, so the caret survives a keystroke.
+fn emit_component_keepnode(
+    component: &ExpandedComponent,
+    file: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+    this_bubbled: &std::collections::BTreeSet<String>,
+    out: &mut String,
+) -> EmitResult<()> {
+    let name = &component.name;
+    let state_names: Vec<String> = component.state.iter().map(|f| f.name.clone()).collect();
+
+    // 1. Run the build walk into a buffer, collecting keep-node handle
+    //    fields + patch statements as a side effect (see `RenderCtx.keep`).
+    let mut build_body = String::new();
+    let mut keep_fields: Vec<(String, String)> = Vec::new();
+    let mut patch_stmts: Vec<String> = Vec::new();
+    if let Some(template) = &component.template {
+        let mut ctx = RenderCtx::new(
+            name,
+            &state_names,
+            &component.state,
+            file,
+            nominals,
+            &component.events,
+            this_bubbled,
+        );
+        ctx.keep = Some(KeepAccum::default());
+        for root_node in &template.roots {
+            emit_template_node(root_node, "root", &mut ctx, &mut build_body)?;
+        }
+        let accum = ctx.keep.take().unwrap();
+        keep_fields = accum.fields;
+        patch_stmts = accum.patch;
+        // The keep-node gate guarantees no `<slot>`/`<Child />`, so the
+        // ctx accumulated no slot_methods and no child-cache sites.
+    }
+
+    // 2. struct — state cells + keep-node handle fields + build flag + root.
+    writeln!(out, "pub struct {} {{", name).unwrap();
+    for field in &component.state {
+        let rust_ty = type_expr_to_rust(&field.type_expr, nominals).map_err(|mut e| {
+            e.context = format!(
+                "state field `{}` of component `{}` (type)",
+                field.name, name
+            );
+            e
+        })?;
+        writeln!(out, "    {}: RefCell<{}>,", field.name, rust_ty).unwrap();
+    }
+    for (fname, fty) in &keep_fields {
+        writeln!(out, "    {}: RefCell<Option<{}>>,", fname, fty).unwrap();
+    }
+    writeln!(out, "    __built: RefCell<bool>,").unwrap();
+    writeln!(out, "    root: RefCell<Option<HtmlElement>>,").unwrap();
+    writeln!(out, "}}\n").unwrap();
+
+    // 3. impl + new()
+    writeln!(out, "impl {} {{", name).unwrap();
+    writeln!(out, "    pub fn new() -> Rc<Self> {{").unwrap();
+    writeln!(out, "        Rc::new({} {{", name).unwrap();
+    for field in &component.state {
+        let default_rust =
+            default_expr_to_rust(&field.default, &field.type_expr).map_err(|mut e| {
+                e.context = format!(
+                    "state field `{}` of component `{}` (default)",
+                    field.name, name
+                );
+                e
+            })?;
+        writeln!(
+            out,
+            "            {}: RefCell::new({}),",
+            field.name, default_rust
+        )
+        .unwrap();
+    }
+    for (fname, _) in &keep_fields {
+        writeln!(out, "            {}: RefCell::new(None),", fname).unwrap();
+    }
+    writeln!(out, "            __built: RefCell::new(false),").unwrap();
+    writeln!(out, "            root: RefCell::new(None),").unwrap();
+    writeln!(out, "        }})").unwrap();
+    writeln!(out, "    }}\n").unwrap();
+
+    // 4. event handlers — unchanged; each mutates a state cell then calls
+    //    `self.render()`, which now dispatches to `__patch()`.
+    emit_event_handlers(component, &state_names, this_bubbled, out)?;
+
+    // 5. mount / mount_into / render dispatch / __build / __patch.
+    writeln!(
+        out,
+        "    pub fn mount(self: &Rc<Self>, selector: &str) -> Result<(), JsValue> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let document = web_sys::window().unwrap().document().unwrap();"
+    )
+    .unwrap();
+    writeln!(out, "        let root = document").unwrap();
+    writeln!(out, "            .query_selector(selector)?").unwrap();
+    writeln!(
+        out,
+        "            .ok_or_else(|| JsValue::from_str(\"mount: selector matched no element\"))?"
+    )
+    .unwrap();
+    writeln!(out, "            .dyn_into::<HtmlElement>()?;").unwrap();
+    writeln!(out, "        self.mount_into(root)").unwrap();
+    writeln!(out, "    }}\n").unwrap();
+
+    writeln!(
+        out,
+        "    pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {{"
+    )
+    .unwrap();
+    if let Some(style) = &component.style {
+        let helper = style_helper_ident(name, style);
+        writeln!(out, "        {}();", helper).unwrap();
+    }
+    // A fresh mount rebuilds (any prior handles point into a discarded DOM).
+    writeln!(out, "        *self.__built.borrow_mut() = false;").unwrap();
+    writeln!(out, "        *self.root.borrow_mut() = Some(root);").unwrap();
+    writeln!(out, "        self.render();").unwrap();
+    writeln!(out, "        Ok(())").unwrap();
+    writeln!(out, "    }}\n").unwrap();
+
+    writeln!(out, "    fn render(self: &Rc<Self>) {{").unwrap();
+    writeln!(out, "        if *self.__built.borrow() {{").unwrap();
+    writeln!(out, "            self.__patch();").unwrap();
+    writeln!(out, "        }} else {{").unwrap();
+    writeln!(out, "            self.__build();").unwrap();
+    writeln!(out, "            *self.__built.borrow_mut() = true;").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}\n").unwrap();
+
+    writeln!(out, "    fn __build(self: &Rc<Self>) {{").unwrap();
+    writeln!(out, "        let root_ref = self.root.borrow();").unwrap();
+    writeln!(out, "        let root = match root_ref.as_ref() {{").unwrap();
+    writeln!(out, "            Some(r) => r,").unwrap();
+    writeln!(out, "            None => return,").unwrap();
+    writeln!(out, "        }};").unwrap();
+    writeln!(out, "        while let Some(child) = root.first_child() {{").unwrap();
+    writeln!(out, "            let _ = root.remove_child(&child);").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(
+        out,
+        "        let document = web_sys::window().unwrap().document().unwrap();"
+    )
+    .unwrap();
+    out.push_str(&build_body);
+    writeln!(out, "    }}\n").unwrap();
+
+    writeln!(out, "    fn __patch(self: &Rc<Self>) {{").unwrap();
+    if patch_stmts.is_empty() {
+        writeln!(out, "        let _ = self;").unwrap();
+    }
+    for stmt in &patch_stmts {
+        writeln!(out, "{}", stmt).unwrap();
+    }
+    writeln!(out, "    }}").unwrap();
+
+    writeln!(out, "}}\n").unwrap();
+
+    if let Some(style) = &component.style {
+        emit_style_helper(name, style, out);
     }
     Ok(())
 }
@@ -1663,6 +1896,27 @@ struct RenderCtx<'a> {
     /// in this vec, matched by `emit_child_component` when it wires the
     /// child's `__slot` callback.
     slot_methods: Vec<Vec<ExpandedTemplateNode>>,
+    /// Phase 11.10 slice 1 — keep-node reconciliation accumulator. `Some`
+    /// only while emitting a keep-node component's `__build()` body: each
+    /// dynamic point (text interpolation, interpolated / mixed attribute)
+    /// stashes a DOM-node handle into a component struct field and records
+    /// a patch statement, so a later state change patches that node in
+    /// place instead of rebuilding the whole subtree (which would re-mount
+    /// a live `<input>` and drop the caret). `None` for the naive
+    /// re-render path — the emitted code is then byte-identical to before.
+    keep: Option<KeepAccum>,
+}
+
+/// Phase 11.10 slice 1 — accumulator threaded through the keep-node build
+/// walk. `next` numbers each dynamic point in DFS order; `fields` are the
+/// `RefCell<Option<web_sys::Text|Element>>` handle fields the component
+/// struct carries; `patch` are the statements of the component's
+/// `__patch()` body (one per dynamic point).
+#[derive(Default)]
+struct KeepAccum {
+    next: usize,
+    fields: Vec<(String, String)>,
+    patch: Vec<String>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -1689,7 +1943,20 @@ impl<'a> RenderCtx<'a> {
             events,
             this_bubbled,
             slot_methods: Vec::new(),
+            keep: None,
         }
+    }
+
+    /// Phase 11.10 — allocate the next keep-node handle index (DFS order).
+    /// Only valid while `self.keep.is_some()` (emitting a `__build()` body).
+    fn keep_index(&mut self) -> usize {
+        let accum = self
+            .keep
+            .as_mut()
+            .expect("keep_index called outside keep-node mode");
+        let k = accum.next;
+        accum.next += 1;
+        k
     }
 
     fn fresh(&mut self, prefix: &str) -> String {
@@ -1859,6 +2126,27 @@ fn emit_interpolation(
         parent_var, var_node
     )
     .unwrap();
+    // Phase 11.10 — keep-node reconciliation: stash the text node so a
+    // later state change patches its content in place (`set_data`) instead
+    // of rebuilding the subtree.
+    if ctx.keep.is_some() {
+        let k = ctx.keep_index();
+        let field = format!("__ktext_{}", k);
+        writeln!(
+            out,
+            "        *self.{}.borrow_mut() = Some({}.clone());",
+            field, var_node
+        )
+        .unwrap();
+        let accum = ctx.keep.as_mut().unwrap();
+        accum
+            .fields
+            .push((field.clone(), "web_sys::Text".to_string()));
+        accum.patch.push(format!(
+            "        if let Some(__n) = self.{}.borrow().as_ref() {{ __n.set_data(&format!(\"{{}}\", {})); }}",
+            field, expr_rust
+        ));
+    }
     Ok(())
 }
 
@@ -2256,6 +2544,29 @@ fn emit_element(
                     args_str
                 )
                 .unwrap();
+                // Phase 11.10 — keep-node: stash the element so a later
+                // state change re-sets this mixed attribute in place.
+                if ctx.keep.is_some() {
+                    let k = ctx.keep_index();
+                    let field = format!("__kattr_{}", k);
+                    writeln!(
+                        out,
+                        "        *self.{}.borrow_mut() = Some({}.clone());",
+                        field, var
+                    )
+                    .unwrap();
+                    let accum = ctx.keep.as_mut().unwrap();
+                    accum
+                        .fields
+                        .push((field.clone(), "web_sys::Element".to_string()));
+                    accum.patch.push(format!(
+                        "        if let Some(__el) = self.{}.borrow().as_ref() {{ let _ = __el.set_attribute({}, &format!(\"{}\"{})); }}",
+                        field,
+                        rust_string_literal(name),
+                        fmt,
+                        args_str
+                    ));
+                }
             }
             // Phase 11.7 R3.5b.1 — an interpolated attribute
             // (`data-flv-value-card_id="{c.id}"`, `class="{cls}"`).
@@ -2279,6 +2590,31 @@ fn emit_element(
                     value_rust
                 )
                 .unwrap();
+                // Phase 11.10 — keep-node: stash the element so a later
+                // state change re-sets this interpolated attribute in place.
+                // For a live `<input value="{name}">` this re-sets the value
+                // content attribute without touching the caret (the current
+                // value property, dirtied by the user's typing, is untouched).
+                if ctx.keep.is_some() {
+                    let k = ctx.keep_index();
+                    let field = format!("__kattr_{}", k);
+                    writeln!(
+                        out,
+                        "        *self.{}.borrow_mut() = Some({}.clone());",
+                        field, var
+                    )
+                    .unwrap();
+                    let accum = ctx.keep.as_mut().unwrap();
+                    accum
+                        .fields
+                        .push((field.clone(), "web_sys::Element".to_string()));
+                    accum.patch.push(format!(
+                        "        if let Some(__el) = self.{}.borrow().as_ref() {{ let _ = __el.set_attribute({}, &format!(\"{{}}\", {})); }}",
+                        field,
+                        rust_string_literal(name),
+                        value_rust
+                    ));
+                }
             }
         }
     }
@@ -5856,6 +6192,96 @@ component Row {
         assert!(
             feats.is_empty(),
             "click-only component needs no extra web-sys features: {feats:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 11.10 slice 1 — keep-node reconciliation
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn phase_11_10_keepnode_gate_fires_for_static_value_input() {
+        // A live `@input` over a static template compiles to the keep-node
+        // model: a `__built` flag, `render()` dispatching build/patch, and a
+        // `__patch()` that updates stashed handles in place.
+        let src = r#"component LiveName {
+  state { name: Str = "" }
+  event on_type() { name = payload["value"] }
+  <template>
+    <input @input="on_type" value="{name}" />
+    <p>Hello, {name}!</p>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(out.contains("__built: RefCell<bool>"), "build flag:\n{out}");
+        assert!(
+            out.contains("fn __build(self: &Rc<Self>)")
+                && out.contains("fn __patch(self: &Rc<Self>)"),
+            "build + patch fns:\n{out}"
+        );
+        assert!(
+            out.contains("if *self.__built.borrow() {") && out.contains("self.__patch();"),
+            "render dispatches to patch once built:\n{out}"
+        );
+        // Text interpolation `{name}` patches via set_data; the `value` attr
+        // patches via set_attribute — both over stashed handles.
+        assert!(
+            out.contains("__ktext_")
+                && out.contains(".set_data(&format!(\"{}\", (*self.name.borrow())))"),
+            "text node patched in place:\n{out}"
+        );
+        assert!(
+            out.contains("__kattr_")
+                && out
+                    .contains(".set_attribute(\"value\", &format!(\"{}\", (*self.name.borrow())))"),
+            "value attr patched in place:\n{out}"
+        );
+        // The input element is built once (no wipe loop in render itself —
+        // it lives in __build), so it is never re-created on a keystroke.
+        assert!(
+            out.contains("*self.__built.borrow_mut() = false;"),
+            "mount_into resets the build flag:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_10_keepnode_falls_back_to_naive_with_if() {
+        // A value-input component whose template has a `{#if}` is NOT static
+        // structure, so it keeps the naive re-render (no keep-node scaffolding)
+        // until a later slice reconciles control flow.
+        let src = r#"component Guarded {
+  state { name: Str = "" }
+  event on_type() { name = payload["value"] }
+  <template>
+    <input @input="on_type" value="{name}" />
+    {#if name == ""}<p>empty</p>{#else}<p>{name}</p>{/if}
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            !out.contains("fn __patch(") && !out.contains("__built"),
+            "control-flow value-input stays naive (no keep-node):\n{out}"
+        );
+        // Naive render rebuilds under root each time.
+        assert!(
+            out.contains("while let Some(child) = root.first_child()"),
+            "naive render wipes and rebuilds:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_10_keepnode_not_used_for_non_value_input() {
+        // A `@click`-only component (no live input) has no caret to preserve,
+        // so it keeps the byte-identical naive re-render.
+        let src = r#"component Tap {
+  state { n: Int = 0 }
+  event bump() { n = n + 1 }
+  <template><button @click="bump">{n}</button></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            !out.contains("fn __patch(") && !out.contains("__built"),
+            "click-only component stays naive:\n{out}"
         );
     }
 

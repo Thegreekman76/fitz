@@ -34,6 +34,11 @@ use web_sys::{Event, HtmlElement};
 pub struct LiveInput {
     name: RefCell<String>,
     color: RefCell<String>,
+    __kattr_0: RefCell<Option<web_sys::Element>>,
+    __ktext_1: RefCell<Option<web_sys::Text>>,
+    __kattr_2: RefCell<Option<web_sys::Element>>,
+    __ktext_3: RefCell<Option<web_sys::Text>>,
+    __built: RefCell<bool>,
     root: RefCell<Option<HtmlElement>>,
 }
 
@@ -42,6 +47,11 @@ impl LiveInput {
         Rc::new(LiveInput {
             name: RefCell::new("".to_string()),
             color: RefCell::new("red".to_string()),
+            __kattr_0: RefCell::new(None),
+            __ktext_1: RefCell::new(None),
+            __kattr_2: RefCell::new(None),
+            __ktext_3: RefCell::new(None),
+            __built: RefCell::new(false),
             root: RefCell::new(None),
         })
     }
@@ -68,12 +78,22 @@ impl LiveInput {
     }
 
     pub fn mount_into(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        *self.__built.borrow_mut() = false;
         *self.root.borrow_mut() = Some(root);
         self.render();
         Ok(())
     }
 
     fn render(self: &Rc<Self>) {
+        if *self.__built.borrow() {
+            self.__patch();
+        } else {
+            self.__build();
+            *self.__built.borrow_mut() = true;
+        }
+    }
+
+    fn __build(self: &Rc<Self>) {
         let root_ref = self.root.borrow();
         let root = match root_ref.as_ref() {
             Some(r) => r,
@@ -134,11 +154,13 @@ impl LiveInput {
         let __el13 = document.create_element("p").unwrap();
         __el13.set_attribute("class", "swatch").unwrap();
         __el13.set_attribute("style", &format!("background: {}", (*self.color.borrow()))).unwrap();
+        *self.__kattr_0.borrow_mut() = Some(__el13.clone());
         let __t14 = document.create_text_node("Picked: ");
         __el13.append_child(&__t14).unwrap();
         let __interp15 = format!("{}", (*self.color.borrow()));
         let __t16 = document.create_text_node(&__interp15);
         __el13.append_child(&__t16).unwrap();
+        *self.__ktext_1.borrow_mut() = Some(__t16.clone());
         __el0.append_child(&__el13).unwrap();
         let __el17 = document.create_element("label").unwrap();
         __el17.set_attribute("class", "row").unwrap();
@@ -166,6 +188,7 @@ impl LiveInput {
             __closure.forget();
         }
         __el20.set_attribute("value", &format!("{}", (*self.name.borrow()))).unwrap();
+        *self.__kattr_2.borrow_mut() = Some(__el20.clone());
         __el20.set_attribute("placeholder", "Type here").unwrap();
         __el20.set_attribute("autocomplete", "off").unwrap();
         __el17.append_child(&__el20).unwrap();
@@ -177,10 +200,18 @@ impl LiveInput {
         let __interp23 = format!("{}", (*self.name.borrow()));
         let __t24 = document.create_text_node(&__interp23);
         __el21.append_child(&__t24).unwrap();
+        *self.__ktext_3.borrow_mut() = Some(__t24.clone());
         let __t25 = document.create_text_node("!");
         __el21.append_child(&__t25).unwrap();
         __el0.append_child(&__el21).unwrap();
         root.append_child(&__el0).unwrap();
+    }
+
+    fn __patch(self: &Rc<Self>) {
+        if let Some(__el) = self.__kattr_0.borrow().as_ref() { let _ = __el.set_attribute("style", &format!("background: {}", (*self.color.borrow()))); }
+        if let Some(__n) = self.__ktext_1.borrow().as_ref() { __n.set_data(&format!("{}", (*self.color.borrow()))); }
+        if let Some(__el) = self.__kattr_2.borrow().as_ref() { let _ = __el.set_attribute("value", &format!("{}", (*self.name.borrow()))); }
+        if let Some(__n) = self.__ktext_3.borrow().as_ref() { __n.set_data(&format!("{}", (*self.name.borrow()))); }
     }
 }
 
