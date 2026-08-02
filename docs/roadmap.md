@@ -10195,7 +10195,7 @@ no por dependencia estricta.
     apilable `@authenticated`/`@admin` sobre el endpoint generado = refinamiento
     post-MVP.)
 
-- 🚧 **11.12 — Hidratación SSR → client** (slices 1+2 ✅ 2026-08-02, resto 🔜).
+- 🚧 **11.12 — Hidratación SSR → client** (slices 1+2+3 ✅ 2026-08-02, resto 🔜).
   Un mismo `.fitzv` rinde **SSR** (first paint, SEO, funciona sin JS) y el
   runtime client-WASM **toma control del DOM existente** en vez de
   re-crearlo: restaura el estado que el server serializó (state inicial +
@@ -10298,9 +10298,39 @@ no por dependencia estricta.
     `-D warnings` limpios + 20+ view smokes. **Sin sintaxis nueva, sin cambio
     de gramática/LSP** — extensión VSCode sigue 0.27.0. Bump 0.30.1 → 0.30.2.
     **Restante de 11.12:** composición `<Child />` en hidratación; texto mixto
-    con corrida dinámica vacía (`name = ""` fusiona en el server); solo state
-    primitivo se restaura del payload; y el render-a-string isomórfico real del
-    lado SSR (hoy el contrato se valida con HTML hand-authored).
+    con corrida dinámica vacía (`name = ""` fusiona en el server); y el
+    render-a-string isomórfico real del lado SSR (hoy el contrato se valida con
+    HTML hand-authored). [slice 3 cierra el restore de state compuesto].
+
+  - ✅ **11.12 slice 3 — restore de state compuesto en hidratación**
+    (2026-08-02). Levanta la restricción "solo primitivos" del restore. El
+    `__apply_state_json` que emiten los componentes hidratables ahora restaura
+    state **compuesto** desde el `<script type="application/json">` del server,
+    no solo escalares: `List<T>` ← array JSON, `Map<Str, V>` ← objeto JSON,
+    `Nullable<T>` ← `null`/inner, y nominales importados ← objeto construido
+    campo por campo. El restore es **recursivo** (nestings tipo `List<Card>`,
+    `Map<Str, List<Int>>`, `Nullable<Str>` round-trippean). Un campo cuyo JSON
+    no matchea su tipo — o un tipo que no round-trippea por JSON (tuplas,
+    funciones, `Map` con key no-`Str`) — mantiene su default. **Diseño:**
+    generador recursivo `json_restore_value(ty, nominals, val)` que baja cada
+    `TypeExpr` a un `Option<T_rust>` sobre un `&serde_json::Value`;
+    `NominalRegistry::fields` expone los campos ordenados para deserializar un
+    nominal. **Los escalares siguen por la rama accessor de slice 1/2
+    (byte-idéntico)**, así los componentes hidratables solo-escalares regeneran
+    sin cambio. **Byte-compat:** de los 20+ view smokes solo `hydrate-regions` y
+    `search-filter` (ambos hidratables con `items: List<Str>`) cambian su lib.rs;
+    `derived`/`hydrate`/`live-input` (solo-escalar) regeneran byte-idéntico.
+    **Verificado end-to-end en Chrome real** (puppeteer): el `hydrate-regions`
+    pinta un `items` server (`[Ada,Grace,Hopper]`) que difiere del default del
+    componente (`[alpha,beta,gamma]`); tras tipear "Grace" la región `{#for}`
+    reconstruye con la lista del **server** → `[Ada, Hopper]`, nunca el default —
+    prueba de que `items` vino del payload. 7/7 checks OK, cero page errors; el
+    crate compiló a `.wasm` real (`wasm-pack` → `:-) Done`). **Tests:** +5 unit
+    en `codegen_wasm` (`phase_11_12_slice3_*`: List<Str> end-to-end, byte-compat
+    scalar-only, Nullable+Map, nominal+List<nominal>, unsupported→None) + 2
+    checks nuevos en el smoke. Suite: **3959 lib** + fmt + clippy `-D warnings`
+    (default + lsp) limpios + 22 view smokes. **Sin sintaxis nueva, sin cambio
+    de gramática/LSP** — extensión VSCode sigue 0.27.0. Bump 0.30.2 → 0.30.3.
 
 - 🔜 **11.13 — Hot reload del template.** `fitz dev` re-parsea el
   `<template>` de un `.fitzv` y aplica el diff sin recompilar el crate WASM
@@ -10309,7 +10339,7 @@ no por dependencia estricta.
   diffs).
 
 **Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
-MVP por slices ✅) → **11.12 (hidratación — slice 1 ✅, slices 2+ en curso)**
+MVP por slices ✅) → **11.12 (hidratación — slices 1+2+3 ✅, composición + isomórfico 🔜)**
 → 11.13 (hot reload — DX). Cada una es una sesión seria.
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).

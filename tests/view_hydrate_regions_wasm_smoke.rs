@@ -7,6 +7,10 @@
 //! by the `__flv_next_comment` cursor) and the mixed-text nodes — instead of
 //! wiping + rebuilding.
 //!
+//! Phase 11.12 slice 3 also asserts that the component's `items` `List<Str>`
+//! state field is restored from the `<script>` payload (composite state
+//! restore), not left at the source default.
+//!
 //! - [`regenerate_hydrate_regions_lib_rs`] (always runs) — regenerates
 //!   `wasm-crate/src/lib.rs` + `Cargo.toml` and asserts the emitted Rust
 //!   carries the slice-2 hydration surface: the comment cursor helper, a
@@ -117,6 +121,14 @@ fn regenerate_hydrate_regions_lib_rs() {
         (
             "return root.hydrate(__el);",
             "the entry wrapper branches to hydrate when the root has DOM",
+        ),
+        (
+            "if let Some(__fv) = __v.get(\"items\") {",
+            "slice 3 — the List<Str> state field restores from the payload",
+        ),
+        (
+            "__fv.as_array().map(|__arr| __arr.iter().filter_map(|__le| __le.as_str().map(|__s| __s.to_string())).collect::<Vec<String>>())",
+            "slice 3 — List<Str> restore deserializes the JSON array",
         ),
     ];
     for (needle, why) in checks {

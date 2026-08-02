@@ -157,6 +157,14 @@ impl NominalRegistry {
         self.defs.is_empty()
     }
 
+    /// The ordered `(field_name, field_type)` list of a registered
+    /// nominal, or `None` when unknown. Phase 11.12 slice 3 — the
+    /// hydration state restore reads these to deserialize a nominal
+    /// state field from its JSON object, field by field.
+    fn fields(&self, name: &str) -> Option<&[(String, TypeExpr)]> {
+        self.defs.get(name).map(|v| v.as_slice())
+    }
+
     /// Iterate registered nominals in deterministic (sorted-by-name)
     /// order so the emitted structs are stable across runs.
     fn iter(&self) -> impl Iterator<Item = (&String, &Vec<(String, TypeExpr)>)> {
@@ -1284,10 +1292,83 @@ fn emit_hydration_helpers(out: &mut String, with_regions: bool) {
     out.push('\n');
 }
 
+/// Phase 11.12 slice 3 — build a Rust expression that restores a state field
+/// of type `ty` from a `&serde_json::Value` bound to `val`, evaluating to
+/// `Option<T_rust>` (`Some` = restored, `None` = the JSON did not match, so the
+/// field keeps its default). Recurses so composite state — `List<T>`,
+/// `Map<Str, V>`, `Nullable<T>`, imported nominals, and their nestings —
+/// restores from the SSR state payload instead of staying at the default.
+///
+/// Returns `None` (the outer Option) when the type can't be restored from JSON
+/// at all: a `Map` with a non-`Str` key (JSON objects key on strings), tuples,
+/// functions, or an unknown nominal. Such fields keep their default, exactly as
+/// before this slice.
+///
+/// Variable naming is role-specific (`__no` nominal object, `__nf` nominal
+/// field, `__le` list element, `__mk`/`__mv` map key/value) so nested closures
+/// never shadow ambiguously.
+fn json_restore_value(ty: &TypeExpr, nominals: &NominalRegistry, val: &str) -> Option<String> {
+    match ty {
+        TypeExpr::Named(name) => match name.as_str() {
+            "Int" => Some(format!("{val}.as_i64()")),
+            "Float" => Some(format!("{val}.as_f64()")),
+            "Bool" => Some(format!("{val}.as_bool()")),
+            "Str" => Some(format!("{val}.as_str().map(|__s| __s.to_string())")),
+            other => {
+                // An imported nominal: build the struct field by field. Every
+                // field must be present and restorable, else the whole nominal
+                // stays `None` (keep default) — we never synthesise a partial.
+                let fields = nominals.fields(other)?;
+                let mut field_lines: Vec<String> = Vec::with_capacity(fields.len());
+                for (fname, fty) in fields {
+                    let inner = json_restore_value(fty, nominals, "__nf")?;
+                    field_lines.push(format!(
+                        "{fname}: {{ let __nf = __no.get({fname:?})?; ({inner})? }}"
+                    ));
+                }
+                Some(format!(
+                    "(|__no: &serde_json::Value| -> Option<{other}> {{ Some({other} {{ {} }}) }})({val})",
+                    field_lines.join(", ")
+                ))
+            }
+        },
+        TypeExpr::Nullable(inner) => {
+            // `null` restores to `Some(None)` (a successful parse of the null
+            // value); a valid inner restores to `Some(Some(v))`; anything else
+            // is `None` (keep default). `val` is always a plain binding here, so
+            // evaluating it twice is pure.
+            let inner_expr = json_restore_value(inner, nominals, val)?;
+            Some(format!(
+                "if {val}.is_null() {{ Some(None) }} else {{ ({inner_expr}).map(Some) }}"
+            ))
+        }
+        TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => {
+            let inner_expr = json_restore_value(&args[0], nominals, "__le")?;
+            let inner_rust = type_expr_to_rust(&args[0], nominals).ok()?;
+            Some(format!(
+                "{val}.as_array().map(|__arr| __arr.iter().filter_map(|__le| {inner_expr}).collect::<Vec<{inner_rust}>>())"
+            ))
+        }
+        TypeExpr::Generic { name, args } if name == "Map" && args.len() == 2 => {
+            // JSON objects key on strings, so only `Map<Str, V>` round-trips.
+            match &args[0] {
+                TypeExpr::Named(k) if k == "Str" => {}
+                _ => return None,
+            }
+            let inner_v = json_restore_value(&args[1], nominals, "__mv")?;
+            let v_rust = type_expr_to_rust(&args[1], nominals).ok()?;
+            Some(format!(
+                "{val}.as_object().map(|__obj| __obj.iter().filter_map(|(__mk, __mv)| ({inner_v}).map(|__vv| (__mk.clone(), __vv))).collect::<Vec<(String, {v_rust})>>())"
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Phase 11.12 — map a primitive state field's Rust type to the
 /// `serde_json::Value` accessor + the RHS expression used to restore it in
-/// `__apply_state_json`. `None` for non-primitive fields (they keep their
-/// default at hydration — documented limitation of slice 1).
+/// `__apply_state_json`. Scalars keep this exact form (byte-identical to
+/// slice 1/2); composite fields restore via [`json_restore_value`].
 fn json_state_accessor(rust_ty: &str) -> Option<(&'static str, &'static str)> {
     match rust_ty {
         "String" => Some(("as_str()", "__x.to_string()")),
@@ -1300,8 +1381,12 @@ fn json_state_accessor(rust_ty: &str) -> Option<(&'static str, &'static str)> {
 
 /// Phase 11.12 — emit `__apply_state_json`, which restores the serialized
 /// state (the SSR `<script type="application/json">` payload) into the
-/// component's state cells. Only primitive fields are restored; non-primitive
-/// fields keep their default (documented slice-1 limitation).
+/// component's state cells. Slice 1/2 restored only primitive scalars; slice 3
+/// also restores composite state — `List<T>`, `Map<Str, V>`, `Nullable<T>`, and
+/// imported nominals (recursively, via [`json_restore_value`]). A field whose
+/// JSON does not match its type keeps its default; types that cannot round-trip
+/// through JSON at all (tuples, functions, `Map` with a non-`Str` key) are
+/// skipped.
 fn emit_apply_state_json(
     component: &ExpandedComponent,
     nominals: &NominalRegistry,
@@ -1328,12 +1413,30 @@ fn emit_apply_state_json(
             e
         })?;
         if let Some((accessor, rhs)) = json_state_accessor(&rust_ty) {
+            // Scalar — byte-identical to slice 1/2.
             writeln!(
                 out,
                 "        if let Some(__x) = __v.get(\"{}\").and_then(|__j| __j.{}) {{ *self.{}.borrow_mut() = {}; }}",
                 field.name, accessor, field.name, rhs
             )
             .unwrap();
+        } else if let Some(restore) = json_restore_value(&field.type_expr, nominals, "__fv") {
+            // Phase 11.12 slice 3 — composite state (List / Map / Nullable /
+            // nominal). Restore from the payload; a shape mismatch keeps the
+            // default (both `if let Some` guards fall through).
+            writeln!(
+                out,
+                "        if let Some(__fv) = __v.get(\"{}\") {{",
+                field.name
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            if let Some(__restored) = {{ {restore} }} {{ *self.{}.borrow_mut() = __restored; }}",
+                field.name
+            )
+            .unwrap();
+            writeln!(out, "        }}").unwrap();
         }
     }
     writeln!(out, "    }}\n").unwrap();
@@ -7219,6 +7322,182 @@ component Row {
                 "__v.get(\"b\").and_then(|__j| __j.as_bool()) { *self.b.borrow_mut() = __x; }"
             ),
             "Bool:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice3_list_str_restores_from_payload() {
+        // A hydratable component with a `List<Str>` state field now restores
+        // it from the payload (slice 1/2 kept the default). The scalar sibling
+        // keeps the byte-identical accessor form.
+        let src = r#"component Names {
+  state {
+    q: Str = ""
+    items: List<Str> = ["a", "b"]
+  }
+  event on_type() { q = payload["value"] }
+  <template>
+    <input @input="on_type" value="{q}" />
+    <ul>{#for it in items}<li>{it}</li>{/for}</ul>
+  </template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        // Scalar unchanged.
+        assert!(
+            out.contains(
+                "__v.get(\"q\").and_then(|__j| __j.as_str()) { *self.q.borrow_mut() = __x.to_string(); }"
+            ),
+            "scalar keeps accessor form:\n{out}"
+        );
+        // Composite restore for the list.
+        assert!(
+            out.contains("if let Some(__fv) = __v.get(\"items\") {"),
+            "list field guarded by get(\"items\"):\n{out}"
+        );
+        assert!(
+            out.contains(
+                "__fv.as_array().map(|__arr| __arr.iter().filter_map(|__le| __le.as_str().map(|__s| __s.to_string())).collect::<Vec<String>>())"
+            ),
+            "list<Str> restore shape:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice3_scalar_only_component_has_no_composite_guard() {
+        // Byte-compat guard: a component whose state is all scalars must not
+        // grow the composite `if let Some(__fv)` restore form.
+        let src = r#"component Lone {
+  state { s: Str = "" }
+  event on_type() { s = payload["value"] }
+  <template><input @input="on_type" value="{s}" /></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            !out.contains("if let Some(__fv) = __v.get("),
+            "scalar-only component keeps no composite restore:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice3_json_restore_nullable_and_map() {
+        let empty = NominalRegistry::new();
+        // Nullable<Int> — null restores to Some(None), else the inner.
+        let nul = json_restore_value(
+            &TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".to_string()))),
+            &empty,
+            "__fv",
+        )
+        .expect("Nullable<Int> restorable");
+        assert_eq!(
+            nul,
+            "if __fv.is_null() { Some(None) } else { (__fv.as_i64()).map(Some) }"
+        );
+        // Map<Str, Int> — object → Vec<(String, i64)>.
+        let m = json_restore_value(
+            &TypeExpr::Generic {
+                name: "Map".to_string(),
+                args: vec![
+                    TypeExpr::Named("Str".to_string()),
+                    TypeExpr::Named("Int".to_string()),
+                ],
+            },
+            &empty,
+            "__fv",
+        )
+        .expect("Map<Str, Int> restorable");
+        assert!(
+            m.contains("as_object()")
+                && m.contains("__mk.clone()")
+                && m.contains("collect::<Vec<(String, i64)>>()"),
+            "Map<Str, Int> restore shape: {m}"
+        );
+        // Map<Int, Str> — a non-Str key can't round-trip through a JSON object.
+        assert!(
+            json_restore_value(
+                &TypeExpr::Generic {
+                    name: "Map".to_string(),
+                    args: vec![
+                        TypeExpr::Named("Int".to_string()),
+                        TypeExpr::Named("Str".to_string()),
+                    ],
+                },
+                &empty,
+                "__fv",
+            )
+            .is_none(),
+            "Map<Int, _> is not restorable"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice3_json_restore_nominal_and_list_nominal() {
+        let mut reg = NominalRegistry::new();
+        reg.insert(
+            "Card".to_string(),
+            vec![
+                ("id".to_string(), TypeExpr::Named("Int".to_string())),
+                ("title".to_string(), TypeExpr::Named("Str".to_string())),
+                ("done".to_string(), TypeExpr::Named("Bool".to_string())),
+            ],
+        );
+        // Nominal: a closure that builds the struct, every field via `?`.
+        let card = json_restore_value(&TypeExpr::Named("Card".to_string()), &reg, "__fv")
+            .expect("nominal");
+        assert!(
+            card.starts_with("(|__no: &serde_json::Value| -> Option<Card> { Some(Card {"),
+            "nominal closure header: {card}"
+        );
+        assert!(
+            card.contains("id: { let __nf = __no.get(\"id\")?; (__nf.as_i64())? }")
+                && card.contains(
+                    "title: { let __nf = __no.get(\"title\")?; (__nf.as_str().map(|__s| __s.to_string()))? }"
+                )
+                && card.contains("done: { let __nf = __no.get(\"done\")?; (__nf.as_bool())? }")
+                && card.ends_with("})(__fv)"),
+            "nominal field restore: {card}"
+        );
+        // List<Card>: each element restored via the nominal closure.
+        let list = json_restore_value(
+            &TypeExpr::Generic {
+                name: "List".to_string(),
+                args: vec![TypeExpr::Named("Card".to_string())],
+            },
+            &reg,
+            "__fv",
+        )
+        .expect("List<Card>");
+        assert!(
+            list.starts_with("__fv.as_array().map(|__arr| __arr.iter().filter_map(|__le|")
+                && list.contains("-> Option<Card>")
+                && list.contains(")(__le))")
+                && list.ends_with(".collect::<Vec<Card>>())"),
+            "List<Card> restore shape: {list}"
+        );
+        // Unknown nominal → not restorable (keeps default).
+        assert!(
+            json_restore_value(&TypeExpr::Named("Ghost".to_string()), &reg, "__fv").is_none(),
+            "unknown nominal is not restorable"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice3_json_restore_unsupported_is_none() {
+        let empty = NominalRegistry::new();
+        assert!(
+            json_restore_value(&TypeExpr::Tuple(vec![]), &empty, "__fv").is_none(),
+            "tuple not restorable"
+        );
+        assert!(
+            json_restore_value(
+                &TypeExpr::Function {
+                    params: vec![],
+                    ret: Box::new(TypeExpr::Named("Int".to_string())),
+                },
+                &empty,
+                "__fv",
+            )
+            .is_none(),
+            "function not restorable"
         );
     }
 

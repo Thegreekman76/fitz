@@ -199,6 +199,9 @@ impl Filter {
         let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
         let _ = (&__v, self);
         if let Some(__x) = __v.get("query").and_then(|__j| __j.as_str()) { *self.query.borrow_mut() = __x.to_string(); }
+        if let Some(__fv) = __v.get("items") {
+            if let Some(__restored) = { __fv.as_array().map(|__arr| __arr.iter().filter_map(|__le| __le.as_str().map(|__s| __s.to_string())).collect::<Vec<String>>()) } { *self.items.borrow_mut() = __restored; }
+        }
     }
 
     pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {

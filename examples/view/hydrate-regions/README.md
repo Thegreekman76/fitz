@@ -45,22 +45,35 @@ Then serve the directory and open `index.html`.
   server) and **stays "Ada"** after the wasm boots (state restored from the
   `<script>`, not reset to the default `"world"`).
 - The `{#if}` hint (**"Hiding items equal to: Ada"**) and the `{#for}` list
-  (alpha / beta / gamma) are the server-painted content between the region
-  anchors — adopted, not rebuilt, on boot.
+  (Grace / Hopper) are the server-painted content between the region anchors —
+  adopted, not rebuilt, on boot.
 - `index.html` tags the `.greeting` and `.items` elements with a JS property
   *before* `init()`. After hydration the properties are still there → the nodes
   were **adopted, not recreated**.
-- Typing a name (e.g. `beta`) updates the greeting live (keep-node patch over
-  the adopted text node — caret preserved) and rebuilds the `{#if}` hint + the
-  `{#for}` list (which now hides the matching item). **reset** restores
-  `"world"`.
+- Typing a name updates the greeting live (keep-node patch over the adopted text
+  node — caret preserved) and rebuilds the `{#if}` hint + the `{#for}` list
+  (which now hides the matching item). **reset** restores `"world"`.
+
+## Composite state restore (slice 3)
+
+Slice 1/2 restored only primitive scalars; a `List`/`Map`/nominal state field
+kept its default. **Slice 3 restores composite state too.** Here the `items`
+`List<Str>` server value (`["Ada","Grace","Hopper"]`) differs from the component
+default (`["alpha","beta","gamma"]`), so after hydration the client holds the
+**server** list. Type `Grace` into the input: the `{#for}` region re-filters the
+restored server list → **Ada / Hopper** (never the default alpha/beta/gamma),
+proving `items` came from the payload, not the source default.
+
+The restore is recursive: `List<T>`, `Map<Str, V>`, `Nullable<T>`, and imported
+nominals (and their nestings) all round-trip through the `<script>` payload. A
+field whose JSON doesn't match its type — or a type that can't round-trip
+through JSON at all (tuples, functions, a `Map` with a non-`Str` key) — keeps
+its default.
 
 ## Limitations (Phase 11.12)
 
 - Only **keep-node** components hydrate (a live `@input`/`@change`);
   composition (`<slot>` / `<Child />`) is a later slice.
-- Only **primitive** state fields restore from the `<script>` payload
-  (`Str`/`Int`/`Float`/`Bool`); a `List`/`Map`/nominal keeps its default.
 - Adopt maps by DFS position, so keep the server runs **tight** (no whitespace
   between an element's open tag and its first significant text — see the greeting
   and `<ul>` in `index.html`).

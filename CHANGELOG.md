@@ -9,6 +9,50 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.30.3] — 2026-08-02 — Phase 11.12 slice 3: hydration restores composite state
+
+### Added — the `<script>` state payload now restores `List` / `Map` / `Nullable` / nominal fields
+
+Slice 1/2 restored only **primitive scalars** (`Str`/`Int`/`Float`/`Bool`) from
+the SSR `<script type="application/json">` payload; a `List`/`Map`/nominal state
+field kept its source default. Slice 3 restores **composite state** too, so a
+hydrated component holds the server's values, not the source defaults:
+
+- `List<T>` ← a JSON array, `Map<Str, V>` ← a JSON object, `Nullable<T>` ←
+  `null` or the inner value, and imported nominals ← a JSON object built field
+  by field. Restore is **recursive**, so nestings (`List<Card>`, `Map<Str,
+  List<Int>>`, `Nullable<Str>`, …) round-trip.
+- A field whose JSON does not match its type — or a type that cannot round-trip
+  through JSON at all (tuples, functions, a `Map` with a non-`Str` key) — keeps
+  its default, exactly as before.
+
+The mechanism is a recursive `json_restore_value` generator that lowers each
+`TypeExpr` to an `Option<T_rust>` expression over a `&serde_json::Value`.
+**Scalars keep the byte-identical slice-1/2 accessor form**, so primitive-only
+hydratable components regenerate unchanged.
+
+**Byte-compat:** of the 20+ view smokes only `hydrate-regions` and
+`search-filter` change (both are hydratable with an `items: List<Str>` field —
+they now restore it); the scalar-only hydratable crates (`derived` / `hydrate` /
+`live-input`) regenerate byte-identical. The `hydrate-regions` example now paints
+an `items` server value that **differs** from the component default, so after an
+edit the `{#for}` region rebuilds from the restored **server** list — verified
+end-to-end in real Chrome (puppeteer): DOM adoption witnesses survive, primitive
++ composite state restore, live keep-node patch, region rebuild from the server
+list, zero page errors. The wasm crate compiled with `wasm-pack`. No syntax /
+grammar / LSP change — the VSCode extension stays at 0.27.0 (bump deferred to the
+11.12 close). Bump 0.30.2 → 0.30.3.
+
+### Remaining slice limitations
+
+- Only **keep-node** components hydrate; composition (`<slot>` / `<Child />`) is
+  the next (larger) slice.
+- There is still **no isomorphic SSR string renderer** — the marker + state
+  contract is validated with hand-authored HTML (as the slice plan intended).
+- An **empty** dynamic run in mixed text (`Hi, {name}!` with `name = ""`) merges
+  with its neighbours at the server and is not robustly separated — keep dynamic
+  runs non-empty, or wait for the isomorphic renderer.
+
 ## [v0.30.2] — 2026-08-02 — Phase 11.12 slice 2: hydrate `{#if}`/`{#for}` regions + mixed text
 
 ### Added — hydration now adopts control-flow regions and mixed static/interpolated text

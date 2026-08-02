@@ -33,6 +33,11 @@
           and leaves the content in place; a later state change rebuilds only
           between the anchors.
 
+      Slice 3 adds COMPOSITE state restore: the `items` list in the state
+      payload below restores into the component (slice 1/2 only restored
+      primitive scalars). Its server value differs from the component default,
+      so the `{#for}` region rebuilds from the SERVER list after an edit.
+
       The runs are kept tight (no whitespace between an element's open tag and
       its first significant text) so the adopt cursor lines up.
     -->
@@ -49,16 +54,20 @@
 
         <!--fr--><p class="hint">Hiding items equal to: Ada</p><!--/fr-->
 
-        <ul class="items"><!--fr--><li>alpha</li><li>beta</li><li>gamma</li><!--/fr--></ul>
+        <ul class="items"><!--fr--><li>Grace</li><li>Hopper</li><!--/fr--></ul>
 
         <button>reset</button>
       </div>
     </div>
 
-    <!-- Serialized initial state — read by App::hydrate() at boot. Only
-         primitive fields restore (name); `items` is kept for realism but the
-         client keeps its List default (documented restore limitation). -->
-    <script type="application/json" id="__flv_state_App">{"name":"Ada","items":["alpha","beta","gamma"]}</script>
+    <!-- Serialized initial state — read by App::hydrate() at boot. Slice 3
+         restores COMPOSITE state too: `items` is a `List<Str>` whose server
+         value (Ada / Grace / Hopper) differs from the component default
+         (alpha / beta / gamma). After hydration the client holds the SERVER
+         list, so the server-painted `<li>`s (Grace, Hopper — Ada is filtered
+         since it equals `name`) match, and a later edit re-filters the SAME
+         server list, never the default. -->
+    <script type="application/json" id="__flv_state_App">{"name":"Ada","items":["Ada","Grace","Hopper"]}</script>
 
     <script type="module">
       // Tag two STABLE adopted elements BEFORE hydration. If the wasm adopts
