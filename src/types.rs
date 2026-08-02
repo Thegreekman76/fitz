@@ -9984,6 +9984,11 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // `@cron + @get/@post/...` are rejected.
             check_cron_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
             check_background_decorator(ctx, fn_name, decorators, *fn_span);
+            // Phase 11.11 — validate `@rpc` (server functions): an `async fn`
+            // callable from a client-WASM `.fitzv` over a generated HTTP
+            // endpoint. Bare decorator, async required, mutually exclusive
+            // with the other handler decorators.
+            check_rpc_decorator(ctx, fn_name, decorators, *is_async, *fn_span);
             // Phase 4 (fitz-liveviews Y-B, session 1.b) — validate
             // `@render_for("name")` and `@on("component", "event")`
             // on fns. Shape errors were already reported by
@@ -11973,6 +11978,77 @@ fn check_cron_decorator(
 /// The `@background` policy is just a marker: it doesn't change the fn's
 /// shape nor its return type. The callsite check (`spawn(call)`)
 /// is what consults `ctx.background_fns` to authorize the spawn.
+/// Phase 11.11 — validate a `@rpc` server function. `@rpc` marks an
+/// `async fn` (defined in classic `.fitz`) as callable directly from a
+/// client-WASM `.fitzv` component: the compiler emits a POST endpoint on
+/// the server side and a `fetch`-based stub on the client side. Rules:
+/// bare decorator (no args/kwargs in the MVP), the fn must be `async`
+/// (a server function does I/O — db/http/etc.), and it can't be combined
+/// with the HTTP/WS/cron/background/auth-provider handler decorators
+/// (those have their own runtimes). The fn's `Result<T>` return and its
+/// params must be JSON-marshalable — that's enforced at codegen where the
+/// `__ToFitzJson`/`__FromFitzJson` machinery runs (parallel to `@post`).
+fn check_rpc_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    decorators: &[Decorator],
+    is_async: bool,
+    fn_span: Span,
+) {
+    let rpc_deco = match decorators.iter().find(|d| d.name == "rpc") {
+        Some(d) => d,
+        None => return,
+    };
+    if !rpc_deco.args.is_empty() || !rpc_deco.kwargs.is_empty() {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@rpc on fn '{}': takes no arguments in the MVP. Syntax: `@rpc async fn {}(...) -> Result<T>`.",
+                fn_name, fn_name
+            ),
+        ));
+    }
+    if !is_async {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@rpc on fn '{}': a server function must be `async` (it runs on the server and its client stub is an async `fetch`). Write `@rpc async fn {}(...)`.",
+                fn_name, fn_name
+            ),
+        ));
+    }
+    let conflicting = [
+        "get",
+        "post",
+        "put",
+        "delete",
+        "ws",
+        "cron",
+        "background",
+        "auth_provider",
+        "test",
+        "server",
+    ];
+    for other in decorators {
+        if conflicting.contains(&other.name.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@rpc on fn '{}' is not combinable with `@{}`: an `@rpc` fn generates its own HTTP endpoint. (Auth: stack `@authenticated`/`@admin` on the generated endpoint is a post-MVP refinement.)",
+                    fn_name, other.name
+                ),
+            ));
+            return;
+        }
+    }
+}
+
 fn check_background_decorator(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -18972,6 +19048,57 @@ print(total)
                 .iter()
                 .any(|e| e.message.contains("is not combinable")),
             "expected msg about combination: {:?}",
+            errors
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Phase 11.11 — `@rpc` server functions.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rpc_async_fn_passes_checker() {
+        let src = "@rpc\nasync fn get_user(id: Int) -> Result<Int> { return Ok(id) }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
+    }
+
+    #[test]
+    fn rpc_sync_fn_is_error() {
+        // A server function must be async (I/O + async fetch client stub).
+        let src = "@rpc\nfn get_user(id: Int) -> Result<Int> { return Ok(id) }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("@rpc") && e.message.contains("must be `async`")),
+            "expected async error: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn rpc_with_args_is_error() {
+        let src = "@rpc(\"/x\")\nasync fn h() -> Result<Int> { return Ok(1) }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("@rpc") && e.message.contains("no arguments")),
+            "expected args error: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn rpc_combined_with_get_is_error() {
+        let src = "@rpc\n@get(\"/x\")\nasync fn h() -> Result<Int> { return Ok(1) }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("is not combinable")),
+            "expected combination error: {:?}",
             errors
         );
     }

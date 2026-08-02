@@ -10099,16 +10099,46 @@ no por dependencia estricta.
   emitido: celdas reactivas + grafo de subscripción en lugar del
   re-render top-down).
 
-- 🔜 **11.11 — Funciones de servidor (`@server`).** Decorator nuevo sobre
-  `async fn` que la vuelve **invocable directo desde el `.fitzv`
-  client-WASM** como si fuera local. El compilador emite las dos mitades de
-  un contrato tipado en un solo lugar: (a) el handler HTTP del lado server
-  (reusa el runtime HTTP nativo + auth + `Result` + marshaling JSON que ya
-  existen) y (b) el stub client que serializa los args → `http.request`
-  (built-in desde v0.17.0) → deserializa el return al tipo declarado.
-  **Bajo costo, alto valor**: las piezas ya están construidas; falta el
-  macro del compilador que las una. Es el feature que le da a la vista su
-  momento "todo el stack junto sin plumbing".
+- 🚧 **11.11 — Funciones de servidor (`@rpc`) (EN CURSO).** Decorator sobre
+  `async fn` (en `.fitz` classic) que la vuelve **invocable directo desde el
+  `.fitzv` client-WASM** como si fuera local: el compilador emite (a) un
+  handler HTTP POST auto-generado del lado server y (b) un stub `fetch` del
+  lado client. Una `@rpc async fn foo() -> Result<T>` ya tipa bien al
+  llamarla (un `async fn` devuelve `Future<Result<T>>`, y `foo(id).await →
+  Result<T>`), así que el checker casi no cambia — toda la magia es codegen.
+  - **Naming (decisión):** el roadmap decía `@server`, pero **`@server` ya
+    existe** (config del servidor, `@server(3000) fn main()`, Fase 4.4) —
+    colisión. Se eligió **`@rpc`** (remote procedure call; conciso, sin
+    colisión). Alternativas evaluadas: `@server_fn`, `@action`.
+  - **11.11.a — Runtime async/fetch en wasm (DE-RISKED por spike).** El
+    mapeo reveló que el crate wasm emitido **no tiene async/fetch hoy** (cero
+    `wasm-bindgen-futures`, cero `fetch`, cero features web-sys `Request`/
+    `Response`/`Headers`; todo síncrono, incluido el `#[wasm_bindgen(start)]`).
+    `http.request` es reqwest nativo — no corre en wasm. Un **spike
+    standalone** validó end-to-end en Chrome real el código exacto a emitir:
+    deps `wasm-bindgen-futures = "0.4"` + `js-sys = "0.3"` + features web-sys
+    `Request`/`RequestInit`/`Response`/`Headers`, el helper
+    `fitz_fetch_post(url, body) -> Result<String, String>` (web-sys fetch +
+    `JsFuture`), y el patrón `spawn_local` para un event handler async (click
+    → `spawn_local(async { fetch; update DOM })`). POST same-origin con body
+    JSON → response text → update del DOM: **round-trip OK**. El crux
+    ("no existe hoy") quedó resuelto; falta wirearlo al emisor (junto a su
+    primer consumidor, el stub, para no dejar dead code).
+  - **11.11.b — server-half.** `@rpc async fn` → handler POST en
+    `/__rpc/<name>` (reusa 100% la cadena de `@post`: extractors →
+    `__FromFitzJson` → dispatch → `Result<U>`→200/err). ~8 sitios de
+    partición de decorators HTTP en `codegen.rs`.
+  - **11.11.c — client-stub.** Agregar deps/features validadas a
+    `compose_cargo_toml_with_features` + emitir el helper `__fitz_fetch` +
+    emitir la fn `@rpc` importada como `async fn <name>(...) -> Result<T>`
+    (serializa args → fetch → deserializa) + envolver los event handlers que
+    la `.await`ean en `spawn_local` → set state → re-render.
+  - **11.11.d — checker (HECHO).** `check_rpc_decorator` en `src/types.rs`:
+    valida bare decorator (sin args/kwargs MVP), `async` requerido, exclusión
+    mutua con `@get`/`@post`/`@ws`/`@cron`/`@background`/`@auth_provider`/
+    `@test`/`@server`. 4 unit tests `types::tests::rpc_*` verdes. (Auth
+    apilable `@authenticated`/`@admin` sobre el endpoint generado = refinamiento
+    post-MVP.)
 
 - 🔜 **11.12 — Hidratación SSR → client.** Un mismo `.fitzv` rinde **SSR**
   (first paint, SEO, funciona sin JS) y el runtime client-WASM **toma
