@@ -1,0 +1,42 @@
+// Phase 11.12 SSR-2 — isomorphic SSR render of MIXED static+interpolated text.
+//
+// The slice-1 `hydrate` example dodged mixed text with a sole-child wrapper
+// (`Hello, <span class="nm">{name}</span>`). This one interpolates directly in
+// a mixed run — `Hello, {name}!` — the shape SSR-2 teaches the SSR emitter to
+// render hydration-ready.
+//
+// The browser coalesces adjacent text runs into ONE node, but the client-WASM
+// adopt walk expects one text node per significant run (`Hello, ` | `{name}` |
+// `!`). So the SSR emitter separates the dynamic run with comment markers —
+// `Hello, <!--fi-->Ada<!--/fi-->!` — which break the coalescing; the skip-based
+// `__flv_next_text` steps over the markers and maps 1:1. The whole `index.html`
+// is the VERBATIM render output (see README.md), no hand-authored markers.
+//
+// This is a hydratable component because it has a live form control (`@input`)
+// over a static, region-free template — the same keep-node gate as slice 1.
+// The `hydrate` marker is opt-in: it tells the SSR emitter to append the state
+// `<script>` (SSR-1) AND to emit the mixed-text `<!--fi-->` markers (SSR-2), so
+// components SSR-rendered for fitz-liveviews' WS-takeover stay byte-identical.
+
+component App hydrate {
+  state {
+    name: Str = "world"
+  }
+
+  event on_name() { name = payload["value"] }
+  event reset() { name = "world" }
+
+  <template>
+    <div class="demo">
+      <h1>SSR → hydration: mixed text</h1>
+      <p class="greeting">Hello, {name}!</p>
+
+      <label class="row">
+        <span>Your name</span>
+        <input @input="on_name" value="{name}" placeholder="type here" autocomplete="off" />
+      </label>
+
+      <button @click="reset">reset</button>
+    </div>
+  </template>
+}

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — SSR → hydration: mixed text</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
+      .demo { display: flex; flex-direction: column; gap: 0.75rem; align-items: flex-start; }
+      .row { display: flex; flex-direction: column; gap: 0.25rem; }
+      input { padding: 0.4rem 0.6rem; font-size: 1rem; }
+      button { padding: 0.4rem 0.8rem; }
+      .greeting { font-size: 1.4rem; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Server-painted DOM (Phase 11.12 SSR-2). Everything inside `#app` below is
+      the VERBATIM output of the SSR emitter for App.fitzv rendered with state
+      `App { name: "Ada" }` — i.e. what a Fitz HTTP server (or a build-time
+      prerender) emits as `<div id="app">{App_render(state).raw}</div>`. It is
+      NOT hand-authored.
+
+      The mixed-text greeting `Hello, {name}!` renders with `fi` comment markers
+      around the dynamic run (see the greeting element below) so the browser
+      paints three distinct text nodes (`Hello, ` | `Ada` | `!`). The client
+      adopt walk calls `__flv_next_text` per run, stepping over the markers, and
+      maps 1:1 onto the keep-node handle. Reproduce it with `fitz run` over a
+      program that imports App.fitzv and prints `App_render(App { name: "Ada" }).raw`
+      — see README.md.
+
+      The wasm bundle adopts this DOM on boot: it reads the state script by id,
+      restores `name = "Ada"` (NOT the component default "world"), walks the
+      existing nodes onto the keep-node handles, and wires listeners. The
+      `data-flv-*` attrs are inert to the adopt walk (the wasm wires its own
+      listeners). A trailing `<script>` sibling of the template root is never
+      adopted — the walk only descends into the first element child.
+    -->
+    <div id="app">
+    <div class="demo">
+      <h1>SSR → hydration: mixed text</h1>
+      <p class="greeting">Hello, <!--fi-->Ada<!--/fi-->!</p>
+
+      <label class="row">
+        <span>Your name</span>
+        <input data-flv-input="on_name" value="Ada" placeholder="type here" autocomplete="off" />
+      </label>
+
+      <button data-flv-click="reset">reset</button>
+    </div>
+  <script type="application/json" id="__flv_state_App">{"name":"Ada"}</script>
+</div>
+
+    <script type="module">
+      // Tag the greeting node BEFORE hydration. If the wasm adopts the
+      // server-painted DOM (rather than recreating it), this JS property
+      // survives — the proof that hydration reused the existing node, mixed
+      // text and all.
+      const greeting = document.querySelector('#app .greeting');
+      if (greeting) greeting.__hydrationWitness = 'server-greeting';
+
+      import init from './wasm-crate/pkg/hydrate_mixed.js';
+      await init();
+
+      // For manual / automated inspection.
+      window.__flvHydrated = true;
+    </script>
+  </body>
+</html>

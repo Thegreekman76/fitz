@@ -473,17 +473,16 @@ fn emit_render_fn(
     }
 
     if let Some(template) = &component.template {
-        for node in &template.roots {
-            emit_template_node_to_pieces(
-                node,
-                &state_field_names,
-                &[],
-                imported_names,
-                component,
-                siblings,
-                &mut pieces,
-            )?;
-        }
+        emit_children_to_pieces(
+            &template.roots,
+            &state_field_names,
+            &[],
+            imported_names,
+            component,
+            siblings,
+            false,
+            &mut pieces,
+        )?;
     }
 
     // Phase 11.12 SSR-1 — isomorphic hydration state script. When the
@@ -552,6 +551,92 @@ fn push_text(pieces: &mut Vec<TemplatePiece>, s: &str) {
         last.push_str(s);
     } else {
         pieces.push(TemplatePiece::Text(s.to_string()));
+    }
+}
+
+/// Phase 11.12 SSR-2 — emit a node's children, wrapping each mixed-context
+/// interpolation in `<!--fi-->` … `<!--/fi-->` split markers so the isomorphic
+/// hydration walk finds distinct server-painted text nodes.
+///
+/// The browser coalesces adjacent text runs (`Hello, ` + `{name}` + `!`) into a
+/// SINGLE text node, but the client-WASM adopt walk expects one text node per
+/// significant run (it calls `__flv_next_text` per run). A comment node between
+/// two runs breaks the coalescing, so we wrap each interpolation that sits next
+/// to another text-producing sibling; the skip-based `__flv_next_text` steps
+/// over the markers and maps 1:1.
+///
+/// Gated three ways (all must hold to wrap):
+/// - `component.hydrate` — the same explicit opt-in SSR-1a used for the state
+///   `<script>`; non-hydratable components (fitz-liveviews WS-takeover, keep-node
+///   auto-hydration without the marker) stay byte-identical.
+/// - `!in_region` — a `{#if}`/`{#for}` region is adopted opaquely (the walk steps
+///   over its content between the `<!--fr-->` anchors), so its interpolations are
+///   never individually adopted and must not carry `fi` markers.
+/// - the interpolation is in a MIXED context (has an adjacent significant
+///   text-producing sibling) — a sole-child interpolation (`<span>{name}</span>`)
+///   is already its own text node, so it stays marker-free (byte-compat).
+#[allow(clippy::too_many_arguments)]
+fn emit_children_to_pieces(
+    children: &[ExpandedTemplateNode],
+    state_field_names: &[&str],
+    local_scope: &[&str],
+    imported_names: &[&str],
+    component: &ExpandedComponent,
+    siblings: &[ExpandedComponent],
+    in_region: bool,
+    pieces: &mut Vec<TemplatePiece>,
+) -> SsrEmitResult<()> {
+    let wrap = component.hydrate && !in_region;
+    for (i, child) in children.iter().enumerate() {
+        let needs_markers = wrap && interp_in_mixed_context(children, i);
+        if needs_markers {
+            push_text(pieces, "<!--fi-->");
+        }
+        emit_template_node_to_pieces(
+            child,
+            state_field_names,
+            local_scope,
+            imported_names,
+            component,
+            siblings,
+            in_region,
+            pieces,
+        )?;
+        if needs_markers {
+            push_text(pieces, "<!--/fi-->");
+        }
+    }
+    Ok(())
+}
+
+/// Phase 11.12 SSR-2 — is the child at `i` an interpolation that shares a text
+/// run boundary with a sibling (so the browser would coalesce them without a
+/// marker)? True only for an `Interpolation` whose immediately-adjacent sibling
+/// (previous or next) is another text-producing node. An Element or a
+/// whitespace-only Text sibling does not trigger markers: an element breaks the
+/// text run on its own, and tight authoring keeps whitespace-only text from
+/// pinning an interpolation (the same slice-1 authoring constraint).
+fn interp_in_mixed_context(children: &[ExpandedTemplateNode], i: usize) -> bool {
+    if !matches!(&children[i], ExpandedTemplateNode::Interpolation { .. }) {
+        return false;
+    }
+    let prev = i
+        .checked_sub(1)
+        .is_some_and(|j| is_significant_text_producer(&children[j]));
+    let next = children
+        .get(i + 1)
+        .is_some_and(is_significant_text_producer);
+    prev || next
+}
+
+/// A node the browser renders as a text node with content: static Text with a
+/// non-empty trim, or any Interpolation. Whitespace-only Text is skipped by the
+/// build/adopt walk, so it is not a coalescing partner.
+fn is_significant_text_producer(node: &ExpandedTemplateNode) -> bool {
+    match node {
+        ExpandedTemplateNode::Text(s) => !s.trim().is_empty(),
+        ExpandedTemplateNode::Interpolation { .. } => true,
+        _ => false,
     }
 }
 
@@ -1157,6 +1242,7 @@ fn format_event_rhs(
 /// - `If` / `For` — Since Phase 11.6.c continuation, lower to
 ///   Fitz if-as-expression / `__fitz_view_str_join(iter.map(...))`.
 /// - `Slot` — rejected with a 11.7+ pointer.
+#[allow(clippy::too_many_arguments)]
 fn emit_template_node_to_pieces(
     node: &ExpandedTemplateNode,
     state_field_names: &[&str],
@@ -1164,6 +1250,11 @@ fn emit_template_node_to_pieces(
     imported_names: &[&str],
     component: &ExpandedComponent,
     siblings: &[ExpandedComponent],
+    // Phase 11.12 SSR-2 — `true` when this node is inside a `{#if}`/`{#for}`
+    // region's content. A region is adopted opaquely on the client (the walk
+    // steps over its content between the `<!--fr-->` anchors), so mixed-text
+    // interpolations inside it must NOT get `<!--fi-->` split markers.
+    in_region: bool,
     pieces: &mut Vec<TemplatePiece>,
 ) -> SsrEmitResult<()> {
     match node {
@@ -1212,17 +1303,16 @@ fn emit_template_node_to_pieces(
                 return Ok(());
             }
             push_text(pieces, ">");
-            for child in children {
-                emit_template_node_to_pieces(
-                    child,
-                    state_field_names,
-                    local_scope,
-                    imported_names,
-                    component,
-                    siblings,
-                    pieces,
-                )?;
-            }
+            emit_children_to_pieces(
+                children,
+                state_field_names,
+                local_scope,
+                imported_names,
+                component,
+                siblings,
+                in_region,
+                pieces,
+            )?;
             let mut close = String::from("</");
             close.push_str(tag);
             close.push('>');
@@ -1250,32 +1340,30 @@ fn emit_template_node_to_pieces(
                 "template `{#if}` condition",
             )?;
             let mut then_pieces: Vec<TemplatePiece> = Vec::new();
-            for child in children {
-                emit_template_node_to_pieces(
-                    child,
-                    state_field_names,
-                    local_scope,
-                    imported_names,
-                    component,
-                    siblings,
-                    &mut then_pieces,
-                )?;
-            }
+            emit_children_to_pieces(
+                children,
+                state_field_names,
+                local_scope,
+                imported_names,
+                component,
+                siblings,
+                true,
+                &mut then_pieces,
+            )?;
             let then_src = serialize_pieces_as_html_arg(&then_pieces);
             let else_src = match else_children {
                 Some(kids) => {
                     let mut ep: Vec<TemplatePiece> = Vec::new();
-                    for child in kids {
-                        emit_template_node_to_pieces(
-                            child,
-                            state_field_names,
-                            local_scope,
-                            imported_names,
-                            component,
-                            siblings,
-                            &mut ep,
-                        )?;
-                    }
+                    emit_children_to_pieces(
+                        kids,
+                        state_field_names,
+                        local_scope,
+                        imported_names,
+                        component,
+                        siblings,
+                        true,
+                        &mut ep,
+                    )?;
                     serialize_pieces_as_html_arg(&ep)
                 }
                 None => "\"\"".to_string(),
@@ -1307,17 +1395,16 @@ fn emit_template_node_to_pieces(
             let mut new_scope: Vec<&str> = local_scope.to_vec();
             new_scope.push(var.as_str());
             let mut body_pieces: Vec<TemplatePiece> = Vec::new();
-            for child in children {
-                emit_template_node_to_pieces(
-                    child,
-                    state_field_names,
-                    &new_scope,
-                    imported_names,
-                    component,
-                    siblings,
-                    &mut body_pieces,
-                )?;
-            }
+            emit_children_to_pieces(
+                children,
+                state_field_names,
+                &new_scope,
+                imported_names,
+                component,
+                siblings,
+                true,
+                &mut body_pieces,
+            )?;
             let body_src = serialize_pieces_as_html_arg(&body_pieces);
             pieces.push(TemplatePiece::Expr(format!(
                 "__fitz_view_str_join({iter_src}.map(fn({var}) => {body_src}))"
@@ -2595,6 +2682,73 @@ mod tests {
         assert!(
             !out.contains("to_json"),
             "non-hydratable component must NOT call to_json:\n{out}"
+        );
+    }
+
+    // ---- SSR-2: mixed-text hydration markers -----------------
+
+    #[test]
+    fn ssr2_mixed_text_in_hydratable_wraps_interp_with_markers() {
+        // A hydratable component with mixed static+interpolated text
+        // (`Hello, {name}!`) emits the dynamic run wrapped in comment
+        // markers so the browser paints three distinct text nodes and the
+        // adopt walk maps 1:1 (`Hello, ` | `{name}` | `!`).
+        let file = parse_expand(
+            "component App hydrate { state { name: Str = \"world\" } \
+             <template><p>Hello, {name}!</p></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("Hello, <!--fi-->{state.name}<!--/fi-->!"),
+            "mixed text should wrap the interpolation in fi markers:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr2_sole_child_interp_no_markers() {
+        // A sole-child interpolation (`<span>{name}</span>`) is already its
+        // own text node — no coalescing partner — so it stays marker-free,
+        // byte-compatible with the slice-1 `hydrate` example.
+        let file = parse_expand(
+            "component App hydrate { state { name: Str = \"world\" } \
+             <template><p>Hello, <span>{name}</span></p></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            !out.contains("<!--fi-->"),
+            "sole-child interpolation must NOT get fi markers:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr2_non_hydratable_mixed_text_no_markers() {
+        // Without the `hydrate` marker the mixed text stays byte-identical
+        // (no fi markers) — fitz-liveviews's WS-takeover output is unchanged.
+        let file = parse_expand(
+            "component App { state { name: Str = \"world\" } \
+             <template><p>Hello, {name}!</p></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            !out.contains("<!--fi-->"),
+            "non-hydratable mixed text must NOT get fi markers:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr2_interp_inside_region_no_markers() {
+        // A mixed-text interpolation INSIDE a `{#if}` region is not
+        // individually adopted (the client adopts the region opaquely between
+        // its `<!--fr-->` anchors), so it must NOT carry fi markers even in a
+        // hydratable component. That is SSR-3 territory (region anchors).
+        let file = parse_expand(
+            "component App hydrate { state { name: Str = \"world\" } \
+             <template><div>{#if name != \"\"}<p>Hi {name}!</p>{/if}</div></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            !out.contains("<!--fi-->"),
+            "interpolation inside a region must NOT get fi markers:\n{out}"
         );
     }
 
