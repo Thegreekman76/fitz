@@ -74,14 +74,17 @@ mejoras/prioridades para próximas iteraciones.
    crates style-less → requiere re-baselinar esos ejemplos).
 
 5. **Render-a-string isomórfico del lado SSR (avanzando por slices)** — SSR-1 hizo
-   que el render fn emita el `<script id="__flv_state_*">` de state, y SSR-2 los
-   markers `<!--fi-->`/`<!--/fi-->` de texto mixto. Faltan: anchors de regiones
-   `<!--fr-->`/`<!--/fr-->` (SSR-3) y el wrapper `__fitz-child-<Name>` + slot content
-   inline (SSR-4). Los markers de SSR-2 se emiten sólo bajo el marcador `hydrate`
-   (igual gate que el `<script>` de SSR-1a): un keep-node auto-hidratante **sin**
-   marcador no recibe markers isomórficos — ligado a la residual #1 (hidratación
-   universal vs opt-in). El `index.html` de los demos hasta SSR-4 sigue hand-authored
-   (cross-repo con fitz-liveviews para el shell).
+   que el render fn emita el `<script id="__flv_state_*">` de state, SSR-2 los
+   markers `<!--fi-->`/`<!--/fi-->` de texto mixto, y **SSR-3 los anchors de
+   regiones `<!--fr-->`/`<!--/fr-->`** (completa `hydrate-regions` isomórfico
+   end-to-end: el HTML SSR generado por el render fn se validó en Chrome real,
+   11/11). Falta: el wrapper `__fitz-child-<Name>` + slot content inline (SSR-4 →
+   completa `hydrate-composition`). Los markers se emiten sólo bajo el marcador
+   `hydrate` (igual gate que el `<script>` de SSR-1a): un keep-node auto-hidratante
+   **sin** marcador no recibe markers isomórficos — ligado a la residual #1
+   (hidratación universal vs opt-in). El `index.html` de los demos hasta SSR-4
+   sigue hand-authored como forma clean/tight (cross-repo con fitz-liveviews para
+   el shell); el smoke Chrome sirve el HTML generado real.
 
 ## 🟢 Límites de recursos en el evaluador (steps + depth) — fase 1 CERRADA (2026-07-27)
 
