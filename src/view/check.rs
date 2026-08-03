@@ -1778,6 +1778,7 @@ mod tests {
             components: vec![ExpandedComponent {
                 name: component_name.into(),
                 loc: Loc::new(1, 1),
+                hydrate: false,
                 state: fields,
                 derived: Vec::new(),
                 events: Vec::new(),
@@ -2373,6 +2374,7 @@ component B {
             components: vec![ExpandedComponent {
                 name: "X".into(),
                 loc: Loc::new(1, 1),
+                hydrate: false,
                 state: vec![synth_state_field(
                     "ratio",
                     TypeExpr::Named("Float".into()),
@@ -2908,6 +2910,7 @@ component B {
             components: vec![ExpandedComponent {
                 name: "X".into(),
                 loc: Loc::new(1, 1),
+                hydrate: false,
                 state: vec![synth_state_field(
                     "maybe",
                     TypeExpr::Nullable(Box::new(TypeExpr::Named("Bool".into()))),

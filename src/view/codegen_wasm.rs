@@ -520,7 +520,14 @@ pub fn emit_module_with_components(
     emit_module_header(&mut out);
     emit_nominal_structs(nominals, fns.has_rpc(), &mut out)?;
     emit_imported_fns(fns, nominals, &mut out)?;
-    let merged = merge_imported_components(file, components);
+    let mut merged = merge_imported_components(file, components);
+    // Phase 11.12 slice 4 — hydration opt-in propagates from the ROOT of the
+    // emitted tree to every component in it. The `component App hydrate { ... }`
+    // marker lives on the root; a composed child (`<Child />` / `<slot>`) has no
+    // marker of its own but must still emit `hydrate()` so the whole tree adopts
+    // the server-painted DOM. Keep-node components hydrate regardless (slices
+    // 1–3); this only lifts the naive composition path.
+    propagate_root_hydrate(&mut merged);
     let bubbled = collect_bubbled_events(&merged);
     // Phase 11.12 — cursor helpers for the hydration adopt walk, emitted once
     // when any component is hydratable (byte-identical output otherwise). The
@@ -594,6 +601,28 @@ pub fn merge_imported_components(
     ExpandedViewFile {
         imports: file.imports.clone(),
         components,
+    }
+}
+
+/// Phase 11.12 slice 4 — propagate the hydration opt-in from the ROOT
+/// component to every component in the emitted tree.
+///
+/// The `component App hydrate { ... }` marker sits on the root (the entry
+/// component, `components[0]` after the merge places local components ahead
+/// of imported ones — but the merge prepends *imported* reachable ones, so
+/// we look for the flag on ANY component rather than assume position). When
+/// the tree hydrates, every naive component in it (the composed children —
+/// `<Child />` + `<slot>`) must emit a `hydrate()` so the whole tree adopts
+/// the server-painted DOM in one boot instead of fresh-mounting.
+///
+/// Keep-node components already hydrate regardless of this flag (slices
+/// 1–3). When no component carries the marker this is a no-op, so pre-11.12
+/// crates stay byte-identical.
+fn propagate_root_hydrate(file: &mut ExpandedViewFile) {
+    if file.components.iter().any(|c| c.hydrate) {
+        for c in &mut file.components {
+            c.hydrate = true;
+        }
     }
 }
 
@@ -998,17 +1027,33 @@ fn emit_component_impl(
     let slot_set = component_slot_set(component);
     validate_slot_set(&component.name, &slot_set)?;
 
+    // Phase 11.12 slice 4 — a naive component hydrates when the tree opted in
+    // (`component App hydrate { ... }` on the root, propagated). When hydratable
+    // it carries `__hslot` adopt-callback fields and emits a `hydrate()` +
+    // `__apply_state_json` + `__hydrate_slot_<n>` alongside the build path. When
+    // not (every pre-11.12 example), none of that is emitted → byte-identical.
+    let hydratable = component_is_hydratable(component, this_bubbled);
+
     emit_struct_and_new(
         component,
         &child_sites,
         nominals,
         this_bubbled,
         &slot_set,
+        hydratable,
         out,
     )?;
     emit_event_handlers(component, &state_names, this_bubbled, out)?;
     emit_recompute_derived(component, &state_names, out)?;
-    emit_mount_and_render(component, &state_names, file, nominals, this_bubbled, out)?;
+    emit_mount_and_render(
+        component,
+        &state_names,
+        file,
+        nominals,
+        this_bubbled,
+        hydratable,
+        out,
+    )?;
     if let Some(style) = &component.style {
         emit_style_helper(&component.name, style, out);
     }
@@ -1177,14 +1222,22 @@ fn component_uses_keep_regions(component: &ExpandedComponent) -> bool {
             .is_some_and(|t| t.roots.iter().any(has_control_flow))
 }
 
-/// Phase 11.12 — `true` when a component can be HYDRATED: it takes the
-/// keep-node path (so it carries `__ktext_<n>` / `__kattr_<n>` handles + a
-/// `__build`/`__patch` model). The adopt walk populates those handles from the
-/// server-painted DOM. Slice 2 also adopts `{#if}`/`{#for}` regions — their
-/// server anchors (`<!--fr-->` / `<!--/fr-->`) are acquired into the
-/// `__astart_<r>` / `__aend_<r>` handles and the content is left in place — so
-/// regions no longer disqualify a component. Composition (`<slot>` /
-/// `<Child />`) is still excluded by the keep-node gate.
+/// Phase 11.12 — `true` when a component can be HYDRATED.
+///
+/// Two roads to hydration:
+///
+/// - **Keep-node (auto, slices 1–3)** — a live-form component takes the
+///   keep-node path (`__ktext_<n>` / `__kattr_<n>` handles + `__build`/`__patch`
+///   model); its adopt walk populates those handles from the server DOM and
+///   also adopts `{#if}`/`{#for}` regions. This needs no opt-in.
+/// - **Naive composition (opt-in, slice 4)** — a naive component (composes
+///   `<Child />` / has a `<slot>`, or is the root that does) hydrates when the
+///   `hydrate` flag is set. The flag is authored on the ROOT via `component App
+///   hydrate { ... }` and propagated to the whole tree (`propagate_root_hydrate`),
+///   so a composed child hydrates alongside its parent. The naive `hydrate()`
+///   adopts the DOM + wires listeners once; a later state change still re-renders
+///   naively (the composition model has no in-place patch). Opt-in keeps
+///   pre-11.12 composition examples byte-identical.
 ///
 /// `this_bubbled` must be the component's real bubbled-event set (empty for a
 /// root component — nothing composes it).
@@ -1192,11 +1245,7 @@ pub fn component_is_hydratable(
     component: &ExpandedComponent,
     this_bubbled: &std::collections::BTreeSet<String>,
 ) -> bool {
-    // Phase 11.12 slice 2 — `{#if}`/`{#for}` regions are now adopted too (their
-    // server-painted anchors are acquired; the content is left in place). So any
-    // keep-node component is hydratable; composition (`<slot>`/`<Child />`) is
-    // still excluded by the keep-node gate itself.
-    use_keep_node_reconciliation(component, this_bubbled)
+    component.hydrate || use_keep_node_reconciliation(component, this_bubbled)
 }
 
 /// Phase 11.12 — `true` when any component in `file` will emit a `hydrate()`
@@ -1451,6 +1500,7 @@ fn emit_hydrate_method(
     component: &ExpandedComponent,
     name: &str,
     hydrate_body: &str,
+    mark_built: bool,
     out: &mut String,
 ) {
     writeln!(
@@ -1482,7 +1532,12 @@ fn emit_hydrate_method(
     writeln!(out, "        let mut __cur_root = root.first_child();").unwrap();
     writeln!(out, "        *self.root.borrow_mut() = Some(root);").unwrap();
     out.push_str(hydrate_body);
-    writeln!(out, "        *self.__built.borrow_mut() = true;").unwrap();
+    // Keep-node components flip `__built` so the next state change patches in
+    // place (slices 1–3). The naive composition path (slice 4) has no `__built`
+    // field — it re-renders wholesale on the next change — so this is skipped.
+    if mark_built {
+        writeln!(out, "        *self.__built.borrow_mut() = true;").unwrap();
+    }
     writeln!(out, "        Ok(())").unwrap();
     writeln!(out, "    }}\n").unwrap();
 }
@@ -1714,7 +1769,7 @@ fn emit_component_keepnode(
     // root already has server-painted DOM.
     writeln!(out).unwrap();
     emit_apply_state_json(component, nominals, out)?;
-    emit_hydrate_method(component, name, &hydrate_body, out);
+    emit_hydrate_method(component, name, &hydrate_body, true, out);
 
     // Phase 11.10 slice 3 — one `__mount_region_<n>` + `__patch_region_<n>`
     // pair per `{#if}`/`{#for}` dynamic region. A component with no regions
@@ -1808,6 +1863,7 @@ fn emit_struct_and_new(
     nominals: &NominalRegistry,
     this_bubbled: &std::collections::BTreeSet<String>,
     slot_set: &SlotSet,
+    hydratable: bool,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
@@ -1893,6 +1949,27 @@ fn emit_struct_and_new(
         )
         .unwrap();
     }
+    // Phase 11.12 slice 4 — hydration adopt callbacks, one per slot the
+    // component declares, holding a cursor-consuming renderer that adopts the
+    // parent-painted slot content during the initial `hydrate()`. Only emitted
+    // for a hydratable component (byte-identical for pre-11.12 slot examples).
+    if hydratable {
+        if slot_set.has_default {
+            writeln!(
+                out,
+                "    __hslot: RefCell<Option<Rc<dyn Fn(&mut Option<web_sys::Node>)>>>,"
+            )
+            .unwrap();
+        }
+        for slot_name in &slot_set.named {
+            writeln!(
+                out,
+                "    {}: RefCell<Option<Rc<dyn Fn(&mut Option<web_sys::Node>)>>>,",
+                hslot_field_name(Some(slot_name))
+            )
+            .unwrap();
+        }
+    }
     writeln!(out, "    root: RefCell<Option<HtmlElement>>,").unwrap();
     writeln!(out, "}}\n").unwrap();
 
@@ -1958,6 +2035,19 @@ fn emit_struct_and_new(
             slot_field_name(Some(slot_name))
         )
         .unwrap();
+    }
+    if hydratable {
+        if slot_set.has_default {
+            writeln!(out, "            __hslot: RefCell::new(None),").unwrap();
+        }
+        for slot_name in &slot_set.named {
+            writeln!(
+                out,
+                "            {}: RefCell::new(None),",
+                hslot_field_name(Some(slot_name))
+            )
+            .unwrap();
+        }
     }
     writeln!(out, "            root: RefCell::new(None),").unwrap();
     writeln!(out, "        }})").unwrap();
@@ -2279,6 +2369,7 @@ fn emit_mount_and_render(
     file: &ExpandedViewFile,
     nominals: &NominalRegistry,
     this_bubbled: &std::collections::BTreeSet<String>,
+    hydratable: bool,
     out: &mut String,
 ) -> EmitResult<()> {
     let name = &component.name;
@@ -2400,6 +2491,73 @@ fn emit_mount_and_render(
             emit_template_node(node, "__target", &mut ctx, out)?;
         }
         writeln!(out, "    }}\n").unwrap();
+    }
+
+    // Phase 11.12 slice 4 — naive hydration. When the tree opted in
+    // (`component App hydrate { ... }`, propagated), a naive composition
+    // component adopts the server-painted DOM on boot instead of fresh-mounting:
+    // it restores its serialized state, then runs the template walk in ADOPT
+    // mode (acquiring nodes from a cursor, wiring listeners, `child.hydrate()`ing
+    // composed children, adopting `<slot>` content) — WITHOUT wiping. It has no
+    // `__built` flag, so the next state change still re-renders wholesale via the
+    // naive `render()`; hydration only removes the initial flash + preserves the
+    // server DOM (JS witnesses survive) for the first paint.
+    if hydratable {
+        let mut hydrate_body = String::new();
+        let mut hslot_methods: Vec<Vec<ExpandedTemplateNode>> = Vec::new();
+        if let Some(template) = &component.template {
+            let mut hctx = RenderCtx::new(
+                name,
+                state_names,
+                &component.state,
+                file,
+                nominals,
+                &component.events,
+                this_bubbled,
+            );
+            // Adopt mode; `keep` stays `None` (naive → no keep-node handles).
+            hctx.hydrate = true;
+            for root_node in &template.roots {
+                emit_template_node(root_node, "__cur_root", &mut hctx, &mut hydrate_body)?;
+            }
+            hslot_methods = hctx.slot_methods;
+        }
+        emit_apply_state_json(component, nominals, out)?;
+        // Naive `hydrate()` — no `__built` to flip.
+        emit_hydrate_method(component, name, &hydrate_body, false, out);
+
+        // One `__hydrate_slot_<n>` per `<Child>content</Child>` site (parallel
+        // to `__render_slot_<n>`), adopting the parent-provided slot content —
+        // in PARENT scope — from the child's cursor at its `<slot />`. The index
+        // matches `__render_slot_<n>` because both walks traverse the template in
+        // the same DFS order (so `__slot`→`__render_slot_n`, `__hslot`→
+        // `__hydrate_slot_n` refer to the same content).
+        for (i, content) in hslot_methods.iter().enumerate() {
+            writeln!(
+                out,
+                "    fn __hydrate_slot_{}(self: &Rc<Self>, __cursor: &mut Option<web_sys::Node>) {{",
+                i
+            )
+            .unwrap();
+            let mut hctx = RenderCtx::new(
+                name,
+                state_names,
+                &component.state,
+                file,
+                nominals,
+                &component.events,
+                this_bubbled,
+            );
+            hctx.hydrate = true;
+            // `__cursor` is already a `&mut Option<Node>` param; the adopt
+            // emitters wrap the cursor var in `&mut {...}`, so pass the deref
+            // place `(*__cursor)` to reborrow it (`&mut (*__cursor)`) instead of
+            // taking `&mut &mut …`. Inner element cursors are fresh owned locals.
+            for node in content {
+                emit_template_node(node, "(*__cursor)", &mut hctx, out)?;
+            }
+            writeln!(out, "    }}\n").unwrap();
+        }
     }
 
     writeln!(out, "}}\n").unwrap();
@@ -2590,10 +2748,10 @@ fn emit_template_node(
     out: &mut String,
 ) -> EmitResult<()> {
     // Phase 11.12 — the hydration adopt walk reuses this dispatch but routes
-    // Text/Interpolation/Element to the adopt emitters (acquire the existing
-    // node from the cursor instead of creating it). Slice 2 also adopts
-    // `{#if}`/`{#for}` regions (acquire their server-painted anchors). The
-    // hydratable gate still forbids composition, so Slot/Child never appear.
+    // each node to its adopt emitter (acquire the existing node from the cursor
+    // instead of creating it). Slice 2 adopts `{#if}`/`{#for}` regions (keep-node
+    // path). Slice 4 adopts composition — `<slot>` and `<Child />` — for the
+    // naive (opt-in) hydration path.
     if ctx.hydrate {
         return match node {
             ExpandedTemplateNode::Text(text) => {
@@ -2611,16 +2769,49 @@ fn emit_template_node(
                 ..
             } => emit_element_adopt(tag, attrs, children, parent_var, ctx, out),
             ExpandedTemplateNode::If { .. } | ExpandedTemplateNode::For { .. } => {
-                emit_keep_region_adopt(ctx, parent_var, out)
+                if ctx.keep.is_some() {
+                    // Keep-node path (slice 2): adopt the region's server anchors.
+                    emit_keep_region_adopt(ctx, parent_var, out)
+                } else {
+                    // Naive hydration (slice 4) does not model `{#if}`/`{#for}`
+                    // adoption yet — a naive region re-renders inline and the
+                    // adopt walk has no anchors to line up on. The composition
+                    // demo has no regions; a naive component that both composes
+                    // AND has a region is out of scope for this slice.
+                    // PRIORITY TODO (docs/deudas-post-5b.md): naive-region adopt
+                    // (evaluate the restored condition, walk the taken branch's
+                    // nodes against the cursor).
+                    Err(EmitError {
+                        message: "hydration of a `{#if}`/`{#for}` region inside a \
+                             NAIVE (composition) component is not supported in this \
+                             slice — only keep-node components adopt regions. Move \
+                             the region into a keep-node child, or drop `hydrate` \
+                             from this component."
+                            .to_string(),
+                        context: format!("component `{}`", ctx.component_name),
+                    })
+                }
             }
-            _ => Err(EmitError {
-                message: "hydration adopt walk hit a composition node \
-                     (Phase 11.12 hydrates keep-node templates: elements, text, \
-                     interpolation, and `{#if}`/`{#for}` regions — no `<slot>` / \
-                     `<Child />`)"
-                    .to_string(),
-                context: format!("component `{}`", ctx.component_name),
-            }),
+            ExpandedTemplateNode::Slot { name, fallback, .. } => {
+                emit_slot_adopt(name.as_deref(), fallback, parent_var, ctx, out)
+            }
+            ExpandedTemplateNode::ChildComponent {
+                name,
+                props,
+                key,
+                events,
+                slot_content,
+                ..
+            } => emit_child_component_adopt(
+                name,
+                props,
+                key.as_ref(),
+                events,
+                slot_content,
+                parent_var,
+                ctx,
+                out,
+            ),
         };
     }
     match node {
@@ -3506,10 +3697,19 @@ fn emit_text_adopt(text: &str, cursor_var: &str, out: &mut String) {
 }
 
 fn emit_interpolation_adopt(cursor_var: &str, ctx: &mut RenderCtx, out: &mut String) {
-    // Same keep index the build walk allocated for this interpolation (the
-    // adopt walk visits dynamic points in the same DFS order). Adopt the
-    // existing text node into the handle; the server already rendered its
-    // value, so no `set_data` — a later state change patches it via `__patch`.
+    // Phase 11.12 slice 4 — a NAIVE component (composition, `ctx.keep` is
+    // `None`) has no `__ktext_<n>` handle: it re-renders wholesale on the next
+    // state change, so there is nothing to patch in place. Just consume the
+    // server-painted text node to keep the cursor aligned with the build DFS.
+    if ctx.keep.is_none() {
+        writeln!(out, "        let _ = __flv_next_text(&mut {});", cursor_var).unwrap();
+        return;
+    }
+    // Keep-node path (slices 1–3): same keep index the build walk allocated for
+    // this interpolation (the adopt walk visits dynamic points in the same DFS
+    // order). Adopt the existing text node into the handle; the server already
+    // rendered its value, so no `set_data` — a later state change patches it via
+    // `__patch`.
     let k = ctx.keep_index();
     let field = format!("__ktext_{}", k);
     writeln!(
@@ -3572,25 +3772,33 @@ fn emit_element_adopt(
                 if let Some(key) = name.strip_prefix("data-flv-value-") {
                     value_keys.push(key.to_string());
                 }
-                let k = ctx.keep_index();
-                writeln!(
-                    out,
-                    "        *self.__kattr_{}.borrow_mut() = Some({}.clone());",
-                    k, el
-                )
-                .unwrap();
+                // Naive component (slice 4, `ctx.keep` is `None`): no keep-node
+                // handle to stash — the server already painted the attribute and
+                // a later state change re-renders wholesale. Only the payload
+                // `value_keys` collected above matters here.
+                if ctx.keep.is_some() {
+                    let k = ctx.keep_index();
+                    writeln!(
+                        out,
+                        "        *self.__kattr_{}.borrow_mut() = Some({}.clone());",
+                        k, el
+                    )
+                    .unwrap();
+                }
             }
             ExpandedAttr::Interpolation { name, .. } => {
                 if let Some(key) = name.strip_prefix("data-flv-value-") {
                     value_keys.push(key.to_string());
                 }
-                let k = ctx.keep_index();
-                writeln!(
-                    out,
-                    "        *self.__kattr_{}.borrow_mut() = Some({}.clone());",
-                    k, el
-                )
-                .unwrap();
+                if ctx.keep.is_some() {
+                    let k = ctx.keep_index();
+                    writeln!(
+                        out,
+                        "        *self.__kattr_{}.borrow_mut() = Some({}.clone());",
+                        k, el
+                    )
+                    .unwrap();
+                }
             }
         }
     }
@@ -3685,6 +3893,50 @@ fn emit_child_component(
     .unwrap();
 
     let child_var = ctx.fresh("child");
+    emit_child_get_or_create(&child_var, child_name, key, ctx, out)?;
+    emit_child_props(&child_var, child_name, props, ctx, out)?;
+    emit_child_event_bindings(&child_var, events, ctx, out)?;
+    emit_child_slot_wiring(&child_var, child_name, slot_content, false, ctx, out)?;
+
+    writeln!(
+        out,
+        "        let {wrapper_var}_html = {wrapper_var}.clone().dyn_into::<HtmlElement>().unwrap();"
+    )
+    .unwrap();
+    // `render()` is `fn(...) -> ()` (no `Result`), so we cannot use
+    // `?` here. `mount_into` failure implies a JS runtime error
+    // (root already detached, etc.) — surface it via `unwrap()` so
+    // the browser console shows the panic trace via
+    // `console_error_panic_hook`.
+    writeln!(
+        out,
+        "        {}.mount_into({wrapper_var}_html).unwrap();",
+        child_var
+    )
+    .unwrap();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared `<Child />` wiring — reused by the build path (`emit_child_component`)
+// and the hydration adopt path (`emit_child_component_adopt`, Phase 11.12
+// slice 4). Extracting these keeps the two paths in lockstep: same
+// instance-cache resolution, same prop coercion, same event bindings, same
+// slot routing. The only difference is the framing (create-wrapper +
+// `mount_into` vs adopt-wrapper + `hydrate`) and that the adopt path also
+// registers the `__hslot` cursor callback.
+// ---------------------------------------------------------------------------
+
+/// Emit `let {child_var} = { ... get-or-create ... };` — resolve the child from
+/// this site's instance cache (`__child_slot_<n>` static, `__child_map_<n>`
+/// dynamic inside a `{#for}`) so its state survives parent re-renders.
+fn emit_child_get_or_create(
+    child_var: &str,
+    child_name: &str,
+    key: Option<&Expr>,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
     if ctx.in_for {
         // Phase 11.7.b R2b — DYNAMIC site inside a `{#for}`. Reconcile
         // the child through this site's keyed instance cache
@@ -3752,7 +4004,19 @@ fn emit_child_component(
         writeln!(out, "            __slot.as_ref().unwrap().clone()").unwrap();
         writeln!(out, "        }};").unwrap();
     }
+    Ok(())
+}
 
+/// Emit the prop assignments `*{child_var}.<field>.borrow_mut() = <value>;` for
+/// each `<Child prop=... />`. Static props coerce to a Rust literal; `prop={expr}`
+/// props lower the interpolated expression in the PARENT scope.
+fn emit_child_props(
+    child_var: &str,
+    child_name: &str,
+    props: &[super::expand::ChildComponentProp],
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
     // Look up the child component to know each prop's declared
     // type. The checker already validated the child exists +
     // props coerce; we trust the shape and re-derive the Rust
@@ -3832,7 +4096,17 @@ fn emit_child_component(
         )
         .unwrap();
     }
+    Ok(())
+}
 
+/// Emit the `@event="handler"` bindings: register a callback on the child that
+/// calls the PARENT's handler (with the bubbled payload when it consumes one).
+fn emit_child_event_bindings(
+    child_var: &str,
+    events: &[super::expand::ChildEventBinding],
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
     // Phase 11.7.c — wire each `@event="handler"` binding: register a
     // callback on the child that calls the PARENT's handler when the
     // child's event fires. The parent handler is validated to exist
@@ -3877,131 +4151,248 @@ fn emit_child_component(
         writeln!(out, "            }}));").unwrap();
         writeln!(out, "        }}").unwrap();
     }
+    Ok(())
+}
 
+/// Emit the `<Child>content</Child>` slot wiring. Registers each content bucket
+/// as a `__render_slot_<n>` renderer on the child's `__slot` / `__slot_<name>`
+/// field (build path, `adopt = false`). When `adopt` is true (Phase 11.12 slice
+/// 4) it ALSO registers a `__hydrate_slot_<n>` cursor callback on the child's
+/// `__hslot` / `__hslot_<name>` field, so the initial `hydrate()` adopts the
+/// parent-painted slot content in place. The `__render_slot_<n>` wiring is kept
+/// on the adopt path too, so a later naive rebuild of the child fills its slot.
+fn emit_child_slot_wiring(
+    child_var: &str,
+    child_name: &str,
+    slot_content: &[ExpandedTemplateNode],
+    adopt: bool,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
     // Phase 11.7.d + named slots — if the parent provided slot content
     // (`<Child>content</Child>`), register a renderer on the child that
     // fills its `<slot />` (or `<slot name="X" />`) with that content
     // (rendered in PARENT scope). `<Child />` nested inside slot content
     // is rejected (the parent has no child-cache field for it).
-    if !slot_content.is_empty() {
-        if let Some(bad) = slot_content.iter().find_map(first_nested_child_name) {
-            return Err(EmitError {
-                message: format!(
-                    "`<{bad} />` nested inside `<{child_name}>...</{child_name}>` slot \
-                     content is not supported on the client-WASM target yet. Slot \
-                     content may contain elements, text, interpolation, `{{#if}}`/\
-                     `{{#for}}`, and event handlers, but not another component."
-                ),
-                context: format!("template of component `{}`", ctx.component_name),
-            });
-        }
+    if slot_content.is_empty() {
+        return Ok(());
+    }
+    if let Some(bad) = slot_content.iter().find_map(first_nested_child_name) {
+        return Err(EmitError {
+            message: format!(
+                "`<{bad} />` nested inside `<{child_name}>...</{child_name}>` slot \
+                 content is not supported on the client-WASM target yet. Slot \
+                 content may contain elements, text, interpolation, `{{#if}}`/\
+                 `{{#for}}`, and event handlers, but not another component."
+            ),
+            context: format!("template of component `{}`", ctx.component_name),
+        });
+    }
 
-        // Named slots: route each top-level element carrying a
-        // `slot="X"` attribute to the child's `<slot name="X" />`; every
-        // other node (text, interpolation, `{#if}`/`{#for}`, or an
-        // element without `slot=`) fills the default `<slot />`. When no
-        // node uses `slot=`, take the byte-for-byte default-slot path
-        // (11.7.d).
-        let child_slots = component_slot_set(child);
-        let has_named_routing = slot_content.iter().any(|n| element_slot_attr(n).is_some());
+    // Named slots: route each top-level element carrying a
+    // `slot="X"` attribute to the child's `<slot name="X" />`; every
+    // other node (text, interpolation, `{#if}`/`{#for}`, or an
+    // element without `slot=`) fills the default `<slot />`. When no
+    // node uses `slot=`, take the byte-for-byte default-slot path
+    // (11.7.d).
+    let child = ctx
+        .file
+        .components
+        .iter()
+        .find(|c| c.name == child_name)
+        .ok_or_else(|| EmitError {
+            message: format!(
+                "internal error: child component `{child_name}` not found in the \
+                 expanded view file — the checker should have caught this."
+            ),
+            context: format!("template of component `{}`", ctx.component_name),
+        })?;
+    let child_slots = component_slot_set(child);
+    let has_named_routing = slot_content.iter().any(|n| element_slot_attr(n).is_some());
 
-        // Each entry: (backing field, content nodes) → one
-        // `__render_slot_<n>` method wired to that field.
-        let mut wirings: Vec<(String, Vec<ExpandedTemplateNode>)> = Vec::new();
-        if has_named_routing {
-            let mut default_bucket: Vec<ExpandedTemplateNode> = Vec::new();
-            let mut named_buckets: Vec<(String, Vec<ExpandedTemplateNode>)> = Vec::new();
-            for node in slot_content {
-                if let Some(slot_name) = element_slot_attr(node) {
-                    let slot_name = slot_name.to_string();
-                    if !child_slots.named.contains(&slot_name) {
-                        return Err(EmitError {
-                            message: format!(
-                                "`slot=\"{slot_name}\"` inside `<{child_name}>...\
-                                 </{child_name}>` targets no `<slot name=\"{slot_name}\" />` \
-                                 declared in `{child_name}`. Declared named slots: {}.",
-                                describe_named_slots(&child_slots)
-                            ),
-                            context: format!("template of component `{}`", ctx.component_name),
-                        });
-                    }
-                    let stripped = strip_slot_attr(node);
-                    match named_buckets.iter_mut().find(|(n, _)| *n == slot_name) {
-                        Some((_, bucket)) => bucket.push(stripped),
-                        None => named_buckets.push((slot_name, vec![stripped])),
-                    }
-                } else {
-                    default_bucket.push(node.clone());
-                }
-            }
-            // Unslotted content only fills the default slot when it has
-            // real (non-whitespace) nodes — incidental formatting between
-            // slotted elements shouldn't force a `<slot />`.
-            if default_bucket.iter().any(|n| !is_whitespace_text(n)) {
-                if !child_slots.has_default {
+    // Each entry: (slot name — `None` = default slot, content nodes) → one
+    // `__render_slot_<n>` (+ `__hydrate_slot_<n>` when adopting) method.
+    let mut wirings: Vec<(Option<String>, Vec<ExpandedTemplateNode>)> = Vec::new();
+    if has_named_routing {
+        let mut default_bucket: Vec<ExpandedTemplateNode> = Vec::new();
+        let mut named_buckets: Vec<(String, Vec<ExpandedTemplateNode>)> = Vec::new();
+        for node in slot_content {
+            if let Some(slot_name) = element_slot_attr(node) {
+                let slot_name = slot_name.to_string();
+                if !child_slots.named.contains(&slot_name) {
                     return Err(EmitError {
                         message: format!(
-                            "`<{child_name}>...</{child_name}>` provides default (unslotted) \
-                             content but `{child_name}` declares no default `<slot />`. Wrap \
-                             the content in an element with `slot=\"<name>\"` targeting one of \
-                             its named slots, or add a `<slot />` to `{child_name}`."
+                            "`slot=\"{slot_name}\"` inside `<{child_name}>...\
+                             </{child_name}>` targets no `<slot name=\"{slot_name}\" />` \
+                             declared in `{child_name}`. Declared named slots: {}.",
+                            describe_named_slots(&child_slots)
                         ),
                         context: format!("template of component `{}`", ctx.component_name),
                     });
                 }
-                wirings.push(("__slot".to_string(), default_bucket));
+                let stripped = strip_slot_attr(node);
+                match named_buckets.iter_mut().find(|(n, _)| *n == slot_name) {
+                    Some((_, bucket)) => bucket.push(stripped),
+                    None => named_buckets.push((slot_name, vec![stripped])),
+                }
+            } else {
+                default_bucket.push(node.clone());
             }
-            for (slot_name, bucket) in named_buckets {
-                wirings.push((slot_field_name(Some(&slot_name)), bucket));
-            }
-        } else {
-            // Byte-for-byte default-slot path (11.7.d): the whole content
-            // fills the child's `<slot />`.
+        }
+        // Unslotted content only fills the default slot when it has
+        // real (non-whitespace) nodes — incidental formatting between
+        // slotted elements shouldn't force a `<slot />`.
+        if default_bucket.iter().any(|n| !is_whitespace_text(n)) {
             if !child_slots.has_default {
                 return Err(EmitError {
                     message: format!(
-                        "`<{child_name}>...</{child_name}>` provides slot content but \
-                         `{child_name}` declares no `<slot />` to fill. Add a `<slot />` \
-                         to `{child_name}`, or route the content with `slot=\"<name>\"` to \
-                         one of its named slots."
+                        "`<{child_name}>...</{child_name}>` provides default (unslotted) \
+                         content but `{child_name}` declares no default `<slot />`. Wrap \
+                         the content in an element with `slot=\"<name>\"` targeting one of \
+                         its named slots, or add a `<slot />` to `{child_name}`."
                     ),
                     context: format!("template of component `{}`", ctx.component_name),
                 });
             }
-            wirings.push(("__slot".to_string(), slot_content.to_vec()));
+            wirings.push((None, default_bucket));
         }
+        for (slot_name, bucket) in named_buckets {
+            wirings.push((Some(slot_name), bucket));
+        }
+    } else {
+        // Byte-for-byte default-slot path (11.7.d): the whole content
+        // fills the child's `<slot />`.
+        if !child_slots.has_default {
+            return Err(EmitError {
+                message: format!(
+                    "`<{child_name}>...</{child_name}>` provides slot content but \
+                     `{child_name}` declares no `<slot />` to fill. Add a `<slot />` \
+                     to `{child_name}`, or route the content with `slot=\"<name>\"` to \
+                     one of its named slots."
+                ),
+                context: format!("template of component `{}`", ctx.component_name),
+            });
+        }
+        wirings.push((None, slot_content.to_vec()));
+    }
 
-        for (field, content) in wirings {
-            let slot_idx = ctx.slot_methods.len();
-            ctx.slot_methods.push(content);
+    for (slot_name, content) in wirings {
+        let slot_idx = ctx.slot_methods.len();
+        ctx.slot_methods.push(content);
+        let field = slot_field_name(slot_name.as_deref());
+        writeln!(out, "        {{").unwrap();
+        writeln!(out, "            let __parent = self.clone();").unwrap();
+        writeln!(
+            out,
+            "            *{}.{}.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_{}(__t)));",
+            child_var, field, slot_idx
+        )
+        .unwrap();
+        writeln!(out, "        }}").unwrap();
+        // Phase 11.12 slice 4 — also register the hydration adopt callback so
+        // the initial `hydrate()` adopts the parent-painted slot content from
+        // the child's cursor at its `<slot />`.
+        if adopt {
+            let hfield = hslot_field_name(slot_name.as_deref());
             writeln!(out, "        {{").unwrap();
             writeln!(out, "            let __parent = self.clone();").unwrap();
             writeln!(
                 out,
-                "            *{}.{}.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_{}(__t)));",
-                child_var, field, slot_idx
+                "            *{}.{}.borrow_mut() = Some(Rc::new(move |__c: &mut Option<web_sys::Node>| __parent.__hydrate_slot_{}(__c)));",
+                child_var, hfield, slot_idx
             )
             .unwrap();
             writeln!(out, "        }}").unwrap();
         }
     }
+    Ok(())
+}
+
+/// Phase 11.12 slice 4 — hydration adopt of a `<Child />` composition site.
+/// Mirrors [`emit_child_component`] but ACQUIRES the child's server-painted
+/// wrapper (`<div class="__fitz-child-<Name>">`) from the parent cursor instead
+/// of creating it, get-or-creates the same cached instance, wires props/events/
+/// slots (registering the `__hslot` adopt callback too), and calls
+/// `child.hydrate(wrapper)` instead of `mount_into`. A later parent re-render
+/// falls back to the naive build path (`emit_child_component`), reusing the same
+/// cached instance so child state persists.
+#[allow(clippy::too_many_arguments)]
+fn emit_child_component_adopt(
+    child_name: &str,
+    props: &[super::expand::ChildComponentProp],
+    key: Option<&Expr>,
+    events: &[super::expand::ChildEventBinding],
+    slot_content: &[ExpandedTemplateNode],
+    cursor_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    if ctx.in_for {
+        // A dynamic `{#for}` child would need region adoption, which the naive
+        // hydration path does not model in this slice (see the `{#if}`/`{#for}`
+        // guard in `emit_template_node`).
+        return Err(EmitError {
+            message: format!(
+                "hydration of a `<{child_name} />` inside a `{{#for}}` (dynamic \
+                 composition) is not supported in this slice — a naive component \
+                 hydrates static composition only. Drop `hydrate`, or move the loop \
+                 into a keep-node child."
+            ),
+            context: format!("template of component `{}`", ctx.component_name),
+        });
+    }
+
+    // Adopt the wrapper `<div class="__fitz-child-<Name>">` the server painted.
+    let wrapper_var = ctx.fresh("hchild");
+    writeln!(
+        out,
+        "        if let Some({}) = __flv_next_element(&mut {}) {{",
+        wrapper_var, cursor_var
+    )
+    .unwrap();
+
+    let child_var = ctx.fresh("child");
+    emit_child_get_or_create(&child_var, child_name, key, ctx, out)?;
+    emit_child_props(&child_var, child_name, props, ctx, out)?;
+    emit_child_event_bindings(&child_var, events, ctx, out)?;
+    emit_child_slot_wiring(&child_var, child_name, slot_content, true, ctx, out)?;
 
     writeln!(
         out,
         "        let {wrapper_var}_html = {wrapper_var}.clone().dyn_into::<HtmlElement>().unwrap();"
     )
     .unwrap();
-    // `render()` is `fn(...) -> ()` (no `Result`), so we cannot use
-    // `?` here. `mount_into` failure implies a JS runtime error
-    // (root already detached, etc.) — surface it via `unwrap()` so
-    // the browser console shows the panic trace via
-    // `console_error_panic_hook`.
     writeln!(
         out,
-        "        {}.mount_into({wrapper_var}_html).unwrap();",
+        "        {}.hydrate({wrapper_var}_html).unwrap();",
         child_var
     )
     .unwrap();
+    writeln!(out, "        }}").unwrap();
+    Ok(())
+}
+
+/// Phase 11.12 slice 4 — hydration adopt of a `<slot />`. If the parent filled
+/// the slot (`__hslot` / `__hslot_<name>` is `Some`), invoke the adopt callback
+/// with the child's cursor so it adopts the parent-painted content in PARENT
+/// scope, advancing the cursor past it. Otherwise adopt the slot's own fallback
+/// content (which the server painted) from the cursor.
+fn emit_slot_adopt(
+    name: Option<&str>,
+    fallback: &[ExpandedTemplateNode],
+    cursor_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    let field = hslot_field_name(name);
+    writeln!(out, "        let __hcb = self.{}.borrow().clone();", field).unwrap();
+    writeln!(out, "        if let Some(__hcb) = __hcb {{").unwrap();
+    writeln!(out, "            __hcb(&mut {});", cursor_var).unwrap();
+    writeln!(out, "        }} else {{").unwrap();
+    for node in fallback {
+        emit_template_node(node, cursor_var, ctx, out)?;
+    }
+    writeln!(out, "        }}").unwrap();
     Ok(())
 }
 
@@ -4542,6 +4933,20 @@ fn slot_field_name(name: Option<&str>) -> String {
     match name {
         None => "__slot".to_string(),
         Some(n) => format!("__slot_{}", sanitize_slot_ident(n)),
+    }
+}
+
+/// Phase 11.12 slice 4 — the struct-field name backing a slot's HYDRATION
+/// callback. Parallel to [`slot_field_name`] but stores a cursor-consuming
+/// adopt renderer (`Fn(&mut Option<web_sys::Node>)`) instead of the build
+/// renderer (`Fn(&web_sys::Node)`). A slot-declaring component that hydrates
+/// carries both: `__slot` for a later naive rebuild, `__hslot` for the one
+/// initial adopt. Only emitted for hydratable components, so pre-11.12
+/// slot examples stay byte-identical.
+fn hslot_field_name(name: Option<&str>) -> String {
+    match name {
+        None => "__hslot".to_string(),
+        Some(n) => format!("__hslot_{}", sanitize_slot_ident(n)),
     }
 }
 
@@ -6302,6 +6707,7 @@ mod tests {
         let component = ExpandedComponent {
             name: "Counter".to_string(),
             loc,
+            hydrate: false,
             state: vec![ExpandedStateField {
                 name: "count".to_string(),
                 type_expr: TypeExpr::Named("Int".to_string()),
@@ -6389,6 +6795,7 @@ mod tests {
         let component = ExpandedComponent {
             name: "Counter".to_string(),
             loc,
+            hydrate: false,
             state: vec![ExpandedStateField {
                 name: "count".to_string(),
                 type_expr: TypeExpr::Named("Int".to_string()),
@@ -7604,6 +8011,161 @@ component Row {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 11.12 slice 4 — naive composition hydration (child + slots)
+    // -----------------------------------------------------------------------
+
+    /// A root `App` marked `hydrate` composing a `Card` with a `<slot>`.
+    const SLICE4_COMPOSITION_SRC: &str = r#"component App hydrate {
+  state { title: Str = "d" }
+  event bump() { title = "x" }
+  <template>
+    <div class="page">
+      <Card>
+        <p class="lead">from parent</p>
+        <button class="b" @click="bump">bump</button>
+      </Card>
+    </div>
+  </template>
+}
+
+component Card {
+  state { taps: Int = 0 }
+  event tap() { taps = taps + 1 }
+  <template>
+    <section class="card">
+      <div class="body"><slot><em>fallback</em></slot></div>
+      <button class="t" @click="tap">tap</button>
+    </section>
+  </template>
+}"#;
+
+    #[test]
+    fn phase_11_12_slice4_marker_makes_naive_composition_hydratable() {
+        let out = emit_module(&parse_expand(SLICE4_COMPOSITION_SRC)).unwrap();
+        // Both App and Card emit a hydrate() (whole tree opted in via the root).
+        assert_eq!(
+            out.matches("pub fn hydrate(").count(),
+            2,
+            "App + Card both emit hydrate():\n{out}"
+        );
+        // The slot-declaring child (Card) carries the __hslot adopt field.
+        assert!(
+            out.contains("__hslot: RefCell<Option<Rc<dyn Fn(&mut Option<web_sys::Node>)>>>,"),
+            "Card carries __hslot field:\n{out}"
+        );
+        // The parent (App) synthesises a __hydrate_slot_0 adopt method taking a
+        // cursor, and reborrows the param place (`&mut (*__cursor)`).
+        assert!(
+            out.contains(
+                "fn __hydrate_slot_0(self: &Rc<Self>, __cursor: &mut Option<web_sys::Node>) {"
+            ),
+            "App emits __hydrate_slot_0:\n{out}"
+        );
+        assert!(
+            out.contains("__flv_next_element(&mut (*__cursor))"),
+            "slot adopt method reborrows the cursor param:\n{out}"
+        );
+        // App wires Card's __hslot (adopt) AND keeps __slot (rebuild) wiring.
+        assert!(
+            out.contains(".__hslot.borrow_mut() = Some(Rc::new(move |__c: &mut Option<web_sys::Node>| __parent.__hydrate_slot_0(__c)));"),
+            "App wires __hslot -> __hydrate_slot_0:\n{out}"
+        );
+        assert!(
+            out.contains(".__slot.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_0(__t)));"),
+            "App keeps __slot -> __render_slot_0 for later rebuild:\n{out}"
+        );
+        // Card.hydrate adopts its <slot> via the __hslot callback.
+        assert!(
+            out.contains("let __hcb = self.__hslot.borrow().clone();"),
+            "Card.hydrate adopts <slot> via __hslot:\n{out}"
+        );
+        // The adopted child is hydrated, not mount_into'd, in App's adopt walk.
+        assert!(
+            out.contains(".hydrate(") && out.contains("_html).unwrap();"),
+            "child is hydrated in the adopt walk:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice4_without_marker_stays_fresh_mount() {
+        // Same tree WITHOUT the `hydrate` marker → no hydration surface at all
+        // (composition still fresh-mounts via mount_into, byte-identical to the
+        // pre-11.12 path).
+        let no_marker =
+            SLICE4_COMPOSITION_SRC.replace("component App hydrate {", "component App {");
+        let out = emit_module(&parse_expand(&no_marker)).unwrap();
+        assert!(
+            !out.contains("pub fn hydrate("),
+            "no marker -> no hydrate() emitted:\n{out}"
+        );
+        assert!(
+            !out.contains("__hslot"),
+            "no marker -> no __hslot field:\n{out}"
+        );
+        assert!(
+            !out.contains("__hydrate_slot_"),
+            "no marker -> no __hydrate_slot method:\n{out}"
+        );
+        // Composition still works via the naive build path.
+        assert!(
+            out.contains(".mount_into(") && out.contains("__render_slot_0"),
+            "composition still fresh-mounts:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice4_gate_and_propagation() {
+        let empty = std::collections::BTreeSet::new();
+        let mut file = parse_expand(SLICE4_COMPOSITION_SRC);
+        // Before propagation: only the root App carries the marker.
+        assert!(file.components[0].hydrate, "root App has the marker");
+        assert!(!file.components[1].hydrate, "Card has no marker of its own");
+        // The gate treats a naive component as hydratable iff its `hydrate` flag
+        // is set (Card is not keep-node — it composes a `<slot>`).
+        assert!(
+            component_is_hydratable(&file.components[0], &empty),
+            "App (marker) is hydratable"
+        );
+        assert!(
+            !component_is_hydratable(&file.components[1], &empty),
+            "Card is not hydratable until propagation"
+        );
+        // Propagation lifts the whole tree.
+        propagate_root_hydrate(&mut file);
+        assert!(
+            file.components.iter().all(|c| c.hydrate),
+            "propagation sets hydrate on every component"
+        );
+        assert!(
+            component_is_hydratable(&file.components[1], &empty),
+            "Card hydratable after propagation"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_slice4_naive_region_hydration_is_rejected() {
+        // A naive component (no value-input → not keep-node) marked `hydrate`
+        // with a `{#if}` region: the naive hydration path does not adopt regions
+        // in this slice, so emit errors with a clear message.
+        let src = r#"component App hydrate {
+  state { on: Bool = true }
+  event flip() { on = false }
+  <template>
+    <div>
+      <button @click="flip">flip</button>
+      {#if on}<p>shown</p>{/if}
+    </div>
+  </template>
+}"#;
+        let err = emit_module(&parse_expand(src)).unwrap_err();
+        assert!(
+            err.message.contains("NAIVE") && err.message.contains("region"),
+            "region-in-naive-hydrate rejected with a clear message: {}",
+            err.message
+        );
+    }
+
     #[test]
     fn phase_11_12_mixed_text_adopts_static_runs_and_the_interp_node() {
         // Phase 11.12 slice 2 — mixed static+interpolated text (`Hi, {name}!`)
@@ -7913,6 +8475,7 @@ component Row {
         let component = ExpandedComponent {
             name: "Foo".to_string(),
             loc: Loc { line: 1, column: 1 },
+            hydrate: false,
             state: vec![],
             derived: Vec::new(),
             events: vec![ExpandedEventHandler {

@@ -15089,6 +15089,63 @@ fitz build --bin counter-web --target wasm-client
 Bundle size del counter demo: **11.4 KB gzipped sobre 40 KB
 gate** (28.6 KB headroom, medido en la Phase 11.4.c).
 
+### Hidratación SSR → client (Phase 11.12)
+
+El target WASM puede **adoptar** el DOM que el server ya pintó en
+vez de fresh-mountearlo: en boot, el `start()` generado detecta que
+el mount root ya tiene contenido, restaura el estado serializado
+desde un `<script type="application/json" id="__flv_state_<Comp>">`,
+recorre el DOM existente cableando los listeners, y **no wipea**. Así
+el primer paint no parpadea y cualquier JS ya atado a los nodos del
+server sobrevive.
+
+Un componente **keep-node** (un control de formulario vivo `@input`/
+`@change` sobre un template estático o con regiones `{#if}`/`{#for}`)
+hidrata **automáticamente** — de ahí en más parchea in-place, así el
+`<input>` vivo conserva el caret.
+
+Un componente de **composición naive** (`<Child />` + `<slot>`)
+hidrata con **opt-in**: poné el marcador `hydrate` en el component
+ROOT y se propaga a todo el árbol.
+
+```
+component App hydrate {
+  state { title: Str = "..." }
+  event like() { ... }
+
+  <template>
+    <div class="page">
+      <Card>
+        <p>Contenido de slot en scope del PADRE: {title}</p>
+        <button @click="like">like</button>
+      </Card>
+    </div>
+  </template>
+}
+
+component Card {
+  state { taps: Int = 0 }
+  event tap() { taps = taps + 1 }
+  <template>
+    <section class="card">
+      <div class="body"><slot><em>fallback</em></slot></div>
+      <button @click="tap">tap</button>
+    </section>
+  </template>
+}
+```
+
+`App.hydrate` adopta el wrapper `<div class="__fitz-child-Card">` que
+el server pintó y llama `Card.hydrate(wrapper)`; el `<slot>` del hijo
+adopta el contenido provisto por el padre (en scope del padre, así
+`@click="like"` cablea a `App`); el estado del hijo se reusa del
+cache de instancias a través de un re-render del padre. La
+composición no tiene patch in-place, así que el **primer** cambio de
+state re-renderiza wholesale (naive) — hidratar sólo elimina el flash
+del primer paint. Sin el marcador `hydrate`, la composición
+fresh-mountea igual que antes. Ejemplo runnable en
+`examples/view/hydrate-composition/`.
+
 ### Editor support (LSP)
 
 La extensión VSCode + el binario `fitz-lsp` reconocen `.fitzv`

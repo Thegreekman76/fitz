@@ -315,6 +315,20 @@ impl ViewParser {
             Token::Ident(s) => s,
             _ => unreachable!(),
         };
+
+        // Phase 11.12 slice 4 — optional `hydrate` opt-in marker between the
+        // component name and its body (`component App hydrate { ... }`). It is
+        // a bare ident (not a lexer keyword — same treatment as `as` in
+        // imports), so it only takes effect in this exact position. On the ROOT
+        // component it makes the whole naive composition tree hydrate the
+        // server-painted DOM instead of fresh-mounting.
+        let mut hydrate = false;
+        self.skip_newlines();
+        if matches!(&self.peek().token, Token::Ident(s) if s == "hydrate") {
+            self.advance();
+            hydrate = true;
+        }
+
         self.expect(Token::LBrace)?;
 
         let mut state = Vec::new();
@@ -401,6 +415,7 @@ impl ViewParser {
         Ok(Component {
             name,
             loc,
+            hydrate,
             state,
             derived,
             events,

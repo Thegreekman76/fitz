@@ -60,6 +60,16 @@ pub struct Component {
     pub name: String,
     /// Position of the `component` keyword. 1-based (line, column).
     pub loc: Loc,
+    /// Phase 11.12 slice 4 — hydration opt-in marker (`component App
+    /// hydrate { ... }`). When set on the ROOT component, the whole
+    /// file's component tree hydrates the server-painted DOM instead of
+    /// fresh-mounting: the entry wrapper adopts, and every naive
+    /// component in the tree emits a `hydrate()` that adopts its DOM +
+    /// wires listeners (composition included — `<Child />` + `<slot>`).
+    /// Keep-node components auto-hydrate regardless of this flag (slices
+    /// 1–3); this opt-in only lifts the NAIVE (composition) path, kept
+    /// off by default so pre-11.12 examples regenerate byte-identical.
+    pub hydrate: bool,
     pub state: Vec<StateField>,
     /// Phase 11.10 slice 4 — read-only derived values (`derived { name: T =
     /// expr }`). Same shape as a state field, but recomputed from state (+

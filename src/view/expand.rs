@@ -76,6 +76,13 @@ pub struct ExpandedViewImport {
 pub struct ExpandedComponent {
     pub name: String,
     pub loc: Loc,
+    /// Phase 11.12 slice 4 — hydration opt-in, carried through from
+    /// [`crate::view::ast::Component::hydrate`]. Set on the ROOT via the
+    /// `component App hydrate { ... }` marker and then propagated to every
+    /// component in the emitted tree (see `propagate_root_hydrate` in
+    /// `codegen_wasm`), so a naive composition tree (`<Child />` + `<slot>`)
+    /// hydrates the server-painted DOM instead of fresh-mounting.
+    pub hydrate: bool,
     pub state: Vec<ExpandedStateField>,
     /// Phase 11.10 slice 4 — read-only derived values. Same shape as a state
     /// field; `default` holds the derived expression (recomputed from state +
@@ -433,6 +440,7 @@ fn expand_component(c: &RawComponent) -> ExpandResult<ExpandedComponent> {
     Ok(ExpandedComponent {
         name: c.name.clone(),
         loc: c.loc,
+        hydrate: c.hydrate,
         state,
         derived,
         events,

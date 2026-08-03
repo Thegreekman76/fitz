@@ -4,6 +4,48 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 Fase 11.12 slice 4 — deudas residuales de la hidratación de composición (ABIERTAS, 2026-08-02)
+
+Derivadas del cierre de 11.12 slice 4 (hidratación naive de `<Child />` + `<slot>`
+con opt-in `component App hydrate`). Ninguna bloquea el uso real del slice; son
+mejoras/prioridades para próximas iteraciones.
+
+1. **Hidratación universal vs opt-in (mejora de UX/perf para el cliente)** — hoy
+   la hidratación de composición es **opt-in** (marcador `hydrate` en el root)
+   sólo para preservar byte-compat de los ~10 ejemplos de composición existentes.
+   Toda composición naive PODRÍA hidratar de forma segura (adopt-then-naive), lo
+   cual es estrictamente mejor para el cliente (sin flash en el primer paint, DOM
+   del server reusado). **Prioridad**: cuando aterrice el render-a-string
+   isomórfico SSR real, evaluar hacer la hidratación **automática** para toda
+   composición y re-baselinar los ejemplos (o gatearla por el shell SSR).
+
+2. **`{#if}`/`{#for}` en un componente naive hidratable** — el adopt walk naive
+   (slice 4) NO adopta regiones: emite un `EmitError` claro si un componente con
+   `hydrate` (y sin ser keep-node) contiene un `{#if}`/`{#for}`. Los keep-node SÍ
+   las adoptan (slice 2). **Fix futuro**: naive-region adopt = evaluar la condición
+   restaurada y caminar la rama tomada contra el cursor (paralelo a `emit_if`/
+   `emit_for` en modo adopt). El demo de composición no usa regiones.
+
+3. **`<Child />` dinámico dentro de `{#for}` en hidratación naive** — mismo límite
+   que (2): `emit_child_component_adopt` rechaza `ctx.in_for`. La composición
+   estática (`__child_slot_<n>`) sí hidrata; la keyed dinámica (`__child_map_<n>`)
+   no, porque depende de la adopción de regiones.
+
+4. **`use std::sync::atomic::{AtomicBool, Ordering};` sin usar en crates sin
+   `<style scoped>`** — el header del módulo emite ese `use` incondicionalmente;
+   un crate sin ningún componente con `<style scoped>` (p.ej. `hydrate`,
+   `hydrate-regions`, `hydrate-composition`) compila a WASM con una warning de
+   import sin usar. **Preexistente** (no lo introduce slice 4). **Fix futuro**:
+   gatear el import a "algún componente tiene style" (cambia el byte-output de los
+   crates style-less → requiere re-baselinar esos ejemplos).
+
+5. **Render-a-string isomórfico del lado SSR** — el `index.html` del demo está
+   hand-authored (mismo enfoque que slices 1-3): no hay todavía un render-to-string
+   del server que produzca el HTML con el wrapper `__fitz-child-<Name>`, el
+   contenido de slot inline y el `<script>` de state. Es la unificación grande
+   pendiente de 11.12 (cross-repo con fitz-liveviews para el shell + serialización
+   de state).
+
 ## 🟢 Límites de recursos en el evaluador (steps + depth) — fase 1 CERRADA (2026-07-27)
 
 **Contexto**: el evaluador NO tenía ningún límite — un `loop {}` CPU-bound

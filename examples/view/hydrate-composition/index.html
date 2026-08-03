@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — SSR → client hydration: composition</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
+      .page { display: flex; flex-direction: column; gap: 0.75rem; align-items: flex-start; }
+      .card { border: 1px solid #ddd; border-radius: 8px; overflow: hidden; width: 100%; }
+      .card-head { background: #f4f4f4; padding: 8px 12px; font-weight: 600; font-size: 0.9rem; }
+      .card-body { padding: 12px; display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+      button { padding: 0.4rem 0.8rem; }
+      p { margin: 0; }
+      .tap-row, .tap { margin: 8px 12px; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Server-painted DOM. In a real deployment a Fitz HTTP server (or a
+      build-time prerender) emits this markup with the current state already
+      interpolated (title = "hydrated!", NOT the component default
+      "default-title"), plus the state <script> below. The wasm bundle ADOPTS
+      this DOM on boot instead of wiping + rebuilding it.
+
+      The shape must match the client build walk exactly — including the
+      `<div class="__fitz-child-Card">` wrapper the parent emits around a
+      `<Child />`, and the parent-provided slot content inlined at the child's
+      `<slot />`. Significant text sits tight after its element's open tag so the
+      adopt cursor lines up (whitespace BETWEEN elements is skipped).
+    -->
+    <div id="app">
+      <div class="page">
+        <h1>SSR to client hydration: composition</h1>
+        <div class="__fitz-child-Card">
+          <section class="card">
+            <header class="card-head">Card header (from the child)</header>
+            <div class="card-body">
+              <p class="lead">Slot content, rendered in the PARENT scope.</p>
+              <p class="ttl-row">title: <span class="ttl">hydrated!</span></p>
+              <button class="like">like</button>
+              <p class="likes-row">likes: <span class="ln">0</span></p>
+            </div>
+            <p class="tap-row">child taps: <span class="tn">0</span></p>
+            <button class="tap">tap</button>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Serialized initial state — read by App::hydrate() at boot. -->
+    <script type="application/json" id="__flv_state_App">{"title":"hydrated!","likes":0}</script>
+
+    <script type="module">
+      // Tag two server-painted nodes BEFORE hydration: one in the PARENT-owned
+      // slot content (.ttl), one inside the CHILD's own DOM (.card-head). If the
+      // wasm adopts the server DOM (rather than recreating it), these JS
+      // properties survive — the proof that composition hydration reused the
+      // existing nodes across the parent/child boundary.
+      const ttl = document.querySelector('#app .ttl');
+      if (ttl) ttl.__hydrationWitness = 'server-title';
+      const head = document.querySelector('#app .card-head');
+      if (head) head.__hydrationWitness = 'server-card';
+
+      import init from './wasm-crate/pkg/hydrate_composition.js';
+      await init();
+
+      window.__flvHydrated = true;
+    </script>
+  </body>
+</html>

@@ -1,0 +1,70 @@
+// Phase 11.12 slice 4 — SSR → client hydration of COMPOSITION (child + slots).
+//
+// Slices 1–3 hydrated a single keep-node component (a live `@input` over a
+// static/region template). This slice lifts the last restriction of the
+// keep-node gate: a NAIVE composition tree — a parent that composes a
+// `<Child />` which itself declares a `<slot>` — can now hydrate the
+// server-painted DOM instead of fresh-mounting.
+//
+// Because naive composition has no in-place patch model, hydration here means:
+// on boot, ADOPT the server DOM (no wipe), restore serialized state, and wire
+// the listeners; a later state change still re-renders wholesale (naive). The
+// win is the first paint — no flash, and any JS already attached to the
+// server-painted nodes survives (the adoption proof below).
+//
+// OPT-IN: the `hydrate` marker on the ROOT component (`component App hydrate`)
+// turns the whole tree hydratable and propagates to the composed `Card`. Without
+// it, a composition tree fresh-mounts exactly as before (pre-11.12 examples stay
+// byte-identical) — that keeps hydration opt-in for composition while keep-node
+// components auto-hydrate.
+//
+// AUTHORING CONSTRAINTS (same as slice 1, naive path):
+//   * Each dynamic `{expr}` is the SOLE child of its element (wrap it in a
+//     `<span>`), so the server-painted text nodes map 1:1 onto the adopt walk.
+//   * Static text sits tight after its element's open tag (no leading
+//     whitespace before significant text), so the text cursor lines up.
+//   * No `<style scoped>` here — plain classes keep the hand-authored server
+//     DOM (index.html) free of the scoped-class hash. Scoped styles hydrate
+//     too; they just need the server markup to carry the suffixed class names.
+
+component App hydrate {
+  state {
+    title: Str = "default-title"
+    likes: Int = 0
+  }
+
+  event like() { likes = likes + 1 }
+
+  <template>
+    <div class="page">
+      <h1>SSR to client hydration: composition</h1>
+      <Card>
+        <p class="lead">Slot content, rendered in the PARENT scope.</p>
+        <p class="ttl-row">title: <span class="ttl">{title}</span></p>
+        <button class="like" @click="like">like</button>
+        <p class="likes-row">likes: <span class="ln">{likes}</span></p>
+      </Card>
+    </div>
+  </template>
+}
+
+component Card {
+  state {
+    taps: Int = 0
+  }
+
+  event tap() { taps = taps + 1 }
+
+  <template>
+    <section class="card">
+      <header class="card-head">Card header (from the child)</header>
+      <div class="card-body">
+        <slot>
+          <em>default fallback content</em>
+        </slot>
+      </div>
+      <p class="tap-row">child taps: <span class="tn">{taps}</span></p>
+      <button class="tap" @click="tap">tap</button>
+    </section>
+  </template>
+}
