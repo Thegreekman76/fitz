@@ -73,12 +73,15 @@ mejoras/prioridades para próximas iteraciones.
    gatear el import a "algún componente tiene style" (cambia el byte-output de los
    crates style-less → requiere re-baselinar esos ejemplos).
 
-5. **Render-a-string isomórfico del lado SSR** — el `index.html` del demo está
-   hand-authored (mismo enfoque que slices 1-3): no hay todavía un render-to-string
-   del server que produzca el HTML con el wrapper `__fitz-child-<Name>`, el
-   contenido de slot inline y el `<script>` de state. Es la unificación grande
-   pendiente de 11.12 (cross-repo con fitz-liveviews para el shell + serialización
-   de state).
+5. **Render-a-string isomórfico del lado SSR (avanzando por slices)** — SSR-1 hizo
+   que el render fn emita el `<script id="__flv_state_*">` de state, y SSR-2 los
+   markers `<!--fi-->`/`<!--/fi-->` de texto mixto. Faltan: anchors de regiones
+   `<!--fr-->`/`<!--/fr-->` (SSR-3) y el wrapper `__fitz-child-<Name>` + slot content
+   inline (SSR-4). Los markers de SSR-2 se emiten sólo bajo el marcador `hydrate`
+   (igual gate que el `<script>` de SSR-1a): un keep-node auto-hidratante **sin**
+   marcador no recibe markers isomórficos — ligado a la residual #1 (hidratación
+   universal vs opt-in). El `index.html` de los demos hasta SSR-4 sigue hand-authored
+   (cross-repo con fitz-liveviews para el shell).
 
 ## 🟢 Límites de recursos en el evaluador (steps + depth) — fase 1 CERRADA (2026-07-27)
 
