@@ -4,6 +4,40 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 Paso 0 SSR isomórfico — `to_json` en `fitz build` requiere HTTP (ABIERTA, 2026-08-03)
+
+El builtin nuevo `to_json(x) -> Str` (Paso 0 del render-a-string isomórfico
+SSR; alimenta el `<script id="__flv_state_*">` de la hidratación) funciona en
+`fitz run` para cualquier valor, y en `fitz build` **sólo cuando el programa
+tiene HTTP** (`@get`/`@post`/`@ws`). Causa: el trait de serialización
+`__ToFitzJson` + sus impls viven dentro de `HTTP_RUNTIME_PRELUDE`
+(`src/codegen.rs`), que además linkea axum (`__apply_cors_and_respond` usa
+`axum::response::Response`), así que emitirlo en un CLI puro sin la dep axum no
+compilaría. Un `fitz build` de un programa CLI puro que use `to_json` se
+rechaza en el codegen con un mensaje claro que cita esta limitación.
+
+**Por qué NO bloquea el SSR isomórfico**: el render fn del SSR — el único
+consumidor real de `to_json` — siempre corre dentro de un servidor HTTP, así
+que `has_http` se cumple y el codegen emite el UFCS
+`serde_json::to_string(&<T as __ToFitzJson>::__to_fitz_json(&(...)))` con
+paridad bit-a-bit ante el intérprete (`http::value_to_json`).
+
+**Fix futuro**: extraer la parte de serialización de `HTTP_RUNTIME_PRELUDE`
+(los dos traits + impls de primitivos/contenedores + los impls por-nominal de
+`gen_type_http_impls`, todo axum-free) a un `JSON_SERIALIZE_PRELUDE`
+independiente, gatearlo con `has_http || uses_to_json` (walk
+`program_uses_to_json` + campo en `CodegenCtx` + transitividad de módulos +
+`serde_json` en el Cargo.toml generado), dejando sólo las piezas axum bajo
+`has_http`. Riesgo: toca el orden de emisión del prelude, muy testeado por el
+path HTTP.
+
+**Divergencias run/build menores** (edge cases; NO afectan el state de un
+componente, que es primitivo/List/Map/nominal): `Float` NaN/Inf (runtime →
+error; codegen → string), `Bytes` (runtime → base64; codegen `Vec<u8>` → array
+de ints), `Map` con clave nominal (codegen no compila vs runtime error). Un
+`to_json` sobre un tipo exótico no serializable da error de rustc (menos
+amigable que el error Fitz del intérprete).
+
 ## 🟡 Fase 11.12 slice 4 — deudas residuales de la hidratación de composición (ABIERTAS, 2026-08-02)
 
 Derivadas del cierre de 11.12 slice 4 (hidratación naive de `<Child />` + `<slot>`

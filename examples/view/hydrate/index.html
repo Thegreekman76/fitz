@@ -15,27 +15,36 @@
   </head>
   <body>
     <!--
-      Server-painted DOM. In a real deployment a Fitz HTTP server (or a
-      build-time prerender) emits this markup with the current state already
-      interpolated (name = "Ada", NOT the component default "world"), plus the
-      state <script> below. The wasm bundle adopts this DOM on boot.
+      Server-painted DOM (Phase 11.12 SSR-1). Everything inside `#app` below is
+      the VERBATIM output of the SSR emitter for App.fitzv rendered with state
+      `App { name: "Ada" }` — i.e. what a Fitz HTTP server (or a build-time
+      prerender) emits as `<div id="app">{App_render(state).raw}</div>`. It is NOT
+      hand-authored: the `data-flv-*` attrs (for fitz-liveviews' WS-takeover) and
+      the trailing `<script>` state payload come straight from the emitter.
+      Reproduce it with `fitz run` over a program that imports App.fitzv and
+      prints `App_render(App { name: "Ada" }).raw` — see README.md.
+
+      The wasm bundle adopts this DOM on boot: it reads the state script by id,
+      restores `name = "Ada"` (NOT the component default "world"), walks the
+      existing nodes onto the keep-node handles, and wires listeners. The
+      `data-flv-*` attrs are inert to the adopt walk (the wasm wires its own
+      listeners). A trailing `<script>` sibling of the template root is never
+      adopted — the walk only descends into the first element child.
     -->
     <div id="app">
-      <div class="demo">
-        <h1>SSR → client hydration</h1>
-        <p class="greeting">Hello, <span class="nm">Ada</span></p>
+    <div class="demo">
+      <h1>SSR → client hydration</h1>
+      <p class="greeting">Hello, <span class="nm">Ada</span></p>
 
-        <label class="row">
-          <span>Your name</span>
-          <input value="Ada" placeholder="type here" autocomplete="off" />
-        </label>
+      <label class="row">
+        <span>Your name</span>
+        <input data-flv-input="on_name" value="Ada" placeholder="type here" autocomplete="off" />
+      </label>
 
-        <button>reset</button>
-      </div>
+      <button data-flv-click="reset">reset</button>
     </div>
-
-    <!-- Serialized initial state — read by App::hydrate() at boot. -->
-    <script type="application/json" id="__flv_state_App">{"name":"Ada"}</script>
+  <script type="application/json" id="__flv_state_App">{"name":"Ada"}</script>
+</div>
 
     <script type="module">
       // Tag the greeting node BEFORE hydration. If the wasm adopts the

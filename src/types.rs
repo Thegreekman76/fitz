@@ -4212,6 +4212,20 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // `to_json(x) -> Str` — serialize any Fitz value to a JSON string.
+        self.scopes[0].insert(
+            "to_json".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Any],
+                    ret: Box::new(Type::Str),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // `cors(config: Map?) -> CorsConfig` — built-in MW.2.
         // We type it as `Any` today (de facto variadic: 0 or 1 arg, and
         // the inner Map has heterogeneous types per key). A more
@@ -21562,6 +21576,17 @@ print(total)
         }
         let n = last_name?;
         ctx.lookup_binding(&n).map(|b| b.ty.clone())
+    }
+
+    #[test]
+    fn to_json_types_as_str() {
+        // `to_json(x)` is pre-registered as `fn(Any) -> Str`, so any call
+        // types as `Str` regardless of the argument shape.
+        assert_eq!(type_of_last_let("let r = to_json(42)"), Some(Type::Str));
+        assert_eq!(
+            type_of_last_let("let r = to_json([1, 2, 3])"),
+            Some(Type::Str)
+        );
     }
 
     #[test]

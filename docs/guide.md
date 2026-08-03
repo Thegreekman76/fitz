@@ -5189,6 +5189,32 @@ print(clamp(-5, 0, 10))                           // 0
 print(clamp(15, 0, 10))                           // 10
 ```
 
+**`to_json(x) -> Str`** — serializa cualquier valor a un JSON string.
+
+Convierte primitivos, `List<T>`, `Map<Str, V>`, instancias de `type`,
+`Nullable` y `Result` a JSON, sin `import` ni interop Python. Una
+instancia se serializa como objeto plano `{"campo": valor}` respetando
+el orden de declaración de los campos. Valores no serializables
+(funciones, módulos, rangos, futuros pendientes, `Secret`, mapas con
+clave no-`Str`) producen un error.
+
+```fitz
+type User { id: Int, name: Str, active: Bool = true }
+
+print(to_json(42))                                // 42
+print(to_json("hola"))                            // "hola"
+print(to_json([1, 2, 3]))                         // [1,2,3]
+print(to_json({"a": 1, "b": 2}))                  // {"a":1,"b":2}
+print(to_json(User { id: 7, name: "Ada" }))       // {"id":7,"name":"Ada","active":true}
+```
+
+> **`fitz build`**: hoy el preludio de serialización JSON se comparte con
+> la capa HTTP, así que `to_json` compila a binario nativo cuando el
+> programa tiene rutas HTTP (`@get`/`@post`/`@ws`). En un programa CLI
+> puro (sin HTTP) usá `fitz run` — el intérprete no tiene esa
+> restricción. Extraer el preludio a un módulo independiente es deuda
+> residual.
+
 **Métodos sobre `Str`**:
 
 **`Str.swap_case() / Str.title()`** — manipulación de case.

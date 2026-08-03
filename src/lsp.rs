@@ -3850,6 +3850,10 @@ fn scope_level_completions(
     for (name, detail) in [
         ("print", "fn(args...)"),
         ("len", "fn(x) -> Int"),
+        (
+            "to_json",
+            "fn(x) -> Str  // serialize any value to a JSON string",
+        ),
         ("sleep", "fn(Int) -> Future<Null>"),
         // Phase 9.w.3 — `spawn(fn_call)` fire-and-forget. The call
         // target must be marked with `@background`. Returns an

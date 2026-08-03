@@ -16,9 +16,19 @@
 //
 // This is a hydratable component because it has a live form control
 // (`@input`) over a static, region-free template — the same gate as keep-node
-// reconciliation (Phase 11.10).
+// reconciliation (Phase 11.10). The client-WASM target already auto-hydrates
+// such keep-node components; the explicit `hydrate` marker adds nothing to the
+// WASM output here.
+//
+// The marker's job is on the SSR side (Phase 11.12 SSR-1): it tells the SSR
+// emitter to append the trailing
+// `<script type="application/json" id="__flv_state_App">` state payload so the
+// server-rendered HTML is what the wasm bundle adopts on boot — no
+// hand-authored `index.html` needed. It is opt-in so components SSR-rendered
+// for fitz-liveviews' WS-takeover (whose HTML diff forbids `<script>` in the
+// LiveView root) stay byte-identical.
 
-component App {
+component App hydrate {
   state {
     name: Str = "world"
   }

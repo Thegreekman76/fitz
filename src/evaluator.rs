@@ -247,6 +247,9 @@ pub fn builtin_names() -> &'static [&'static str] {
     &[
         "print",
         "len",
+        // to_json(x) -> Str — serialize any Fitz value to a JSON string
+        // (Step 0 of the SSR isomorphic render; feeds the __flv_state script).
+        "to_json",
         "cors",
         "sleep",
         "assert",
@@ -11474,6 +11477,14 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_len,
         },
     );
+    // to_json(x) -> Str — serialize any Fitz value to a JSON string.
+    env.lock().define(
+        "to_json",
+        Value::Builtin {
+            name: "to_json",
+            func: builtin_to_json,
+        },
+    );
     // Mini-batch Bytes — constructor `bytes(s: Str) -> Bytes`.
     // Converts a Str to Value::Bytes using UTF-8 encoding.
     env.lock().define(
@@ -17690,6 +17701,47 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Int(n))
 }
 
+/// `to_json(x) -> Str` — serialize any Fitz value to a JSON string.
+///
+/// Reuses `http::value_to_json` so the JSON shape matches what the HTTP
+/// layer, the codegen `__ToFitzJson` impls, and the WASM hydration reader
+/// (`__apply_state_json`) all expect: an `Instance` becomes a flat
+/// `{"field": value}` object, keyed by declared field order.
+///
+/// Non-serializable values (functions, modules, ranges, pending futures,
+/// secrets, maps with non-Str keys) return a type error — the same values
+/// `value_to_json` already rejects for HTTP responses.
+fn builtin_to_json(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`to_json` expects 1 argument, received {}", args.len()),
+        ));
+    }
+    let json = crate::http::value_to_json(&args[0]).map_err(|e| {
+        FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            format!("`to_json`: value not serializable to JSON: {}", e),
+        )
+    })?;
+    let s = serde_json::to_string(&json).map_err(|e| {
+        FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            format!("`to_json`: could not serialize to JSON: {}", e),
+        )
+    })?;
+    Ok(Value::Str(s))
+}
+
 /// Mini-batch Bytes — `bytes(s: Str) -> Bytes` builtin. Converts a
 /// Str into `Value::Bytes` using UTF-8 encoding.
 fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
@@ -22987,6 +23039,49 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("no_int".into())));
+    }
+
+    // ---- builtin to_json ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn to_json_serializes_primitives_containers_and_instance() {
+        let src = r#"
+type User { id: Int, name: Str, active: Bool = true }
+a = to_json(42)
+b = to_json("hola")
+c = to_json([1, 2, 3])
+d = to_json({"a": 1, "b": 2})
+e = to_json(User { id: 7, name: "Ada" })
+f = to_json(true)
+"#;
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("42".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("\"hola\"".into())));
+        assert_eq!(env.lock().get("c"), Some(Value::Str("[1,2,3]".into())));
+        assert_eq!(
+            env.lock().get("d"),
+            Some(Value::Str("{\"a\":1,\"b\":2}".into()))
+        );
+        // Instance -> flat `{"field": value}` object, declared field order
+        // preserved. This is the shape the WASM `__apply_state_json` reader
+        // (SSR hydration) expects.
+        assert_eq!(
+            env.lock().get("e"),
+            Some(Value::Str(
+                "{\"id\":7,\"name\":\"Ada\",\"active\":true}".into()
+            ))
+        );
+        assert_eq!(env.lock().get("f"), Some(Value::Str("true".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn to_json_rejects_non_serializable_value() {
+        // A function value cannot be serialized to JSON — same values
+        // `value_to_json` already rejects for HTTP responses.
+        let src = "fn myfn() => 1\nr = to_json(myfn)";
+        let (_env, res) = parse_eval_into_env(src).await;
+        assert!(res.is_err());
     }
 
     // ---- builtin len ----

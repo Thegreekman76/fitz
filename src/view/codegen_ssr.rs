@@ -485,6 +485,30 @@ fn emit_render_fn(
             )?;
         }
     }
+
+    // Phase 11.12 SSR-1 — isomorphic hydration state script. When the
+    // component opts into hydration (the `hydrate` marker), append a
+    // trailing `<script type="application/json" id="__flv_state_<Comp>">`
+    // carrying `to_json(state)`. The WASM boot reads it by id
+    // (document-wide `get_element_by_id`) to restore the server state,
+    // and the adopt walk skips it: it only takes the FIRST element child
+    // of the mount as the template root, so a trailing sibling script is
+    // never adopted. `to_json(state)` is a classic-Fitz builtin call that
+    // resolves at runtime inside the `html("""...""")` triple-string; it
+    // produces the flat `{"field": value}` shape the WASM reader
+    // `__apply_state_json` expects.
+    //
+    // Gated by the explicit `hydrate` marker so components that SSR-render
+    // for fitz-liveviews' WS-takeover (whose HTML diff forbids `<script>`
+    // inside the LiveView root) stay byte-identical.
+    if component.hydrate {
+        let script = format!(
+            "<script type=\"application/json\" id=\"__flv_state_{}\">{{to_json(state)}}</script>",
+            component.name
+        );
+        push_text(&mut pieces, &script);
+    }
+
     let arg = serialize_pieces_as_html_arg(&pieces);
     writeln!(out, "  return html({arg})").unwrap();
     writeln!(out, "}}\n").unwrap();
@@ -2531,6 +2555,46 @@ mod tests {
         assert!(
             out.contains("count: Int = 0"),
             "missing state field:\n{out}"
+        );
+    }
+
+    // ---- SSR-1: hydration state script -----------------------
+
+    #[test]
+    fn ssr1_hydrate_marker_emits_state_script() {
+        // A component with the `hydrate` marker gets a trailing
+        // <script id="__flv_state_App"> carrying to_json(state), the
+        // state payload the WASM adopt reader restores at boot.
+        let file = parse_expand(
+            "component App hydrate { state { name: Str = \"world\" } <template><div><span>{name}</span></div></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("__flv_state_App"),
+            "hydratable component should emit the state script:\n{out}"
+        );
+        assert!(
+            out.contains("{to_json(state)}"),
+            "state script should serialize state via to_json(state):\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr1_no_marker_no_state_script() {
+        // Without the `hydrate` marker the SSR output is unchanged
+        // (byte-compat with existing components + fitz-liveviews's
+        // WS-takeover path, whose HTML diff forbids <script> in the root).
+        let file = parse_expand(
+            "component App { state { name: Str = \"world\" } <template><div><span>{name}</span></div></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            !out.contains("__flv_state"),
+            "non-hydratable component must NOT emit a state script:\n{out}"
+        );
+        assert!(
+            !out.contains("to_json"),
+            "non-hydratable component must NOT call to_json:\n{out}"
         );
     }
 

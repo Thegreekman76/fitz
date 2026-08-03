@@ -17490,6 +17490,38 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             return Ok((format!("({}).as_bytes().to_vec()", arg_code), Type::Bytes));
         }
+        // `to_json(x) -> Str` — serialize any value to a JSON string.
+        // Reuses the `__ToFitzJson` trait (emitted in the HTTP runtime
+        // prelude) via UFCS, which disambiguates the `Arc<Mutex<T>>` vs
+        // `T` impls. The produced shape matches `http::value_to_json`
+        // (interpreter parity) and the WASM `__apply_state_json` reader.
+        //
+        // Residual debt: the serialization prelude is shared with the
+        // HTTP layer (it links axum), so a pure-CLI `fitz build` that
+        // uses `to_json` without any @get/@post/@ws is rejected here.
+        // The SSR render fn — the real consumer — always runs inside an
+        // HTTP server, so `has_http` holds. `fitz run` has no such gate.
+        if name == "to_json" && !self.is_user_callable(name) && args.len() == 1 {
+            let arg_span = args[0].span();
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            if !self.has_http {
+                return Err(self.err_at(
+                    arg_span,
+                    "`to_json(...)` in `fitz build` currently requires a program with HTTP \
+                     (@get/@post/@ws): the JSON serialization prelude (`__ToFitzJson`) is \
+                     shared with the HTTP layer. Use `fitz run` for a pure-CLI program."
+                        .to_string(),
+                ));
+            }
+            let rt = rust_type_for(&arg_ty, self.env)?;
+            return Ok((
+                format!(
+                    "serde_json::to_string(&<{} as __ToFitzJson>::__to_fitz_json(&({}))).unwrap_or_default()",
+                    rt, arg_code
+                ),
+                Type::Str,
+            ));
+        }
         // 5b.5: if the name is in `module_bindings` as `Named`
         // (`from foo import greet`), the signature comes from the
         // module, not from `fn_sigs`. The `use foo::greet;` already
@@ -42696,6 +42728,28 @@ async fn get_u(id: Int) -> Result<U> {
             "expected pipeline lock + len + as i64, was: {}",
             init
         );
+    }
+
+    #[test]
+    fn to_json_emits_ufcs_serialize_in_http_context() {
+        // In an HTTP program the `__ToFitzJson` prelude is present, so
+        // `to_json(x)` lowers to
+        // `serde_json::to_string(&<T as __ToFitzJson>::__to_fitz_json(&(...)))`.
+        let rust = gen("type U { id: Int }\n\
+             @get(\"/x/{id}\")\n\
+             fn h(id: Int) -> Str { let u = U { id: id }\nreturn to_json(u) }\n\
+             @server(8080) fn main() => 0")
+        .unwrap();
+        assert!(rust.contains("__to_fitz_json"));
+        assert!(rust.contains("serde_json::to_string"));
+    }
+
+    #[test]
+    fn to_json_without_http_is_rejected_in_codegen() {
+        // The serialization prelude is shared with the HTTP layer, so a
+        // pure-CLI build that uses `to_json` is rejected with a clear
+        // message (residual debt — `fitz run` has no such gate).
+        assert_err_contains("print(to_json(42))", &["to_json", "HTTP"]);
     }
 
     #[test]
