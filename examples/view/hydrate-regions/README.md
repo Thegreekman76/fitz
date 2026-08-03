@@ -27,9 +27,13 @@ the server-painted HTML uses two kinds of comment markers (see `index.html`):
   content between the adopted anchors (`__patch_region_<r>`), so the live
   `<input>` outside the region keeps its caret.
 
-(There is no isomorphic SSR string renderer yet — the contract is validated with
-hand-authored HTML, as the slice plan intended. A real Fitz SSR emitter that
-writes these markers is a later slice.)
+**These markers are now emitted by the Fitz SSR render fn** (SSR-1 the state
+`<script>`, SSR-2 the `<!--fi-->` mixed-text markers, SSR-3 the `<!--fr-->`
+region anchors). The `@render_for` fn the SSR emitter produces from `App.fitzv`
+— gated on the component's `hydrate` marker — paints exactly this contract, so
+the client bundle and the server output line up isomorphically. `index.html`
+keeps a clean/tight hand-authored form for readability; the Chrome smoke serves
+the actual generated HTML.
 
 ## Build
 

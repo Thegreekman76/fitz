@@ -1213,6 +1213,38 @@ fn format_event_rhs(
 // Template — HTML string emission
 // ---------------------------------------------------------------------------
 
+/// Phase 11.12 SSR-3 — push a `{#if}`/`{#for}` region's Fitz Str-expression,
+/// wrapping it in `<!--fr-->` … `<!--/fr-->` anchor markers when the component
+/// is hydratable and this region is TOP-LEVEL (`!in_region`).
+///
+/// The client-WASM adopt walk (`__flv_next_comment`) acquires those two anchors
+/// into the region's `__astart_<r>` / `__aend_<r>` handles and leaves the
+/// server-painted content between them in place — a later state change patches
+/// only that region. The anchors are ALWAYS emitted, even when the region
+/// renders empty (a false `{#if}` → `<!--fr--><!--/fr-->`), because the build
+/// walk always creates both comment anchors regardless of the condition, and
+/// the adopt must find both to line up `keep_region_index()`.
+///
+/// A NESTED region (already `in_region` — e.g. the `{#if}` inside a `{#for}`
+/// body) is rebuilt naively on the client inside its parent region's fragment,
+/// so it has no anchors and stays marker-free. Non-hydratable components stay
+/// byte-identical (same `component.hydrate` gate as SSR-1/SSR-2).
+fn push_region_expr(
+    pieces: &mut Vec<TemplatePiece>,
+    expr_src: String,
+    component: &ExpandedComponent,
+    in_region: bool,
+) {
+    let wrap = component.hydrate && !in_region;
+    if wrap {
+        push_text(pieces, "<!--fr-->");
+    }
+    pieces.push(TemplatePiece::Expr(expr_src));
+    if wrap {
+        push_text(pieces, "<!--/fr-->");
+    }
+}
+
 /// Recursively emit a template node into `out` as HTML source
 /// text. State-field identifiers in interpolations get
 /// rewritten with the `state.` prefix so classic Fitz's
@@ -1241,6 +1273,9 @@ fn format_event_rhs(
 ///   `main.fitz`).
 /// - `If` / `For` — Since Phase 11.6.c continuation, lower to
 ///   Fitz if-as-expression / `__fitz_view_str_join(iter.map(...))`.
+///   Since Phase 11.12 SSR-3, a TOP-LEVEL region is wrapped in
+///   `<!--fr-->` … `<!--/fr-->` anchors via [`push_region_expr`]
+///   when the component is hydratable.
 /// - `Slot` — rejected with a 11.7+ pointer.
 #[allow(clippy::too_many_arguments)]
 fn emit_template_node_to_pieces(
@@ -1368,9 +1403,12 @@ fn emit_template_node_to_pieces(
                 }
                 None => "\"\"".to_string(),
             };
-            pieces.push(TemplatePiece::Expr(format!(
-                "if ({cond_src}) {{ {then_src} }} else {{ {else_src} }}"
-            )));
+            push_region_expr(
+                pieces,
+                format!("if ({cond_src}) {{ {then_src} }} else {{ {else_src} }}"),
+                component,
+                in_region,
+            );
             Ok(())
         }
         // Phase 11.6.c continuation — `{#for x in xs}...{/for}`
@@ -1406,9 +1444,12 @@ fn emit_template_node_to_pieces(
                 &mut body_pieces,
             )?;
             let body_src = serialize_pieces_as_html_arg(&body_pieces);
-            pieces.push(TemplatePiece::Expr(format!(
-                "__fitz_view_str_join({iter_src}.map(fn({var}) => {body_src}))"
-            )));
+            push_region_expr(
+                pieces,
+                format!("__fitz_view_str_join({iter_src}.map(fn({var}) => {body_src}))"),
+                component,
+                in_region,
+            );
             Ok(())
         }
         ExpandedTemplateNode::Slot { .. } => Err(SsrEmitError {
@@ -2749,6 +2790,110 @@ mod tests {
         assert!(
             !out.contains("<!--fi-->"),
             "interpolation inside a region must NOT get fi markers:\n{out}"
+        );
+    }
+
+    // ---- SSR-3: region anchor markers ------------------------
+
+    #[test]
+    fn ssr3_top_level_if_in_hydratable_wraps_region_in_fr_markers() {
+        // A top-level `{#if}` in a hydratable component paints its content
+        // bounded by `<!--fr-->` … `<!--/fr-->` anchors so the client-WASM
+        // adopt walk (`__flv_next_comment`) acquires them into the region's
+        // `__astart_<r>` / `__aend_<r>` handles.
+        let file = parse_expand(
+            "component App hydrate { state { name: Str = \"world\" } \
+             <template><div>{#if name != \"\"}<p>hi</p>{/if}</div></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("<!--fr-->"),
+            "top-level region should open with an fr anchor:\n{out}"
+        );
+        assert!(
+            out.contains("<!--/fr-->"),
+            "top-level region should close with a /fr anchor:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr3_top_level_for_in_hydratable_wraps_region_in_fr_markers() {
+        // A top-level `{#for}` region gets the same anchors — the WASM adopt
+        // treats every top-level `{#if}`/`{#for}` as a region.
+        let file = parse_expand(
+            "component App hydrate { state { items: List<Str> = [\"a\"] } \
+             <template><ul>{#for it in items}<li>{it}</li>{/for}</ul></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("<!--fr-->") && out.contains("<!--/fr-->"),
+            "top-level `{{#for}}` region should be wrapped in fr anchors:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr3_non_hydratable_region_no_fr_markers() {
+        // Without the `hydrate` marker the region stays byte-identical (no fr
+        // anchors) — fitz-liveviews's WS-takeover output is unchanged.
+        let file = parse_expand(
+            "component App { state { name: Str = \"world\" } \
+             <template><div>{#if name != \"\"}<p>hi</p>{/if}</div></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            !out.contains("<!--fr-->"),
+            "non-hydratable region must NOT get fr markers:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr3_nested_region_inside_for_no_fr_markers() {
+        // The `{#if}` nested inside a `{#for}` body is rebuilt naively on the
+        // client (inside the parent region's fragment, no anchors of its own),
+        // so it must NOT carry fr markers — only the top-level `{#for}` region
+        // is wrapped. Exactly one anchor pair is emitted (the `{#for}`).
+        let file = parse_expand(
+            "component App hydrate { state { items: List<Str> = [\"a\"]\n name: Str = \"world\" } \
+             <template><ul>{#for it in items}{#if it != name}<li>{it}</li>{/if}{/for}</ul></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert_eq!(
+            out.matches("<!--fr-->").count(),
+            1,
+            "exactly one top-level region (the `{{#for}}`) should be wrapped:\n{out}"
+        );
+        assert_eq!(
+            out.matches("<!--/fr-->").count(),
+            1,
+            "exactly one closing anchor for the top-level region:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ssr3_regions_and_mixed_text_coexist_in_hydratable() {
+        // The region anchors (SSR-3) and the mixed-text markers (SSR-2) live
+        // side by side in a hydratable component: the greeting keeps its `fi`
+        // markers, the region keeps its `fr` anchors, and the region's own
+        // interpolation stays marker-free (adopted opaquely).
+        let file = parse_expand(
+            "component App hydrate { state { name: Str = \"world\" } \
+             <template><div><p>Hello, {name}!</p>{#if name != \"\"}<p>Hi {name}!</p>{/if}</div></template> }",
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("Hello, <!--fi-->{state.name}<!--/fi-->!"),
+            "the mixed-text greeting keeps its fi markers:\n{out}"
+        );
+        assert!(
+            out.contains("<!--fr-->") && out.contains("<!--/fr-->"),
+            "the region keeps its fr anchors:\n{out}"
+        );
+        // The region's interpolation (`Hi {name}!`) is adopted opaquely, so it
+        // has no fi markers — only the greeting's pair exists.
+        assert_eq!(
+            out.matches("<!--fi-->").count(),
+            1,
+            "only the greeting's interpolation carries fi markers:\n{out}"
         );
     }
 

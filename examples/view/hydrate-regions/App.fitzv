@@ -19,8 +19,16 @@
 // This is a hydratable component because it is keep-node (a live `@input` over
 // a template with no `<slot>` / `<Child />`); slice 2 lifted the region
 // restriction, so `{#if}` / `{#for}` no longer disqualify it.
+//
+// SSR-3 — the `hydrate` marker opts this component into the isomorphic SSR
+// render path: the `@render_for` fn the SSR emitter produces now paints each
+// top-level region bounded by `<!--fr-->` … `<!--/fr-->` anchors (plus the
+// mixed-text `<!--fi-->` markers from SSR-2 and the trailing state `<script>`
+// from SSR-1). The keep-node WASM emit ignores the marker (it hydrates
+// unconditionally), so the client bundle is byte-identical; the marker only
+// tells the SERVER to emit the anchors the adopt walk lines up on.
 
-component App {
+component App hydrate {
   state {
     name: Str = "world"
     items: List<Str> = ["alpha", "beta", "gamma"]

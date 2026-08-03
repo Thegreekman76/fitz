@@ -17,23 +17,33 @@
   </head>
   <body>
     <!--
-      Server-painted DOM. In a real deployment a Fitz HTTP server (or a
-      build-time prerender) emits this markup with the current state already
-      interpolated (name = "Ada", NOT the component default "world"), plus the
-      state <script> below. The wasm bundle adopts this DOM on boot.
+      Server-painted DOM. As of SSR-3, this markup is EMITTED BY THE FITZ SSR
+      RENDER FN — the `@render_for` fn the SSR emitter produces from
+      `App.fitzv` (with the `hydrate` marker) now paints the region anchors and
+      mixed-text markers itself, so this is no longer hand-authored guesswork:
+      it mirrors the real isomorphic output. The wasm bundle adopts this DOM on
+      boot. (The real SSR output also carries `data-flv-*` event attributes and
+      the template's source whitespace; both are harmless — the adopt cursor
+      scans past whitespace and ignores the WS-takeover attrs. This file keeps
+      a clean/tight form for readability; the Chrome smoke serves the actual
+      generated HTML.)
 
-      Two contract details slice 2 adds on top of slice 1:
+      The three server-side markers, all emitted by the SSR render fn:
 
-        * MIXED text (`Hello, {name}!`) is emitted with comment markers around
-          the dynamic run — `Hello, <!--fi-->Ada<!--/fi-->!` — so the browser
-          keeps three distinct text nodes and the adopt walk maps 1:1.
+        * SSR-1 — a trailing state <script> (below), read by App::hydrate() to
+          restore state (name = "Ada", NOT the component default "world").
 
-        * `{#if}` / `{#for}` REGIONS are bounded by tagged comment anchors,
-          `<!--fr-->` … <content> … `<!--/fr-->`. The client adopts the anchors
-          and leaves the content in place; a later state change rebuilds only
-          between the anchors.
+        * SSR-2 — MIXED text (`Hello, {name}!`) wraps the dynamic run in comment
+          markers — `Hello, <!--fi-->Ada<!--/fi-->!` — so the browser keeps
+          three distinct text nodes and the adopt walk maps 1:1.
 
-      Slice 3 adds COMPOSITE state restore: the `items` list in the state
+        * SSR-3 — `{#if}` / `{#for}` REGIONS are bounded by tagged comment
+          anchors, `<!--fr-->` … <content> … `<!--/fr-->`. The client adopts the
+          anchors and leaves the content in place; a later state change rebuilds
+          only between the anchors. A region's own interpolations carry NO `fi`
+          markers (the region is adopted opaquely between its anchors).
+
+      Slice 3 also restores COMPOSITE state: the `items` list in the state
       payload below restores into the component (slice 1/2 only restored
       primitive scalars). Its server value differs from the component default,
       so the `{#for}` region rebuilds from the SERVER list after an edit.
