@@ -9126,3 +9126,64 @@ bump (siguiendo la convención de 11.1/11.2). Los tres commits
 del día se ven en git log como `feat(view): Phase 11.3.<x>
 mini-commit — ...`.
 
+
+---
+
+## 🟡 Runtime data-driven de template (11.13 Approach A/B) — ABIERTO 2026-08-04
+
+**Contexto.** 11.13 (hot reload del template) se cerró en su
+**slice-1 con Approach C** (reload incremental + auto-refresh vía
+WebSocket + `wasm-pack --dev`, ver `docs/roadmap.md` → "11.13").
+C entrega el ~90% del DX sentido pero **recompila el crate**
+(incremental, no clean). El spec literal del roadmap
+—*"aplica el diff sin recompilar el crate WASM entero"*— exige un
+**runtime del template en el cliente que acepte diffs**. Eso NO se
+hizo, y queda como norte futuro grande.
+
+**El muro.** Hoy `codegen_wasm` desenrolla el `<template>` en Rust
+imperativo hard-codeado por nodo (`create_element`/`append_child`/
+`set_attribute`/`create_text_node`), sin ninguna forma serializada
+del árbol en runtime. Las interpolaciones/condiciones/iterables son
+**expresiones Fitz arbitrarias sobre el state** (`{count * 2}`,
+`{user.name.upper()}`, `{cards.filter(fn(c) => …)}`) que se bajan a
+Rust vía `lower_expr`. Un runtime data-driven que acepte un template
+nuevo tendría que **evaluar esas expresiones en WASM** → embeber un
+**intérprete de expresiones Fitz en el browser** (aritmética, method
+dispatch, field access, coerciones, closures). Es, en efecto, un 2º
+back-end de Fitz.
+
+**Approaches evaluados (descartados para el MVP):**
+
+- **A — runtime data-driven completo + VM de expresiones en WASM.**
+  Cumple la letra del spec. Costo: la cosa más grande de toda la
+  Fase 11 (escala de meses); fuerza **dual-codegen permanente**
+  (dev interpretado / prod hard-codeado) para no romper byte-compat;
+  infla el bundle contra el gate de 40 KB.
+- **B — data-driven solo estructural, expresiones compiladas.**
+  Estructura hot-swappable + expresiones como closures Rust por ID
+  estable; expresión nueva/cambiada degrada a recompilar. Cubre el
+  80% visual. Sigue siendo rewrite mayor con dual-mode emit. Cumple
+  parcial.
+
+**Estado.** El front-end del compilador YA tiene el template como
+árbol de datos rico (`ExpandedTemplateNode`, todos los tipos derivan
+`PartialEq` → detectar "solo cambió el template" es trivial). El
+bloqueo es puramente el back-end (codegen imperativo + falta de un
+formato serializado del árbol en runtime + la VM de expresiones). Se
+reabre cuando aparezca demanda real de sub-second hot reload sin
+recompilar; hasta entonces C (slice-1 + slice-2 state preservation)
+cubre el DX.
+
+**Follow-ups de Approach C (no bloquean, refinamientos del slice-1):**
+- **Slice-2 — preservación de state a través del reload** reusando la
+  hidratación de v0.31.0 (serializar al `<script id="__flv_state_*">`
+  antes del reload; hidratar después). Elimina el reset del state al
+  editar.
+- **Multi-bin wasm dev** — un proyecto `server` + `web` (fullstack
+  `@rpc`) hace `select_bin(None)` ambiguo → hoy `fitz dev` cae al
+  path clásico. Requiere `fitz dev --bin <name>` (+ eventualmente
+  correr el server Y servir el wasm juntos).
+- **Re-resolver `fitz.toml` en vivo** — hoy el loop reusa el
+  `ResolvedEntry` inicial; editar `[bin].main` no se toma sin
+  reiniciar `fitz dev` (editar el `.fitzv`/imports sí, se re-lee cada
+  build).

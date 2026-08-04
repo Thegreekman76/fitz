@@ -10332,15 +10332,39 @@ no por dependencia estricta.
     (default + lsp) limpios + 22 view smokes. **Sin sintaxis nueva, sin cambio
     de gramática/LSP** — extensión VSCode sigue 0.27.0. Bump 0.30.2 → 0.30.3.
 
-- 🔜 **11.13 — Hot reload del template.** `fitz dev` re-parsea el
-  `<template>` de un `.fitzv` y aplica el diff sin recompilar el crate WASM
-  entero (hoy `fitz dev` recompila todo). Salto de DX; el más ambicioso
-  técnicamente (requiere un runtime del template en el cliente que acepte
-  diffs).
+- 🚧 **11.13 — Hot reload del template.** **Approach C — slice-1 ✅
+  (2026-08-04).** `fitz dev` gana modo **wasm-client**: cuando el bin
+  default del manifest apunta a `wasm-client`, en vez de respawnear
+  `fitz run` (el path clásico native/SSR), buildea el bundle
+  (`wasm-pack --dev`, incremental sobre el crate estable en
+  `target/wasm-build/`, sin `wasm-opt`), sirve el proyecto en
+  `127.0.0.1:<port>` (default `1234`, flag `--port`) con un WebSocket de
+  live-reload, e inyecta un snippet en el `index.html` servido; ante cada
+  save de `.fitzv`/`.fitz`/`fitz.toml` rebuildea y empuja un reload al
+  browser. Sirve el root del proyecto estático (como `python -m
+  http.server`), respetando el `index.html` del usuario o generando uno
+  mínimo. `Cache-Control: no-store` para fetch fresco del `.wasm`.
+  Validado en Chrome real (puppeteer): editar el `<template>` → el browser
+  se actualiza solo. **Reencuadre honesto:** el roadmap original decía
+  *"aplica el diff sin recompilar el crate"*, pero (a) hoy `fitz dev` ni
+  siquiera watcheaba `.fitzv` (extensión ≠ `.fitz`) y nunca invocaba
+  `wasm-pack` — no había dev loop para el path client-WASM en absoluto; y
+  (b) el runtime data-driven verdadero (diff sin recompilar) choca con la
+  **VM de expresiones en WASM** (las interpolaciones son expresiones Fitz
+  arbitrarias sobre el state → un intérprete de Fitz en el browser, un 2º
+  back-end). C entrega el ~90% del DX sentido (auto-refresh en ~segundos,
+  incremental) sin rewrite de codegen ni riesgo byte-compat. El runtime
+  data-driven (A/B) queda como **norte futuro grande**, gatillado por la
+  VM de expresiones (deuda 🟡 en `docs/deudas-post-5b.md`).
+  - **Slice-2 (follow-up):** preservación de state a través del reload
+    reusando la hidratación de v0.31.0 (serializar state al `<script
+    id="__flv_state_*">` antes del reload; hidratar después).
+  - **Follow-ups:** multi-bin wasm dev (proyectos `server` + `web`
+    fullstack — hoy caen al path clásico), re-resolver `fitz.toml` en vivo.
 
 **Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
-MVP por slices ✅) → **11.12 (hidratación — slices 1+2+3 ✅, composición + isomórfico 🔜)**
-→ 11.13 (hot reload — DX). Cada una es una sesión seria.
+MVP por slices ✅) → **11.12 (hidratación — SSR-1→SSR-4 ✅, cierra entera)**
+→ 11.13 (hot reload — Approach C slice-1 ✅, slice-2 state preservation 🔜).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

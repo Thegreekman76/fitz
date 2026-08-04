@@ -5672,3 +5672,84 @@ dependency:
 **Suggested order:** 11.11 (server fns — pieces ready) → 11.10
 (signals — unblocks child state) → 11.12 (hydration — unifies
 backends) → 11.13 (hot reload — DX). Each is a serious session.
+
+---
+
+## §11.13 — Template hot reload: research, decision, slice-1 (2026-08-04)
+
+Research mapped two seam sets (Explore agents over `src/main.rs`
+and `src/view/`), then chose **Approach C** and shipped slice-1.
+
+### Seams
+
+- **`fitz dev` today** is kill+respawn of `fitz run` (interpreter,
+  SSR path). The watcher (`path_is_relevant`, `main.rs`) matched
+  `ext == "fitz"` **exact** → it ignored `.fitzv` entirely and
+  never invoked `wasm-pack`. So the client-WASM `.fitzv` path had
+  **no dev loop at all** (the roadmap's "recompiles everything" was
+  inaccurate). No browser channel existed.
+- **View pipeline** already holds the template as a rich data tree
+  (`ExpandedTemplateNode`; all types derive `PartialEq`, so
+  "only the template changed" is a trivial `==`). The blocker is the
+  **back-end**: `codegen_wasm` unrolls that tree into imperative
+  hard-coded Rust per node, with no serialized template artifact at
+  runtime. Interpolations lower arbitrary Fitz expressions over
+  state via `lower_expr`. The slow rebuild is
+  `wasm-pack build --release` (cargo + `wasm-opt`) inside the stable
+  scaffold `target/wasm-build/<bin>/`.
+
+### The wall (why the literal spec is huge)
+
+A data-driven runtime that swaps a new template tree must **evaluate
+the interpolation expressions in WASM** — i.e. ship a Fitz
+expression interpreter in the browser (a 2nd back-end). That's what
+makes the literal spec ("diff without recompiling") the single
+largest thing in Fase 11.
+
+### Approaches
+
+- **A** — full data-driven runtime + expression VM in WASM. Meets
+  the letter; months-scale; permanent dual-codegen; bundle bloat.
+- **B** — structural-only data-driven, expressions stay compiled by
+  stable ID; new/changed expression degrades to recompile. Covers
+  80% visual; still a rewrite with dual-mode emit; partial spec.
+- **C (chosen)** — no template runtime. Watch `.fitzv`; rebuild
+  incrementally (`wasm-pack --dev`, no `wasm-opt`, stable scaffold →
+  warm cargo cache); serve the project root + a live-reload WS;
+  push a browser reload on rebuild. State preservation (via the
+  v0.31.0 hydration payload) is slice-2. Recompiles incrementally
+  (~seconds), so it does **not** meet the literal "no recompile" —
+  reframed honestly. Zero codegen rewrite, zero byte-compat risk.
+- **D** — hot-patch the WASM (Dioxus `subsecond`: recompile changed
+  fns + jump-patch the live module). Frontier; out of scale for a
+  solo author. Descartado.
+
+**Decision:** C for the MVP; A/B (the true data-driven runtime)
+left as a separate large future norte gated by the expression-VM
+sub-problem (deuda 🟡 in `docs/deudas-post-5b.md`).
+
+### Slice-1 (shipped)
+
+- **Seam A** — `path_is_relevant` accepts `.fitzv`.
+- Extracted `build_wasm_client(resolved, release) -> Result<
+  WasmBuildOutput, String>` from the exit-on-error
+  `build_wasm_client_cmd` (thin wrapper kept for the CLI). `release`
+  toggles `--release` vs `--dev`.
+- New bin-local `src/dev_server.rs`: axum static server (root =
+  manifest dir, `Cache-Control: no-store`, `application/wasm` MIME,
+  missing `favicon.ico` → 204) + `/__fitz_dev_ws` broadcast WS +
+  reload-snippet injection into the served `index.html` (or a
+  generated fallback with the `[[bin]].mount` element).
+- `fitz dev` detects a wasm-client default bin (`is_wasm_client_dev`)
+  and runs `run_wasm_dev_loop`: initial build → serve → watch →
+  rebuild + `signal_reload()` on each save. New `--port` flag
+  (default `1234`).
+- **Validated in real Chrome (puppeteer):** initial render + click
+  interactivity, then editing the `<template>` auto-reloads the
+  browser to the new content; state resets on reload (slice-1, no
+  preservation); zero page errors. `cargo test --lib` green, view
+  smokes byte-identical (`git status examples/view/` clean), fmt +
+  clippy (default + lsp) clean.
+
+Follow-ups: slice-2 (state preservation), multi-bin wasm dev
+(`--bin`), live `fitz.toml` re-resolution. See the deuda entry.

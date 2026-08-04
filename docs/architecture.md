@@ -174,8 +174,16 @@ code; they fork after that:
   (preserves the user's comments + blank lines).
 - **`fitz test [filter] [--file]`** — Built-in test runner
   (discovers `@test` fns, cargo-style output).
-- **`fitz dev [--file]`** — Hot reload with a file watcher
-  (kill+respawn of the child on change).
+- **`fitz dev [--file] [--port]`** — Hot reload with a file
+  watcher. Classic mode (native/SSR): kill+respawn of the child on
+  change. **Phase 11.13** added a **wasm-client mode**: when the
+  manifest's default bin targets `wasm-client`, it builds the
+  bundle (`wasm-pack --dev`, incremental), serves the project on
+  `127.0.0.1:<port>` via a bin-local dev server
+  (`src/dev_server.rs` — axum static serving + a `/__fitz_dev_ws`
+  live-reload WebSocket + `index.html` snippet injection), and
+  rebuilds + reloads the browser on each `.fitzv`/`.fitz`/
+  `fitz.toml` save (Approach C — no client-side template runtime).
 - **`fitz repl`** — Interactive REPL with a shared env between
   lines.
 - **`fitz lint [files] [--deny <name>]`** — Pattern linter

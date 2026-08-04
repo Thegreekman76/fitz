@@ -18,6 +18,11 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
 
+// Phase 11.13 — bin-local dev server for `fitz dev`'s wasm-client
+// mode (static serving + live-reload WebSocket). Not part of the
+// `fitz` library — only the CLI dev loop uses it.
+mod dev_server;
+
 /// Fitz — the programming language born in Patagonia 🏔️
 #[derive(Parser)]
 #[command(name = "fitz")]
@@ -277,11 +282,22 @@ enum Commands {
     /// debt). Excludes `target/`, `.git/`, `node_modules/`, hidden
     /// files. 100 ms debounce to collapse multiple editor saves.
     /// Ctrl+C kills the child before exiting.
+    ///
+    /// Phase 11.13 — when the manifest's default bin targets
+    /// `wasm-client`, `fitz dev` switches to wasm mode instead:
+    /// builds the bundle (`wasm-pack --dev`), serves the project
+    /// on `127.0.0.1:<port>` with a live-reload WebSocket, and
+    /// rebuilds + reloads the browser on each `.fitzv`/`.fitz`/
+    /// `fitz.toml` save.
     Dev {
         /// Specific `.fitz` file. If omitted, looks for
         /// `fitz.toml` (manifest mode) and runs `[bin].main`.
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Phase 11.13 — port for the wasm-client dev server.
+        /// Ignored in the classic (native/SSR) respawn mode.
+        #[arg(long, default_value_t = 1234)]
+        port: u16,
     },
     /// Phase 9.z.4 — Interactive REPL. Opens a `fitz> ` prompt
     /// where you can enter expressions and statements line by
@@ -774,8 +790,8 @@ fn main() {
         Commands::Test { filter, file } => {
             test_cmd(filter, file);
         }
-        Commands::Dev { file } => {
-            dev_cmd(file);
+        Commands::Dev { file, port } => {
+            dev_cmd(file, port);
         }
         Commands::Repl => {
             repl_cmd();
@@ -1091,42 +1107,75 @@ fn enforce_build_target_supported(target: manifest::Target) -> Result<(), String
 /// manifest because it needs `mount` from the `[[bin]]` entry
 /// AND a fixed output layout.
 fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
-    let ctx = match &resolved.manifest_ctx {
-        Some(c) => c,
-        None => {
-            eprintln!(
-                "✗ `--target wasm-client` requires a manifest with a `[[bin]]` \
-                 entry (needs `mount = \"<selector>\"`). Single-file mode \
-                 is not yet supported — declare the bin in `fitz.toml`."
-            );
+    // Thin CLI wrapper: run the release build and print the
+    // success/serve tip. Any error aborts the process (the classic
+    // `fitz build` UX). The Result-returning core `build_wasm_client`
+    // is shared with `fitz dev`'s wasm-client mode (Phase 11.13),
+    // which must survive build errors instead of exiting.
+    let out = match build_wasm_client(resolved, /*release=*/ true) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("✗ {e}");
             std::process::exit(1);
         }
     };
-    let bin = match &ctx.selected_bin {
-        Some(b) => b,
-        None => {
-            // Should not happen — resolve_entry_with_bin sets
-            // selected_bin whenever the manifest has one — but
-            // we guard for completeness.
-            eprintln!("✗ internal error: manifest ctx has no selected bin");
-            std::process::exit(1);
-        }
-    };
+    println!("✓ wasm bundle at `{}`", out.pkg_dir.display());
+    println!(
+        "  serve it with: `python -m http.server` (or `fitz dev` for \
+         live reload) and point `<script type=\"module\">` at \
+         `{}/{}.js`",
+        out.pkg_dir.display(),
+        out.pkg_name
+    );
+}
+
+/// Result of a successful wasm-client build — the paths the caller
+/// (CLI wrapper or `fitz dev` server) needs to serve the bundle.
+struct WasmBuildOutput {
+    /// Final `pkg/` copy the browser consumes
+    /// (`<manifest>/target/wasm/<bin>/`).
+    pkg_dir: PathBuf,
+    /// Sanitised package name (`<bin>.js` / `<bin>_bg.wasm` inside
+    /// `pkg_dir`).
+    pkg_name: String,
+}
+
+/// Phase 11.5.c core + Phase 11.13 refactor — builds the
+/// wasm-client bundle and returns its layout. Runs the view
+/// pipeline (parse → expand → check → `emit_module`), materialises
+/// the scaffold at `<manifest_dir>/target/wasm-build/<bin>/`,
+/// shells out to `wasm-pack build [--release|--dev] --target web`,
+/// and copies `pkg/` to `<manifest_dir>/target/wasm/<bin>/`.
+///
+/// `release = true` uses `--release` (with `wasm-opt`, slower — the
+/// `fitz build` default); `release = false` uses `--dev` (skips
+/// `wasm-opt`, much faster — the `fitz dev` inner loop). The
+/// scaffold dir is stable across calls, so cargo's incremental
+/// cache survives between rebuilds.
+///
+/// Returns `Err(msg)` instead of exiting so `fitz dev` can print
+/// the error and keep serving the previous bundle.
+fn build_wasm_client(resolved: &ResolvedEntry, release: bool) -> Result<WasmBuildOutput, String> {
+    let ctx = resolved.manifest_ctx.as_ref().ok_or_else(|| {
+        "`--target wasm-client` requires a manifest with a `[[bin]]` entry (needs \
+         `mount = \"<selector>\"`). Single-file mode is not yet supported — declare \
+         the bin in `fitz.toml`."
+            .to_string()
+    })?;
+    let bin = ctx
+        .selected_bin
+        .as_ref()
+        .ok_or_else(|| "internal error: manifest ctx has no selected bin".to_string())?;
 
     // `mount` is REQUIRED by Manifest::parse cross-field
-    // validation when target = WasmClient. This unwrap is safe.
-    let mount = match &bin.mount {
-        Some(m) => m.as_str(),
-        None => {
-            eprintln!(
-                "✗ internal error: `[[bin]] name = \"{}\"` has `target = \
-                 \"wasm-client\"` but no `mount` (cross-field validation \
-                 should have caught this at parse time).",
-                bin.name
-            );
-            std::process::exit(1);
-        }
-    };
+    // validation when target = WasmClient. This is safe.
+    let mount = bin.mount.as_deref().ok_or_else(|| {
+        format!(
+            "internal error: `[[bin]] name = \"{}\"` has `target = \"wasm-client\"` but no \
+             `mount` (cross-field validation should have caught this at parse time).",
+            bin.name
+        )
+    })?;
 
     // Extension check — the emitter is `.fitzv`-only in Phase
     // 11.5.c. Classic `.fitz` composition lands with 11.5.d
@@ -1138,38 +1187,21 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         .map(|s| s.eq_ignore_ascii_case("fitzv"))
         .unwrap_or(false);
     if !ext_view {
-        eprintln!(
-            "✗ `[[bin]] name = \"{}\"` targets `wasm-client` but its `main = \
-             \"{}\"` is not a `.fitzv` file. Phase 11.5.c only wires the \
-             single-component wasm-client emit for `.fitzv` sources; \
-             composing classic `.fitz` files as WASM roots is 11.5.d work.",
+        return Err(format!(
+            "`[[bin]] name = \"{}\"` targets `wasm-client` but its `main = \"{}\"` is not a \
+             `.fitzv` file. Phase 11.5.c only wires the single-component wasm-client emit for \
+             `.fitzv` sources; composing classic `.fitz` files as WASM roots is 11.5.d work.",
             bin.name, bin.main
-        );
-        std::process::exit(1);
+        ));
     }
 
     // Load + run the view pipeline.
-    let src_text = match fs::read_to_string(&resolved.entry) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("✗ could not read `{}`: {e}", resolved.entry.display());
-            std::process::exit(1);
-        }
-    };
-    let raw = match view::parse(&src_text) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("✗ view::parse on `{}`: {e}", resolved.entry.display());
-            std::process::exit(1);
-        }
-    };
-    let expanded = match view::expand(&raw) {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("✗ view::expand on `{}`: {e}", resolved.entry.display());
-            std::process::exit(1);
-        }
-    };
+    let src_text = fs::read_to_string(&resolved.entry)
+        .map_err(|e| format!("could not read `{}`: {e}", resolved.entry.display()))?;
+    let raw = view::parse(&src_text)
+        .map_err(|e| format!("view::parse on `{}`: {e}", resolved.entry.display()))?;
+    let expanded = view::expand(&raw)
+        .map_err(|e| format!("view::expand on `{}`: {e}", resolved.entry.display()))?;
     // Phase 11.7 — cross-file `<Child />`. Load the components declared
     // in imported sibling `.fitzv` files BEFORE the check so composition
     // of an imported child validates against its real surface (state /
@@ -1198,61 +1230,51 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         &dep_registry,
     );
     let imported_components =
-        match view::load_imported_components_with_deps(&all_imports, &base_dir, &dep_registry) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "✗ loading imported components for `{}`: {e}",
+        view::load_imported_components_with_deps(&all_imports, &base_dir, &dep_registry).map_err(
+            |e| {
+                format!(
+                    "loading imported components for `{}`: {e}",
                     resolved.entry.display()
-                );
-                std::process::exit(1);
-            }
-        };
+                )
+            },
+        )?;
 
     let check_errs =
         view::check_with_imported_components(&expanded, imported_components.components());
     if !check_errs.is_empty() {
-        eprintln!(
-            "✗ view::check on `{}` reported {} error(s):",
+        let mut msg = format!(
+            "view::check on `{}` reported {} error(s):",
             resolved.entry.display(),
             check_errs.len()
         );
         for err in &check_errs {
-            eprintln!("  - {err}");
+            msg.push_str(&format!("\n  - {err}"));
         }
-        std::process::exit(1);
+        return Err(msg);
     }
 
     // Phase 11.7 R3 — load the classic `type` defs imported by the
     // `.fitzv` (e.g. `from card import Card`) from their sibling
     // `.fitz` files so the emitter can synthesise a Rust `struct` for
     // each. Empty when the file imports no nominals (the pre-R3 examples).
-    let nominals =
-        match view::load_imported_nominals_with_deps(&all_imports, &base_dir, &dep_registry) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!(
-                    "✗ loading imported nominals for `{}`: {e}",
-                    resolved.entry.display()
-                );
-                std::process::exit(1);
-            }
-        };
+    let nominals = view::load_imported_nominals_with_deps(&all_imports, &base_dir, &dep_registry)
+        .map_err(|e| {
+        format!(
+            "loading imported nominals for `{}`: {e}",
+            resolved.entry.display()
+        )
+    })?;
 
     // Phase 11.7 R3.5a.2 — load the sibling `.fitz` helper functions the
     // `.fitzv` imports (`from board_helpers import cards_in, ...`) so the
     // emitter can transpile each into the bundle.
-    let imported_fns =
-        match view::load_imported_fns_with_deps(&all_imports, &base_dir, &dep_registry) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!(
-                    "✗ loading imported functions for `{}`: {e}",
-                    resolved.entry.display()
-                );
-                std::process::exit(1);
-            }
-        };
+    let imported_fns = view::load_imported_fns_with_deps(&all_imports, &base_dir, &dep_registry)
+        .map_err(|e| {
+            format!(
+                "loading imported functions for `{}`: {e}",
+                resolved.entry.display()
+            )
+        })?;
 
     // Materialise the scaffold. Path is Cargo-style —
     // `target/wasm-build/<bin>/` for the temporary crate,
@@ -1271,7 +1293,7 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         .join(&sanitised_pkg);
 
     let source_label = bin.main.clone();
-    let scaffold = match view::write_wasm_crate_scaffold(
+    let scaffold = view::write_wasm_crate_scaffold(
         &scaffold_dir,
         &expanded,
         &nominals,
@@ -1280,71 +1302,51 @@ fn build_wasm_client_cmd(resolved: &ResolvedEntry) {
         &sanitised_pkg,
         mount,
         Some(&source_label),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("✗ wasm-crate scaffold at `{}`: {e}", scaffold_dir.display());
-            std::process::exit(1);
-        }
-    };
+    )
+    .map_err(|e| format!("wasm-crate scaffold at `{}`: {e}", scaffold_dir.display()))?;
 
-    println!(
-        "  scaffold ready at `{}` (Cargo.toml + src/lib.rs)",
-        scaffold.crate_dir.display()
-    );
-
-    // Shell out to `wasm-pack build --release --target web`.
-    println!("  running `wasm-pack build --release --target web` ...");
+    // Shell out to `wasm-pack build [--release|--dev] --target web`.
+    let profile_flag = if release { "--release" } else { "--dev" };
+    println!("  running `wasm-pack build {profile_flag} --target web` ...");
     let status = std::process::Command::new("wasm-pack")
-        .args(["build", "--release", "--target", "web"])
+        .args(["build", profile_flag, "--target", "web"])
         .current_dir(&scaffold.crate_dir)
-        .status();
-    let status = match status {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "✗ could not invoke `wasm-pack`: {e}\n\
-                 (install with `cargo install wasm-pack`, or grab the installer \
-                 from https://rustwasm.github.io/wasm-pack/)"
-            );
-            std::process::exit(1);
-        }
-    };
+        .status()
+        .map_err(|e| {
+            format!(
+                "could not invoke `wasm-pack`: {e}\n(install with `cargo install wasm-pack`, or \
+                 grab the installer from https://rustwasm.github.io/wasm-pack/)"
+            )
+        })?;
     if !status.success() {
-        eprintln!(
-            "✗ `wasm-pack build --release --target web` exited with {status} at `{}`. \
-             See the wasm-pack output above.",
+        return Err(format!(
+            "`wasm-pack build {profile_flag} --target web` exited with {status} at `{}`. See the \
+             wasm-pack output above.",
             scaffold.crate_dir.display()
-        );
-        std::process::exit(1);
+        ));
     }
 
     // Copy `<scaffold>/pkg/` → `<manifest>/target/wasm/<bin>/`.
     // Overwrite whatever is there so re-builds are idempotent.
     let src_pkg = scaffold.crate_dir.join("pkg");
     if !src_pkg.is_dir() {
-        eprintln!(
-            "✗ wasm-pack succeeded but did not produce `pkg/` at `{}`",
+        return Err(format!(
+            "wasm-pack succeeded but did not produce `pkg/` at `{}`",
             src_pkg.display()
-        );
-        std::process::exit(1);
+        ));
     }
-    if let Err(e) = copy_dir_tree_overwriting(&src_pkg, &final_pkg_dir) {
-        eprintln!(
-            "✗ copying `{}` → `{}`: {e}",
+    copy_dir_tree_overwriting(&src_pkg, &final_pkg_dir).map_err(|e| {
+        format!(
+            "copying `{}` → `{}`: {e}",
             src_pkg.display(),
             final_pkg_dir.display()
-        );
-        std::process::exit(1);
-    }
+        )
+    })?;
 
-    println!("✓ wasm bundle at `{}`", final_pkg_dir.display());
-    println!(
-        "  serve it with: `python -m http.server` (or any static server) \
-         and point `<script type=\"module\">` at `{}/{}.js`",
-        final_pkg_dir.display(),
-        sanitised_pkg
-    );
+    Ok(WasmBuildOutput {
+        pkg_dir: final_pkg_dir,
+        pkg_name: sanitised_pkg,
+    })
 }
 
 /// Recursively copies `src` to `dst`, overwriting existing files
@@ -4436,7 +4438,24 @@ struct DevTarget {
 /// `tokio::signal::ctrl_c`, and an async channel for `notify`
 /// events (which is sync; we forward them via
 /// `std::thread::spawn` + `tokio::sync::mpsc::UnboundedSender`).
-fn dev_cmd(file_arg: Option<PathBuf>) {
+fn dev_cmd(file_arg: Option<PathBuf>, port: u16) {
+    // Phase 11.13 — wasm-client mode. Manifest mode only (needs
+    // `mount` + the fixed output layout), so `--file` always takes
+    // the classic respawn path. When the manifest's default bin
+    // targets `wasm-client`, build the bundle + serve it with
+    // live-reload instead of respawning `fitz run`.
+    if file_arg.is_none() && is_wasm_client_dev() {
+        let resolved = resolve_entry(None);
+        let runtime = evaluator::build_runtime();
+        runtime.block_on(async move {
+            if let Err(e) = run_wasm_dev_loop(resolved, port).await {
+                eprintln!("✗ fitz dev: {e}");
+                std::process::exit(1);
+            }
+        });
+        return;
+    }
+
     let target = resolve_dev_target(file_arg);
 
     eprintln!("🔄 fitz dev — watching {}", target.watch_dir.display());
@@ -4450,6 +4469,158 @@ fn dev_cmd(file_arg: Option<PathBuf>) {
             std::process::exit(1);
         }
     });
+}
+
+/// Phase 11.13 — cheap manifest peek: does the default bin of the
+/// `fitz.toml` in scope target `wasm-client`? Returns `false` (→
+/// classic respawn mode) on any resolution error (missing/ambiguous
+/// manifest, parse error, multi-bin ambiguity) so the classic path
+/// keeps its exact behaviour and error messages. Multi-bin
+/// wasm-client dev (e.g. a `server` + `web` fullstack project) is a
+/// follow-up: it falls through to the classic path today.
+fn is_wasm_client_dev() -> bool {
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    let Some(mp) = manifest::find_manifest(&cwd) else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(&mp) else {
+        return false;
+    };
+    let Ok(m) = manifest::Manifest::parse(&text) else {
+        return false;
+    };
+    matches!(
+        m.select_bin(None),
+        Ok(Some(bin)) if bin.effective_target() == manifest::Target::WasmClient
+    )
+}
+
+/// Phase 11.13 — `fitz dev` wasm-client loop (Approach C). Builds
+/// the bundle (`wasm-pack --dev`, incremental), serves the project
+/// on `127.0.0.1:<port>` with a live-reload WebSocket, and on each
+/// relevant save rebuilds + pushes a reload to the browser. A build
+/// failure prints and keeps serving the previous bundle. Ctrl+C
+/// exits.
+async fn run_wasm_dev_loop(resolved: ResolvedEntry, port: u16) -> Result<(), String> {
+    let watch_dir = resolved
+        .manifest_ctx
+        .as_ref()
+        .map(|c| c.manifest_dir.clone())
+        .ok_or_else(|| "wasm-client dev requires a manifest".to_string())?;
+
+    eprintln!("🔄 fitz dev — wasm-client mode");
+    eprintln!("   watching {}", watch_dir.display());
+
+    // Initial build (dev profile). If it fails we still start the
+    // server so the user can fix and re-save; the browser 404s the
+    // bundle until a build succeeds. No client is connected yet, so
+    // the initial outcome doesn't gate a reload.
+    build_and_report(&resolved);
+
+    // Server params come from the (valid) manifest, independent of
+    // whether the first build succeeded.
+    let (pkg_name, mount) = wasm_server_params(&resolved)?;
+    let pkg_rel_js = format!("target/wasm/{pkg_name}/{pkg_name}.js");
+
+    let server = dev_server::start(watch_dir.clone(), pkg_name, pkg_rel_js, mount, port).await?;
+    eprintln!("   serving {}", server.url);
+    eprintln!("   (Ctrl+C para salir)\n");
+
+    // Watcher (kept alive by `_watcher` for the loop's lifetime).
+    let (_watcher, mut rx) = setup_watcher(&watch_dir)?;
+
+    loop {
+        tokio::select! {
+            change = wait_for_relevant_change(&mut rx, &watch_dir) => {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    drain_pending(&mut rx),
+                )
+                .await;
+                eprintln!(
+                    "\n↻ change in {} — rebuilding ...",
+                    relative_to(&change, &watch_dir)
+                );
+                if build_and_report(&resolved) {
+                    server.signal_reload();
+                    eprintln!("✓ reloaded browser");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\n👋 Ctrl+C received — exiting");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Runs one wasm-client dev build (dev profile) and reports the
+/// outcome. Returns `true` on success.
+fn build_and_report(resolved: &ResolvedEntry) -> bool {
+    match build_wasm_client(resolved, /*release=*/ false) {
+        Ok(out) => {
+            eprintln!("✓ built `{}` at {}", out.pkg_name, out.pkg_dir.display());
+            true
+        }
+        Err(e) => {
+            eprintln!("✗ build failed:\n{e}");
+            false
+        }
+    }
+}
+
+/// Derives the dev-server params (pkg name + mount selector) from
+/// the resolved manifest bin. Works even when the current build
+/// failed, since it reads only the (valid) manifest.
+fn wasm_server_params(resolved: &ResolvedEntry) -> Result<(String, String), String> {
+    let ctx = resolved
+        .manifest_ctx
+        .as_ref()
+        .ok_or_else(|| "internal: wasm dev without manifest ctx".to_string())?;
+    let bin = ctx
+        .selected_bin
+        .as_ref()
+        .ok_or_else(|| "internal: wasm dev without a selected bin".to_string())?;
+    let pkg = view::sanitise_wasm_pkg_name(&bin.name);
+    let mount = bin
+        .mount
+        .clone()
+        .ok_or_else(|| "internal: wasm-client bin without `mount`".to_string())?;
+    Ok((pkg, mount))
+}
+
+/// Sets up the `notify` file watcher over `watch_dir` and bridges
+/// its sync events to a tokio channel (a `std::thread` forwards
+/// them). The returned `RecommendedWatcher` MUST be kept alive by
+/// the caller — dropping it stops the watch.
+fn setup_watcher(
+    watch_dir: &std::path::Path,
+) -> Result<
+    (
+        notify::RecommendedWatcher,
+        tokio::sync::mpsc::UnboundedReceiver<notify::Event>,
+    ),
+    String,
+> {
+    use notify::Watcher;
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+    let mut watcher = notify::recommended_watcher(notify_tx)
+        .map_err(|e| format!("could not create the file watcher: {e}"))?;
+    watcher
+        .watch(watch_dir, notify::RecursiveMode::Recursive)
+        .map_err(|e| format!("could not watch `{}`: {e}", watch_dir.display()))?;
+
+    let (tokio_tx, tokio_rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
+    std::thread::spawn(move || {
+        for event in notify_rx.into_iter().flatten() {
+            if tokio_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    Ok((watcher, tokio_rx))
 }
 
 /// Decides which directory to watch + which args to pass to the
@@ -4686,7 +4857,10 @@ async fn drain_until_change(
 
 /// Decides whether an event path warrants a restart. Rules:
 ///
-/// - Only `.fitz` or `fitz.toml` (other extensions are ignored).
+/// - Only `.fitz` / `.fitzv` or `fitz.toml` (other extensions are
+///   ignored). Phase 11.13 added `.fitzv` so `fitz dev`'s
+///   wasm-client mode reacts to single-file component edits (the
+///   watcher used to ignore them entirely — `.fitzv` ≠ `.fitz`).
 /// - Excludes paths under `target/`, `.git/`, `node_modules/`,
 ///   `.fitz/`, hidden files (`.something`).
 fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool {
@@ -4694,7 +4868,7 @@ fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool
     let is_fitz_file = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|ext| ext == "fitz")
+        .map(|ext| ext == "fitz" || ext == "fitzv")
         .unwrap_or(false);
     let is_manifest = path
         .file_name()
@@ -4719,11 +4893,16 @@ fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool
             return false;
         }
         // Any other component starting with `.` is hidden.
-        // Except the final file if it's a literal `.fitz` — but
-        // we already checked the extension, so a `.something.fitz`
+        // Except the final file if it's a literal `.fitz`/`.fitzv`
+        // — we already checked the extension, so a `.something.fitz`
         // file (hidden with the fitz extension) does trigger.
         // Reasonable.
-        if s.starts_with('.') && s != "." && s != ".." && !s.ends_with(".fitz") {
+        if s.starts_with('.')
+            && s != "."
+            && s != ".."
+            && !s.ends_with(".fitz")
+            && !s.ends_with(".fitzv")
+        {
             return false;
         }
     }
