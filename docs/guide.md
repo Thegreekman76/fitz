@@ -12352,6 +12352,24 @@ request). Los values de tipos compuestos (List<scalar>, Map para
 JSONB) se marshallean con los casts SQL apropiados
 (`::text[]`/`::jsonb`).
 
+**Expresiones SQL (v0.32.0)** — los values del Map también aceptan
+`sql.now()` → `NOW()` y `sql.raw("<fragmento>")` (inline verbatim, no
+parametrizado), y el `.where(...)` soporta `sql.now()` + aritmética de
+fechas `m.col.plus_seconds(n)` / `plus_days(n)` / etc:
+
+```fitz
+Monitor.where(fn(m) =>
+    m.last_check_at.plus_seconds(m.interval_secs) < sql.now())  // due?
+    .update(db, {"last_check_at": sql.now(), "streak": sql.raw("streak + 1")})
+    .await?
+```
+
+El namespace es `sql` (no `db`) porque la conexión se liga como
+`let db = db.connect(...)`, que shadowearía el módulo. Para SQL más
+complejo (agregaciones condicionales, CTEs, window functions), el
+escape hatch canónico sigue siendo `db.query(...)` crudo — ver
+[`docs/db-orm.md`](db-orm.md) §7, §8 y §28.
+
 **`Type.bulk_insert(rows, db)`** (v0.10.27) — inserta muchas rows
 en batches multi-tuple `VALUES`. Default `batch_size=1000`.
 Optimizado para seeds y migraciones: 1 round-trip por batch.

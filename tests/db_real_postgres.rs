@@ -660,6 +660,165 @@ async fn orm_where_filters_by_age() {
     seed.close().await.unwrap();
 }
 
+// ---- O1/O3 (v0.32.0) — SQL expressions + date arithmetic ----
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_update_with_db_now_and_raw_o1() {
+    // O1 — `.update({...})` inlines `sql.now()` → NOW() and
+    // `sql.raw("streak + 1")` → raw fragment, while a normal value
+    // ("up") binds a placeholder. Verified against real Postgres.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_o1_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_o1_test (id bigint PRIMARY KEY, streak int, last_status text, updated_at timestamptz)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_o1_test VALUES (1, 5, 'down', NULL)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_o1_test\") type Monitor {{\n  \
+             @primary id: Int\n  \
+             streak: Int\n  \
+             last_status: Str\n  \
+             updated_at: Str\n\
+         }}\n\
+         async fn run() -> Result<Int> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let n = Monitor.where(fn(m) => m.id == 1).update(db, {{\"streak\": sql.raw(\"streak + 1\"), \"updated_at\": sql.now(), \"last_status\": \"up\"}}).await?\n  \
+             return Ok(n)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    // The update returns rows affected = 1.
+    match env.lock().get("result").unwrap() {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => {
+            assert_eq!(*boxed, Value::Int(1), "expected 1 row updated");
+        }
+        other => panic!("expected Ok(Int), was {:?}", other),
+    }
+
+    // Verify via raw SQL: streak incremented (5 → 6), updated_at set,
+    // last_status = 'up'.
+    let qr = seed
+        .query(
+            "SELECT streak, last_status, updated_at IS NOT NULL AS has_ts FROM fitz_orm_o1_test WHERE id = 1",
+            &[],
+        )
+        .await
+        .unwrap();
+    let row = &qr.rows[0];
+    assert_eq!(
+        row.get("streak"),
+        Some(&PgValue::Int(6)),
+        "db.raw streak + 1"
+    );
+    assert_eq!(
+        row.get("last_status"),
+        Some(&PgValue::Text("up".into())),
+        "normal bound value"
+    );
+    assert_eq!(
+        row.get("has_ts"),
+        Some(&PgValue::Bool(true)),
+        "sql.now() set updated_at"
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_orm_o1_test", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_where_date_arithmetic_o3() {
+    // O3 — `.where(fn(m) => m.last_check_at.is_null() or
+    // m.last_check_at.plus_seconds(m.interval_secs) < sql.now())`.
+    // Uses `.count(db)` to avoid deserializing timestamptz columns.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_o3_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_o3_test (id bigint PRIMARY KEY, last_check_at timestamptz, interval_secs int)",
+        &[],
+    )
+    .await
+    .unwrap();
+    // Row 1: stale — checked 1h ago with a 60s interval → due.
+    // Row 2: fresh — checked now with a 1h interval → not due.
+    // Row 3: never checked (NULL) → due via is_null.
+    seed.exec(
+        "INSERT INTO fitz_orm_o3_test VALUES \
+             (1, NOW() - interval '1 hour', 60), \
+             (2, NOW(), 3600), \
+             (3, NULL, 30)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_o3_test\") type Monitor {{\n  \
+             @primary id: Int\n  \
+             last_check_at: Str\n  \
+             interval_secs: Int\n\
+         }}\n\
+         async fn run() -> Result<Int> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let due = Monitor.where(fn(m) => m.last_check_at.is_null() or m.last_check_at.plus_seconds(m.interval_secs) < sql.now()).count(db).await?\n  \
+             return Ok(due)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    match env.lock().get("result").unwrap() {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => {
+            // Rows 1 (stale) and 3 (null) are due; row 2 (fresh) is not.
+            assert_eq!(*boxed, Value::Int(2), "expected 2 due monitors");
+        }
+        other => panic!("expected Ok(Int), was {:?}", other),
+    }
+
+    let _ = seed.exec("DROP TABLE fitz_orm_o3_test", &[]).await;
+    seed.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore]
 async fn orm_where_chain_combines_with_and() {

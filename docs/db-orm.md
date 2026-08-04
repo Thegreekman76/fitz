@@ -1104,6 +1104,33 @@ Post.where(fn(p) => p.tags.contained_in(["rust", "postgres", "go"]))  // tags <@
 Cuando algo del translator no alcanza, bajar a `db.query(...)`
 crudo con SQL escrito a mano.
 
+### Aritmética de fechas: `sql.now()` + `plus_seconds(...)` (v0.32.0)
+
+Sobre columns Date/DateTime, el `.where` soporta `sql.now()` +
+aritmética de intervalos:
+
+- **`sql.now()`** → `NOW()` (el timestamp del server).
+- **`m.<col>.plus_seconds(<n>)`** → `("col" + make_interval(secs => <n>))`.
+  También `minus_seconds`, `plus_minutes`/`minus_minutes`,
+  `plus_hours`/`minus_hours`, `plus_days`/`minus_days`.
+
+El argumento `<n>` puede ser otra columna (`m.interval_secs`), un
+literal, o una var externa (se parametriza).
+
+```fitz
+// Monitores "vencidos": nunca chequeados, o cuyo último check +
+// su intervalo ya pasó.
+let due = Monitor.where(fn(m) =>
+    m.last_check_at.is_null()
+    or m.last_check_at.plus_seconds(m.interval_secs) < sql.now()
+).all(db).await?
+```
+
+Reemplaza el workaround `db.query("SELECT ... WHERE last_check_at +
+make_interval(...) < NOW()", [])` crudo. Para funciones de fecha más
+exóticas (`AGE`, `date_trunc`, `EXTRACT` en el `WHERE`) el escape
+hatch sigue siendo `db.query(...)` crudo.
+
 ### Lo que NO soporta el translator
 
 - Field access sobre nested types (no JOINs implícitos): `u.posts.title`
@@ -1210,6 +1237,42 @@ Post.where(fn(p) => p.id == 1)
     })
     .await?
 ```
+
+#### Expresiones SQL: `sql.now()` / `sql.raw(...)` (v0.32.0)
+
+Además de valores literales/vars, los values del Map aceptan dos
+helpers del módulo `sql` que se **inlinan como SQL crudo** en el `SET`
+(sin bindear un placeholder `$N`):
+
+- **`sql.now()`** → `NOW()`. El timestamp del server.
+- **`sql.raw("<fragmento>")`** → el fragmento verbatim. Sirve para
+  aritmética sobre la columna (`streak + 1`) o expresiones
+  (`EXTRACT(EPOCH FROM (NOW() - started_at))::int`).
+
+```fitz
+Monitor.where(fn(m) => m.id == id)
+    .update(db, {
+        "last_status": status,                // valor normal → $1
+        "last_check_at": sql.now(),           // → SET last_check_at = NOW()
+        "streak": sql.raw("streak + 1"),      // → SET streak = streak + 1
+    })
+    .await?
+```
+
+Reemplaza el workaround `db.exec("UPDATE ... SET last_check_at = NOW()
+...", [...])` crudo por un `.update` tipado que mezcla valores
+parametrizados con expresiones SQL.
+
+> **`sql`, no `db`**: el namespace es `sql` a propósito — la conexión
+> se liga convencionalmente como `let db = db.connect(...)`, que
+> shadowearía el módulo `db`. Paralelo a `func.now()`/`text(...)` de
+> SQLAlchemy.
+
+> **`sql.raw(...)` NO está parametrizado**: el fragmento se inlina
+> verbatim (mismo modelo de confianza que `db.exec`/`db.query` crudo).
+> Nunca metas input del usuario sin sanitizar adentro de `sql.raw`.
+> En `fitz build` el argumento debe ser un string literal
+> (compile-time). Los valores normales del Map sí van parametrizados.
 
 ### `QueryBuilder.delete(db) -> Future<Result<Int>>`
 
@@ -2195,9 +2258,11 @@ futura.
 - **Sin Date/DateTime/UUID nativos**: validación de formato es
   responsabilidad del user al insertar. Postgres rechaza con error
   si el formato es inválido (lo cual se propaga como `Result::Err`).
-- **Sin aritmética de fechas adentro del translator**: `e.occurred_at
-  + interval '1 day'` no funciona. Workaround: `db.query(...)` crudo
-  con SQL que usa `INTERVAL`/`AGE`/`EXTRACT`.
+- **Aritmética de fechas en `.where`/`.update`**: soportada desde
+  v0.32.0 vía `sql.now()` + `m.col.plus_seconds(n)` / `plus_days(n)` /
+  etc. (ver §7) y `sql.raw(...)` en `.update` (ver §8). Para funciones
+  de fecha más exóticas (`AGE`, `date_trunc`, `EXTRACT` dentro del
+  `WHERE`) el escape hatch sigue siendo `db.query(...)` crudo.
 - **Timezone handling**: timestamptz se preserva en UTC; conversión
   a local timezone es responsabilidad del cliente Fitz que consume.
 
@@ -3717,6 +3782,35 @@ jsonb / tsvector (ver sección 13). Lo que queda como deuda menor:
   para ordenar por relevancia full-text. Detalle en sección 28
   (closures de `.where()`) + sección 31 (terminales del
   QueryBuilder).
+
+### SQL complejo (agregaciones, CTEs, window functions, JOINs custom) — trade-off intencional
+
+Estos casos **no son un gap que falte cerrar** — son un límite de
+diseño deliberado. El ORM cubre el CRUD tipado + queries por columna;
+para SQL analítico complejo, `db.query(...)` / `db.exec(...)` crudo es
+el **escape hatch canónico**, exactamente como recomiendan Diesel
+(`sql_query`) y SQLAlchemy (`text()`). El ORM y el SQL crudo comparten
+la misma conexión y el mismo pool; no hay penalización por mezclarlos.
+
+Concretamente, quedan intencionalmente en el escape hatch:
+
+- **Agregaciones complejas** — `SUM(CASE WHEN ... THEN 1 ELSE 0 END)`,
+  `COUNT(*) / NULLIF(...)`, `ROUND(100.0 * ... , 2)` con `LEFT JOIN`.
+  El `.aggregate` del ORM cubre count/sum/avg/min/max simples por una
+  columna; expresiones condicionales o ratios → `db.query`.
+- **CTEs + window functions + funciones específicas de Postgres** —
+  `WITH ... AS`, `OVER (PARTITION BY ...)`, `percentile_cont(...)
+  WITHIN GROUP`, `date_trunc('hour', ts)`. Serían un mini-DSL en sí
+  mismos; el SQL crudo es más claro y directo.
+- **JOINs con `SELECT` de shape custom** — `SELECT i.id, m.name AS
+  monitor_name FROM incidents i JOIN monitors m ON ...`, donde el row
+  resultante mezcla columnas de varias tablas (distinto a cualquier
+  `type` ORM). El `.preload(...)` cubre relaciones que pueblan el
+  companion field del type padre; para shapes ad-hoc → `db.query` +
+  un type plano construido a mano con `row.get_str(...)`.
+
+**Filosofía**: ORM para el 90% del CRUD tipado; SQL crudo para el
+resto. Un proyecto real termina con una mezcla — y eso es sano.
 
 ### Refinamientos pendientes del query builder
 

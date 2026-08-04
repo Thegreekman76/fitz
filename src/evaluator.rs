@@ -12014,6 +12014,38 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
+    // O1/O3 — `sql` module with SQL-expression helpers for the ORM.
+    // A dedicated namespace (not `db`) because the connection is
+    // conventionally bound as `let db = db.connect(...)`, which would
+    // shadow the `db` module inside the same scope. `sql.now()` →
+    // `NOW()`; `sql.raw(s)` → the raw fragment `s` (un-parameterised,
+    // same trust model as `conn.exec`). Both produce a
+    // `Value::SqlExpr` that the `.update({...})` marshaling inlines in
+    // the `SET` clause; the `.where(...)` translator also recognises
+    // them at the AST level.
+    let sql_env = Environment::new();
+    sql_env.lock().define(
+        "now",
+        Value::Builtin {
+            name: "now",
+            func: builtin_db_now,
+        },
+    );
+    sql_env.lock().define(
+        "raw",
+        Value::Builtin {
+            name: "raw",
+            func: builtin_db_raw,
+        },
+    );
+    env.lock().define(
+        "sql",
+        Value::Module {
+            name: "sql".into(),
+            env: sql_env,
+        },
+    );
+
     // v0.10.24 (Date/DateTime/Uuid) — register the 3 types as
     // `Value::Module` so the field-access dispatcher resolves them
     // as `Date.today()`, `DateTime.now()`, `Uuid.v4()`, etc. Same
@@ -12921,6 +12953,62 @@ fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
         }
     });
     Ok(Value::new_future(fut))
+}
+
+/// O1 — `sql.now()` → `Value::SqlExpr("NOW()")`. No args. Used as a
+/// value inside an ORM `.update({...})` Map, where the marshaling
+/// inlines `NOW()` in the `SET` clause. Also recognised directly by
+/// the `.where(...)` AST translator (see `translate_expr_to_sql`).
+fn builtin_db_now(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`sql.now()` takes no arguments, received {}", args.len()),
+        ));
+    }
+    Ok(Value::SqlExpr("NOW()".to_string()))
+}
+
+/// O1 — `sql.raw(s: Str)` → `Value::SqlExpr(s)`. Inlines the raw SQL
+/// fragment `s` verbatim in an ORM `.update({...})` `SET` clause
+/// (e.g. `sql.raw("streak + 1")`, `sql.raw("EXTRACT(EPOCH FROM ...)")`).
+/// Un-parameterised — the caller is trusted, same model as
+/// `conn.exec`. In `fitz build` the argument must be a string literal.
+fn builtin_db_raw(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`sql.raw(sql)` expects 1 argument (sql: Str), received {}",
+                args.len()
+            ),
+        ));
+    }
+    match &args[0] {
+        Value::Str(s) => Ok(Value::SqlExpr(s.clone())),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Str".into(),
+                found: other.type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "`sql.raw(sql)` expects Str (raw SQL fragment), received `{}`",
+                other.type_name()
+            ),
+        )),
+    }
 }
 
 /// Convert a Fitz `Value` into a `PgValue` to send to the server
@@ -16064,7 +16152,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
     }
     let mut set_clauses = String::new();
     let mut pg_args: Vec<crate::db::PgValue> = Vec::new();
-    for (i, (key, value)) in changes.iter().enumerate() {
+    for (key, value) in changes.iter() {
         let key_str = match key {
             Value::Str(s) => s.clone(),
             other => {
@@ -16107,6 +16195,16 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             .get(&key_str)
             .and_then(|c| c.sql_name.as_deref())
             .unwrap_or(key_str.as_str());
+        // O1 — raw SQL expression (`sql.now()` / `sql.raw(...)`):
+        // inline it verbatim in the SET clause instead of binding a
+        // `$N` placeholder. Skips the marshaling ramas below.
+        if let Value::SqlExpr(raw_sql) = value {
+            if !set_clauses.is_empty() {
+                set_clauses.push_str(", ");
+            }
+            set_clauses.push_str(&format!("\"{}\" = {}", sql_col, raw_sql));
+            continue;
+        }
         // Phase 10.5.a — if the destination field is Map<...>,
         // marshal to JSON + `::jsonb` cast.
         // Phase 10.5.b — if it's List<T>, marshal to array +
@@ -16149,15 +16247,15 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             };
             (pg, "")
         };
-        if i > 0 {
+        if !set_clauses.is_empty() {
             set_clauses.push_str(", ");
         }
-        set_clauses.push_str(&format!(
-            "\"{}\" = ${}{}",
-            sql_col,
-            i + 1,
-            placeholder_suffix
-        ));
+        // Placeholder number = 1-based position this arg will occupy.
+        // Computed from the live count (not the loop index `i`) so that
+        // inlined SqlExpr fragments — which consume no placeholder —
+        // don't skew the numbering (O1).
+        let ph = pg_args.len() + 1;
+        set_clauses.push_str(&format!("\"{}\" = ${}{}", sql_col, ph, placeholder_suffix));
         pg_args.push(pg);
     }
     // where_sql uses $1..$M; we renumber to $(N+1)..$(N+M) where N
@@ -16620,6 +16718,24 @@ fn renumber_placeholders(sql: &str, offset: usize) -> String {
     out
 }
 
+/// O3 — maps an ORM date-arithmetic method name to its
+/// `(sign, make_interval unit)` pair, or `None` if the method is not a
+/// date helper. Shared by the interpreter and the codegen `.where`
+/// translators so both emit bit-for-bit identical SQL.
+pub(crate) fn interval_method_parts(method: &str) -> Option<(&'static str, &'static str)> {
+    Some(match method {
+        "plus_seconds" => ("+", "secs"),
+        "minus_seconds" => ("-", "secs"),
+        "plus_minutes" => ("+", "mins"),
+        "minus_minutes" => ("-", "mins"),
+        "plus_hours" => ("+", "hours"),
+        "minus_hours" => ("-", "hours"),
+        "plus_days" => ("+", "days"),
+        "minus_days" => ("-", "days"),
+        _ => return None,
+    })
+}
+
 /// Phase 10.3.b2 — Fitz Expr → parametrized SQL translator.
 /// Walks the closure body AST and produces SQL, emitting `$N`
 /// placeholders for literals (appended to `args_acc`).
@@ -16968,9 +17084,28 @@ fn translate_method_call_to_sql(
                 }
             }
         }
+        // O3 — date arithmetic on a Date/DateTime field, e.g.
+        // `m.last_check_at.plus_seconds(m.interval_secs)` →
+        // `("last_check_at" + make_interval(secs => "interval_secs"))`.
+        // The amount is translated recursively (a sibling column ref,
+        // a literal binding, or an external var).
+        m if interval_method_parts(m).is_some() => {
+            let (sign, unit) = interval_method_parts(m).unwrap();
+            if args.len() != 1 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.{method}(n)` expects 1 arg (the amount)"
+                ));
+            }
+            let amount =
+                translate_expr_to_sql_with_env(&args[0], param_name, fields, meta, args_acc, env)?;
+            Ok(format!(
+                "(\"{}\" {} make_interval({} => {}))",
+                sql_col, sign, unit, amount
+            ))
+        }
         other => Err(format!(
             "method `.{other}(...)` not supported on fields in `.where(...)`. \
-             Supported: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches."
+             Supported: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches, plus_seconds, minus_seconds, plus_minutes, minus_minutes, plus_hours, minus_hours, plus_days, minus_days."
         )),
     }
 }
@@ -17360,6 +17495,29 @@ pub fn translate_expr_to_sql_with_env(
         // Field { object: Field { Ident(param), col }, method },
         // args }`.
         Expr::Call { callee, args, .. } => {
+            // O1/O3 — `sql.now()` / `sql.raw("...")` as SQL expressions
+            // inside a `.where(...)` predicate (e.g. `... < sql.now()`).
+            if let Expr::Field { object, field, .. } = callee.as_ref() {
+                if let Expr::Ident(recv, _) = object.as_ref() {
+                    if recv == "sql" {
+                        match field.as_str() {
+                            "now" => {
+                                if !args.is_empty() {
+                                    return Err("`sql.now()` takes no arguments".to_string());
+                                }
+                                return Ok("NOW()".to_string());
+                            }
+                            "raw" => match args.as_slice() {
+                                [Expr::Str(s, _)] => return Ok(s.clone()),
+                                _ => {
+                                    return Err("`sql.raw(sql)` inside `.where(...)` expects exactly one string literal".to_string());
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
             translate_method_call_to_sql(callee, args, param_name, fields, meta, args_acc, env)
         }
         Expr::Int(n, _) => {
@@ -32095,6 +32253,92 @@ f = to_json(true)
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
         assert_eq!(sql, "\"name\" IS NULL");
         assert!(args.is_empty());
+    }
+
+    // ---- O1/O3 (v0.32.0) — SQL expressions + date arithmetic ----
+
+    #[test]
+    fn translate_db_now_in_comparison() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age < sql.now()");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "(\"age\" < NOW())");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn translate_db_raw_fragment() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => sql.raw(\"age > 0\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "age > 0");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn translate_plus_seconds_with_column_amount() {
+        // O3 — `m.field.plus_seconds(m.other)` → column ref amount.
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age.plus_seconds(u.id) < sql.now()");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "((\"age\" + make_interval(secs => \"id\")) < NOW())");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn translate_plus_days_literal_amount_binds_placeholder() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age.plus_days(7) < sql.now()");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "((\"age\" + make_interval(days => $1)) < NOW())");
+        assert_eq!(args, vec![crate::db::PgValue::Int(7)]);
+    }
+
+    #[test]
+    fn translate_minus_hours_maps_to_hours_unit() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age.minus_hours(3) == u.age");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "((\"age\" - make_interval(hours => $1)) = \"age\")");
+        assert_eq!(args, vec![crate::db::PgValue::Int(3)]);
+    }
+
+    #[test]
+    fn interval_method_parts_maps_all_eight() {
+        assert_eq!(interval_method_parts("plus_seconds"), Some(("+", "secs")));
+        assert_eq!(interval_method_parts("minus_seconds"), Some(("-", "secs")));
+        assert_eq!(interval_method_parts("plus_minutes"), Some(("+", "mins")));
+        assert_eq!(interval_method_parts("minus_minutes"), Some(("-", "mins")));
+        assert_eq!(interval_method_parts("plus_hours"), Some(("+", "hours")));
+        assert_eq!(interval_method_parts("minus_hours"), Some(("-", "hours")));
+        assert_eq!(interval_method_parts("plus_days"), Some(("+", "days")));
+        assert_eq!(interval_method_parts("minus_days"), Some(("-", "days")));
+        assert_eq!(interval_method_parts("plus_years"), None);
+        assert_eq!(interval_method_parts("is_null"), None);
+    }
+
+    #[test]
+    fn db_now_builtin_returns_sql_expr() {
+        assert_eq!(
+            builtin_db_now(&[]).unwrap(),
+            Value::SqlExpr("NOW()".to_string())
+        );
+        assert!(builtin_db_now(&[Value::Int(1)]).is_err());
+    }
+
+    #[test]
+    fn db_raw_builtin_returns_sql_expr() {
+        assert_eq!(
+            builtin_db_raw(&[Value::Str("streak + 1".into())]).unwrap(),
+            Value::SqlExpr("streak + 1".to_string())
+        );
+        assert!(builtin_db_raw(&[Value::Int(1)]).is_err());
+        assert!(builtin_db_raw(&[]).is_err());
     }
 
     #[test]

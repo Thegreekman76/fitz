@@ -2480,6 +2480,23 @@ fn after_dot_completions(
         "db" => {
             return method_items(&[("connect", "async fn(url: Str) -> Result<DbConn>".into())]);
         }
+        // O1/O3 (v0.32.0) — `sql` module: SQL-expression helpers for the
+        // ORM, used inside `.update({...})` values and `.where(...)`
+        // predicates. Dedicated namespace so the conventional
+        // `let db = db.connect(...)` binding doesn't shadow it.
+        "sql" => {
+            return method_items(&[
+                (
+                    "now",
+                    "fn() -> SqlExpr  // NOW() — for .update values / .where predicates".into(),
+                ),
+                (
+                    "raw",
+                    "fn(sql: Str) -> SqlExpr  // raw SQL fragment, e.g. sql.raw(\"streak + 1\")"
+                        .into(),
+                ),
+            ]);
+        }
         // Phase 12.8 — built-in module `flags` (feature flags).
         "flags" => {
             return method_items(&[
@@ -3949,6 +3966,10 @@ fn scope_level_completions(
         ),
         ("db", "module: connect (Postgres native driver + ORM)"),
         (
+            "sql",
+            "module: now, raw (SQL expressions for ORM .update / .where)",
+        ),
+        (
             "log",
             "module: info, warn, error, debug (structured logging)",
         ),
@@ -4699,7 +4720,9 @@ fn make_resp() -> Response {
     // the failure message names which one.
     #[test]
     fn lsp_audit_all_builtin_modules_visible_from_lsp_path() {
-        for module in &["smtp", "http", "jwt", "hash", "log", "db", "auth", "flags"] {
+        for module in &[
+            "smtp", "http", "jwt", "hash", "log", "db", "sql", "auth", "flags",
+        ] {
             let src = format!("let m = {}\nprint(m)\n", module);
             let errs = check_source(&src);
             let unknown: Vec<&FitzError> = errs
@@ -6777,6 +6800,26 @@ fn make_resp() -> Response {
             labels.contains(&"HttpClientResponse"),
             "missing built-in type `HttpClientResponse`: {labels:?}"
         );
+    }
+
+    #[test]
+    fn after_dot_on_sql_lists_now_and_raw() {
+        // O1/O3 (v0.32.0) — `sql.` lists `now`/`raw` (ORM SQL helpers).
+        let src = "let x = sql.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor right after the dot: line 0, col 12.
+        let items = completion_at_position(src, &program, &type_info, &env, 0, 12);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"now"),
+            "missing sql method `now`: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"raw"),
+            "missing sql method `raw`: {labels:?}"
+        );
+        let now_item = items.iter().find(|i| i.label == "now").unwrap();
+        assert_eq!(now_item.kind, Some(CompletionItemKind::METHOD));
     }
 
     #[test]

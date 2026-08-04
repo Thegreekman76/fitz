@@ -16841,6 +16841,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if recv == "db" && self.lookup_var(recv).is_none() {
                     return self.gen_db_module_call(field, args, *field_span);
                 }
+                // O1/O3 — `sql.now()` / `sql.raw(...)` module dispatch.
+                // Only meaningful inside ORM `.update`/`.where` (detected
+                // at the AST level there); a bare call errors clearly.
+                if recv == "sql" && self.lookup_var(recv).is_none() {
+                    return self.gen_sql_module_call(field, args, *field_span);
+                }
                 // v0.10.26 — Date/DateTime/Uuid constructor dispatch.
                 // `Date.today()`, `DateTime.parse(s)`, `Uuid.v4()`, etc.
                 // Parallel to `db.connect`: detect receiver "Date" /
@@ -18561,9 +18567,40 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             // Method call over `u.field.method(...)` — is_in, is_null,
             // is_not_null, like, ilike, starts_with, ends_with, contains.
-            Expr::Call { callee, args, .. } => self.translate_closure_method_call_to_sql(
-                callee, args, param_name, fields, table_meta, bindings,
-            ),
+            Expr::Call { callee, args, .. } => {
+                // O1/O3 — `sql.now()` / `sql.raw("...")` as SQL expressions
+                // inside a `.where(...)` predicate.
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
+                    if let Expr::Ident(recv, _) = object.as_ref() {
+                        if recv == "sql" {
+                            match field.as_str() {
+                                "now" => {
+                                    if !args.is_empty() {
+                                        return Err(self.err_at(
+                                            body.span(),
+                                            "`sql.now()` takes no arguments",
+                                        ));
+                                    }
+                                    return Ok("NOW()".to_string());
+                                }
+                                "raw" => match args.as_slice() {
+                                    [Expr::Str(s, _)] => return Ok(s.clone()),
+                                    _ => {
+                                        return Err(self.err_at(
+                                            body.span(),
+                                            "`sql.raw(sql)` inside `.where(...)` expects exactly one string literal",
+                                        ));
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                self.translate_closure_method_call_to_sql(
+                    callee, args, param_name, fields, table_meta, bindings,
+                )
+            }
             Expr::Int(n, _) => {
                 bindings.push(format!("__FitzPgValue::Int({}i64)", n));
                 Ok(format!("${}", bindings.len()))
@@ -19058,11 +19095,35 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 };
                 Ok(format!("\"{}\" @@ {}({})", sql_col, func, q))
             }
+            // O3 — date arithmetic on a Date/DateTime field, parallel to
+            // the interpreter. Shares `interval_method_parts` for
+            // bit-for-bit parity. e.g. `m.last_check_at.plus_seconds(
+            // m.interval_secs)` → `("last_check_at" + make_interval(
+            // secs => "interval_secs"))`.
+            m if crate::evaluator::interval_method_parts(m).is_some() => {
+                let (sign, unit) = crate::evaluator::interval_method_parts(m).unwrap();
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.{}(n)` expects 1 arg (the amount)",
+                            param_name, col_name, m
+                        ),
+                    ));
+                }
+                let amount = self.translate_closure_to_sql(
+                    &args[0], param_name, fields, table_meta, bindings,
+                )?;
+                Ok(format!(
+                    "(\"{}\" {} make_interval({} => {}))",
+                    sql_col, sign, unit, amount
+                ))
+            }
             other => Err(self.err_at(
                 callee_span,
                 format!(
                     "method `.{}(...)` not supported on fields in `.where(...)`. \
-                     Supported: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches.",
+                     Supported: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches, plus_seconds, minus_seconds, plus_minutes, minus_minutes, plus_hours, minus_hours, plus_days, minus_days.",
                     other
                 ),
             )),
@@ -19856,6 +19917,33 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             other => Err(self.err_at(
                 field_span,
                 format!("module `db` has no `{}` (supported: connect)", other),
+            )),
+        }
+    }
+
+    /// O1/O3 — `sql.now()` / `sql.raw(...)` are ORM SQL-expression
+    /// helpers; they are only meaningful as a value inside an ORM
+    /// `.update({...})` Map or a `.where(...)` predicate, where they are
+    /// detected at the AST level (see `orm_update_sql_expr_fragment` /
+    /// `translate_closure_to_sql`). A bare call in general expression
+    /// position has no native representation, so it errors clearly.
+    fn gen_sql_module_call(
+        &mut self,
+        field: &str,
+        _args: &[Expr],
+        field_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        match field {
+            "now" | "raw" => Err(self.err_at(
+                field_span,
+                format!(
+                    "`sql.{}(...)` can only be used as a value inside an ORM `.update({{...}})` or a `.where(...)` predicate",
+                    field
+                ),
+            )),
+            other => Err(self.err_at(
+                field_span,
+                format!("module `sql` has no `{}` (supported: now, raw)", other),
             )),
         }
     }
@@ -23023,7 +23111,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         }
         let mut set_clauses = String::new();
         let mut set_args_init = String::new();
-        for (i, (key_expr, value_expr)) in pairs.iter().enumerate() {
+        // O1 — count of real bound args (placeholders). Some fields may
+        // inline a raw SQL fragment (sql.now()/sql.raw()) that consumes no
+        // placeholder, so `$N` can't be derived from the loop index.
+        let mut arg_count: usize = 0;
+        for (key_expr, value_expr) in pairs.iter() {
             let key_str = match key_expr {
                 Expr::Str(s, _) => s.clone(),
                 _ => {
@@ -23044,9 +23136,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 .get(&key_str)
                 .and_then(|c| c.sql_name.as_deref())
                 .unwrap_or(key_str.as_str());
-            if i > 0 {
-                set_clauses.push_str(", ");
-                set_args_init.push_str(", ");
+            // O1 — raw SQL expression (sql.now()/sql.raw("literal")):
+            // inline it in the SET clause; no placeholder, no arg.
+            if let Some(raw_sql) = self.orm_update_sql_expr_fragment(value_expr)? {
+                if !set_clauses.is_empty() {
+                    set_clauses.push_str(", ");
+                }
+                set_clauses.push_str(&format!("\"{}\" = {}", sql_col, raw_sql));
+                continue;
             }
             // Phase 10.b.11 — the value of the `.update` Map literal
             // has 3 paths depending on the field type:
@@ -23080,7 +23177,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             } else {
                 ""
             };
-            set_clauses.push_str(&format!("\"{}\" = ${}{}", sql_col, i + 1, cast_suffix));
+            if !set_clauses.is_empty() {
+                set_clauses.push_str(", ");
+            }
+            arg_count += 1;
+            set_clauses.push_str(&format!("\"{}\" = ${}{}", sql_col, arg_count, cast_suffix));
 
             let arg_code = if let Some((_, pg_variant, _, _)) = array_info {
                 // Field is List<scalar>. The value must be List literal.
@@ -23119,12 +23220,54 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (val_code, _) = self.gen_expr(value_expr)?;
                 format!("<_ as __IntoPgValue>::into_pg({})", val_code)
             };
+            if !set_args_init.is_empty() {
+                set_args_init.push_str(", ");
+            }
             set_args_init.push_str(&arg_code);
         }
         Ok(UpdateSetEmission::Static {
             set_clauses,
             set_args_init,
         })
+    }
+
+    /// O1 — detects a `sql.now()` / `sql.raw("literal")` call in an ORM
+    /// `.update({...})` value position and returns the raw SQL fragment
+    /// to inline in the `SET` clause (no placeholder). Returns `None`
+    /// for any other expression (which then goes through normal
+    /// marshaling). `db.raw` requires a string literal in `fitz build`
+    /// (the SET clause is a compile-time constant).
+    fn orm_update_sql_expr_fragment(&self, value_expr: &Expr) -> Result<Option<String>, FitzError> {
+        if let Expr::Call { callee, args, .. } = value_expr {
+            if let Expr::Field { object, field, .. } = callee.as_ref() {
+                if let Expr::Ident(recv, _) = object.as_ref() {
+                    if recv == "sql" {
+                        match field.as_str() {
+                            "now" => {
+                                if !args.is_empty() {
+                                    return Err(self.err_at(
+                                        value_expr.span(),
+                                        "`sql.now()` takes no arguments",
+                                    ));
+                                }
+                                return Ok(Some("NOW()".to_string()));
+                            }
+                            "raw" => match args.as_slice() {
+                                [Expr::Str(s, _)] => return Ok(Some(s.clone())),
+                                _ => {
+                                    return Err(self.err_at(
+                                        value_expr.span(),
+                                        "`sql.raw(sql)` in `.update` expects one string literal (fitz build needs a compile-time constant)",
+                                    ));
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// W7 (v0.10.6) — dynamic dispatch of `.update(db, changes)` when
@@ -48037,6 +48180,79 @@ async fn get_u(id: Int) -> Result<U> {
         assert!(
             rust.contains(".all(&db"),
             "expected terminal .all(&db) in async block, was: {rust}",
+        );
+    }
+
+    // ---- O1/O3 (v0.32.0) — SQL expressions + date arithmetic ----
+
+    #[test]
+    fn codegen_orm_update_inlines_db_now_and_raw_o1() {
+        // O1 — `sql.now()` / `sql.raw("...")` in `.update` values inline
+        // raw SQL in the SET clause (no `$N`). Ordering the SQL exprs
+        // BEFORE the one real binding proves the placeholder-counter
+        // migration: `last_status` must be `$1`, not `$3`.
+        let src = "@table(\"monitors\") type Monitor {\n  \
+                       @primary id: Int = 0\n  \
+                       streak: Int\n  \
+                       last_check_at: Str\n  \
+                       last_status: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = Monitor.where(fn(m) => m.id == 1).update(db, {\"last_check_at\": sql.now(), \"streak\": sql.raw(\"streak + 1\"), \"last_status\": \"up\"}).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\\\"last_check_at\\\" = NOW()"),
+            "expected sql.now() inlined as NOW(), was: {rust}"
+        );
+        assert!(
+            rust.contains("\\\"streak\\\" = streak + 1"),
+            "expected sql.raw() inlined verbatim, was: {rust}"
+        );
+        assert!(
+            rust.contains("\\\"last_status\\\" = $1"),
+            "expected the only bound arg to be $1 (counter migration), was: {rust}"
+        );
+    }
+
+    #[test]
+    fn codegen_orm_where_date_arithmetic_and_db_now_o3() {
+        // O3 — `m.field.plus_seconds(m.other) < sql.now()` translates to
+        // `("field" + make_interval(secs => "other")) < NOW()`.
+        let src = "@table(\"monitors\") type Monitor {\n  \
+                       @primary id: Int = 0\n  \
+                       last_check_at: Str\n  \
+                       interval_secs: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = Monitor.where(fn(m) => m.last_check_at.plus_seconds(m.interval_secs) < sql.now()).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("make_interval(secs => \\\"interval_secs\\\")"),
+            "expected make_interval date arithmetic, was: {rust}"
+        );
+        assert!(
+            rust.contains("< NOW()"),
+            "expected sql.now() → NOW() in the WHERE, was: {rust}"
+        );
+    }
+
+    #[test]
+    fn codegen_db_now_bare_call_errors_with_orm_hint() {
+        // Bare `sql.now()` outside an ORM context has no representation.
+        let src = "async fn boot() -> Result<Null> {\n  \
+                       let _x = sql.now()\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("expected codegen error");
+        assert!(
+            err.to_string().contains(".update") || err.to_string().contains(".where"),
+            "expected an ORM-context hint, was: {err:?}"
         );
     }
 

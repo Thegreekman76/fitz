@@ -4431,6 +4431,22 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // O1/O3 (v0.32.0) — `sql` module with `now()`/`raw(...)` SQL
+        // expression helpers for the ORM. Same `Type::Any` pattern as
+        // db/jwt/hash: `sql.now()` → SqlExpr and `sql.raw(s)` → SqlExpr
+        // used inside `.update({...})` values and `.where(...)`
+        // predicates. Dedicated namespace so the conventional
+        // `let db = db.connect(...)` binding doesn't shadow it.
+        self.scopes[0].insert(
+            "sql".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // Mini-fase HTTP client (2026-06-18) — `http` module always
         // available. Same `Type::Any` pattern as jwt/hash/auth/db/log:
         // the exact signature of `http.get(url) -> Future<Result<HttpClientResponse>>`

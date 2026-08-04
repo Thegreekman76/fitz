@@ -700,6 +700,16 @@ pub enum Value {
     /// canonical format `xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx`
     /// (lowercase, with dashes). Structural equality.
     Uuid(uuid::Uuid),
+
+    /// O1 (ORM SQL expressions) — a raw SQL fragment produced by
+    /// `db.now()` / `db.raw("...")`. It is NOT a normal value: its
+    /// only purpose is to flow through the `Map` of an ORM
+    /// `.update({...})` so the marshaling inlines it verbatim in the
+    /// `SET` clause (`SET col = NOW()`) instead of binding a `$N`
+    /// placeholder. Un-parameterised: `db.raw(s)` trusts the caller
+    /// (same model as `conn.exec`). Not JSON-serialisable, not
+    /// printable in normal code. Structural equality on the string.
+    SqlExpr(String),
 }
 
 /// `Value::Result` variant. Uses `Box<Value>` to avoid an
@@ -774,6 +784,7 @@ impl Value {
             Value::Date(_) => "Date",
             Value::DateTime(_) => "DateTime",
             Value::Uuid(_) => "Uuid",
+            Value::SqlExpr(_) => "SqlExpr",
             #[cfg(feature = "python")]
             Value::PyObject(_) => "PyObject",
         }
@@ -923,6 +934,7 @@ impl std::fmt::Display for Value {
             Value::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
             Value::DateTime(dt) => write!(f, "{}", dt.format("%Y-%m-%dT%H:%M:%SZ")),
             Value::Uuid(u) => write!(f, "{}", u),
+            Value::SqlExpr(sql) => write!(f, "<sql-expr {}>", sql),
             Value::NativeFn(_) => write!(f, "<native function>"),
             #[cfg(feature = "python")]
             Value::PyObject(_) => write!(f, "<python object>"),
@@ -1028,6 +1040,8 @@ impl PartialEq for Value {
             (Value::DbConn(a), Value::DbConn(b)) => Arc::ptr_eq(a, b),
             // Same criterion for QueryBuilder.
             (Value::QueryBuilder(a), Value::QueryBuilder(b)) => Arc::ptr_eq(a, b),
+            // O1 — SqlExpr: structural equality on the fragment.
+            (Value::SqlExpr(a), Value::SqlExpr(b)) => a == b,
             // Functions are not compared by value — always unequal.
             _ => false,
         }

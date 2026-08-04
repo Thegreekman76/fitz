@@ -1679,6 +1679,14 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 "QueryBuilder is not serializable to JSON — finish the chain with `.all(db)` / `.first(db)` to obtain the result".to_string(),
             );
         }
+        // O1 — SqlExpr (db.now()/db.raw()) is an ORM-only marker; it
+        // only makes sense inside a `.update({...})` Map. If it reaches
+        // the serializer, the handler returned it by mistake.
+        Value::SqlExpr(_) => {
+            return Err(
+                "SqlExpr (db.now()/db.raw()) is not serializable — it can only be used as a value inside an ORM `.update({...})`".to_string(),
+            );
+        }
         // v0.10.24 — Date/DateTime/Uuid serialize as canonical JSON
         // strings (ISO 8601 for temporals, canonical hyphenated
         // format for Uuid). Industry standard convention (JSON

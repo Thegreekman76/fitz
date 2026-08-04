@@ -9,6 +9,53 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.32.0] — 2026-08-04 — ORM: expresiones SQL (`sql.now()`/`sql.raw()`) + aritmética de fechas en `.where` (cierra O1 + O3)
+
+Cierra dos deudas del ORM detectadas construyendo fitzwatch (O1 + O3
+de la auditoría 2026-06-18), con paridad bit-a-bit `fitz run` ↔ `fitz
+build`. Documenta O4/O5/O6 como trade-off intencional.
+
+### Added
+- **Módulo `sql` con helpers de expresiones SQL para el ORM**:
+  - **`sql.now()`** → `NOW()`, usable en los valores de `.update({...})`
+    (se inlina en el `SET` sin bindear placeholder) y en predicados de
+    `.where(...)`.
+  - **`sql.raw("<fragmento>")`** → inlina el fragmento SQL verbatim en
+    `.update` (p.ej. `sql.raw("streak + 1")`,
+    `sql.raw("EXTRACT(EPOCH FROM ...)::int")`). **No parametrizado** —
+    mismo modelo de confianza que `db.exec`/`db.query` crudo; en `fitz
+    build` el argumento debe ser string literal.
+  - Namespace `sql` (no `db`) a propósito: la conexión se liga como
+    `let db = db.connect(...)`, que shadowearía el módulo `db`.
+    Paralelo a `func.now()`/`text(...)` de SQLAlchemy.
+- **Aritmética de fechas en `.where(...)`** sobre columns Date/DateTime:
+  `m.col.plus_seconds(n)` → `("col" + make_interval(secs => n))`, más
+  `minus_seconds`, `plus_minutes`/`minus_minutes`,
+  `plus_hours`/`minus_hours`, `plus_days`/`minus_days`. El argumento
+  puede ser otra columna, un literal o una var externa (se parametriza).
+- Nueva variante `Value::SqlExpr(String)`; módulo `sql` registrado en
+  el checker (`Type::Any`) + completions LSP (scope-level + after-dot).
+
+### Docs
+- `docs/db-orm.md`: §8 (`.update` con `sql.now/raw`), §7 (aritmética de
+  fechas en `.where`), §18 (limitación de fechas actualizada), §28
+  (párrafo nuevo "SQL complejo — trade-off intencional" que cierra
+  O4/O5/O6). `docs/guide.md` cap 31 + curso M6.C3 actualizados.
+- Deudas O1/O3 marcadas cerradas, O4/O5/O6 como trade-off documentado
+  en `docs/deudas-post-5b.md`.
+- Blog drafts ES/EN #12 (`12-orm-sql-expressions-fitz-*`).
+
+### Fixed / chore
+- **Extensión VSCode al día**: bump 0.27.0 → 0.32.0 con `.vsix`
+  reconstruido (cierra la deuda de la extensión rezagada desde v0.28.0;
+  bundlea el `fitz-lsp.exe` fresco con las completions nuevas).
+
+### Tests
+- 11 unit (translator evaluator + codegen + helpers) + 2 E2E reales
+  contra Postgres + 1 compile_e2e (binario nativo, conexión llamada
+  `db` para probar el caso de colisión). Suite: **3996 lib** + 161 LSP,
+  `fmt` + `clippy --all-targets -D warnings` (default + `lsp`) limpios.
+
 ## [v0.31.0] — 2026-08-03 — Phase 11.12: isomorphic SSR render-to-string (closes 11.12)
 
 ### Added — the SSR emitter now paints the exact server DOM the client-WASM hydration adopts

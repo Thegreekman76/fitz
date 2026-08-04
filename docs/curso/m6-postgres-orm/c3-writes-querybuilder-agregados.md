@@ -183,6 +183,21 @@ let n = User.where(fn(_) => true).update(db, {"active": false}).await?
 // Explícito → compila. No se confunde con un olvido.
 ```
 
+**Expresiones SQL en el `.update` (v0.32.0)** — los values también
+aceptan `sql.now()` → `NOW()` y `sql.raw("<fragmento>")` (inline
+verbatim, no parametrizado). Y el `.where(...)` soporta aritmética de
+fechas (`m.col.plus_seconds(n)` / `plus_days(n)` / etc + `sql.now()`):
+
+```fitz
+Monitor.where(fn(m) => m.id == id)
+    .update(db, {"last_seen": sql.now(), "hits": sql.raw("hits + 1")})
+    .await?
+```
+
+Es `sql.` (no `db.`) porque la conexión se liga como `let db =
+db.connect(...)`. Para SQL analítico complejo (CTEs, window functions),
+el escape hatch canónico sigue siendo `db.query(...)` crudo.
+
 ---
 
 ## Paso 4 — `.delete(db)`: borrar con guard

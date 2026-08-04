@@ -9235,6 +9235,40 @@ fn orm_qb_upd_with_where_compiles_to_binary() {
 }
 
 #[test]
+fn orm_sql_expr_and_date_arith_compila_o1_o3() {
+    // O1/O3 (v0.32.0) — `sql.raw(...)` / `sql.now()` en `.update` +
+    // aritmética de fechas (`plus_seconds`) + `sql.now()` en `.where`
+    // compilan a binario nativo. La conexión se llama `db` (el caso de
+    // colisión con el módulo) para probar que el namespace `sql` lo
+    // evita. Run-time falla por URL inválida. El nombre del test evita
+    // la cadena `update` (handler UAC de Windows sobre `*update*.exe`).
+    let (stdout, code) = build_and_run(
+        "orm_sql_expr_y_date_arith_compila",
+        "@table(\"monitors\") type Monitor {\n  \
+             @primary id: Int = 0\n  \
+             streak: Int\n  \
+             last_check_at: Str\n  \
+             interval_secs: Int\n\
+         }\n\
+         async fn run() -> Result<Int> {\n  \
+             let db = db.connect(\"mysql://x@h/d\").await?\n  \
+             let due = Monitor.where(fn(m) => m.last_check_at.plus_seconds(m.interval_secs) < sql.now()).count(db).await?\n  \
+             let n = Monitor.where(fn(m) => m.id == 1).update(db, {\"streak\": sql.raw(\"streak + 1\"), \"last_check_at\": sql.now()}).await?\n  \
+             return Ok(n + due)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "expected `err`, was: {}", stdout);
+}
+
+#[test]
 fn orm_delete_with_where_compiles_to_binary() {
     // `User.where(...).delete(db)` compila a binario. Run-time falla
     // por URL inválida.

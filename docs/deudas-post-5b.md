@@ -300,7 +300,15 @@ para slices posteriores según demanda):
     con dos aliases aplica solo el primero); resolución contra un único
     dir plano.
 
-## 🟡 Framework support gaps — surface durante fitz-liveviews kanban migration (Phase 8.5) — **ABIERTAS 2026-07-16** (Phase 11.7+ scope)
+## 🟢 Framework support gaps — surface durante fitz-liveviews kanban migration (Phase 8.5) — **K-1..K-4 CERRADAS** (verificado 2026-08-04)
+
+> **Cierre confirmado 2026-08-04**: las 4 K-debts están cerradas. K-1 y
+> K-2 se implementaron en **fitz-liveviews v0.5.0** (2026-07-16) con
+> `dispatch_to(...)` + `component_state(...)`/`set_component_state(...)`
+> (funciones de la lib en Fitz puro, no built-ins del core). K-3 y K-4
+> se cerraron en Fitz core (ver sus sub-secciones). Los "Remaining gaps
+> para Phase 11.7+" listados más abajo también están todos cerrados por
+> las Fases 11.7–11.12 (ver CLAUDE.md).
 
 **Trigger**: migración de kanban a `.fitzv` SFC (Phase 8.5 en
 `fitz-liveviews`). Post-cierre de las 6 view pipeline gaps (§9.cc +
@@ -311,7 +319,12 @@ framework features que hoy no existen. Documentado aquí para
 priorización futura — cada uno DESBLOQUEA nuevos idioms + patterns
 en fitz-liveviews.
 
-### K-1 — Event bubbling entre componentes
+### 🟢 K-1 — Event bubbling entre componentes — **CERRADO 2026-07-16** (fitz-liveviews v0.5.0)
+
+> **Cierre**: se shipeó la opción (a) recomendada — API explícita
+> `dispatch_to(component_name, instance_id, event, payload) -> Bool` en
+> `fitz-liveviews/src/lib.fitz` (6 tests). El texto original queda como
+> registro histórico del diseño.
 
 **Síntoma**: cuando `CardEditor.save` fires con `payload["text"]`,
 el `Board` component debería recibir el evento también (para
@@ -347,7 +360,14 @@ composability.
 **Recomendación**: (a) primero (explicit `dispatch_to`), (b) si
 demand aparece.
 
-### K-2 — Cross-component state read/write API
+### 🟢 K-2 — Cross-component state read/write API — **CERRADO 2026-07-16** (fitz-liveviews v0.5.0)
+
+> **Cierre**: se shipearon los dos built-ins como PAIR —
+> `component_state(name, id) -> Any` (snapshot) +
+> `set_component_state(name, id, new_state) -> Bool` en
+> `fitz-liveviews/src/lib.fitz` (6 tests). Matiz de diseño documentado:
+> `set_component_state` escribe pero NO dispara re-render solo — el
+> caller llama `component(name, id).raw` + `ws.broadcast(...)`.
 
 **Síntoma**: parent handler quiere leer `Board.cards[i]` (Board
 componenet's state) para propagar CardEditor's save. Hoy component
@@ -3258,9 +3278,16 @@ Pre-fix: 12 errores rustc, 6 símbolos faltantes (`__fitz_otel_is_enabled`, `__f
 
 ---
 
-## 🟡 Hallazgos del codegen del Bloque 5 HTTP client — 3 deudas residuales NO bloqueantes (2026-06-18)
+## 🟢 Hallazgos del codegen del Bloque 5 HTTP client — 3 deudas residuales — **RESUELTAS/N-A (verificado 2026-08-04)**
 
 Descubiertas al validar bit-a-bit `fitz run` ↔ `fitz build` sobre los 4 ejemplos runnable `17e/f/g/h`. Documentadas con workaround idiomático conocido para cada caso; el ejemplo respectivo aplica el workaround en línea con comentario explicativo. Ninguna bloquea la mini-tanda HTTP client.
+
+> **Estado al 2026-08-04**: las tres quedan resueltas. #1 (`?` top-level)
+> **no es bug** — la regla 5.3.3 es deliberada. #2 (for/await en `@cron`)
+> **CERRADA v0.18.1**. #3 (Map heterogéneo en `return <status>`) **CERRADA**
+> — el detector `program_uses_fitz_value` ya walkea `Stmt::ReturnStatus`
+> (`src/codegen.rs`), así que `return 400 { "ok": false, ... }` activa
+> `__FitzValue` correctamente.
 
 ### 1. `?` top-level rechazado por el codegen (esperado por la regla del checker 5.3.3)
 
@@ -3328,9 +3355,16 @@ async fn dispatch_all(channels: List<NotificationChannel>, payload: Map<Str, Str
 
 Ahora compila bit-a-bit con `fitz build`. Cap 17h y otros ejemplos guía que tenían workarounds documentados pueden refactorearse al patrón canónico (deuda menor, cosmética).
 
-### 3. Map literal heterogéneo (Bool + Str) en `return <status> { ... }` rompe el codegen
+### 3. Map literal heterogéneo (Bool + Str) en `return <status> { ... }` — **CERRADO (verificado 2026-08-04)**
 
-**Síntoma**: handler HTTP que retorna un status custom con Map literal mezclando Bool y Str rompe el codegen:
+> **Cierre**: el detector `program_uses_fitz_value` (`src/codegen.rs`) ya
+> walkea el body de handlers con status custom — `stmt_uses_fv` maneja
+> `Stmt::ReturnStatus` y `expr_uses_fv` sobre `Expr::Map` invoca
+> `map_is_heterogeneous(pairs)`. Un `return 400 { "ok": false, "error":
+> "x" }` activa `uses_fitz_value=true` y el `enum __FitzValue` se emite.
+> El workaround de homogeneizar a `Map<Str, Str>` ya no es necesario.
+
+**Síntoma (histórico)**: handler HTTP que retorna un status custom con Map literal mezclando Bool y Str rompía el codegen:
 
 ```fitz
 @post("/webhook")
@@ -3769,7 +3803,17 @@ let n = match result {
 
 ---
 
-## 🟡 ORM nativo — gaps detectados durante fitzwatch (2026-06-18)
+## 🟢 ORM nativo — gaps detectados durante fitzwatch — **O1-O6 RESUELTOS** (2026-06-18 → v0.32.0)
+
+> **Estado al v0.32.0 (2026-08-04)**: los 6 gaps quedan resueltos. **O2**
+> (migraciones) cerrada por la deuda 10.6. **O1** (`sql.now()`/`sql.raw()`
+> en `.update`) y **O3** (aritmética de fechas en `.where` +
+> `sql.now()`) implementados en v0.32.0 con paridad `fitz run` ↔ `fitz
+> build` (11 unit + 2 E2E real Postgres + 1 compile_e2e). **O4/O5/O6**
+> (agregaciones complejas / CTEs / JOINs custom) documentados como
+> **trade-off intencional** — `db.query` crudo es el escape hatch
+> canónico (párrafo nuevo en `docs/db-orm.md` §28). El texto de abajo
+> queda como registro histórico.
 
 > **Auditoría hermana de la cosecha codegen** (arriba). Durante el
 > desarrollo de **fitzwatch** (`d:\fitzwatch\`, status page +
@@ -3785,7 +3829,12 @@ let n = match result {
 > [`docs/db-orm.md`](db-orm.md) y replicado en los boilerplates
 > `api-orm-full`/`taskhub`/`api-multi-tenant`.
 
-### O1 — `.update({...})` no acepta expresiones SQL como `NOW()` / `EXTRACT`
+### 🟢 O1 — `.update({...})` con expresiones SQL (`NOW()` / `EXTRACT`) — **CERRADO v0.32.0**
+
+> **Cierre**: `sql.now()` → `NOW()` y `sql.raw("<fragmento>")` (inline
+> verbatim, no parametrizado) usables en los valores de `.update({...})`
+> — se insertan en el `SET` sin bindear placeholder. Namespace `sql`
+> (no `db`, que la conexión shadowea). Ver `docs/db-orm.md` §8.
 
 **Síntoma**: el ORM `.update(conn, {...})` solo acepta valores literales o variables Fitz. Para `last_check_at = NOW()` o `duration_secs = EXTRACT(EPOCH FROM (NOW() - started_at))::int` hay que bajar a `conn.exec(SQL crudo, [args])`.
 
@@ -3801,9 +3850,21 @@ let _ = conn.exec(
 
 **Severity**: Medium. **Fix sugerido**: permitir expresiones whitelisted en el Map del `.update({...})`, tipo `{"last_check_at": db.now(), "count": db.raw("count + 1")}` o helpers similares. Otra opción más quirúrgica: aceptar strings prefijados con `SQL!` que el ORM trata como expresión cruda (similar a `sqlalchemy.func.now()`). ~80-120 LoC.
 
-### O2 — Sin migrations automáticas (`fitz db diff`/`migrate`)
+### 🟢 O2 — Migrations automáticas (`fitz db diff`/`migrate`) — **CERRADA (verificado 2026-08-04)**
 
-**Síntoma**: cualquier proyecto serio que usa ORM nativo tiene que mantener el SQL crudo del `CREATE TABLE` en un módulo aparte (`schema.fitz` en fitzwatch) y llamarlo al boot del main con `init_schema().await`. El ORM declara los `@table` types pero no genera ni el DDL inicial ni los diffs cuando los types cambian.
+> **Cierre (deuda 10.6)**: se implementó un subsistema de migraciones
+> completo, mucho más allá de `diff`/`migrate`. Módulo `src/migrations.rs`
+> (~5485 LoC, "Phase 10.6 — Automatic ORM migrations"): introspección PG,
+> schema desde tipos `@table`, algoritmo de diff, DDL, tracking table
+> `_fitz_migrations`, severidad `Safe/Risky/Destructive`, migraciones
+> `.fitz` nativas, composite PK, CHECK constraints, expression indexes.
+> CLI `fitz db`: `diff`/`migrate`/`status`/`new`/`rollback`/`check`/
+> `history`/`squash`/`stamp`/`inspect` (`src/main.rs`). Documentado en el
+> curso M6.C6 (`docs/curso/m6-postgres-orm/c6-migraciones-fitz-db.md`) +
+> ejemplo runnable + tests en `tests/db_real_postgres.rs`. El texto de
+> abajo queda como registro histórico del gap original.
+
+**Síntoma (histórico)**: cualquier proyecto serio que usa ORM nativo tenía que mantener el SQL crudo del `CREATE TABLE` en un módulo aparte (`schema.fitz` en fitzwatch) y llamarlo al boot del main con `init_schema().await`. El ORM declara los `@table` types pero no generaba ni el DDL inicial ni los diffs cuando los types cambian.
 
 **Repro fitzwatch** (`schema.fitz` → 5 `CREATE TABLE IF NOT EXISTS`).
 
@@ -3811,7 +3872,13 @@ let _ = conn.exec(
 
 **Severity**: High (impacto al ecosistema entero). **Fix sugerido**: **deuda 10.6 ya conocida** — `fitz db diff` + `fitz db migrate`. Mini-fase dedicada cuando la cosecha codegen cierre — paralelo a Diesel CLI / Alembic / Prisma migrate. NO bloquea la cosecha; queda como deuda visible en el roadmap.
 
-### O3 — Aritmética de fechas no soportada en `.where(closure)`
+### 🟢 O3 — Aritmética de fechas en `.where(closure)` — **CERRADO v0.32.0**
+
+> **Cierre**: `sql.now()` + métodos de intervalo `m.col.plus_seconds(n)`
+> / `minus_seconds` / `plus_minutes`/`minus_minutes` /
+> `plus_hours`/`minus_hours` / `plus_days`/`minus_days` →
+> `("col" ± make_interval(<unit> => <n>))`. El argumento puede ser otra
+> columna, un literal o una var externa. Ver `docs/db-orm.md` §7.
 
 **Síntoma**: filtros tipo "monitores con `last_check_at + interval_secs < NOW()`" no se pueden expresar con el translator AST→SQL del `.where(...)`. Sin SQL crudo, hay que cargar TODOS los monitores activos y filtrar en aplicación con date arithmetic JS-style — N queries ineficientes.
 
@@ -3826,6 +3893,15 @@ let rows = conn.query(
 **Workaround user-side**: `conn.query` crudo.
 
 **Severity**: Medium. **Fix sugerido**: extender el translator `.where(...)` para soportar operadores de fecha (método tipo `m.last_check_at.add_seconds(m.interval_secs) < db.now()` con helpers `db.now()` / `db.add_interval(...)`). Probablemente paralelo a la deuda del tipo nativo `DateTime` mencionada en fitzwatch DEUDA.md. ~100-150 LoC (junto con O1 comparten translator).
+
+### 🟢 O4/O5/O6 — SQL complejo (agregaciones / CTEs / JOINs custom) — **DOCUMENTADO como trade-off (v0.32.0)**
+
+> **Cierre (doc)**: `docs/db-orm.md` §28 suma la sub-sección "SQL
+> complejo — trade-off intencional": agregaciones condicionales, CTEs,
+> window functions y JOINs con shape custom quedan intencionalmente en
+> el escape hatch `db.query`/`db.exec` crudo, exactamente como Diesel
+> (`sql_query`) y SQLAlchemy (`text()`). No es un gap a cerrar. El
+> texto original de O4/O5/O6 queda abajo como registro.
 
 ### O4 — Agregaciones complejas (`COUNT` + `SUM(CASE WHEN)` + JOINs + GROUP BY)
 
@@ -3875,18 +3951,18 @@ let rows = conn.query("""
 
 | # | Gap | Sev | Workaround user | Fix sugerido / decisión |
 |---|---|---|---|---|
-| O1 | `.update()` con `NOW()`/`EXTRACT` | Medium | ✅ `conn.exec` crudo | helpers `db.now()`/`db.raw(...)` o tipo `SQL!` strings |
-| O2 | Sin migrations automáticas | High | ✅ `CREATE TABLE IF NOT EXISTS` al boot | deuda 10.6 ya conocida — `fitz db diff`/`migrate` |
-| O3 | Aritmética de fechas en `.where` | Medium | ✅ `conn.query` crudo | helpers `db.now()`/`db.add_interval(...)` (junto con O1) |
-| O4 | Agregaciones complejas (SUM/CASE) | Low | ✅ `conn.query` crudo | documentar como trade-off, no cerrar |
-| O5 | CTEs + window functions + Postgres-specifics | Low | ✅ `conn.query` crudo | documentar como trade-off, no cerrar |
-| O6 | JOINs custom con `SELECT` alias | Low | ✅ `conn.query` crudo + tipo manual | sub-case de O4/O5 — escape hatch canónico |
+| ~~O1~~ | ~~`.update()` con `NOW()`/`EXTRACT`~~ | ✅ **CERRADO v0.32.0** | — | `sql.now()` / `sql.raw(...)` inline en `.update` |
+| ~~O2~~ | ~~Sin migrations automáticas~~ | ✅ **CERRADA** | — | `src/migrations.rs` + `fitz db diff/migrate/rollback/check/...` (deuda 10.6) |
+| ~~O3~~ | ~~Aritmética de fechas en `.where`~~ | ✅ **CERRADO v0.32.0** | — | `sql.now()` + `m.col.plus_seconds(n)`/`plus_days(n)`/... |
+| ~~O4~~ | ~~Agregaciones complejas (SUM/CASE)~~ | ✅ **DOC** | `db.query` crudo | trade-off intencional (db-orm.md §28) |
+| ~~O5~~ | ~~CTEs + window functions~~ | ✅ **DOC** | `db.query` crudo | trade-off intencional (db-orm.md §28) |
+| ~~O6~~ | ~~JOINs custom con `SELECT` alias~~ | ✅ **DOC** | `db.query` crudo | trade-off intencional (db-orm.md §28) |
 
-**Plan de ataque sugerido** (después de cerrar la cosecha codegen — son independientes):
+**Plan de ataque** (todo resuelto al v0.32.0):
 
-1. **O1 + O3 — helpers de expresiones SQL en ORM**: nueva sub-fase del ORM que suma `db.now()` / `db.add_interval(...)` / `db.raw(...)` para usar adentro de `.update({...})` y `.where(closure)`. ~150-200 LoC. Cierra los dos en un solo bloque coordinado porque comparten el translator.
-2. **O2 — migrations automáticas**: deuda 10.6, mini-fase dedicada (proyecto separado, paralelo a Diesel CLI / Alembic / Prisma migrate). ~500-1000 LoC. Cuando entre, beneficia al ecosistema entero. **No bloquea la cosecha codegen ni fitzwatch**.
-3. **O4 + O5 + O6 — documentación reforzada**: actualizar `docs/db-orm.md` y `docs/guide.md` cap 31 con un párrafo explícito tipo "estos tres casos son intencionales — `conn.query` crudo es el escape hatch canónico, paralelo a Diesel/SQLAlchemy". Sumar a `docs/curso/m6/` también. ~100 LoC docs.
+1. ~~**O1 + O3 — helpers de expresiones SQL en ORM**~~: ✅ **CERRADO v0.32.0** — `sql.now()` / `sql.raw(...)` en `.update` + `sql.now()` / métodos de intervalo en `.where`, un bloque coordinado (comparten el translator, paridad `run` ↔ `build`).
+2. ~~**O2 — migrations automáticas**~~: ✅ **CERRADA** — deuda 10.6 (`src/migrations.rs` + `fitz db diff/migrate/rollback/check/...`).
+3. ~~**O4 + O5 + O6 — documentación reforzada**~~: ✅ **CERRADO v0.32.0** — párrafo "SQL complejo — trade-off intencional" en `docs/db-orm.md` §28.
 
 **Origen de la auditoría**: balance ORM:SQL-crudo de fitzwatch terminó en aproximadamente **35:65** en términos de queries. La filosofía es la misma que en los boilerplates `api-orm-full` / `taskhub` / `api-multi-tenant`: ORM para CRUD básico, SQL crudo para todo lo demás. La tabla por módulo de fitzwatch está en `d:\fitzwatch\NEXT-SESSION.md`.
 
