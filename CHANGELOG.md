@@ -9,6 +9,39 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.31.0] — 2026-08-03 — Phase 11.12: isomorphic SSR render-to-string (closes 11.12)
+
+### Added — the SSR emitter now paints the exact server DOM the client-WASM hydration adopts
+
+Cierra **Fase 11.12 entera**: la mitad server del render isomórfico. Un
+`.fitzv` marcado `hydrate` que compila a SSR (`src/view/codegen_ssr.rs`) ahora
+emite el HTML byte-por-byte que el adopt walk client-WASM (Fase 11.12 slices
+1–4) espera — antes ese HTML se escribía a mano en cada ejemplo. Cuatro sub-pasos
+acumulados sobre v0.30.4 (SSR-1/2/3 fueron sin bump; SSR-4 cierra el arco):
+
+- **SSR-1** — `<script type="application/json" id="__flv_state_<Comp>">` con el
+  state serializado (`to_json(state)`) al final del render del root.
+- **SSR-2** — markers `<!--fi-->` alrededor de cada interpolación en contexto
+  mixto (`Hello, {name}!`), para que el browser pinte text nodes distintos.
+- **SSR-3** — anchors `<!--fr-->` alrededor de cada región `{#if}`/`{#for}`
+  top-level, alineados con `keep_region_index()` del build walk.
+- **SSR-4** (este release) — composición: el padre hidratable envuelve cada
+  `<Child />` en `<div class="__fitz-child-<Name>">` e inlina el contenido de
+  slot provisto por el padre (renderizado en **scope del padre** — sus state
+  fields + handlers → `data-flv-*`) en el `<slot>` del hijo, threadeado como el
+  argumento `__slot: Str` del render fn del hijo. El root emite su state script;
+  un hijo compuesto NO (su state se re-deriva de props en el cliente). Named
+  slots en SSR quedan diferidos (puntero claro).
+
+**Sin sintaxis nueva** (el marcador `hydrate` ya existía desde v0.30.4).
+Cambio interno del emitter SSR: no-hidratables byte-idénticos; el WASM `lib.rs`
+de los ejemplos no cambia. Validado en Chrome real 10/10 sirviendo el HTML
+**generado** por el render fn (no el hand-authored): witnesses sobreviven la
+adopción cross-boundary, state restaurado, eventos de slot (padre) y de hijo
+funcionan, el state del hijo persiste el re-render del padre. 3985 unit
+(+6 `ssr4_*`), fmt + clippy `--lib --tests --bins -D warnings` limpios (default
+y `--features lsp`).
+
 ## [v0.30.3] — 2026-08-02 — Phase 11.12 slice 3: hydration restores composite state
 
 ### Added — the `<script>` state payload now restores `List` / `Map` / `Nullable` / nominal fields

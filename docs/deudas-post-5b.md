@@ -38,11 +38,12 @@ de ints), `Map` con clave nominal (codegen no compila vs runtime error). Un
 `to_json` sobre un tipo exótico no serializable da error de rustc (menos
 amigable que el error Fitz del intérprete).
 
-## 🟡 Fase 11.12 slice 4 — deudas residuales de la hidratación de composición (ABIERTAS, 2026-08-02)
+## 🟡 Fase 11.12 — deudas residuales de la hidratación de composición (ABIERTAS; render isomórfico SSR CERRADO en v0.31.0)
 
 Derivadas del cierre de 11.12 slice 4 (hidratación naive de `<Child />` + `<slot>`
-con opt-in `component App hydrate`). Ninguna bloquea el uso real del slice; son
-mejoras/prioridades para próximas iteraciones.
+con opt-in `component App hydrate`) y del render isomórfico SSR (SSR-1..4,
+CERRADO v0.31.0, ver #5). Ninguna bloquea el uso real; son mejoras/prioridades
+para próximas iteraciones.
 
 1. **Hidratación universal vs opt-in (mejora de UX/perf para el cliente)** — hoy
    la hidratación de composición es **opt-in** (marcador `hydrate` en el root)
@@ -73,18 +74,28 @@ mejoras/prioridades para próximas iteraciones.
    gatear el import a "algún componente tiene style" (cambia el byte-output de los
    crates style-less → requiere re-baselinar esos ejemplos).
 
-5. **Render-a-string isomórfico del lado SSR (avanzando por slices)** — SSR-1 hizo
-   que el render fn emita el `<script id="__flv_state_*">` de state, SSR-2 los
-   markers `<!--fi-->`/`<!--/fi-->` de texto mixto, y **SSR-3 los anchors de
-   regiones `<!--fr-->`/`<!--/fr-->`** (completa `hydrate-regions` isomórfico
-   end-to-end: el HTML SSR generado por el render fn se validó en Chrome real,
-   11/11). Falta: el wrapper `__fitz-child-<Name>` + slot content inline (SSR-4 →
-   completa `hydrate-composition`). Los markers se emiten sólo bajo el marcador
-   `hydrate` (igual gate que el `<script>` de SSR-1a): un keep-node auto-hidratante
-   **sin** marcador no recibe markers isomórficos — ligado a la residual #1
-   (hidratación universal vs opt-in). El `index.html` de los demos hasta SSR-4
-   sigue hand-authored como forma clean/tight (cross-repo con fitz-liveviews para
-   el shell); el smoke Chrome sirve el HTML generado real.
+5. **Render-a-string isomórfico del lado SSR — 🟢 CERRADO (v0.31.0, 2026-08-03)** —
+   SSR-1 hizo que el render fn emita el `<script id="__flv_state_*">` de state,
+   SSR-2 los markers `<!--fi-->`/`<!--/fi-->` de texto mixto, SSR-3 los anchors de
+   regiones `<!--fr-->`/`<!--/fr-->`, y **SSR-4** el wrapper `<div
+   class="__fitz-child-<Name>">` + slot content inline (contenido de slot del
+   padre renderizado en scope del padre → arg `__slot: Str` del render fn del
+   hijo) — completa `hydrate-composition` isomórfico end-to-end (Chrome real 10/10
+   sobre el HTML generado por `App_render`, no el hand-authored). El hijo compuesto
+   NO emite su propio `<script id="__flv_state_Card">` (su state se re-deriva de
+   props en el cliente). Los markers/wrapper se emiten sólo bajo el marcador
+   `hydrate` (mismo gate que el `<script>` de SSR-1a): un keep-node auto-hidratante
+   **sin** marcador no recibe output isomórfico — ligado a la residual #1
+   (hidratación universal vs opt-in). El `index.html` de los demos sigue como
+   referencia clean/tight; el smoke Chrome sirve el HTML generado real. **Cierra
+   Fase 11.12 entera.** Deudas residuales NUEVAS de SSR-4 (ninguna bloquea):
+   (a) **named slots en SSR** (`<slot name="X">`) diferidos con puntero claro —
+   requieren un `__slot_<name>` param por slot; el demo usa solo el slot default;
+   (b) **`<Child />` anidado dentro de slot content** — recurre por el mismo path
+   pero sin test/ejemplo dedicado; (c) **caveat naive** — un cambio de state
+   re-renderiza el árbol wholesale, así que el nodo del hijo adoptado se
+   reconstruye (identidad del nodo perdida) aunque su **state** persista vía el
+   cache `__child_slot_<n>` (documentado; mismo modelo que el WASM slice 4).
 
 ## 🟢 Límites de recursos en el evaluador (steps + depth) — fase 1 CERRADA (2026-07-27)
 

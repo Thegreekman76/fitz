@@ -61,8 +61,16 @@ test drives a real `wasm-pack build`.
 
 ## Authoring the server DOM
 
-`index.html` hand-authors the server-painted markup (there is no isomorphic SSR
-render-to-string yet — a later 11.12 unification). It must match the client
-build walk exactly: the `__fitz-child-Card` wrapper, the slot content inlined at
-the child's `<slot />`, and significant text tight after each element's open tag
-(whitespace between elements is skipped by the adopt cursor).
+`index.html` hand-authors the server-painted markup as a readable reference. It
+matches the client build walk exactly: the `__fitz-child-Card` wrapper, the slot
+content inlined at the child's `<slot />`, and significant text tight after each
+element's open tag (whitespace between elements is skipped by the adopt cursor).
+
+Since **Phase 11.12 SSR-4** the isomorphic SSR emitter
+(`src/view/codegen_ssr.rs`) generates this exact shape: `App_render(App { ... })`
+emits the `<div class="__fitz-child-Card">` wrapper, threads the parent-rendered
+slot content into `Card_render`'s `__slot: Str` argument, and appends the
+`__flv_state_App` restore script (the composed `Card` gets no script of its own —
+its state is re-derived from props on the client). So a real Fitz HTTP server (or
+a build-time prerender) can now produce the server DOM instead of hand-authoring
+it; `index.html` is kept as the readable contract.

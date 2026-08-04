@@ -962,7 +962,19 @@ The pipeline lives entirely under `src/view/`:
   SSR target: a `type <Component>` with the state fields, a
   `<Component>_render(state)` fn producing the HTML, one
   `<Component>_<event>(state, payload)` per event, and a
-  `flv_register(...)` at boot (auto-injected via §9.bb).
+  `flv_register(...)` at boot (auto-injected via §9.bb). Since
+  Phase 11.12 (v0.31.0) a component marked `hydrate` emits the
+  **isomorphic render-to-string** the client-WASM hydration adopt
+  walk expects: a `<script id="__flv_state_<Comp>">` state payload,
+  `<!--fi-->` markers around mixed-context interpolations,
+  `<!--fr-->` anchors around `{#if}`/`{#for}` regions, and — for
+  composition — a `<div class="__fitz-child-<Name>">` wrapper with
+  the parent-provided slot content inlined at the child's `<slot>`
+  (threaded as the child render fn's `__slot: Str` arg). The
+  `hydrate` marker propagates to the whole tree; a composed child
+  suppresses its own state script (its state is re-derived from
+  props on the client). Non-hydratable components stay
+  byte-identical.
 - **`view/codegen_wasm.rs`** — emits Rust source for the WASM
   target: a struct with `RefCell` fields, a `render()` method
   that mutates the DOM via `web-sys`, event handlers that

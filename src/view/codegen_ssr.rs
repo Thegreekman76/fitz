@@ -225,6 +225,19 @@ pub type SsrEmitResult<T> = Result<T, SsrEmitError>;
 /// is auto-generated but still developer-inspectable — the
 /// counter demo baseline pattern from 11.5).
 pub fn emit_module_ssr(file: &ExpandedViewFile) -> SsrEmitResult<String> {
+    // Phase 11.12 SSR-4 — propagate the root `hydrate` marker across the whole
+    // component tree (parallel to the WASM `propagate_root_hydrate`) BEFORE any
+    // emit, so a composed child emits the isomorphic `fi`/`fr` markers its
+    // client adopt walk expects. No component carries the marker → no-op → the
+    // rest of the emit is byte-identical to pre-SSR-4.
+    let propagated;
+    let file: &ExpandedViewFile = if file.components.iter().any(|c| c.hydrate) {
+        propagated = propagate_hydrate_clone(file);
+        &propagated
+    } else {
+        file
+    };
+
     let mut out = String::new();
     emit_module_header(&mut out);
     // §9.dd (2026-07-16) — Emit `from X import Y1, Y2, ...` for each
@@ -259,10 +272,133 @@ pub fn emit_module_ssr(file: &ExpandedViewFile) -> SsrEmitResult<String> {
         })
         .collect();
 
+    // Phase 11.12 SSR-4 — a component composed as a `<Child />` by any sibling
+    // derives its state from props on the client (the parent re-applies props at
+    // adopt time), so it must NOT emit its own `<script id="__flv_state_<Comp>">`
+    // restore payload — only the un-composed root does. This also avoids
+    // duplicate `id` collisions when the same child is composed more than once.
+    let composed = collect_composed_child_names(file);
+
     for component in &file.components {
-        emit_component_ssr_into(component, &file.components, &imported_names, &mut out)?;
+        let emit_state_script = !composed.contains(component.name.as_str());
+        emit_component_ssr_into(
+            component,
+            &file.components,
+            &imported_names,
+            emit_state_script,
+            &mut out,
+        )?;
     }
     Ok(out)
+}
+
+/// Phase 11.12 SSR-4 — clone `file` with the `hydrate` marker set on every
+/// component. Called only when some component already carries the marker, so
+/// the clone is never taken on the common (non-hydratable) path.
+fn propagate_hydrate_clone(file: &ExpandedViewFile) -> ExpandedViewFile {
+    let mut f = file.clone();
+    for c in &mut f.components {
+        c.hydrate = true;
+    }
+    f
+}
+
+/// Phase 11.12 SSR-4 — collect the names of every component composed as a
+/// `<Child />` anywhere in the file (descending into Element / `{#if}` /
+/// `{#for}` / `<slot>` fallback / nested slot content), so their render fns
+/// suppress the per-component hydration state script.
+fn collect_composed_child_names(file: &ExpandedViewFile) -> std::collections::HashSet<String> {
+    fn walk(node: &ExpandedTemplateNode, out: &mut std::collections::HashSet<String>) {
+        match node {
+            ExpandedTemplateNode::ChildComponent {
+                name, slot_content, ..
+            } => {
+                out.insert(name.clone());
+                for c in slot_content {
+                    walk(c, out);
+                }
+            }
+            ExpandedTemplateNode::Element { children, .. } => {
+                children.iter().for_each(|c| walk(c, out))
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().for_each(|c| walk(c, out));
+                if let Some(els) = else_children {
+                    els.iter().for_each(|c| walk(c, out));
+                }
+            }
+            ExpandedTemplateNode::For { children, .. } => {
+                children.iter().for_each(|c| walk(c, out))
+            }
+            ExpandedTemplateNode::Slot { fallback, .. } => {
+                fallback.iter().for_each(|c| walk(c, out))
+            }
+            _ => {}
+        }
+    }
+    let mut set = std::collections::HashSet::new();
+    for c in &file.components {
+        if let Some(t) = &c.template {
+            for root in &t.roots {
+                walk(root, &mut set);
+            }
+        }
+    }
+    set
+}
+
+/// Phase 11.12 SSR-4 — the `<slot />` holes a component declares. `has_default`
+/// is set by a bare `<slot />`; `named` lists each `<slot name="X" />`. Mirrors
+/// the WASM `component_slot_set` (kept local to avoid cross-module coupling).
+struct SsrSlotShape {
+    has_default: bool,
+    named: Vec<String>,
+}
+
+fn ssr_slot_shape(component: &ExpandedComponent) -> SsrSlotShape {
+    fn walk(node: &ExpandedTemplateNode, shape: &mut SsrSlotShape) {
+        match node {
+            ExpandedTemplateNode::Slot { name, .. } => match name {
+                None => shape.has_default = true,
+                Some(n) => {
+                    if !shape.named.contains(n) {
+                        shape.named.push(n.clone());
+                    }
+                }
+            },
+            ExpandedTemplateNode::Element { children, .. } => {
+                children.iter().for_each(|c| walk(c, shape))
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().for_each(|c| walk(c, shape));
+                if let Some(els) = else_children {
+                    els.iter().for_each(|c| walk(c, shape));
+                }
+            }
+            ExpandedTemplateNode::For { children, .. } => {
+                children.iter().for_each(|c| walk(c, shape))
+            }
+            _ => {}
+        }
+    }
+    let mut shape = SsrSlotShape {
+        has_default: false,
+        named: Vec::new(),
+    };
+    if let Some(t) = &component.template {
+        for root in &t.roots {
+            walk(root, &mut shape);
+        }
+    }
+    shape
 }
 
 /// Emit one component's classic Fitz source. Rarely useful in
@@ -282,7 +418,8 @@ pub fn emit_component_ssr(component: &ExpandedComponent) -> SsrEmitResult<String
     let siblings = std::slice::from_ref(component);
     // K-4: single-component emit sees no imports (no file wrapper);
     // tests exercising this path can't reference imported fns.
-    emit_component_ssr_into(component, siblings, &[], &mut out)?;
+    // SSR-4: a lone component is never composed → it emits its own state script.
+    emit_component_ssr_into(component, siblings, &[], true, &mut out)?;
     Ok(out)
 }
 
@@ -379,6 +516,10 @@ fn emit_component_ssr_into(
     component: &ExpandedComponent,
     siblings: &[ExpandedComponent],
     imported_names: &[&str],
+    // Phase 11.12 SSR-4 — `false` for a component composed as a `<Child />`
+    // elsewhere (its state is re-derived from props on the client), so its
+    // render fn skips the `<script id="__flv_state_<Comp>">` payload.
+    emit_state_script: bool,
     out: &mut String,
 ) -> SsrEmitResult<()> {
     // Phase 11.10 slice 4 — `derived` blocks are a client-WASM capability so
@@ -392,7 +533,7 @@ fn emit_component_ssr_into(
         });
     }
     emit_state_type(component, out)?;
-    emit_render_fn(component, siblings, imported_names, out)?;
+    emit_render_fn(component, siblings, imported_names, emit_state_script, out)?;
     for event in &component.events {
         emit_event_fn(component, event, imported_names, out)?;
     }
@@ -434,17 +575,43 @@ fn emit_render_fn(
     component: &ExpandedComponent,
     siblings: &[ExpandedComponent],
     imported_names: &[&str],
+    emit_state_script: bool,
     out: &mut String,
 ) -> SsrEmitResult<()> {
     let state_field_names: Vec<&str> = component.state.iter().map(|f| f.name.as_str()).collect();
 
+    // Phase 11.12 SSR-4 — a component that declares a default `<slot />` renders
+    // parent-provided slot content, threaded in as a `__slot: Str` parameter
+    // (the parent computes the slot HTML in its own scope and passes it at the
+    // composition site). Named slots need one `__slot_<name>` param each — a
+    // later slice; reject for now.
+    let slots = ssr_slot_shape(component);
+    if !slots.named.is_empty() {
+        return Err(SsrEmitError {
+            message: "named `<slot name=\"...\" />` is a client-WASM (`target = \
+                      \"wasm-client\"`) capability; SSR support is a later slice. Use a \
+                      single default `<slot />`."
+                .to_string(),
+            context: format!("component `{}` template", component.name),
+        });
+    }
+
     writeln!(out, "@render_for(\"{}\")", component.name).unwrap();
-    writeln!(
-        out,
-        "fn {}_render(state: {}) -> Html {{",
-        component.name, component.name
-    )
-    .unwrap();
+    if slots.has_default {
+        writeln!(
+            out,
+            "fn {}_render(state: {}, __slot: Str) -> Html {{",
+            component.name, component.name
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "fn {}_render(state: {}) -> Html {{",
+            component.name, component.name
+        )
+        .unwrap();
+    }
 
     let mut pieces: Vec<TemplatePiece> = Vec::new();
 
@@ -499,8 +666,11 @@ fn emit_render_fn(
     //
     // Gated by the explicit `hydrate` marker so components that SSR-render
     // for fitz-liveviews' WS-takeover (whose HTML diff forbids `<script>`
-    // inside the LiveView root) stay byte-identical.
-    if component.hydrate {
+    // inside the LiveView root) stay byte-identical. SSR-4: additionally
+    // suppressed for a composed child (`emit_state_script == false`) — its
+    // state is re-derived from props on the client, so a nested per-child
+    // script would be redundant (and collide on `id` across instances).
+    if component.hydrate && emit_state_script {
         let script = format!(
             "<script type=\"application/json\" id=\"__flv_state_{}\">{{to_json(state)}}</script>",
             component.name
@@ -1452,12 +1622,46 @@ fn emit_template_node_to_pieces(
             );
             Ok(())
         }
-        ExpandedTemplateNode::Slot { .. } => Err(SsrEmitError {
-            message: "`<slot />` — fallback children composition is deferred to Phase \
-                     11.7+ (composition wiring across parent/child)."
-                .to_string(),
-            context: format!("component `{}` template", component.name),
-        }),
+        // Phase 11.12 SSR-4 — a default `<slot />` renders the parent-provided
+        // slot content, threaded in as the `__slot: Str` render-fn parameter.
+        // With a fallback, `if (__slot == "") { <fallback> } else { __slot }`
+        // paints the child's own fallback only when the parent passed nothing
+        // (a self-closing `<Child />` passes `""`), mirroring the WASM
+        // `emit_slot` (`__slot None` → fallback). Named slots are rejected in
+        // `emit_render_fn` before we get here.
+        ExpandedTemplateNode::Slot { name, fallback, .. } => {
+            if name.is_some() {
+                return Err(SsrEmitError {
+                    message: "named `<slot name=\"...\" />` is a client-WASM (`target = \
+                              \"wasm-client\"`) capability; SSR support is a later slice."
+                        .to_string(),
+                    context: format!("component `{}` template", component.name),
+                });
+            }
+            if fallback.is_empty() {
+                pieces.push(TemplatePiece::Expr("__slot".to_string()));
+            } else {
+                // The fallback belongs to the CHILD, so it renders in the child's
+                // scope (the same `state_field_names` / `local_scope` /
+                // `imported_names` this render fn already uses).
+                let mut fb: Vec<TemplatePiece> = Vec::new();
+                emit_children_to_pieces(
+                    fallback,
+                    state_field_names,
+                    local_scope,
+                    imported_names,
+                    component,
+                    siblings,
+                    in_region,
+                    &mut fb,
+                )?;
+                let fb_src = serialize_pieces_as_html_arg(&fb);
+                pieces.push(TemplatePiece::Expr(format!(
+                    "if (__slot == \"\") {{ {fb_src} }} else {{ __slot }}"
+                )));
+            }
+            Ok(())
+        }
         // Phase 11.6.d — Same-file `<Child />` composition. Look
         // up the child in the sibling list, build a struct
         // literal with each supplied prop coerced to a Fitz
@@ -1495,19 +1699,6 @@ fn emit_template_node_to_pieces(
                     context: format!("component `{}` template", component.name),
                 });
             }
-            // Phase 11.7.d — `<Child>content</Child>` slot fill is a
-            // client-WASM capability (it pairs with `<slot />`, which the
-            // SSR target also defers).
-            if !slot_content.is_empty() {
-                return Err(SsrEmitError {
-                    message: format!(
-                        "slot content `<{name}>...</{name}>` — filling a child's `<slot />` \
-                         is a client-WASM (`target = \"wasm-client\"`) capability (Phase \
-                         11.7.d); it is not supported on the SSR target."
-                    ),
-                    context: format!("component `{}` template", component.name),
-                });
-            }
             let child = siblings
                 .iter()
                 .find(|c| &c.name == name)
@@ -1522,6 +1713,46 @@ fn emit_template_node_to_pieces(
                     ),
                     context: format!("component `{}` template", component.name),
                 })?;
+
+            // Phase 11.12 SSR-4 — slot fill (`<Child>content</Child>`) inlines
+            // the parent-provided content at the child's default `<slot />`. The
+            // content is rendered in the PARENT's scope (its state fields + event
+            // handlers → `data-flv-*`) and passed to the child render fn as the
+            // `__slot: Str` argument. A child with no default `<slot />` can't
+            // receive content — reject (the checker already guards this, but keep
+            // a targeted emit-time message).
+            let child_slots = ssr_slot_shape(child);
+            if !slot_content.is_empty() && !child_slots.has_default {
+                return Err(SsrEmitError {
+                    message: format!(
+                        "slot content `<{name}>...</{name}>` — component `{name}` declares \
+                         no default `<slot />` to receive it, so the content would be \
+                         dropped. Add `<slot />` to `{name}`, or use a self-closing \
+                         `<{name} />`."
+                    ),
+                    context: format!("component `{}` template", component.name),
+                });
+            }
+            // When the child declares a default `<slot />`, always pass a slot
+            // argument (possibly `""` for a self-closing `<Child />`, so the
+            // child falls back to its own `<slot>` fallback).
+            let slot_arg: Option<String> = if child_slots.has_default {
+                let mut sp: Vec<TemplatePiece> = Vec::new();
+                emit_children_to_pieces(
+                    slot_content,
+                    state_field_names,
+                    local_scope,
+                    imported_names,
+                    component,
+                    siblings,
+                    in_region,
+                    &mut sp,
+                )?;
+                Some(serialize_pieces_as_html_arg(&sp))
+            } else {
+                None
+            };
+
             let expr_src = format_child_composition(
                 child,
                 props,
@@ -1529,8 +1760,22 @@ fn emit_template_node_to_pieces(
                 state_field_names,
                 local_scope,
                 imported_names,
+                slot_arg.as_deref(),
             )?;
-            pieces.push(TemplatePiece::Expr(expr_src));
+
+            // Phase 11.12 SSR-4 — a hydratable parent wraps the child render in
+            // `<div class="__fitz-child-<Name>">`, matching the WASM build walk
+            // (`emit_child_component`) so the isomorphic client adopt
+            // (`emit_child_component_adopt`) finds the wrapper with
+            // `__flv_next_element`. Non-hydratable parents keep the bare inline
+            // splice (byte-identical to pre-SSR-4).
+            if component.hydrate {
+                push_text(pieces, &format!("<div class=\"__fitz-child-{name}\">"));
+                pieces.push(TemplatePiece::Expr(expr_src));
+                push_text(pieces, "</div>");
+            } else {
+                pieces.push(TemplatePiece::Expr(expr_src));
+            }
             Ok(())
         }
     }
@@ -1688,6 +1933,11 @@ fn format_child_composition(
     parent_state_field_names: &[&str],
     parent_local_scope: &[&str],
     parent_imported_names: &[&str],
+    // Phase 11.12 SSR-4 — the parent-rendered slot content, as a serialized
+    // classic-Fitz `Str` expression, when the child declares a default
+    // `<slot />` (passed as the second `__slot` render-fn argument). `None`
+    // when the child has no slot (byte-identical to the pre-SSR-4 call shape).
+    slot_arg: Option<&str>,
 ) -> SsrEmitResult<String> {
     let child_name = &child.name;
     let mut out = format!("{child_name}_render({child_name} {{");
@@ -1745,7 +1995,14 @@ fn format_child_composition(
     // shapes: `Child { }` (no props → all state fields use their
     // declared defaults) and `Child { count: 42, msg: "hi" }`
     // (some props supplied).
-    out.push_str(" }).raw");
+    out.push_str(" }");
+    // SSR-4: append the `__slot` argument for a child that declares a
+    // default `<slot />`.
+    if let Some(sa) = slot_arg {
+        out.push_str(", ");
+        out.push_str(sa);
+    }
+    out.push_str(").raw");
     Ok(out)
 }
 
@@ -3407,16 +3664,197 @@ component Card {
         });
     }
 
+    // Phase 11.12 SSR-4 — a bare default `<slot />` is no longer rejected: the
+    // render fn gains a `__slot: Str` param and emits it at the slot position.
     #[test]
-    fn emit_rejects_slot_citing_11_7() {
+    fn ssr4_default_slot_emits_slot_param() {
         let src = r#"component X {
   state {}
-  <template><slot /></template>
+  <template><div><slot /></div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("default <slot /> now emits");
+        assert!(
+            out.contains("fn X_render(state: X, __slot: Str) -> Html"),
+            "render fn takes __slot param:\n{out}"
+        );
+        // No fallback → the slot position emits the `__slot` argument directly.
+        assert!(
+            out.contains("(__slot)"),
+            "slot emits the __slot arg:\n{out}"
+        );
+    }
+
+    // Phase 11.12 SSR-4 — a default `<slot>fallback</slot>` emits the parent
+    // content when provided, otherwise the child's own fallback.
+    #[test]
+    fn ssr4_default_slot_with_fallback_emits_conditional() {
+        let src = r#"component X {
+  state {}
+  <template><div><slot><em>none</em></slot></div></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("slot with fallback emits");
+        assert!(
+            out.contains("if (__slot == \"\") {") && out.contains("} else { __slot }"),
+            "slot with fallback emits the conditional:\n{out}"
+        );
+        assert!(
+            out.contains("<em>none</em>"),
+            "fallback content is present:\n{out}"
+        );
+    }
+
+    // Phase 11.12 SSR-4 — named slots are still deferred on the SSR target.
+    #[test]
+    fn ssr4_named_slot_rejected() {
+        let src = r#"component X {
+  state {}
+  <template><div><slot name="header" /></div></template>
 }"#;
         let file = parse_expand(src);
         let err = emit_module_ssr(&file).unwrap_err();
-        assert!(err.message.contains("slot"), "msg: {}", err.message);
-        assert!(err.message.contains("11.7"), "msg: {}", err.message);
+        assert!(err.message.contains("named"), "msg: {}", err.message);
+    }
+
+    // Phase 11.12 SSR-4 — the full composition shape: a hydratable root `App`
+    // composing a `<Card>content</Card>` whose `Card` declares a `<slot>`. The
+    // emit must (a) wrap the child in `<div class="__fitz-child-Card">`, (b) pass
+    // the parent-rendered slot content as `Card`'s `__slot` arg, (c) give `App`
+    // (root) a state script but NOT `Card` (composed child), and (d) render the
+    // parent's `{title}` in the slot content as `state.title` (parent scope).
+    #[test]
+    fn ssr4_hydratable_composition_wraps_inlines_slot_and_scopes_script() {
+        let src = r#"component App hydrate {
+  state { title: Str = "d" }
+  <template>
+    <div class="page">
+      <Card>
+        <span class="ttl">{title}</span>
+      </Card>
+    </div>
+  </template>
+}
+
+component Card {
+  state { taps: Int = 0 }
+  <template>
+    <section class="card">
+      <div class="body"><slot /></div>
+      <span class="tn">{taps}</span>
+    </section>
+  </template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("composition + slot emit");
+
+        assert!(
+            out.contains("<div class=\\\"__fitz-child-Card\\\">"),
+            "hydratable parent wraps the child:\n{out}"
+        );
+        assert!(
+            out.contains("Card_render(Card {") && out.contains(").raw"),
+            "child composed via Card_render(...).raw:\n{out}"
+        );
+        // Card takes a __slot param (it declares a <slot />).
+        assert!(
+            out.contains("fn Card_render(state: Card, __slot: Str) -> Html"),
+            "Card render fn takes __slot:\n{out}"
+        );
+        // The slot content is rendered in the PARENT scope: `{title}` → state.title.
+        assert!(
+            out.contains("{state.title}"),
+            "slot content interp uses parent state:\n{out}"
+        );
+        // Root App gets a restore script; composed Card does not.
+        assert!(
+            out.contains("id=\\\"__flv_state_App\\\">"),
+            "root App emits its state script:\n{out}"
+        );
+        assert!(
+            !out.contains("__flv_state_Card"),
+            "composed Card must NOT emit its own state script:\n{out}"
+        );
+        // The whole tree is hydratable → Card's `{taps}` is a plain (sole-child)
+        // interp, so no `fi` markers here; but the child render fn still exists.
+        assert!(
+            out.contains("fn Card_render("),
+            "Card render fn emitted:\n{out}"
+        );
+    }
+
+    // Phase 11.12 SSR-4 — a self-closing `<Card />` where Card has a slot passes
+    // `""` so the child falls back to its own `<slot>` fallback.
+    #[test]
+    fn ssr4_self_closing_child_with_slot_passes_empty_arg() {
+        let src = r#"component App hydrate {
+  state {}
+  <template><div><Card /></div></template>
+}
+
+component Card {
+  state {}
+  <template><section><slot><em>fb</em></slot></section></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("self-closing child with slot");
+        // The composition passes an empty-string slot arg.
+        assert!(
+            out.contains("Card_render(Card { }, \"\").raw")
+                || out.contains("Card_render(Card {  }, \"\").raw"),
+            "self-closing child passes empty slot arg:\n{out}"
+        );
+    }
+
+    // Phase 11.12 SSR-4 — a NON-hydratable parent composing a slotless child
+    // stays byte-identical to the pre-SSR-4 shape: no wrapper, no slot arg.
+    #[test]
+    fn ssr4_non_hydratable_slotless_composition_byte_identical() {
+        let src = r#"component App {
+  state { n: Int = 0 }
+  <template><div><Badge count="3" /></div></template>
+}
+
+component Badge {
+  state { count: Int = 0 }
+  <template><span>{count}</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("non-hydratable slotless composition");
+        assert!(
+            !out.contains("__fitz-child-"),
+            "non-hydratable parent emits no wrapper:\n{out}"
+        );
+        assert!(
+            out.contains("Badge_render(Badge { count: 3 }).raw"),
+            "slotless child keeps the bare composition shape:\n{out}"
+        );
+        assert!(
+            !out.contains("__flv_state_"),
+            "non-hydratable tree emits no state script:\n{out}"
+        );
+    }
+
+    // Phase 11.12 SSR-4 — providing slot content to a child with no default
+    // `<slot />` is rejected at emit time (the checker also guards it).
+    #[test]
+    fn ssr4_slot_content_without_child_slot_rejected() {
+        let src = r#"component App hydrate {
+  state {}
+  <template><div><Card><span>x</span></Card></div></template>
+}
+
+component Card {
+  state {}
+  <template><section>no slot</section></template>
+}"#;
+        let file = parse_expand(src);
+        let err = emit_module_ssr(&file).unwrap_err();
+        assert!(
+            err.message.contains("no default `<slot />`"),
+            "msg: {}",
+            err.message
+        );
     }
 
     #[test]
