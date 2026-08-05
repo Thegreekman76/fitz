@@ -10356,15 +10356,26 @@ no por dependencia estricta.
   incremental) sin rewrite de codegen ni riesgo byte-compat. El runtime
   data-driven (A/B) queda como **norte futuro grande**, gatillado por la
   VM de expresiones (deuda 🟡 en `docs/deudas-post-5b.md`).
-  - **Slice-2 (follow-up):** preservación de state a través del reload
-    reusando la hidratación de v0.31.0 (serializar state al `<script
-    id="__flv_state_*">` antes del reload; hidratar después).
-  - **Follow-ups:** multi-bin wasm dev (proyectos `server` + `web`
-    fullstack — hoy caen al path clásico), re-resolver `fitz.toml` en vivo.
+  - **Slice-2 ✅ (2026-08-04) — preservación de state a través del
+    reload.** Gated por el dev-flag (`fitz dev` lo activa; `fitz build`
+    emite `lib.rs` byte-idéntico). El codegen dev emite en el root
+    `__fitz_dev_snapshot()`/`__fitz_dev_apply()`; el entry wrapper dev
+    guarda el snapshot en `sessionStorage` en `beforeunload` y lo
+    re-aplica tras `mount()` (+`render()`). El Cargo.toml dev gana
+    `serde_json` + la feature web-sys `Storage`. Validado en Chrome: al
+    editar el template, el `count` bumpeado sobrevive el reload. **Este
+    increment cubre state primitivo** (`Int`/`Float`/`Str`/`Bool`);
+    compuesto (`List`/`Map`/nominal) resetea a default (follow-up:
+    espejar `json_restore_value` para el snapshot). Nota: un campo de
+    state preservado gana sobre un cambio de su *default* en el template
+    (comportamiento correcto — el state se preserva).
+  - **Follow-ups:** state compuesto en el snapshot; multi-bin wasm dev
+    (proyectos `server` + `web` fullstack — hoy caen al path clásico);
+    re-resolver `fitz.toml` en vivo.
 
 **Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
 MVP por slices ✅) → **11.12 (hidratación — SSR-1→SSR-4 ✅, cierra entera)**
-→ 11.13 (hot reload — Approach C slice-1 ✅, slice-2 state preservation 🔜).
+→ 11.13 (hot reload — Approach C slice-1 + slice-2 ✅; state compuesto + multi-bin 🔜).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

@@ -1492,6 +1492,97 @@ fn emit_apply_state_json(
     Ok(())
 }
 
+/// Phase 11.13 slice-2 (`fitz dev` hot reload — state preservation) —
+/// emit a dev-only `impl <Name>` with `__fitz_dev_snapshot()` (state →
+/// JSON string) and `__fitz_dev_apply(&str)` (JSON → state, then
+/// `render()`). The composed dev entry wrapper stashes the snapshot in
+/// `sessionStorage` on `beforeunload` and re-applies it after mount, so
+/// a hot reload preserves live state. **Only emitted in `fitz dev`'s
+/// dev-mode build** (`fitz build` never carries this — the prod `lib.rs`
+/// stays byte-identical).
+///
+/// This first increment covers **primitive** state fields
+/// (`Int`/`Float`/`Str`/`Bool` — exactly [`json_state_accessor`]).
+/// Composite fields (`List`/`Map`/nominal) are skipped: they reset to
+/// their defaults on reload (a follow-up mirrors [`json_restore_value`]
+/// for the snapshot side).
+pub fn emit_dev_state_methods(
+    component: &ExpandedComponent,
+    nominals: &NominalRegistry,
+    out: &mut String,
+) -> EmitResult<()> {
+    let name = &component.name;
+    writeln!(out, "impl {name} {{").unwrap();
+
+    // snapshot: build a JSON object of the primitive state fields.
+    writeln!(
+        out,
+        "    pub fn __fitz_dev_snapshot(self: &Rc<Self>) -> String {{"
+    )
+    .unwrap();
+    writeln!(out, "        let _ = self;").unwrap();
+    writeln!(out, "        let mut __m = serde_json::Map::new();").unwrap();
+    for field in &component.state {
+        let rust_ty = type_expr_to_rust(&field.type_expr, nominals).map_err(|mut e| {
+            e.context = format!(
+                "state field `{}` of component `{}` (dev snapshot)",
+                field.name, component.name
+            );
+            e
+        })?;
+        if json_state_accessor(&rust_ty).is_some() {
+            let val = if rust_ty == "String" {
+                format!("self.{}.borrow().clone()", field.name)
+            } else {
+                format!("*self.{}.borrow()", field.name)
+            };
+            writeln!(
+                out,
+                "        __m.insert(\"{}\".to_string(), serde_json::json!({}));",
+                field.name, val
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "        serde_json::Value::Object(__m).to_string()").unwrap();
+    writeln!(out, "    }}").unwrap();
+
+    // apply: restore the primitive fields, then render.
+    writeln!(
+        out,
+        "    pub fn __fitz_dev_apply(self: &Rc<Self>, __json: &str) {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let __v: serde_json::Value = match serde_json::from_str(__json) {{ Ok(__j) => __j, Err(_) => return, }};"
+    )
+    .unwrap();
+    writeln!(out, "        let _ = &__v;").unwrap();
+    for field in &component.state {
+        let rust_ty = type_expr_to_rust(&field.type_expr, nominals).map_err(|mut e| {
+            e.context = format!(
+                "state field `{}` of component `{}` (dev apply)",
+                field.name, component.name
+            );
+            e
+        })?;
+        if let Some((accessor, rhs)) = json_state_accessor(&rust_ty) {
+            writeln!(
+                out,
+                "        if let Some(__x) = __v.get(\"{}\").and_then(|__j| __j.{}) {{ *self.{}.borrow_mut() = {}; }}",
+                field.name, accessor, field.name, rhs
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "        self.render();").unwrap();
+    writeln!(out, "    }}").unwrap();
+
+    writeln!(out, "}}\n").unwrap();
+    Ok(())
+}
+
 /// Phase 11.12 — emit `hydrate(root)`: inject the scoped style, restore the
 /// serialized state from the SSR `<script>`, refresh derived cells, then run
 /// the adopt walk over the server-painted DOM (no wipe, no rebuild) and mark
@@ -7729,6 +7820,46 @@ component Row {
                 "__v.get(\"b\").and_then(|__j| __j.as_bool()) { *self.b.borrow_mut() = __x; }"
             ),
             "Bool:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_13_emit_dev_state_methods_snapshots_and_applies_primitives() {
+        // The dev-only state-preservation methods snapshot primitive state to
+        // JSON and re-apply it, mirroring `json_state_accessor`.
+        let src = "component App {\n  state {\n    count: Int = 0\n    label: Str = \"x\"\n  }\n  event inc() { count = count + 1 }\n  <template><div><span>{label}</span><span>{count}</span></div></template>\n}\n";
+        let comp = &parse_expand(src).components[0];
+        let mut out = String::new();
+        emit_dev_state_methods(comp, &NominalRegistry::new(), &mut out).unwrap();
+        assert!(
+            out.contains("pub fn __fitz_dev_snapshot(self: &Rc<Self>) -> String"),
+            "snapshot method:\n{out}"
+        );
+        assert!(
+            out.contains("pub fn __fitz_dev_apply(self: &Rc<Self>, __json: &str)"),
+            "apply method:\n{out}"
+        );
+        // snapshot: Int via `*borrow`, Str via `.clone()`.
+        assert!(
+            out.contains("serde_json::json!(*self.count.borrow())"),
+            "int snapshot:\n{out}"
+        );
+        assert!(
+            out.contains("serde_json::json!(self.label.borrow().clone())"),
+            "str snapshot:\n{out}"
+        );
+        // apply: byte-identical to the scalar branch of `__apply_state_json`.
+        assert!(
+            out.contains("if let Some(__x) = __v.get(\"count\").and_then(|__j| __j.as_i64()) { *self.count.borrow_mut() = __x; }"),
+            "int apply:\n{out}"
+        );
+        assert!(
+            out.contains("if let Some(__x) = __v.get(\"label\").and_then(|__j| __j.as_str()) { *self.label.borrow_mut() = __x.to_string(); }"),
+            "str apply:\n{out}"
+        );
+        assert!(
+            out.contains("self.render();"),
+            "re-render after apply:\n{out}"
         );
     }
 

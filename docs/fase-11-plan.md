@@ -5751,5 +5751,36 @@ sub-problem (deuda 🟡 in `docs/deudas-post-5b.md`).
   smokes byte-identical (`git status examples/view/` clean), fmt +
   clippy (default + lsp) clean.
 
-Follow-ups: slice-2 (state preservation), multi-bin wasm dev
+### Slice-2 (shipped) — state preservation across reload
+
+Dev-flag gated (`fitz dev` sets it via `write_wasm_crate_scaffold(...,
+dev_mode = !release)`; `fitz build` passes `false` → prod `lib.rs` +
+`Cargo.toml` byte-identical). Pieces:
+
+- **`emit_dev_state_methods`** (`codegen_wasm.rs`) — emits `impl <Root> {
+  __fitz_dev_snapshot() -> String; __fitz_dev_apply(&str) }` for the
+  **primitive** state fields (mirrors `json_state_accessor`; apply ends
+  in `self.render()`). Composite state (`List`/`Map`/nominal) is skipped
+  → resets on reload (follow-up: a `json_dump_value` mirror of
+  `json_restore_value`).
+- **Dev entry wrapper** (`compose_entry_wrapper(..., dev_mode)`) — after
+  `root.mount(...)`, restores `sessionStorage["__fitz_dev_state"]` (then
+  clears it) and installs a `beforeunload` `Closure` that snapshots the
+  live state back. Reuses the exact `Closure`/`add_event_listener` idiom
+  the `@click` emit already uses (no `js_sys` direct dep).
+- **`dev_augment_cargo_toml`** — post-processes the dev `Cargo.toml` to
+  add `serde_json` + the `Storage` web-sys feature (idempotent), leaving
+  `compose_cargo_toml_with_features` and its ~10 smoke call sites
+  untouched.
+
+`compose_lib_rs_with_components` was refactored into
+`compose_lib_rs_inner(..., dev_mode)` (public fn delegates with
+`false`); `write_wasm_crate_scaffold` gained a `dev_mode` param.
+**Validated in Chrome:** editing a static template text reloads the DOM
+while a bumped `count` survives the reload; view smokes byte-identical
+(`git status examples/view/` clean); +2 unit tests
+(`phase_11_13_emit_dev_state_methods_*`,
+`phase_11_13_dev_augment_cargo_toml_*`).
+
+Remaining follow-ups: composite-state snapshot, multi-bin wasm dev
 (`--bin`), live `fitz.toml` re-resolution. See the deuda entry.

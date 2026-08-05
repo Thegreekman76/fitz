@@ -9175,10 +9175,13 @@ recompilar; hasta entonces C (slice-1 + slice-2 state preservation)
 cubre el DX.
 
 **Follow-ups de Approach C (no bloquean, refinamientos del slice-1):**
-- **Slice-2 — preservación de state a través del reload** reusando la
-  hidratación de v0.31.0 (serializar al `<script id="__flv_state_*">`
-  antes del reload; hidratar después). Elimina el reset del state al
-  editar.
+- **Slice-2 — preservación de state a través del reload — ✅ CERRADO
+  2026-08-04.** Dev-flag gated (prod byte-idéntico). El codegen dev
+  emite `__fitz_dev_snapshot`/`__fitz_dev_apply` en el root; el entry
+  wrapper dev guarda/restaura vía `sessionStorage` (`beforeunload` +
+  post-`mount`). **Cubre state primitivo**; el compuesto
+  (`List`/`Map`/nominal) resetea a default — **follow-up: espejar
+  `json_restore_value` en el snapshot** (`json_dump_value`).
 - **Multi-bin wasm dev** — un proyecto `server` + `web` (fullstack
   `@rpc`) hace `select_bin(None)` ambiguo → hoy `fitz dev` cae al
   path clásico. Requiere `fitz dev --bin <name>` (+ eventualmente

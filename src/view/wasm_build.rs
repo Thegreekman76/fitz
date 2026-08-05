@@ -159,6 +159,32 @@ pub fn compose_lib_rs_with_components(
     mount_selector: &str,
     header_source_label: Option<&str>,
 ) -> EmitResult<String> {
+    compose_lib_rs_inner(
+        expanded,
+        nominals,
+        fns,
+        components,
+        mount_selector,
+        header_source_label,
+        /*dev_mode=*/ false,
+    )
+}
+
+/// Phase 11.13 slice-2 — like [`compose_lib_rs_with_components`], but for
+/// `fitz dev`'s dev-mode build: appends the dev-only state-snapshot methods
+/// (`__fitz_dev_snapshot`/`__fitz_dev_apply`) on the root component and a dev
+/// entry wrapper that stashes/restores state through `sessionStorage` so a hot
+/// reload preserves live state. `fitz build` never calls this — the prod
+/// `lib.rs` stays byte-identical.
+fn compose_lib_rs_inner(
+    expanded: &ExpandedViewFile,
+    nominals: &NominalRegistry,
+    fns: &ImportedFnRegistry,
+    components: &ImportedComponentRegistry,
+    mount_selector: &str,
+    header_source_label: Option<&str>,
+    dev_mode: bool,
+) -> EmitResult<String> {
     let root = match expanded.components.first() {
         Some(c) => c,
         None => {
@@ -184,6 +210,11 @@ pub fn compose_lib_rs_with_components(
     out.push_str("// the entry point so future targets (SSR, hybrid) can compose\n");
     out.push_str("// their own.\n\n");
     out.push_str(&emitted);
+    // Phase 11.13 slice-2 — dev-only state-preservation methods on the root.
+    if dev_mode {
+        out.push('\n');
+        super::codegen_wasm::emit_dev_state_methods(root, nominals, &mut out)?;
+    }
     // Phase 11.12 — a root component is never bubbled (nothing composes it),
     // so an empty bubbled set is the right context for its hydratability.
     let root_hydratable =
@@ -192,6 +223,7 @@ pub fn compose_lib_rs_with_components(
         &root.name,
         mount_selector,
         root_hydratable,
+        dev_mode,
     ));
     Ok(out)
 }
@@ -637,12 +669,24 @@ fn compose_entry_wrapper(
     root_component: &str,
     mount_selector: &str,
     root_hydratable: bool,
+    dev_mode: bool,
 ) -> String {
     // Escape backslashes / quotes for the Rust string literal. In
     // practice `mount` is a CSS selector like `"#app"` — no such
     // chars appear — but doing the escape keeps the emitter honest
     // if someone declares `mount = "[data-app='x']"` later.
     let escaped_selector = mount_selector.replace('\\', "\\\\").replace('"', "\\\"");
+
+    // Phase 11.13 slice-2 — dev-only glue injected after `root.mount(...)`:
+    // restore the state snapshot stashed by the previous run before a hot
+    // reload, and register a `beforeunload` handler that snapshots the live
+    // state back into `sessionStorage`. Empty string in prod builds → the
+    // wrapper is byte-identical to the pre-11.13 output.
+    let dev_glue = if dev_mode {
+        dev_state_preservation_glue()
+    } else {
+        String::new()
+    };
 
     if root_hydratable {
         return format!(
@@ -663,10 +707,12 @@ fn compose_entry_wrapper(
              \x20\x20\x20\x20\x20\x20\x20\x20}}\n\
              \x20\x20\x20\x20}}\n\
              \x20\x20\x20\x20root.mount(\"{selector}\")?;\n\
+             {dev_glue}\
              \x20\x20\x20\x20Ok(())\n\
              }}\n",
             root = root_component,
             selector = escaped_selector,
+            dev_glue = dev_glue,
         );
     }
 
@@ -681,11 +727,38 @@ fn compose_entry_wrapper(
          \x20\x20\x20\x20console_error_panic_hook::set_once();\n\
          \x20\x20\x20\x20let root = {root}::new();\n\
          \x20\x20\x20\x20root.mount(\"{selector}\")?;\n\
+         {dev_glue}\
          \x20\x20\x20\x20Ok(())\n\
          }}\n",
         root = root_component,
         selector = escaped_selector,
+        dev_glue = dev_glue,
     )
+}
+
+/// Phase 11.13 slice-2 — the dev-only `start()` body inserted between
+/// `root.mount(...)` and `Ok(())`. Restores the state stashed before the
+/// previous reload (then clears it) and installs a `beforeunload` snapshot,
+/// both through `sessionStorage`. Reuses the exact `Closure` + event-listener
+/// idiom the emitter already uses for `@click`/`@input` handlers, so it needs
+/// no extra deps beyond the `Storage` web-sys feature the dev Cargo.toml adds.
+fn dev_state_preservation_glue() -> String {
+    "\x20\x20\x20\x20// Phase 11.13 — fitz dev hot-reload state preservation.\n\
+     \x20\x20\x20\x20let __win = web_sys::window().unwrap();\n\
+     \x20\x20\x20\x20if let Ok(Some(__ss)) = __win.session_storage() {\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20if let Ok(Some(__saved)) = __ss.get_item(\"__fitz_dev_state\") {\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20root.__fitz_dev_apply(&__saved);\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let _ = __ss.remove_item(\"__fitz_dev_state\");\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20}\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20let __ss_bu = __ss.clone();\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20let __root_bu = root.clone();\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20let __closure = Closure::wrap(Box::new(move |_evt: Event| {\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let _ = __ss_bu.set_item(\"__fitz_dev_state\", &__root_bu.__fitz_dev_snapshot());\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20}) as Box<dyn FnMut(Event)>);\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20__win.add_event_listener_with_callback(\"beforeunload\", __closure.as_ref().unchecked_ref()).unwrap();\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20__closure.forget();\n\
+     \x20\x20\x20\x20}\n"
+        .to_string()
 }
 
 /// Produces the `Cargo.toml` for the scaffolded wasm-crate. The
@@ -821,6 +894,35 @@ features = [
     )
 }
 
+/// Phase 11.13 slice-2 — augments a composed `Cargo.toml` with the two extra
+/// bits a `fitz dev` build needs: the `serde_json` dependency (state
+/// snapshot/apply) and the `Storage` web-sys feature (`sessionStorage`). Both
+/// are idempotent: if `serde_json` is already present (rpc/hydration crate) or
+/// `Storage` is already in the feature list, that injection is skipped. Only
+/// called on the dev path — the prod `Cargo.toml` is never touched.
+fn dev_augment_cargo_toml(toml: String) -> String {
+    let mut out = toml;
+    // serde_json dep — insert after the always-present
+    // `console_error_panic_hook = "0.1"` line.
+    if !out.contains("serde_json = \"1\"") {
+        let anchor = "console_error_panic_hook = \"0.1\"\n";
+        if let Some(pos) = out.find(anchor) {
+            let at = pos + anchor.len();
+            out.insert_str(at, "serde_json = \"1\"\n");
+        }
+    }
+    // `Storage` web-sys feature — insert after the always-present `"Window",`
+    // feature line (BASE_FEATURES).
+    if !out.contains("\"Storage\",") {
+        let anchor = "    \"Window\",\n";
+        if let Some(pos) = out.find(anchor) {
+            let at = pos + anchor.len();
+            out.insert_str(at, "    \"Storage\",\n");
+        }
+    }
+    out
+}
+
 /// Sanitises a bin name into a valid Rust crate identifier. The
 /// Fitz manifest allows bin names like `"web-client"` (kebab-case
 /// per `is_valid_package_name`), but Rust crate names in
@@ -943,6 +1045,11 @@ pub fn write_wasm_crate_scaffold(
     bin_name: &str,
     mount_selector: &str,
     source_label: Option<&str>,
+    // Phase 11.13 slice-2 — `fitz dev` sets this so the scaffold carries the
+    // dev-only hot-reload state-preservation glue (`sessionStorage` +
+    // `serde_json` + the `Storage` web-sys feature). `fitz build` passes
+    // `false` → the prod scaffold is byte-identical to pre-11.13.
+    dev_mode: bool,
 ) -> Result<ScaffoldResult, ScaffoldError> {
     // Phase 11.7 R3.5b.2 — a `data-flv-submit` form needs the
     // `HtmlInputElement` web-sys feature; form-free crates keep the base
@@ -962,13 +1069,23 @@ pub fn write_wasm_crate_scaffold(
     // `compose_cargo_toml_with_features`).
     let cargo_toml_text =
         compose_cargo_toml_with_features(bin_name, &extra_features, fns.has_rpc(), uses_hydration);
-    let lib_rs_text = compose_lib_rs_with_components(
+    // Phase 11.13 slice-2 — dev builds need `serde_json` (state snapshot) + the
+    // `Storage` web-sys feature (`sessionStorage`). Post-process instead of
+    // threading a param through `compose_cargo_toml_with_features` so its ~10
+    // smoke call sites stay untouched and the prod Cargo.toml is byte-identical.
+    let cargo_toml_text = if dev_mode {
+        dev_augment_cargo_toml(cargo_toml_text)
+    } else {
+        cargo_toml_text
+    };
+    let lib_rs_text = compose_lib_rs_inner(
         expanded,
         nominals,
         fns,
         components,
         mount_selector,
         source_label,
+        dev_mode,
     )?;
 
     let src_dir = crate_dir.join("src");
@@ -1102,6 +1219,26 @@ component Beta {
     }
 
     #[test]
+    fn phase_11_13_dev_augment_cargo_toml_adds_serde_json_and_storage() {
+        // A plain crate (no rpc, no hydration) has neither serde_json nor the
+        // Storage feature. The dev augment adds both, idempotently.
+        let plain = compose_cargo_toml("counter");
+        assert!(!plain.contains("serde_json = \"1\""));
+        assert!(!plain.contains("\"Storage\","));
+        let dev = dev_augment_cargo_toml(plain);
+        assert!(dev.contains("serde_json = \"1\""), "serde_json dep:\n{dev}");
+        assert!(dev.contains("\"Storage\","), "Storage feature:\n{dev}");
+        // `Storage` sits right after `Window` in the feature list.
+        let win = dev.find("\"Window\",").unwrap();
+        let sto = dev.find("\"Storage\",").unwrap();
+        assert!(sto > win, "Storage after Window:\n{dev}");
+        // Idempotent — augmenting again does not duplicate.
+        let dev2 = dev_augment_cargo_toml(dev);
+        assert_eq!(dev2.matches("serde_json = \"1\"").count(), 1);
+        assert_eq!(dev2.matches("\"Storage\",").count(), 1);
+    }
+
+    #[test]
     fn compose_cargo_toml_contains_the_wasm_opt_metadata_knob() {
         let toml = compose_cargo_toml("counter");
         assert!(
@@ -1216,7 +1353,7 @@ component Beta {
 
     #[test]
     fn phase_11_12_entry_wrapper_hydratable_branches_to_hydrate() {
-        let wrapper = compose_entry_wrapper("Greeter", "#app", true);
+        let wrapper = compose_entry_wrapper("Greeter", "#app", true, false);
         assert!(
             wrapper.contains("query_selector(\"#app\")?")
                 && wrapper.contains("first_element_child().is_some()")
@@ -1232,7 +1369,7 @@ component Beta {
 
     #[test]
     fn phase_11_12_entry_wrapper_non_hydratable_is_mount_only() {
-        let wrapper = compose_entry_wrapper("Counter", "#app", false);
+        let wrapper = compose_entry_wrapper("Counter", "#app", false, false);
         assert!(
             wrapper.contains("root.mount(\"#app\")?;") && !wrapper.contains("hydrate"),
             "non-hydratable entry is mount-only (byte-identical to pre-11.12):\n{wrapper}"
@@ -1312,6 +1449,7 @@ component Beta {
             "web",
             "#app",
             None,
+            false,
         )
         .unwrap();
         assert!(result.cargo_toml.is_file(), "Cargo.toml not written");
@@ -1347,6 +1485,7 @@ component Beta {
             "web",
             "#app",
             None,
+            false,
         )
         .unwrap();
         // Second write with identical inputs — must not error.
@@ -1359,6 +1498,7 @@ component Beta {
             "web",
             "#app",
             None,
+            false,
         )
         .unwrap();
         assert!(result.cargo_toml.is_file());

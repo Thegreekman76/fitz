@@ -1302,6 +1302,10 @@ fn build_wasm_client(resolved: &ResolvedEntry, release: bool) -> Result<WasmBuil
         &sanitised_pkg,
         mount,
         Some(&source_label),
+        // Phase 11.13 slice-2 — dev profile (`fitz dev`) carries the
+        // hot-reload state-preservation glue; `fitz build` (release) does not.
+        /*dev_mode=*/
+        !release,
     )
     .map_err(|e| format!("wasm-crate scaffold at `{}`: {e}", scaffold_dir.display()))?;
 
