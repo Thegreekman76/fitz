@@ -144,8 +144,9 @@ code; they fork after that:
 - **`fitz run [file]`** — Type-checks in strict mode (flag
   `--no-typecheck` downgrades it to a warning) and executes the
   AST with the evaluator. Without args, it looks for `fitz.toml`
-  and runs `[bin].main`. If the program registered HTTP / WS /
-  `@cron` routes, it starts the server / scheduler.
+  and runs `[bin].main`; `--bin <name>` (Phase 11.13) selects a
+  specific bin in a multi-bin project. If the program registered
+  HTTP / WS / `@cron` routes, it starts the server / scheduler.
 - **`fitz build [file]`** — Strict check (no escape), generates a
   Cargo project, invokes `cargo build --release`, copies the
   binary. Without args, manifest mode + output to
@@ -174,16 +175,19 @@ code; they fork after that:
   (preserves the user's comments + blank lines).
 - **`fitz test [filter] [--file]`** — Built-in test runner
   (discovers `@test` fns, cargo-style output).
-- **`fitz dev [--file] [--port]`** — Hot reload with a file
-  watcher. Classic mode (native/SSR): kill+respawn of the child on
-  change. **Phase 11.13** added a **wasm-client mode**: when the
-  manifest's default bin targets `wasm-client`, it builds the
-  bundle (`wasm-pack --dev`, incremental), serves the project on
-  `127.0.0.1:<port>` via a bin-local dev server
-  (`src/dev_server.rs` — axum static serving + a `/__fitz_dev_ws`
-  live-reload WebSocket + `index.html` snippet injection), and
-  rebuilds + reloads the browser on each `.fitzv`/`.fitz`/
-  `fitz.toml` save (Approach C — no client-side template runtime).
+- **`fitz dev [--file] [--bin] [--port]`** — Hot reload with a
+  file watcher. Classic mode (native/SSR): kill+respawn of the
+  child on change. **Phase 11.13** added a **wasm-client mode**:
+  when the selected bin (`--bin <name>`, or the manifest's only
+  bin) targets `wasm-client`, it builds the bundle (`wasm-pack
+  --dev`, incremental), serves the project on `127.0.0.1:<port>`
+  via a bin-local dev server (`src/dev_server.rs` — axum static
+  serving + a `/__fitz_dev_ws` live-reload WebSocket + `index.html`
+  snippet injection), and rebuilds + reloads the browser on each
+  `.fitzv`/`.fitz`/`fitz.toml` save (Approach C — no client-side
+  template runtime). `--bin` also lands on `fitz run`, so a
+  fullstack `server` + `web` project runs `fitz run --bin server`
+  in one terminal and `fitz dev --bin web` in another.
 - **`fitz repl`** — Interactive REPL with a shared env between
   lines.
 - **`fitz lint [files] [--deny <name>]`** — Pattern linter

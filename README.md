@@ -240,7 +240,7 @@ Verificá la instalación con `fitz --version` y `fitz --help`.
 
 | Comando                       | Qué hace                                                                       |
 | ----------------------------- | ------------------------------------------------------------------------------ |
-| `fitz run [archivo]`          | Ejecuta el archivo (o el `[bin].main` del `fitz.toml`) con checker strict.     |
+| `fitz run [archivo]`          | Ejecuta el archivo (o el `[bin].main` del `fitz.toml`) con checker strict. `--bin <nombre>` selecciona el bin en proyectos multi-bin. |
 | `fitz build [archivo]`        | Compila a binario nativo standalone (~5 MB, sin runtime de Fitz en el destino). |
 | `fitz check [archivo]`        | Valida tipos y sintaxis sin ejecutar. Exit 1 si hay errores.                   |
 | `fitz openapi <archivo>`      | Emite el schema OpenAPI 3.1 del programa a stdout. Útil para CI.               |
@@ -261,7 +261,7 @@ Verificá la instalación con `fitz --version` y `fitz --help`.
 | ----------------------------- | ------------------------------------------------------------------------------ |
 | `fitz fmt [archivos]`         | Formatea código Fitz a estilo canónico, cero config. `--check` para CI.        |
 | `fitz test [filter]`          | Corre fns con `@test`. Output estilo cargo (ok/FAILED + summary + exit code).  |
-| `fitz dev [--file] [--port]`  | Hot reload — re-arranca el programa cuando un `.fitz`/`.fitzv`/`fitz.toml` cambia. Con un bin `wasm-client` default: buildea + sirve con auto-refresh + preservación de state en el browser (`--port`, default 1234). |
+| `fitz dev [--file] [--bin] [--port]` | Hot reload — re-arranca el programa cuando un `.fitz`/`.fitzv`/`fitz.toml` cambia. Con un bin `wasm-client`: buildea + sirve con auto-refresh + preservación de state en el browser (`--port`, default 1234). `--bin <nombre>` selecciona el bin en proyectos multi-bin (fullstack: `fitz run --bin server` + `fitz dev --bin web`). |
 | `fitz repl`                   | REPL interactivo con env persistente, multi-line, history, comandos `:type`/`:env`/`:load`. |
 | `fitz lint [archivos]`        | Linter de patrones (unused_variable, unused_import, useless_match, string_concat). |
 

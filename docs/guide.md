@@ -10626,6 +10626,7 @@ lo sirve con auto-refresh en el browser**.
 # En un proyecto con un [[bin]] target = "wasm-client":
 fitz dev              # sirve en http://127.0.0.1:1234/
 fitz dev --port 8080  # otro puerto
+fitz dev --bin web    # elegí el bin en un proyecto multi-bin
 ```
 
 Qué hace en este modo:
@@ -10655,9 +10656,25 @@ estado.
 
 > **Nota:** este modo requiere un manifest con un `[[bin]] target =
 > "wasm-client"` (necesita `mount` + el layout de salida). Corré
-> `fitz dev` desde el directorio del proyecto (sin `--file`). Un
-> proyecto con dos bins (`server` + `web`) todavía cae al modo
-> clásico — el modo wasm dedicado es para un bin wasm-client default.
+> `fitz dev` desde el directorio del proyecto (sin `--file`).
+
+**Proyectos fullstack (`server` + `web`).** En un proyecto con dos
+bins — un backend native (con `@rpc`, cap 36) y un frontend
+`wasm-client` — usá `--bin` para elegir cuál dev-ear, en dos
+terminales:
+
+```bash
+# Terminal 1 — el backend @rpc (bin native)
+fitz run --bin server
+
+# Terminal 2 — el frontend wasm con hot reload
+fitz dev --bin web
+```
+
+`--bin <nombre>` también existe en `fitz run` (y `fitz build`), así
+que podés seleccionar cualquier bin de un manifest multi-bin. Sin
+`--bin`, un proyecto multi-bin es ambiguo y `fitz run`/`fitz dev`
+piden que elijas uno.
 
 ### Lo que NO anda todavía
 

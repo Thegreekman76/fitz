@@ -42,6 +42,13 @@ enum Commands {
         /// current directory or ancestors (Cargo-style) and runs
         /// its `[bin].main`.
         file: Option<PathBuf>,
+        /// Phase 11.13 — Selects which `[[bin]]` to run when the
+        /// manifest declares more than one (e.g. a `server` + `web`
+        /// fullstack project). In single-bin projects the flag is
+        /// optional (defaults to the only bin). Ignored in
+        /// single-file mode.
+        #[arg(long = "bin", value_name = "NAME")]
+        bin: Option<String>,
         /// Skip the static type check. Without this flag, checker
         /// errors abort execution (strict mode).
         #[arg(long)]
@@ -294,6 +301,14 @@ enum Commands {
         /// `fitz.toml` (manifest mode) and runs `[bin].main`.
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Phase 11.13 — Selects which `[[bin]]` to dev when the
+        /// manifest declares more than one. A `wasm-client` bin
+        /// runs the wasm dev server (build + serve + live-reload);
+        /// a native bin runs the classic respawn. In a `server` +
+        /// `web` fullstack project: `fitz run --bin server` in one
+        /// terminal, `fitz dev --bin web` in another.
+        #[arg(long = "bin", value_name = "NAME")]
+        bin: Option<String>,
         /// Phase 11.13 — port for the wasm-client dev server.
         /// Ignored in the classic (native/SSR) respawn mode.
         #[arg(long, default_value_t = 1234)]
@@ -638,10 +653,11 @@ fn main() {
     match cli.command {
         Commands::Run {
             file,
+            bin,
             no_typecheck,
             args,
         } => {
-            let resolved = resolve_entry(file);
+            let resolved = resolve_entry_with_bin(file, bin.as_deref(), None);
             sync_lockfile_if_needed(&resolved);
             let dep_registry = dep_registry_from(&resolved);
             run_file(&resolved.entry, no_typecheck, dep_registry, args);
@@ -790,8 +806,8 @@ fn main() {
         Commands::Test { filter, file } => {
             test_cmd(filter, file);
         }
-        Commands::Dev { file, port } => {
-            dev_cmd(file, port);
+        Commands::Dev { file, bin, port } => {
+            dev_cmd(file, bin, port);
         }
         Commands::Repl => {
             repl_cmd();
@@ -4442,14 +4458,15 @@ struct DevTarget {
 /// `tokio::signal::ctrl_c`, and an async channel for `notify`
 /// events (which is sync; we forward them via
 /// `std::thread::spawn` + `tokio::sync::mpsc::UnboundedSender`).
-fn dev_cmd(file_arg: Option<PathBuf>, port: u16) {
+fn dev_cmd(file_arg: Option<PathBuf>, bin: Option<String>, port: u16) {
     // Phase 11.13 — wasm-client mode. Manifest mode only (needs
     // `mount` + the fixed output layout), so `--file` always takes
-    // the classic respawn path. When the manifest's default bin
-    // targets `wasm-client`, build the bundle + serve it with
-    // live-reload instead of respawning `fitz run`.
-    if file_arg.is_none() && is_wasm_client_dev() {
-        let resolved = resolve_entry(None);
+    // the classic respawn path. When the selected bin (`--bin`, or
+    // the manifest's only bin) targets `wasm-client`, build the
+    // bundle + serve it with live-reload instead of respawning
+    // `fitz run`.
+    if file_arg.is_none() && is_wasm_client_dev(bin.as_deref()) {
+        let resolved = resolve_entry_with_bin(None, bin.as_deref(), None);
         let runtime = evaluator::build_runtime();
         runtime.block_on(async move {
             if let Err(e) = run_wasm_dev_loop(resolved, port).await {
@@ -4460,7 +4477,7 @@ fn dev_cmd(file_arg: Option<PathBuf>, port: u16) {
         return;
     }
 
-    let target = resolve_dev_target(file_arg);
+    let target = resolve_dev_target(file_arg, bin);
 
     eprintln!("🔄 fitz dev — watching {}", target.watch_dir.display());
     eprintln!("   ejecutando: {}", target.display);
@@ -4475,14 +4492,14 @@ fn dev_cmd(file_arg: Option<PathBuf>, port: u16) {
     });
 }
 
-/// Phase 11.13 — cheap manifest peek: does the default bin of the
-/// `fitz.toml` in scope target `wasm-client`? Returns `false` (→
-/// classic respawn mode) on any resolution error (missing/ambiguous
-/// manifest, parse error, multi-bin ambiguity) so the classic path
-/// keeps its exact behaviour and error messages. Multi-bin
-/// wasm-client dev (e.g. a `server` + `web` fullstack project) is a
-/// follow-up: it falls through to the classic path today.
-fn is_wasm_client_dev() -> bool {
+/// Phase 11.13 — cheap manifest peek: does the selected bin (`--bin`,
+/// or the manifest's only bin) target `wasm-client`? Returns `false`
+/// (→ classic respawn mode) on any resolution error (missing manifest,
+/// parse error, unknown bin, or multi-bin ambiguity when no `--bin`)
+/// so the classic path keeps its exact behaviour and error messages.
+/// With `--bin <name>` a `server` + `web` fullstack project resolves
+/// its `web` (wasm) bin here.
+fn is_wasm_client_dev(bin: Option<&str>) -> bool {
     let Ok(cwd) = std::env::current_dir() else {
         return false;
     };
@@ -4496,8 +4513,8 @@ fn is_wasm_client_dev() -> bool {
         return false;
     };
     matches!(
-        m.select_bin(None),
-        Ok(Some(bin)) if bin.effective_target() == manifest::Target::WasmClient
+        m.select_bin(bin),
+        Ok(Some(b)) if b.effective_target() == manifest::Target::WasmClient
     )
 }
 
@@ -4628,8 +4645,10 @@ fn setup_watcher(
 }
 
 /// Decides which directory to watch + which args to pass to the
-/// child.
-fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
+/// child. `bin` (`--bin <name>`, Phase 11.13) selects a specific
+/// `[[bin]]` in manifest mode — the child becomes `fitz run --bin
+/// <name>`; ignored in single-file mode.
+fn resolve_dev_target(file_arg: Option<PathBuf>, bin: Option<String>) -> DevTarget {
     if let Some(path) = file_arg {
         // Single-file mode: watch the file's parent, child with
         // `fitz run <file>` (absolute path to avoid issues if
@@ -4651,9 +4670,9 @@ fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
     }
 
     // Manifest mode: find fitz.toml, watch its directory. Child
-    // `fitz run` without args so it re-discovers the manifest on
-    // every start (if the user edits `[bin].main`, it's
-    // respected).
+    // `fitz run` (with `--bin <name>` if selected) so it
+    // re-discovers the manifest on every start (if the user edits
+    // `[bin].main`, it's respected).
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("✗ could not read the current directory: {e}");
         std::process::exit(1);
@@ -4683,9 +4702,18 @@ fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
         Some(m) => format!("project `{}`", m.package.name),
         None => format!("project at `{}`", manifest_dir.display()),
     };
+    let mut child_args = vec!["run".to_string()];
+    if let Some(name) = &bin {
+        child_args.push("--bin".to_string());
+        child_args.push(name.clone());
+    }
+    let display = match &bin {
+        Some(name) => format!("{display} (bin `{name}`)"),
+        None => display,
+    };
     DevTarget {
         watch_dir: manifest_dir,
-        child_args: vec!["run".into()],
+        child_args,
         display,
     }
 }

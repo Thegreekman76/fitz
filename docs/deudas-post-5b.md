@@ -9187,10 +9187,12 @@ cubre el DX.
   entero.** Tipos que no round-trippean por JSON (Map con key no-`Str`,
   tuplas, fns) se omiten del snapshot (resetean a default), simétrico con
   el restore.
-- **Multi-bin wasm dev** — un proyecto `server` + `web` (fullstack
-  `@rpc`) hace `select_bin(None)` ambiguo → hoy `fitz dev` cae al
-  path clásico. Requiere `fitz dev --bin <name>` (+ eventualmente
-  correr el server Y servir el wasm juntos).
+- **Multi-bin wasm dev — ✅ CERRADO 2026-08-05.** `--bin <name>` en
+  `fitz dev` (y nuevo en `fitz run`) selecciona el bin. Fullstack
+  `server` + `web`: `fitz run --bin server` + `fitz dev --bin web`
+  (dos terminales). El bin wasm-client rutea al dev loop; el native al
+  respawn clásico con `fitz run --bin`. (Correr ambos en UN `fitz dev`
+  —orquestación dual-process— queda como enhancement futuro.)
 - **Re-resolver `fitz.toml` en vivo** — hoy el loop reusa el
   `ResolvedEntry` inicial; editar `[bin].main` no se toma sin
   reiniciar `fitz dev` (editar el `.fitzv`/imports sí, se re-lee cada

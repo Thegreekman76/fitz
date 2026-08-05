@@ -2638,6 +2638,35 @@ fn phase_11_5_b_build_with_bin_missing_name_errors_listing_available() {
     assert!(stderr.contains("web"), "stderr: {stderr}");
 }
 
+// Phase 11.13 — `fitz run --bin <name>` selects a specific bin in a
+// multi-bin project (unblocks the `fitz run --bin server` half of the
+// fullstack dev workflow, paired with `fitz dev --bin web`).
+#[test]
+fn phase_11_13_run_with_bin_selects_the_named_bin() {
+    let tmp = tempfile::tempdir().unwrap();
+    scaffold_multi_bin_project(tmp.path(), "multi-app");
+    let (stdout, stderr, code) = run_fitz(&["run", "--bin", "server"], tmp.path());
+    assert_eq!(code, 0, "run --bin server should succeed; stderr: {stderr}");
+    assert!(
+        stdout.contains("server bin"),
+        "should run the server bin: {stdout}"
+    );
+}
+
+#[test]
+fn phase_11_13_run_multi_bin_without_flag_still_errors_ambiguous() {
+    let tmp = tempfile::tempdir().unwrap();
+    scaffold_multi_bin_project(tmp.path(), "multi-app");
+    let (_stdout, stderr, code) = run_fitz(&["run"], tmp.path());
+    assert_ne!(code, 0, "expected run to reject ambiguous multi-bin");
+    assert!(stderr.contains("server"), "stderr: {stderr}");
+    assert!(stderr.contains("web"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("--bin"),
+        "stderr should mention --bin: {stderr}"
+    );
+}
+
 #[test]
 fn phase_11_5_c_build_with_bin_wasm_client_and_fitz_main_rejects_citing_11_5_d() {
     // The multi-bin fixture uses `main = "src/app.fitz"` (a

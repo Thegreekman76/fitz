@@ -113,6 +113,18 @@ Cuándo usarlo:
 **No lo uses en CI** — el sentido del checker estático es que
 los errores son tu primera línea de defensa.
 
+### Flag: `--bin <nombre>`
+
+```
+fitz run --bin server
+```
+
+Cuando tu `fitz.toml` declara **más de un `[[bin]]`** (por ejemplo
+un proyecto fullstack con un backend `server` y un frontend
+`web`), `fitz run` sin `--bin` es ambiguo y te pide que elijas.
+`--bin <nombre>` selecciona cuál correr. Existe igual en
+`fitz build --bin` y `fitz dev --bin` (Paso 5).
+
 ### Modos de ejecución
 
 #### Manifest mode (sin args)
@@ -512,12 +524,22 @@ fitz dev [OPTIONS]
 | Flag | Qué hace |
 |---|---|
 | `--file <FILE>` | Single-file mode. Sin él, manifest mode (lee `fitz.toml`). |
+| `--bin <NAME>` | Elige el bin en un proyecto multi-bin (`server` + `web`). |
+| `--port <N>` | Puerto del dev server (modo wasm-client). Default `1234`. |
 
 ### Cómo funciona
 
 `fitz dev` **levanta tu programa y lo re-arranca** cada vez que
-un `.fitz` o el `fitz.toml` cambia. Análogo a `nodemon`, `cargo
-watch`, o `vite dev`.
+un `.fitz`/`.fitzv` o el `fitz.toml` cambia. Análogo a `nodemon`,
+`cargo watch`, o `vite dev`.
+
+> **Modo wasm-client.** Si el bin apunta a `wasm-client` (un
+> componente `.fitzv` que compila a WebAssembly, M9), `fitz dev`
+> en vez de kill+respawn **buildea el bundle y lo sirve con
+> auto-refresh en el browser** (live-reload + preservación de
+> state). En un proyecto fullstack `server` + `web`: `fitz run
+> --bin server` en una terminal, `fitz dev --bin web` en otra.
+> Detalle en [cap 25 de la guía](../../guide.md#25---fitz-dev--hot-reload).
 
 ```bash
 fitz dev

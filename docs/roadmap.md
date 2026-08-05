@@ -10376,8 +10376,15 @@ no por dependencia estricta.
     state compuesto compila limpio. Tipos que no round-trippean por JSON
     (`Map` con key no-`Str`, tuplas, fns) se omiten del snapshot (resetean
     a default), simétrico con el restore.
-  - **Follow-ups:** multi-bin wasm dev (proyectos `server` + `web`
-    fullstack — hoy caen al path clásico); re-resolver `fitz.toml` en vivo.
+  - **Multi-bin wasm dev ✅ (2026-08-05).** `--bin <name>` en `fitz dev`
+    (y nuevo en `fitz run`) selecciona el bin de un manifest multi-bin.
+    Un proyecto fullstack `server` + `web`: `fitz run --bin server`
+    (backend) + `fitz dev --bin web` (frontend wasm con hot reload).
+    `is_wasm_client_dev(bin)` + `resolve_entry_with_bin` rutean el bin
+    wasm-client al dev loop; el bin native cae al respawn clásico con
+    `fitz run --bin <name>`. +2 cli_e2e (`phase_11_13_run_with_bin_*`).
+  - **Follow-ups:** re-resolver `fitz.toml` en vivo (editar `[bin].main`
+    con `fitz dev` corriendo aún requiere reiniciar).
 
 **Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
 MVP por slices ✅) → **11.12 (hidratación — SSR-1→SSR-4 ✅, cierra entera)**
