@@ -9193,7 +9193,14 @@ cubre el DX.
   (dos terminales). El bin wasm-client rutea al dev loop; el native al
   respawn clásico con `fitz run --bin`. (Correr ambos en UN `fitz dev`
   —orquestación dual-process— queda como enhancement futuro.)
-- **Re-resolver `fitz.toml` en vivo** — hoy el loop reusa el
-  `ResolvedEntry` inicial; editar `[bin].main` no se toma sin
-  reiniciar `fitz dev` (editar el `.fitzv`/imports sí, se re-lee cada
-  build).
+- **Re-resolver `fitz.toml` en vivo — ✅ CERRADO 2026-08-05 (v0.34.1).**
+  El modo wasm-client de `fitz dev` re-resuelve `fitz.toml` al guardarlo:
+  repuntar `[bin].main`, agregar una `[dependencies]` o editar `[flags]`
+  se toman sin reiniciar. Core extraído a `try_resolve_entry_with_bin(...)
+  -> Result<ResolvedEntry, String>` (los `exit(1)` → `Err`); el loop
+  atrapa un `fitz.toml` roto, imprime el error y sigue sirviendo el bundle
+  anterior (recupera al próximo save válido). Opción a: si cambió
+  pkg_name/mount (rename del bin / mount) imprime una nota pidiendo
+  reiniciar, en vez de driftear (el output dir `target/wasm/<pkg>/` + la
+  host page del user no los puede adoptar el server ya corriendo). Helper
+  `change_is_manifest`; +2 unit; validado en un proyecto multi-bin real.

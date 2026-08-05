@@ -5800,5 +5800,21 @@ snapshot and reset to their default — symmetric with the restore side.
 items survives the reload; the composite-state wasm crate compiles
 clean. +1 unit test (`phase_11_13_slice3_composite_state_dump_and_apply`).
 
-Remaining follow-ups: multi-bin wasm dev (`--bin`), live `fitz.toml`
-re-resolution. See the deuda entry.
+Multi-bin wasm dev (`--bin`) — CLOSED 2026-08-05 (v0.34.0): `--bin
+<name>` on `fitz dev` (and now `fitz run`) selects the bin; fullstack
+`server` + `web` runs `fitz run --bin server` + `fitz dev --bin web`.
+
+Live `fitz.toml` re-resolution — CLOSED 2026-08-05 (v0.34.1): the
+wasm-client dev loop re-resolves the manifest on a `fitz.toml` save
+(repoint `[bin].main`, add a dep, edit `[flags]` — picked up without a
+restart). Core extracted to `try_resolve_entry_with_bin(...) ->
+Result<ResolvedEntry, String>` (the `exit(1)`s → `Err`); the loop
+catches a broken manifest, prints the error, and keeps serving the
+previous bundle (recovers on the next valid save). Option a: a
+pkg_name/mount change (bin rename / mount edit) prints a restart note
+instead of drifting — the running server can't adopt the new
+`target/wasm/<pkg>/` output dir + host page. Helper `change_is_manifest`;
++2 unit tests; validated on a real multi-bin project.
+
+Remaining follow-up: running both bins (`server` + `web`) in ONE `fitz
+dev` (dual-process orchestration). See the deuda entry.

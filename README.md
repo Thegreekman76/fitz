@@ -261,7 +261,7 @@ Verificá la instalación con `fitz --version` y `fitz --help`.
 | ----------------------------- | ------------------------------------------------------------------------------ |
 | `fitz fmt [archivos]`         | Formatea código Fitz a estilo canónico, cero config. `--check` para CI.        |
 | `fitz test [filter]`          | Corre fns con `@test`. Output estilo cargo (ok/FAILED + summary + exit code).  |
-| `fitz dev [--file] [--bin] [--port]` | Hot reload — re-arranca el programa cuando un `.fitz`/`.fitzv`/`fitz.toml` cambia. Con un bin `wasm-client`: buildea + sirve con auto-refresh + preservación de state en el browser (`--port`, default 1234). `--bin <nombre>` selecciona el bin en proyectos multi-bin (fullstack: `fitz run --bin server` + `fitz dev --bin web`). |
+| `fitz dev [--file] [--bin] [--port]` | Hot reload — re-arranca el programa cuando un `.fitz`/`.fitzv`/`fitz.toml` cambia. Con un bin `wasm-client`: buildea + sirve con auto-refresh + preservación de state en el browser (`--port`, default 1234). Editar `fitz.toml` se re-resuelve en vivo. `--bin <nombre>` selecciona el bin en proyectos multi-bin (fullstack: `fitz run --bin server` + `fitz dev --bin web`). |
 | `fitz repl`                   | REPL interactivo con env persistente, multi-line, history, comandos `:type`/`:env`/`:load`. |
 | `fitz lint [archivos]`        | Linter de patrones (unused_variable, unused_import, useless_match, string_concat). |
 

@@ -10647,6 +10647,12 @@ Qué hace en este modo:
   contador, texto en un input, una lista, un mapa, un tipo custom)
   **sobrevive el reload** — editás el template y no perdés el estado
   con el que estabas probando.
+- **Re-resolución del manifest en vivo**: si editás `fitz.toml` —
+  repuntás `[bin].main`, agregás una `[dependencies]`, o cambiás
+  `[flags]` — se toma sin reiniciar. Un `fitz.toml` roto a mitad de
+  edición imprime el error y sigue sirviendo el bundle anterior (se
+  recupera al próximo save válido). Renombrar el bin o cambiar su
+  `mount` sí requiere reiniciar `fitz dev` (imprime una nota).
 
 Es "Approach C": reload rápido con auto-refresh, no un runtime de
 template que aplique diffs sin recompilar (eso es un norte futuro más

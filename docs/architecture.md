@@ -185,9 +185,12 @@ code; they fork after that:
   serving + a `/__fitz_dev_ws` live-reload WebSocket + `index.html`
   snippet injection), and rebuilds + reloads the browser on each
   `.fitzv`/`.fitz`/`fitz.toml` save (Approach C — no client-side
-  template runtime). `--bin` also lands on `fitz run`, so a
-  fullstack `server` + `web` project runs `fitz run --bin server`
-  in one terminal and `fitz dev --bin web` in another.
+  template runtime). On a `fitz.toml` save it re-resolves the
+  manifest (new `[bin].main` entry, new deps, edited flags) without
+  restarting; a transiently-broken manifest prints the error and
+  keeps serving the previous bundle. `--bin` also lands on `fitz
+  run`, so a fullstack `server` + `web` project runs `fitz run --bin
+  server` in one terminal and `fitz dev --bin web` in another.
 - **`fitz repl`** — Interactive REPL with a shared env between
   lines.
 - **`fitz lint [files] [--deny <name>]`** — Pattern linter

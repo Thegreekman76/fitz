@@ -295,7 +295,9 @@ enum Commands {
     /// builds the bundle (`wasm-pack --dev`), serves the project
     /// on `127.0.0.1:<port>` with a live-reload WebSocket, and
     /// rebuilds + reloads the browser on each `.fitzv`/`.fitz`/
-    /// `fitz.toml` save.
+    /// `fitz.toml` save. Editing `fitz.toml` (repoint entry / add
+    /// a dep / edit flags) is re-resolved live; a broken manifest
+    /// keeps serving the previous bundle.
     Dev {
         /// Specific `.fitz` file. If omitted, looks for
         /// `fitz.toml` (manifest mode) and runs `[bin].main`.
@@ -964,42 +966,50 @@ fn resolve_entry_with_bin(
     bin_selector: Option<&str>,
     target_override: Option<manifest::Target>,
 ) -> ResolvedEntry {
+    try_resolve_entry_with_bin(file_opt, bin_selector, target_override).unwrap_or_else(|e| {
+        eprintln!("✗ {e}");
+        std::process::exit(1);
+    })
+}
+
+/// Phase 11.13 — `Result` core of [`resolve_entry_with_bin`]. Returns a
+/// formatted error message (without the `✗ ` prefix) instead of
+/// `exit(1)`, so the `fitz dev` wasm-client loop can re-resolve on a
+/// `fitz.toml` save without the process dying on a transiently-broken
+/// manifest (a mid-edit parse error). `resolve_entry_with_bin` wraps
+/// this and exits on `Err`, preserving the exact behaviour + messages
+/// of every other subcommand.
+fn try_resolve_entry_with_bin(
+    file_opt: Option<PathBuf>,
+    bin_selector: Option<&str>,
+    target_override: Option<manifest::Target>,
+) -> Result<ResolvedEntry, String> {
     if let Some(entry) = file_opt {
-        return ResolvedEntry {
+        return Ok(ResolvedEntry {
             entry,
             manifest_ctx: None,
             target_override,
-        };
+        });
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("✗ could not read the current directory: {e}");
-        std::process::exit(1);
-    });
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("could not read the current directory: {e}"))?;
 
-    let manifest_path = match manifest::find_manifest(&cwd) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "✗ could not find `{}` in `{}` or in parent directories.\n   \
-                 Pass an explicit file (`fitz <cmd> file.fitz`) or create a \
-                 project with `fitz new <name>` / `fitz init`.",
-                manifest::MANIFEST_FILE,
-                cwd.display()
-            );
-            std::process::exit(1);
-        }
-    };
+    let manifest_path = manifest::find_manifest(&cwd).ok_or_else(|| {
+        format!(
+            "could not find `{}` in `{}` or in parent directories.\n   \
+             Pass an explicit file (`fitz <cmd> file.fitz`) or create a \
+             project with `fitz new <name>` / `fitz init`.",
+            manifest::MANIFEST_FILE,
+            cwd.display()
+        )
+    })?;
 
-    let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("✗ could not read `{}`: {e}", manifest_path.display());
-        std::process::exit(1);
-    });
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("could not read `{}`: {e}", manifest_path.display()))?;
 
-    let manifest = manifest::Manifest::parse(&manifest_text).unwrap_or_else(|e| {
-        eprintln!("✗ `{}`: {e}", manifest_path.display());
-        std::process::exit(1);
-    });
+    let manifest = manifest::Manifest::parse(&manifest_text)
+        .map_err(|e| format!("`{}`: {e}", manifest_path.display()))?;
 
     let manifest_dir = manifest_path
         .parent()
@@ -1012,17 +1022,13 @@ fn resolve_entry_with_bin(
     let selected_bin = match manifest.select_bin(bin_selector) {
         Ok(Some(b)) => b.clone(),
         Ok(None) => {
-            eprintln!(
-                "✗ `{}` has no `[bin]` section with a `main`. The package \
+            return Err(format!(
+                "`{}` has no `[bin]` section with a `main`. The package \
                  manager MVP (Phase 9.y) requires one. Add:\n\n[bin]\nmain = \"src/main.fitz\"\n",
                 manifest_path.display()
-            );
-            std::process::exit(1);
+            ));
         }
-        Err(e) => {
-            eprintln!("✗ {e}");
-            std::process::exit(1);
-        }
+        Err(e) => return Err(e.to_string()),
     };
 
     let entry = manifest_dir.join(&selected_bin.main);
@@ -1030,18 +1036,17 @@ fn resolve_entry_with_bin(
     // Phase 9.y.3.a — eager dep resolution (fail-fast with the
     // resolver's message). On errors, abort before touching the
     // lockfile or invoking the evaluator/codegen.
-    let resolved_deps =
-        manifest::resolve_dependencies(&manifest, &manifest_dir).unwrap_or_else(|e| {
-            eprintln!("✗ no se pudieron resolver las dependencias: {e}");
-            std::process::exit(1);
-        });
+    let resolved_deps = manifest::resolve_dependencies(&manifest, &manifest_dir)
+        .map_err(|e| format!("no se pudieron resolver las dependencias: {e}"))?;
 
     // Phase 12.8 — load feature flag defaults into the runtime
     // registry. Idempotent, called once per process. Without a
     // manifest (single-file mode), the registry stays empty and all
     // flags fall back to the `false` default unless an env var
     // overrides them. The BTreeMap→HashMap conversion is O(N) over
-    // N declared flags (typically < 50).
+    // N declared flags (typically < 50). Re-running this on a live
+    // `fitz dev` re-resolve is intentional: editing `[flags]` in
+    // `fitz.toml` is picked up on the next build.
     let flag_defaults: std::collections::HashMap<String, bool> = manifest
         .flags
         .iter()
@@ -1049,7 +1054,7 @@ fn resolve_entry_with_bin(
         .collect();
     evaluator::set_flag_defaults(flag_defaults);
 
-    ResolvedEntry {
+    Ok(ResolvedEntry {
         entry,
         manifest_ctx: Some(ManifestCtx {
             manifest,
@@ -1058,7 +1063,7 @@ fn resolve_entry_with_bin(
             selected_bin: Some(selected_bin),
         }),
         target_override,
-    }
+    })
 }
 
 /// Phase 11.5.b — parses the `--target <t>` CLI flag into
@@ -4469,7 +4474,7 @@ fn dev_cmd(file_arg: Option<PathBuf>, bin: Option<String>, port: u16) {
         let resolved = resolve_entry_with_bin(None, bin.as_deref(), None);
         let runtime = evaluator::build_runtime();
         runtime.block_on(async move {
-            if let Err(e) = run_wasm_dev_loop(resolved, port).await {
+            if let Err(e) = run_wasm_dev_loop(resolved, bin, port).await {
                 eprintln!("✗ fitz dev: {e}");
                 std::process::exit(1);
             }
@@ -4524,7 +4529,11 @@ fn is_wasm_client_dev(bin: Option<&str>) -> bool {
 /// relevant save rebuilds + pushes a reload to the browser. A build
 /// failure prints and keeps serving the previous bundle. Ctrl+C
 /// exits.
-async fn run_wasm_dev_loop(resolved: ResolvedEntry, port: u16) -> Result<(), String> {
+async fn run_wasm_dev_loop(
+    mut resolved: ResolvedEntry,
+    bin: Option<String>,
+    port: u16,
+) -> Result<(), String> {
     let watch_dir = resolved
         .manifest_ctx
         .as_ref()
@@ -4545,9 +4554,26 @@ async fn run_wasm_dev_loop(resolved: ResolvedEntry, port: u16) -> Result<(), Str
     let (pkg_name, mount) = wasm_server_params(&resolved)?;
     let pkg_rel_js = format!("target/wasm/{pkg_name}/{pkg_name}.js");
 
-    let server = dev_server::start(watch_dir.clone(), pkg_name, pkg_rel_js, mount, port).await?;
+    let server = dev_server::start(
+        watch_dir.clone(),
+        pkg_name.clone(),
+        pkg_rel_js,
+        mount.clone(),
+        port,
+    )
+    .await?;
     eprintln!("   serving {}", server.url);
     eprintln!("   (Ctrl+C para salir)\n");
+
+    // Phase 11.13 — server baseline params. The dev_server was started
+    // once with these. A live re-resolve can change entry/deps/flags
+    // (all picked up by the next build), but pkg_name/mount only change
+    // on a bin rename / mount edit, which the running server cannot
+    // adopt: the output dir `target/wasm/<pkg>/` and the user's
+    // index.html would desync. We compare a re-resolve against these
+    // and print a restart note instead of silently drifting (option a).
+    let server_pkg = pkg_name;
+    let server_mount = mount;
 
     // Watcher (kept alive by `_watcher` for the loop's lifetime).
     let (_watcher, mut rx) = setup_watcher(&watch_dir)?;
@@ -4564,6 +4590,37 @@ async fn run_wasm_dev_loop(resolved: ResolvedEntry, port: u16) -> Result<(), Str
                     "\n↻ change in {} — rebuilding ...",
                     relative_to(&change, &watch_dir)
                 );
+                // Phase 11.13 — live manifest re-resolution. When the
+                // saved file is `fitz.toml`, re-resolve so an edited
+                // `[bin].main` (new entry), a new `[dependencies]` (new
+                // dep_registry), or a changed `[flags]` is picked up
+                // without restarting. A broken manifest (mid-edit parse
+                // error) keeps the previous resolution and keeps
+                // serving; the next valid save recovers.
+                if change_is_manifest(&change) {
+                    match try_resolve_entry_with_bin(None, bin.as_deref(), None) {
+                        Ok(new_resolved) => {
+                            if let Ok((new_pkg, new_mount)) = wasm_server_params(&new_resolved) {
+                                if new_pkg != server_pkg || new_mount != server_mount {
+                                    eprintln!(
+                                        "↻ nota: el bin cambió de nombre/mount \
+                                         (`{server_pkg}`/`{server_mount}` → `{new_pkg}`/`{new_mount}`).\n   \
+                                         Reiniciá `fitz dev` para tomarlo (el bundle servido y la \
+                                         host page siguen apuntando al anterior)."
+                                    );
+                                }
+                            }
+                            resolved = new_resolved;
+                            eprintln!("↻ fitz.toml re-resolved");
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "✗ fitz.toml re-resolve failed:\n   {e}\n   \
+                                 keeping the previous resolution — fix and re-save."
+                            );
+                        }
+                    }
+                }
                 if build_and_report(&resolved) {
                     server.signal_reload();
                     eprintln!("✓ reloaded browser");
@@ -4575,6 +4632,16 @@ async fn run_wasm_dev_loop(resolved: ResolvedEntry, port: u16) -> Result<(), Str
             }
         }
     }
+}
+
+/// Phase 11.13 — is this changed path the project's `fitz.toml`? Used
+/// by the wasm dev loop to decide whether to re-resolve the manifest
+/// (vs a plain `.fitzv`/`.fitz` save that only needs a rebuild).
+fn change_is_manifest(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == manifest::MANIFEST_FILE)
+        .unwrap_or(false)
 }
 
 /// Runs one wasm-client dev build (dev profile) and reports the
@@ -7089,6 +7156,38 @@ fn db_squash_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_11_13_change_is_manifest_only_for_fitz_toml() {
+        assert!(change_is_manifest(std::path::Path::new("fitz.toml")));
+        assert!(change_is_manifest(std::path::Path::new(
+            "/some/project/fitz.toml"
+        )));
+        assert!(!change_is_manifest(std::path::Path::new("App.fitzv")));
+        assert!(!change_is_manifest(std::path::Path::new("src/main.fitz")));
+        assert!(!change_is_manifest(std::path::Path::new("Cargo.toml")));
+        assert!(!change_is_manifest(std::path::Path::new("/proj")));
+    }
+
+    #[test]
+    fn phase_11_13_try_resolve_single_file_is_ok_without_touching_manifest() {
+        // Single-file mode returns Ok immediately (no cwd walk, no
+        // manifest read), so the wasm dev loop's Result core never
+        // exits the process — the whole point of the extraction.
+        let r = try_resolve_entry_with_bin(
+            Some(PathBuf::from("App.fitzv")),
+            None,
+            Some(manifest::Target::WasmClient),
+        );
+        let resolved = r.expect("single-file resolve should be Ok");
+        assert_eq!(resolved.entry, PathBuf::from("App.fitzv"));
+        assert!(resolved.manifest_ctx.is_none());
+        assert_eq!(
+            resolved.effective_target(),
+            manifest::Target::WasmClient,
+            "explicit --target override must win"
+        );
+    }
 
     #[test]
     fn pip_inputs_hash_is_deterministic() {

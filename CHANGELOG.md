@@ -9,6 +9,57 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.34.1] — 2026-08-05 — `fitz dev` wasm-client: re-resolución del manifest en vivo (último follow-up de Fase 11.13)
+
+Patch — el modo wasm-client de `fitz dev` ahora **re-resuelve
+`fitz.toml` cuando lo guardás**, sin reiniciar. Cierra el último
+follow-up abierto de la Fase 11.13 (Approach C). Cambio contenido en
+`src/main.rs` — no toca el emisor view (los `examples/view/` regeneran
+byte-idéntico) ni la extensión VSCode (sin sintaxis nueva, sin superficie
+LSP).
+
+Antes: el loop wasm resolvía el manifest **una sola vez** al arrancar y
+reusaba ese `ResolvedEntry` en cada rebuild. Editar el `.fitzv` se tomaba
+(el entry se re-lee cada build), pero repuntar `[bin].main`, agregar una
+`[dependencies]` o cambiar `[flags]` usaban la resolución vieja. (El path
+clásico native/SSR ya era live por kill+respawn del child; no cambia.)
+
+### Changed
+- **`fitz dev` (modo wasm-client) re-resuelve `fitz.toml` en vivo.**
+  Al guardar el manifest, re-resuelve entry + deps + flags y rebuildea
+  con lo nuevo — repuntar `[bin].main`, agregar una dep de la companion
+  UI (`from fitz_liveviews.ui.Badge import Badge` + la entry en
+  `[dependencies]`) o editar `[flags]` se toman sin reiniciar.
+- **Un `fitz.toml` roto a mitad de edición ya no mata el dev loop.** El
+  core de resolución se extrajo a `try_resolve_entry_with_bin(...) ->
+  Result<ResolvedEntry, String>` (los `exit(1)` → `Err`); el
+  `resolve_entry_with_bin` clásico queda como wrapper que sale-en-error,
+  así el resto de los subcomandos se comportan byte-idéntico. El loop
+  atrapa el `Err`, imprime el error de parse y **sigue sirviendo el
+  bundle anterior**, recuperándose al próximo save válido.
+- **Nota de reinicio (opción a):** re-resolver solo alimenta los builds
+  (entry + deps + flags). Renombrar el bin o cambiar su `mount` cambia el
+  output dir `target/wasm/<pkg>/` + la host page del user, que el server
+  ya corriendo no puede adoptar — el loop imprime una nota pidiendo
+  reiniciar `fitz dev` en vez de driftear en silencio.
+
+### Tests
+- +2 unit deterministas (`phase_11_13_change_is_manifest_only_for_fitz_toml`,
+  `phase_11_13_try_resolve_single_file_is_ok_without_touching_manifest`).
+  Suite: **3999 lib** + **123 cli_e2e** + `view_*` byte-compat todos verdes;
+  `fmt --all --check` + clippy `--lib --tests --bins -D warnings` (default y
+  `--features lsp`) limpios.
+- **Validado en un proyecto multi-bin real** (`fitz dev --bin web`,
+  `wasm-pack` real): repuntar `[bin].main` App→App2 se toma en vivo (bundle
+  regenerado con el nuevo entry, rebuild ~1.3s, js=200, sin reiniciar); un
+  `fitz.toml` roto imprime el error y sigue sirviendo el bundle previo
+  (proceso vivo); restaurar el manifest re-resuelve; un edit de `.fitzv`
+  rebuildea sin re-resolver (path no-manifest byte-idéntico).
+
+**Follow-ups restantes de 11.13:** el runtime data-driven verdadero
+(deuda 🟡, gatillado por la VM de expresiones en WASM); correr ambos bins
+(`server` + `web`) en UN `fitz dev` (orquestación dual-process).
+
 ## [v0.34.0] — 2026-08-05 — `--bin` en `fitz run` + `fitz dev`: selección de bin en proyectos multi-bin (workflow fullstack)
 
 Minor — `--bin <nombre>` selecciona el bin en un manifest con varios

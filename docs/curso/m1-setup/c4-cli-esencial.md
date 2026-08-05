@@ -537,8 +537,10 @@ un `.fitz`/`.fitzv` o el `fitz.toml` cambia. Análogo a `nodemon`,
 > componente `.fitzv` que compila a WebAssembly, M9), `fitz dev`
 > en vez de kill+respawn **buildea el bundle y lo sirve con
 > auto-refresh en el browser** (live-reload + preservación de
-> state). En un proyecto fullstack `server` + `web`: `fitz run
-> --bin server` en una terminal, `fitz dev --bin web` en otra.
+> state). Editar `fitz.toml` (repuntar el entry, agregar deps) se
+> toma en vivo, sin reiniciar. En un proyecto fullstack `server` +
+> `web`: `fitz run --bin server` en una terminal, `fitz dev --bin
+> web` en otra.
 > Detalle en [cap 25 de la guía](../../guide.md#25---fitz-dev--hot-reload).
 
 ```bash

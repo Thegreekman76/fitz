@@ -10383,12 +10383,25 @@ no por dependencia estricta.
     `is_wasm_client_dev(bin)` + `resolve_entry_with_bin` rutean el bin
     wasm-client al dev loop; el bin native cae al respawn clásico con
     `fitz run --bin <name>`. +2 cli_e2e (`phase_11_13_run_with_bin_*`).
-  - **Follow-ups:** re-resolver `fitz.toml` en vivo (editar `[bin].main`
-    con `fitz dev` corriendo aún requiere reiniciar).
+  - **Re-resolución del manifest en vivo ✅ (2026-08-05, v0.34.1).** El
+    modo wasm-client de `fitz dev` re-resuelve `fitz.toml` al guardarlo:
+    repuntar `[bin].main`, agregar una `[dependencies]` o editar `[flags]`
+    se toman sin reiniciar. Core extraído a `try_resolve_entry_with_bin(...)
+    -> Result<ResolvedEntry, String>` (los `exit(1)` → `Err`); el loop
+    atrapa el `Err` de un `fitz.toml` roto, imprime el error y sigue
+    sirviendo el bundle anterior (recupera al próximo save válido). Nota de
+    reinicio (opción a) si cambia pkg_name/mount (rename del bin / mount).
+    Helper `change_is_manifest`. +2 unit (`phase_11_13_change_is_manifest_*`,
+    `phase_11_13_try_resolve_single_file_*`). Validado en un proyecto
+    multi-bin real (repoint entry live + `fitz.toml` roto graceful +
+    recover + edit `.fitzv` sin re-resolver).
+  - **Follow-ups restantes:** correr ambos bins (`server` + `web`) en UN
+    `fitz dev` (orquestación dual-process); el runtime data-driven de
+    template (deuda 🟡, gatillado por la VM de expresiones en WASM).
 
 **Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
 MVP por slices ✅) → **11.12 (hidratación — SSR-1→SSR-4 ✅, cierra entera)**
-→ 11.13 (hot reload — Approach C slice-1 + slice-2 + slice-3 ✅, cierra Approach C; multi-bin 🔜).
+→ 11.13 (hot reload — Approach C slice-1+2+3 ✅ + multi-bin ✅ + re-resolución del manifest en vivo ✅; dual-process `fitz dev` 🔜).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —
