@@ -10643,10 +10643,9 @@ Qué hace en este modo:
   `fitz.toml`, rebuildea y el browser se recarga solo. Sin refrescar
   a mano.
 - **Preservación de state**: el estado vivo del componente (un
-  contador, texto en un input) **sobrevive el reload** — editás el
-  template y no perdés el estado con el que estabas probando. (Cubre
-  campos de estado primitivos; listas/mapas/tipos custom vuelven a su
-  default por ahora.)
+  contador, texto en un input, una lista, un mapa, un tipo custom)
+  **sobrevive el reload** — editás el template y no perdés el estado
+  con el que estabas probando.
 
 Es "Approach C": reload rápido con auto-refresh, no un runtime de
 template que aplique diffs sin recompilar (eso es un norte futuro más

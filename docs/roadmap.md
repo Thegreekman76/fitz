@@ -10363,19 +10363,25 @@ no por dependencia estricta.
     guarda el snapshot en `sessionStorage` en `beforeunload` y lo
     re-aplica tras `mount()` (+`render()`). El Cargo.toml dev gana
     `serde_json` + la feature web-sys `Storage`. Validado en Chrome: al
-    editar el template, el `count` bumpeado sobrevive el reload. **Este
-    increment cubre state primitivo** (`Int`/`Float`/`Str`/`Bool`);
-    compuesto (`List`/`Map`/nominal) resetea a default (follow-up:
-    espejar `json_restore_value` para el snapshot). Nota: un campo de
-    state preservado gana sobre un cambio de su *default* en el template
-    (comportamiento correcto — el state se preserva).
-  - **Follow-ups:** state compuesto en el snapshot; multi-bin wasm dev
-    (proyectos `server` + `web` fullstack — hoy caen al path clásico);
-    re-resolver `fitz.toml` en vivo.
+    editar el template, el `count` bumpeado sobrevive el reload. Nota: un
+    campo de state preservado gana sobre un cambio de su *default* en el
+    template (comportamiento correcto — el state se preserva).
+  - **Slice-3 ✅ (2026-08-05) — state compuesto en el snapshot.** Nuevo
+    `json_dump_value` (inverso de `json_restore_value`) serializa
+    `List<T>` / `Map<Str, V>` / `Nullable<T>` / nominales importados
+    (recursivo) al snapshot; `__fitz_dev_apply` gana la rama compuesta
+    (reusa `json_restore_value`). Ahora una lista/mapa/tipo custom también
+    sobrevive el reload — **cierra 11.13 Approach C entero**. Validado en
+    Chrome: `List<Str>` con 2 items persiste el reload; el crate wasm con
+    state compuesto compila limpio. Tipos que no round-trippean por JSON
+    (`Map` con key no-`Str`, tuplas, fns) se omiten del snapshot (resetean
+    a default), simétrico con el restore.
+  - **Follow-ups:** multi-bin wasm dev (proyectos `server` + `web`
+    fullstack — hoy caen al path clásico); re-resolver `fitz.toml` en vivo.
 
 **Orden sugerido:** 11.11 (server fns ✅) → 11.10 (reactividad keep-node —
 MVP por slices ✅) → **11.12 (hidratación — SSR-1→SSR-4 ✅, cierra entera)**
-→ 11.13 (hot reload — Approach C slice-1 + slice-2 ✅; state compuesto + multi-bin 🔜).
+→ 11.13 (hot reload — Approach C slice-1 + slice-2 + slice-3 ✅, cierra Approach C; multi-bin 🔜).
 
 - ✅ **11.1** POC parser + `src/view/` module isolation (2026-07-14).
 - ✅ **11.2.a** Bridge del raw view AST a `crate::ast` clásico —

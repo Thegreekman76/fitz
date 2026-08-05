@@ -5782,5 +5782,23 @@ while a bumped `count` survives the reload; view smokes byte-identical
 (`phase_11_13_emit_dev_state_methods_*`,
 `phase_11_13_dev_augment_cargo_toml_*`).
 
-Remaining follow-ups: composite-state snapshot, multi-bin wasm dev
-(`--bin`), live `fitz.toml` re-resolution. See the deuda entry.
+### Slice-3 (shipped) — composite state in the snapshot
+
+New `json_dump_value` (`codegen_wasm.rs`) — the recursive inverse of
+`json_restore_value` — serializes `List<T>` / `Map<Str, V>` /
+`Nullable<T>` / imported nominals into a `serde_json::Value`. Each
+recursion level threads a fresh `&T` binding (`__le`/`__mv`/`__iv`/
+`__fv`) so scalar leaves serialize via `serde_json::to_value(<ref>)`
+with no `*&` deref (clippy-clean). `__fitz_dev_apply` gains the
+composite branch (reuses `json_restore_value`, mirroring
+`emit_apply_state_json`). The top-level snapshot ref is parenthesized
+(`(&*self.<field>.borrow())`) so a trailing `.iter()`/`match` binds to
+the `&T`, not the `Ref`. Types that can't round-trip through JSON (a
+`Map` with a non-`Str` key, tuples, functions) are omitted from the
+snapshot and reset to their default — symmetric with the restore side.
+**Closes 11.13 Approach C.** Validated in Chrome: a `List<Str>` with 2
+items survives the reload; the composite-state wasm crate compiles
+clean. +1 unit test (`phase_11_13_slice3_composite_state_dump_and_apply`).
+
+Remaining follow-ups: multi-bin wasm dev (`--bin`), live `fitz.toml`
+re-resolution. See the deuda entry.

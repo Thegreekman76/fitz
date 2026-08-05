@@ -9179,9 +9179,14 @@ cubre el DX.
   2026-08-04.** Dev-flag gated (prod byte-idéntico). El codegen dev
   emite `__fitz_dev_snapshot`/`__fitz_dev_apply` en el root; el entry
   wrapper dev guarda/restaura vía `sessionStorage` (`beforeunload` +
-  post-`mount`). **Cubre state primitivo**; el compuesto
-  (`List`/`Map`/nominal) resetea a default — **follow-up: espejar
-  `json_restore_value` en el snapshot** (`json_dump_value`).
+  post-`mount`).
+- **Slice-3 — state compuesto en el snapshot — ✅ CERRADO 2026-08-05.**
+  Nuevo `json_dump_value` (inverso recursivo de `json_restore_value`)
+  serializa `List<T>` / `Map<Str, V>` / `Nullable<T>` / nominales al
+  snapshot; `__fitz_dev_apply` gana la rama compuesta. **Cierra Approach C
+  entero.** Tipos que no round-trippean por JSON (Map con key no-`Str`,
+  tuplas, fns) se omiten del snapshot (resetean a default), simétrico con
+  el restore.
 - **Multi-bin wasm dev** — un proyecto `server` + `web` (fullstack
   `@rpc`) hace `select_bin(None)` ambiguo → hoy `fitz dev` cae al
   path clásico. Requiere `fitz dev --bin <name>` (+ eventualmente

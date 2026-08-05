@@ -1492,7 +1492,71 @@ fn emit_apply_state_json(
     Ok(())
 }
 
-/// Phase 11.13 slice-2 (`fitz dev` hot reload — state preservation) —
+/// Phase 11.13 slice-3 — inverse of [`json_restore_value`]: builds a Rust
+/// expression that serializes a composite state field into a
+/// `serde_json::Value` (recursively over `List<T>`, `Map<Str, V>`,
+/// `Nullable<T>`, and imported nominals). `ref_expr` is a `&T_rust` binding
+/// (every recursion level threads a fresh `&T` binding — `__le` list element,
+/// `__mv` map value, `__iv` nullable inner, `__fv` nominal field — so scalar
+/// leaves never need a `*&` deref that clippy would flag).
+///
+/// Returns `None` for types that cannot round-trip through JSON (a `Map` with a
+/// non-`Str` key, tuples, functions, unknown nominal) — those fields are simply
+/// omitted from the snapshot and reset to their default on reload, symmetric
+/// with `json_restore_value` returning `None` for the same shapes.
+fn json_dump_value(ty: &TypeExpr, nominals: &NominalRegistry, ref_expr: &str) -> Option<String> {
+    match ty {
+        TypeExpr::Named(name) => match name.as_str() {
+            "Int" | "Float" | "Bool" | "Str" => Some(format!(
+                "serde_json::to_value({ref_expr}).unwrap_or(serde_json::Value::Null)"
+            )),
+            other => {
+                // Imported nominal: build a JSON object field by field. Each
+                // field is bound to a fresh `&T` (`__fv`) before recursing.
+                let fields = nominals.fields(other)?;
+                let mut lines: Vec<String> =
+                    vec!["let mut __o = serde_json::Map::new();".to_string()];
+                for (fname, fty) in fields {
+                    let inner = json_dump_value(fty, nominals, "__fv")?;
+                    lines.push(format!(
+                        "__o.insert({fname:?}.to_string(), {{ let __fv = &__nv.{fname}; {inner} }});"
+                    ));
+                }
+                lines.push("serde_json::Value::Object(__o)".to_string());
+                Some(format!(
+                    "(|__nv: &{other}| -> serde_json::Value {{ {} }})({ref_expr})",
+                    lines.join(" ")
+                ))
+            }
+        },
+        TypeExpr::Nullable(inner) => {
+            let inner_dump = json_dump_value(inner, nominals, "__iv")?;
+            Some(format!(
+                "match {ref_expr} {{ Some(__iv) => {inner_dump}, None => serde_json::Value::Null }}"
+            ))
+        }
+        TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => {
+            let inner_dump = json_dump_value(&args[0], nominals, "__le")?;
+            Some(format!(
+                "serde_json::Value::Array({ref_expr}.iter().map(|__le| {inner_dump}).collect::<Vec<serde_json::Value>>())"
+            ))
+        }
+        TypeExpr::Generic { name, args } if name == "Map" && args.len() == 2 => {
+            // JSON objects key on strings, so only `Map<Str, V>` round-trips.
+            match &args[0] {
+                TypeExpr::Named(k) if k == "Str" => {}
+                _ => return None,
+            }
+            let inner_v = json_dump_value(&args[1], nominals, "__mv")?;
+            Some(format!(
+                "serde_json::Value::Object({ref_expr}.iter().map(|(__mk, __mv)| (__mk.clone(), {inner_v})).collect::<serde_json::Map<String, serde_json::Value>>())"
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Phase 11.13 slice-2/3 (`fitz dev` hot reload — state preservation) —
 /// emit a dev-only `impl <Name>` with `__fitz_dev_snapshot()` (state →
 /// JSON string) and `__fitz_dev_apply(&str)` (JSON → state, then
 /// `render()`). The composed dev entry wrapper stashes the snapshot in
@@ -1501,11 +1565,13 @@ fn emit_apply_state_json(
 /// dev-mode build** (`fitz build` never carries this — the prod `lib.rs`
 /// stays byte-identical).
 ///
-/// This first increment covers **primitive** state fields
-/// (`Int`/`Float`/`Str`/`Bool` — exactly [`json_state_accessor`]).
-/// Composite fields (`List`/`Map`/nominal) are skipped: they reset to
-/// their defaults on reload (a follow-up mirrors [`json_restore_value`]
-/// for the snapshot side).
+/// Covers **primitive** state (`Int`/`Float`/`Str`/`Bool` — via
+/// [`json_state_accessor`]) AND, since slice-3, **composite** state:
+/// `List<T>`, `Map<Str, V>`, `Nullable<T>`, and imported nominals restore
+/// via [`json_restore_value`] and serialize via its inverse
+/// [`json_dump_value`], both recursive. A field whose type can't round-trip
+/// through JSON (a `Map` with a non-`Str` key, tuples, functions) is omitted
+/// from the snapshot and keeps its default on reload.
 pub fn emit_dev_state_methods(
     component: &ExpandedComponent,
     nominals: &NominalRegistry,
@@ -1531,6 +1597,7 @@ pub fn emit_dev_state_methods(
             e
         })?;
         if json_state_accessor(&rust_ty).is_some() {
+            // Scalar — byte-identical to slice 2.
             let val = if rust_ty == "String" {
                 format!("self.{}.borrow().clone()", field.name)
             } else {
@@ -1540,6 +1607,20 @@ pub fn emit_dev_state_methods(
                 out,
                 "        __m.insert(\"{}\".to_string(), serde_json::json!({}));",
                 field.name, val
+            )
+            .unwrap();
+        } else if let Some(dump) = json_dump_value(
+            &field.type_expr,
+            nominals,
+            // Parenthesized so a trailing `.iter()` / `match` binds to the
+            // `&T`, not to the `Ref` from `borrow()` (method-call precedence).
+            &format!("(&*self.{}.borrow())", field.name),
+        ) {
+            // Composite (List / Map<Str,V> / Nullable / nominal) — slice 3.
+            writeln!(
+                out,
+                "        __m.insert(\"{}\".to_string(), {{ {} }});",
+                field.name, dump
             )
             .unwrap();
         }
@@ -1568,12 +1649,30 @@ pub fn emit_dev_state_methods(
             e
         })?;
         if let Some((accessor, rhs)) = json_state_accessor(&rust_ty) {
+            // Scalar — byte-identical to slice 2.
             writeln!(
                 out,
                 "        if let Some(__x) = __v.get(\"{}\").and_then(|__j| __j.{}) {{ *self.{}.borrow_mut() = {}; }}",
                 field.name, accessor, field.name, rhs
             )
             .unwrap();
+        } else if let Some(restore) = json_restore_value(&field.type_expr, nominals, "__fv") {
+            // Composite (List / Map<Str,V> / Nullable / nominal) — slice 3.
+            // A shape mismatch keeps the default (both `if let` guards fall
+            // through), mirroring `emit_apply_state_json`.
+            writeln!(
+                out,
+                "        if let Some(__fv) = __v.get(\"{}\") {{",
+                field.name
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "            if let Some(__restored) = {{ {restore} }} {{ *self.{}.borrow_mut() = __restored; }}",
+                field.name
+            )
+            .unwrap();
+            writeln!(out, "        }}").unwrap();
         }
     }
     writeln!(out, "        self.render();").unwrap();
@@ -7860,6 +7959,35 @@ component Row {
         assert!(
             out.contains("self.render();"),
             "re-render after apply:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_13_slice3_composite_state_dump_and_apply() {
+        // A `List<Str>` state field now round-trips through the dev snapshot:
+        // the snapshot serializes it (json_dump_value → Value::Array) and the
+        // apply restores it (json_restore_value → as_array filter_map).
+        let src = "component App {\n  state {\n    items: List<Str> = []\n  }\n  event add() { items.push(\"x\") }\n  <template><div>{items.len()}</div></template>\n}\n";
+        let comp = &parse_expand(src).components[0];
+        let mut out = String::new();
+        emit_dev_state_methods(comp, &NominalRegistry::new(), &mut out).unwrap();
+        // snapshot: builds a JSON array from the Vec.
+        assert!(
+            out.contains("serde_json::Value::Array((&*self.items.borrow()).iter().map(|__le|"),
+            "composite snapshot:\n{out}"
+        );
+        // apply: restores the composite behind the get() guard, then assigns.
+        assert!(
+            out.contains("if let Some(__fv) = __v.get(\"items\") {"),
+            "composite apply guard:\n{out}"
+        );
+        assert!(
+            out.contains("as_array().map(|__arr|"),
+            "composite apply restore:\n{out}"
+        );
+        assert!(
+            out.contains("*self.items.borrow_mut() = __restored;"),
+            "assign:\n{out}"
         );
     }
 
