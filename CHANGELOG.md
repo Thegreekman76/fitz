@@ -9,6 +9,59 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.33.0] — 2026-08-05 — `fitz dev` modo wasm-client: hot reload de `.fitzv` con auto-refresh + preservación de state (Fase 11.13 Approach C, slices 1+2)
+
+Primera mitad de la Fase 11.13 (hot reload del template). `fitz dev`
+gana un **modo wasm-client**: cuando el bin default del manifest apunta
+a `wasm-client`, en vez de respawnear `fitz run` buildea el bundle
+incremental y lo sirve con auto-refresh en el browser. Approach C
+(reload incremental rápido, sin runtime de template en el cliente) — el
+runtime data-driven verdadero (diff sin recompilar) queda como norte
+futuro, gatillado por una VM de expresiones en WASM (deuda documentada).
+**Sin cambios al path prod** (`fitz build`): el `lib.rs`/`Cargo.toml`
+emitidos son byte-idénticos; los view smokes regeneran sin cambios.
+
+### Added
+- **`fitz dev` — modo wasm-client (slice-1).** Detecta un bin default
+  `wasm-client` y, en lugar del respawn clásico:
+  - Buildea con `wasm-pack --dev` (sin `wasm-opt`, incremental sobre el
+    crate estable `target/wasm-build/` → cache de cargo caliente).
+  - Sirve el root del proyecto en `127.0.0.1:<port>` (default `1234`,
+    flag nuevo **`--port`**) desde un dev server axum
+    (`src/dev_server.rs`): static serving (`Cache-Control: no-store`,
+    MIME `application/wasm`, `favicon.ico` faltante → 204) + un
+    WebSocket de live-reload en `/__fitz_dev_ws`, inyectando el snippet
+    de reload en el `index.html` servido (o generando uno mínimo con el
+    elemento del `mount`).
+  - Ante cada save de `.fitzv`/`.fitz`/`fitz.toml`: rebuild + push de
+    "reload" al browser (que hace `location.reload()`).
+  - El watcher ahora reconoce `.fitzv` (antes lo ignoraba — extensión
+    `.fitzv` ≠ `.fitz`).
+- **Preservación de state a través del reload (slice-2).** En modo dev
+  (gated por dev-flag; `fitz build` no lo emite), el codegen agrega en el
+  componente root `__fitz_dev_snapshot()`/`__fitz_dev_apply()`, y el
+  entry wrapper guarda el snapshot en `sessionStorage` en `beforeunload`
+  y lo re-aplica tras `mount()`. Editás el template y el estado vivo
+  (contadores, texto tipeado) **sobrevive** el reload. El Cargo.toml dev
+  gana `serde_json` + la feature web-sys `Storage`. Cubre state
+  **primitivo** (`Int`/`Float`/`Str`/`Bool`); compuesto
+  (`List`/`Map`/nominal) resetea a default (follow-up).
+
+### Notes
+- **Reencuadre honesto vs. el roadmap original.** Decía *"aplica el diff
+  sin recompilar el crate"*; en realidad (a) `fitz dev` ni watcheaba
+  `.fitzv` ni invocaba `wasm-pack` (no había dev loop para el path
+  client-WASM), y (b) el runtime data-driven verdadero choca con la VM de
+  expresiones en WASM. C entrega ~90% del DX sentido a ~5% del costo, sin
+  rewrite de codegen ni riesgo byte-compat.
+- **Follow-ups abiertos** (no bloquean): state compuesto en el snapshot,
+  multi-bin wasm dev (`--bin`), re-resolver `fitz.toml` en vivo, y el
+  runtime data-driven verdadero (deuda 🟡 en `docs/deudas-post-5b.md`).
+- **Validado en Chrome real** (puppeteer): editar un `<template>`
+  auto-recarga el browser; con slice-2, un `count` bumpeado persiste el
+  reload. Byte-compat de los view smokes verificado. Sin cambios a la
+  extensión VSCode (11.13 no toca grammar ni LSP del `.fitz` clásico).
+
 ## [v0.32.0] — 2026-08-04 — ORM: expresiones SQL (`sql.now()`/`sql.raw()`) + aritmética de fechas en `.where` (cierra O1 + O3)
 
 Cierra dos deudas del ORM detectadas construyendo fitzwatch (O1 + O3

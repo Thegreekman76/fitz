@@ -10615,14 +10615,62 @@ el servidor; al detectar cambio, lo mata + respawnea, así el nuevo
 código toma efecto sin re-ejecutar curl o refrescar el browser por
 varios segundos.
 
+### Modo wasm-client (`.fitzv` → WASM)
+
+Cuando el bin default de tu `fitz.toml` apunta a `wasm-client` (un
+componente `.fitzv` que compila a WebAssembly, cap 36), `fitz dev`
+cambia de estrategia: en vez de kill+respawn, **buildea el bundle y
+lo sirve con auto-refresh en el browser**.
+
+```bash
+# En un proyecto con un [[bin]] target = "wasm-client":
+fitz dev              # sirve en http://127.0.0.1:1234/
+fitz dev --port 8080  # otro puerto
+```
+
+Qué hace en este modo:
+
+- **Build incremental** con `wasm-pack --dev` (sin `wasm-opt`, mucho
+  más rápido que el `--release` de `fitz build`; reusa el crate
+  estable en `target/wasm-build/` así la cache de cargo queda
+  caliente — el primer build compila las deps, los siguientes son de
+  ~1-2 segundos).
+- **Dev server** en `127.0.0.1:<port>` que sirve el root de tu
+  proyecto igual que `python -m http.server`: tu `index.html`, tu
+  CSS, y el bundle en `target/wasm/<bin>/` resuelven tal cual. Si no
+  tenés `index.html`, genera uno mínimo con el elemento del `mount`.
+- **Live reload por WebSocket**: al guardar un `.fitzv`/`.fitz`/
+  `fitz.toml`, rebuildea y el browser se recarga solo. Sin refrescar
+  a mano.
+- **Preservación de state**: el estado vivo del componente (un
+  contador, texto en un input) **sobrevive el reload** — editás el
+  template y no perdés el estado con el que estabas probando. (Cubre
+  campos de estado primitivos; listas/mapas/tipos custom vuelven a su
+  default por ahora.)
+
+Es "Approach C": reload rápido con auto-refresh, no un runtime de
+template que aplique diffs sin recompilar (eso es un norte futuro más
+grande). Para el 90% del loop de edición visual, el efecto es el
+mismo: guardás, ves el cambio en un par de segundos, sin perder el
+estado.
+
+> **Nota:** este modo requiere un manifest con un `[[bin]] target =
+> "wasm-client"` (necesita `mount` + el layout de salida). Corré
+> `fitz dev` desde el directorio del proyecto (sin `--file`). Un
+> proyecto con dos bins (`server` + `web`) todavía cae al modo
+> clásico — el modo wasm dedicado es para un bin wasm-client default.
+
 ### Lo que NO anda todavía
 
-- **Incremental rebuild** (cambiar 1 archivo y re-cargar sólo eso):
-  hoy es kill+respawn full. Mejora cuando aparezca el modelo de
-  módulos pre-compilados.
-- **Browser auto-refresh para HTTP** (inyectar WebSocket en
-  respuestas): NO en MVP. Quien edite HTML/CSS junto al backend
-  Fitz puede usar herramientas separadas (Live Server, etc.).
+- **Incremental rebuild en el modo clásico** (native/SSR): hoy es
+  kill+respawn full. Mejora cuando aparezca el modelo de módulos
+  pre-compilados. (El modo wasm-client sí hace build incremental —
+  ver arriba.)
+- **Browser auto-refresh para HTTP nativo** (inyectar WebSocket en
+  respuestas del server Fitz): NO en MVP. Quien edite HTML/CSS junto
+  al backend Fitz puede usar herramientas separadas (Live Server,
+  etc.). El auto-refresh **sí** existe para el modo wasm-client
+  (ver arriba).
 - **`[dev]` section en `fitz.toml`** para configurar paths
   watched, debounce time, etc.: usamos defaults razonables. Sumar
   config si aparece demanda concreta.
