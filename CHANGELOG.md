@@ -9,6 +9,32 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.33.1] — 2026-08-05 — `fitz dev` hot reload: preservación de state compuesto (Fase 11.13 slice-3, cierra Approach C)
+
+Patch — completa la preservación de state del hot reload wasm-client
+(v0.33.0). Ahora el snapshot cubre state **compuesto**, no solo primitivos.
+**Sin cambios al path prod** (`fitz build` byte-idéntico; view smokes sin
+cambios).
+
+### Added
+- **State compuesto sobrevive el hot reload.** El snapshot de `fitz dev`
+  ahora serializa/restaura `List<T>` / `Map<Str, V>` / `Nullable<T>` /
+  nominales importados (recursivo), además de los primitivos de v0.33.0.
+  Nuevo `json_dump_value` (inverso recursivo de `json_restore_value`)
+  construye el JSON del snapshot; `__fitz_dev_apply` gana la rama compuesta
+  que reusa `json_restore_value`. Editás el template y una lista/mapa/tipo
+  custom con el que estabas probando sobrevive el reload. **Cierra la Fase
+  11.13 Approach C entera** (slices 1+2+3).
+
+### Notes
+- Tipos que no round-trippean por JSON (`Map` con key no-`Str`, tuplas,
+  funciones) se omiten del snapshot y resetean a su default en el reload —
+  simétrico con el restore.
+- Dev-flag gated: `fitz build` sigue emitiendo `lib.rs`/`Cargo.toml`
+  byte-idénticos. Validado en Chrome real (puppeteer): un `List<Str>` con
+  2 items persiste el reload; el crate wasm con state compuesto compila
+  limpio. Sin cambios a la extensión VSCode.
+
 ## [v0.33.0] — 2026-08-05 — `fitz dev` modo wasm-client: hot reload de `.fitzv` con auto-refresh + preservación de state (Fase 11.13 Approach C, slices 1+2)
 
 Primera mitad de la Fase 11.13 (hot reload del template). `fitz dev`
