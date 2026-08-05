@@ -9,6 +9,34 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.34.0] — 2026-08-05 — `--bin` en `fitz run` + `fitz dev`: selección de bin en proyectos multi-bin (workflow fullstack)
+
+Minor — `--bin <nombre>` selecciona el bin en un manifest con varios
+`[[bin]]`. **`fitz run` gana selección multi-bin** (estaba diferido desde
+la Fase 11.5.b) y `fitz dev --bin` extiende el hot reload a proyectos
+multi-bin.
+
+### Added
+- **`fitz run --bin <nombre>`** — corre un bin específico de un manifest
+  multi-bin. Sin `--bin`, un proyecto multi-bin es ambiguo y `fitz run`
+  pide que elijas (mismo error que `fitz build`).
+- **`fitz dev --bin <nombre>`** — dev-ea un bin específico. Un bin
+  `wasm-client` entra al modo wasm (build + serve + live-reload +
+  preservación de state); un bin native cae al respawn clásico (child
+  `fitz run --bin <nombre>`).
+- **Workflow fullstack `@rpc` (`server` + `web`)** — desbloqueado: `fitz
+  run --bin server` (backend native) en una terminal + `fitz dev --bin
+  web` (frontend wasm con hot reload) en otra.
+
+### Notes
+- Documentado donde vive el CLI: README, guía cap 25 (sección fullstack),
+  `docs/architecture.md`, curso M1.C4, y los `--help` de `fitz run`/`fitz
+  dev`. Es enteramente del lenguaje/CLI — la librería `fitz-liveviews` no
+  cambia.
+- Follow-up restante de 11.13: re-resolver `fitz.toml` en vivo (editar
+  `[bin].main` con `fitz dev` corriendo aún requiere reiniciar); correr
+  ambos bins en UN `fitz dev` (orquestación dual-process).
+
 ## [v0.33.1] — 2026-08-05 — `fitz dev` hot reload: preservación de state compuesto (Fase 11.13 slice-3, cierra Approach C)
 
 Patch — completa la preservación de state del hot reload wasm-client
