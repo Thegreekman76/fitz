@@ -1468,8 +1468,18 @@ fn emit_template_node_to_pieces(
             Ok(())
         }
         ExpandedTemplateNode::Interpolation { expr, .. } => {
+            // CW.9 (1b/1c) — `{raw_html(x)}` / `{html(x)}` is the explicit
+            // raw-HTML marker that dual-targets with the wasm `set_inner_html`
+            // sink. On SSR, classic `{expr}` interpolation is ALREADY raw
+            // (unescaped — escaping is opt-in via `flv()`), so strip the
+            // marker and emit the inner expr verbatim. This keeps a template
+            // authored with `{raw_html(icon.raw)}` byte-identical to the
+            // idiomatic `{icon.raw}`, while letting the same source compile to
+            // the wasm target. (Left unwrapped, `raw_html`/`html` return an
+            // `Html` struct that would serialise as its debug repr here.)
+            let target = raw_html_marker_arg(expr).unwrap_or(expr);
             let rendered = format_fitz_expr_scoped(
-                expr,
+                target,
                 state_field_names,
                 local_scope,
                 imported_names,
@@ -2344,6 +2354,23 @@ fn format_fitz_expr(
 ///    module-loader scope resolution to know if it's a free
 ///    var in the caller's scope).
 ///
+/// CW.9 — if `expr` is `raw_html(x)` / `html(x)` (single arg), returns the
+/// inner `x`. The interpolation handler strips this raw-HTML marker on SSR
+/// (classic `{expr}` is already raw), so a dual-target template written with
+/// `{raw_html(...)}` renders byte-identically to the idiomatic raw `{x}` and
+/// still compiles to the wasm `set_inner_html` sink. Mirrors
+/// `codegen_wasm::raw_html_sink_arg`.
+fn raw_html_marker_arg(expr: &Expr) -> Option<&Expr> {
+    if let Expr::Call { callee, args, .. } = expr {
+        if let Expr::Ident(name, _) = callee.as_ref() {
+            if (name == "raw_html" || name == "html") && args.len() == 1 {
+                return Some(&args[0]);
+            }
+        }
+    }
+    None
+}
+
 /// Kept as an inner impl so the public [`format_fitz_expr`]
 /// signature stays terse for the common case (no locals).
 fn format_fitz_expr_scoped(
@@ -5538,6 +5565,27 @@ component X { state { n: Int = 0 } <template><div class="row {cls(n)}">x</div></
         assert!(
             !out.contains("data-flv-key"),
             "keyless for-loop must not emit data-flv-key:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_ssr_raw_html_marker_stripped_in_interpolation() {
+        // CW.9 — `{raw_html(x)}` / `{html(x)}` in an interpolation is the
+        // raw-HTML marker that dual-targets with the wasm `set_inner_html`
+        // sink. On SSR, classic `{expr}` is already raw, so the emitter strips
+        // the marker to `{x}` (byte-identical to the idiomatic raw form, and
+        // never serialising the `Html` struct's debug repr).
+        let file = parse_expand(
+            "component App {\n  state { svg: Str = \"\" }\n  <template><span>{raw_html(svg)}</span></template>\n}",
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("{state.svg}"),
+            "the marker must strip to the inner (raw) expr:\n{out}"
+        );
+        assert!(
+            !out.contains("raw_html("),
+            "the raw_html wrapper must not survive into the emitted SSR:\n{out}"
         );
     }
 }

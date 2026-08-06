@@ -9,6 +9,70 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.35.0] — 2026-08-06 — CW.9: expansión del envelope client-WASM (5 componentes markup/list de la companion UI dual-targetean)
+
+Cierre de los gaps del **envelope client-WASM** del `.fitzv` (CW.9, para
+fitz-liveviews) en `src/view/`. Sin sintaxis nueva del `.fitzv`; sin
+cambio de la extensión VSCode (`raw_html`/`html`/`flv` son helpers del
+framework que ya existían). Validado end-to-end a `.wasm` real
+(`wasm-pack :-) Done`) **con 5 componentes reales de la companion UI de
+fitz-liveviews** que antes eran SSR-only y ahora compilan a wasm desde su
+source exacto, con su SSR byte-idéntico (227 tests de la ui-gallery
+verdes): **Button** (icono SVG vía `icon() -> Html` → sink), **Select** y
+**RadioGroup** (`{#for o in options}` sobre `List<FieldOption>` con
+`{#if o.on}`), **GridToolbar** (`{raw_html(actions)}`), y **BarChart**
+(`bar_scale` con `for b in bars`). Cambio confinado a `src/view/` — no
+toca el pipeline clásico (parser/checker/evaluator/`codegen.rs`).
+
+### Added
+- **CW.9 (1a) — `?` / `Result` en cuerpos de helper-fn.** `Result<T>` mapea
+  a Rust `Result<T, String>` (Err pineado a `String`, igual que classic
+  Fitz + el stub `@rpc`). Bajan los constructores `Ok(v)` / `Err(e)`, la
+  propagación con `?`, y los arms de `match` que bindean `Ok(v)` / `Err(e)`
+  (con la binding visible en el body del arm — antes el scope del arm no se
+  threadeaba). Un helper puede validar y propagar fallas; un caller puede
+  `match`earlo.
+- **CW.9 (1b) — sink raw-HTML en interpolación.** `{raw_html(x)}` /
+  `{html(x)}` como hijo de un elemento inyecta el markup (sin escapar) vía
+  `set_inner_html` sobre el padre, en vez de un text node que escapa
+  (modelo `dangerouslySetInnerHTML` de React — la interpolación raw-HTML
+  debe ser el ÚNICO contenido de su padre). Requiere `from fitz_liveviews
+  import raw_html` en scope (paralelo a `flv`). Es el camino para
+  dual-targetear los componentes SSR cuyos helpers arman strings de markup
+  (`icon`, chart/grid helpers). Los folding helpers
+  (`h_join`/`h_when`/`h_either`) siguen SSR-only (sin forma de string
+  único). No soportado todavía dentro de componentes keep-node /
+  hidratables.
+- **CW.9 (1c) — shim `Html` en wasm.** El newtype `Html` de fitz-liveviews
+  (`type Html { raw: Str }`) transpila al target wasm vía un shim
+  per-bundle: `Html` → `struct __FlvHtml { raw: String }`, con
+  constructores `html(x)` / `raw_html(x)` y field access `.raw`. Esto
+  destraba los helpers que devuelven `Html` (p.ej. `icon` → un string SVG),
+  que el sink 1b luego renderiza como DOM (`{raw_html(icon.raw)}`). El shim
+  se emite solo cuando algún fn importado usa `Html` (byte-idéntico si no).
+  Los folding helpers (`h_join`/`h_when`/`h_either`) siguen SSR-only.
+- **CW.9 — alias de fns en el loader wasm.** `from icon import icon as
+  render_icon` ahora registra el fn transpilado también bajo el alias, así
+  un template que llama `render_icon(...)` resuelve (paralelo al alias de
+  nominales/componentes de CW.8). En `src/view/wasm_build.rs`.
+- **CW.9 — marker raw-HTML simétrico en el SSR.** El emitter SSR
+  (`src/view/codegen_ssr.rs`) stripea `{raw_html(x)}` / `{html(x)}` en
+  interpolación a `{x}` (el `{expr}` clásico ya es crudo — el escape es
+  opt-in con `flv()`). Así el MISMO source `{raw_html(icon.raw)}` es raw en
+  ambos targets y byte-idéntico al idiomático `{icon.raw}` en SSR.
+- **CW.9 — field access booleano en condición `{#if}`.** `lower_cond_expr`
+  acepta `{#if o.on}` (un field `Bool` sobre un loop var de `{#for}`, p.ej.
+  una `List<FieldOption>`). Destraba `Select` / `RadioGroup` sin re-author.
+- **CW.9 — `for x in <list>` en cuerpos de helper.** `lower_stmt` itera una
+  lista además de un range (`for b in bars` → `for b in (bars).iter().cloned()`,
+  el loop var queda owned y la lista sigue disponible para un `.map(...)`
+  posterior). Destraba `BarChart` (`bar_scale`) sin re-author.
+
+### Deuda residual
+- **Reactividad fine-grained** (patch-in-place vs naive re-render, para que
+  un `@input` de texto conserve el caret) sigue abierta — es un upgrade del
+  render model (Fase 11.10), ortogonal a lo de arriba.
+
 ## [v0.34.1] — 2026-08-05 — `fitz dev` wasm-client: re-resolución del manifest en vivo (último follow-up de Fase 11.13)
 
 Patch — el modo wasm-client de `fitz dev` ahora **re-resuelve

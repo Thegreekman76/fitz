@@ -412,6 +412,19 @@ pub fn load_imported_fns_with_deps(
 
     let mut registry = ImportedFnRegistry::new();
     let mut scanned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // CW.9 — fn aliases from the imports (`from icon import icon as
+    // render_icon`). The "load whole file" scan registers each fn by its real
+    // name; a template calls it by its local binding, so an aliased fn is ALSO
+    // registered (and emitted) under the alias. Parallel to the alias handling
+    // in `load_imported_nominals` / `load_imported_components` (CW.8).
+    let fn_aliases: Vec<(String, String)> = imports
+        .iter()
+        .flat_map(|imp| imp.names.iter())
+        .filter_map(|(orig, alias)| match alias {
+            Some(a) if a != orig => Some((orig.clone(), a.clone())),
+            _ => None,
+        })
+        .collect();
     for imp in imports {
         let sibling = match resolve_view_import(imp, base_dir, dep_registry, "fitz") {
             Some(f) => f,
@@ -453,11 +466,24 @@ pub fn load_imported_fns_with_deps(
                 let is_rpc = decorators.iter().any(|d| d.name == "rpc");
                 registry.insert(
                     name.clone(),
-                    param_list,
+                    param_list.clone(),
                     return_type.clone(),
                     body.clone(),
                     is_rpc,
                 );
+                // Also register under any import alias for this fn name, so a
+                // template calling the aliased binding resolves (CW.9).
+                for (orig, alias) in &fn_aliases {
+                    if orig == name {
+                        registry.insert(
+                            alias.clone(),
+                            param_list.clone(),
+                            return_type.clone(),
+                            body.clone(),
+                            is_rpc,
+                        );
+                    }
+                }
             }
         }
     }
@@ -1700,6 +1726,30 @@ component Card {
             reg.contains("next_column"),
             "an internal (non-imported) helper reachable through an imported fn \
              must be registered too"
+        );
+    }
+
+    #[test]
+    fn cw9_load_imported_fns_registers_alias_binding() {
+        // CW.9 — `from icon import icon as render_icon` must register the fn
+        // under its local binding (the alias) so a template calling
+        // `render_icon(...)` resolves. The real name stays registered too (for
+        // any internal sibling call).
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("icon.fitz"),
+            "fn icon(n: Str) -> Str { return n }\n",
+        )
+        .unwrap();
+        let imports = vec![imp("icon", &[("icon", Some("render_icon"))])];
+        let reg = load_imported_fns(&imports, tmp.path()).unwrap();
+        assert!(
+            reg.contains("render_icon"),
+            "the aliased binding must be registered"
+        );
+        assert!(
+            reg.contains("icon"),
+            "the real name stays registered for internal sibling calls"
         );
     }
 

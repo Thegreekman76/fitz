@@ -519,6 +519,12 @@ pub fn emit_module_with_components(
     let mut out = String::new();
     emit_module_header(&mut out);
     emit_nominal_structs(nominals, fns.has_rpc(), &mut out)?;
+    // CW.9 (1c) — the `Html` shim, emitted once before the imported fns that
+    // reference it (e.g. `icon -> Html`). Only when the bundle actually uses
+    // `Html`, so bundles without it stay byte-identical.
+    if bundle_uses_html(fns) {
+        out.push_str(HTML_SHIM);
+    }
     emit_imported_fns(fns, nominals, &mut out)?;
     let mut merged = merge_imported_components(file, components);
     // Phase 11.12 slice 4 — hydration opt-in propagates from the ROOT of the
@@ -745,6 +751,46 @@ fn emit_nominal_structs(
 /// supports (`if`/`let`/`return`, struct literals, field access,
 /// `.map`/`.filter`, free-fn calls, comparisons); an unsupported
 /// construct (`match`, loops, `Result`/`?`) rejects, naming the fn.
+/// CW.9 (1c) — client-WASM shim for fitz-liveviews's `Html` newtype. `Html`
+/// wraps a raw (unescaped) markup string; on the wasm target we model it as a
+/// struct so `.raw` field access + the `html`/`raw_html` constructors
+/// transpile. A helper that returns `Html` (e.g. `icon` → an SVG string) then
+/// compiles into the bundle, and the markup renders as DOM via the raw-HTML
+/// sink at the interpolation site (`{raw_html(x.raw)}` → `set_inner_html`).
+/// Escaping (`flv`, identity) and `List<Html>` folding
+/// (`h_join`/`h_when`/`h_either`, still SSR-only) are unaffected.
+const HTML_SHIM: &str = "\
+#[allow(dead_code)]\n\
+#[derive(Clone)]\n\
+struct __FlvHtml {\n    raw: String,\n}\n\
+#[allow(dead_code)]\n\
+fn html(__s: String) -> __FlvHtml {\n    __FlvHtml { raw: __s }\n}\n\
+#[allow(dead_code)]\n\
+fn raw_html(__s: String) -> __FlvHtml {\n    __FlvHtml { raw: __s }\n}\n\n";
+
+/// CW.9 (1c) — does the bundle need the [`HTML_SHIM`]? True when any imported
+/// classic fn's signature references `Html` (param or return) — the common
+/// case (`icon -> Html`). The `html`/`raw_html` constructors + `.raw` access
+/// all key off that.
+fn bundle_uses_html(fns: &ImportedFnRegistry) -> bool {
+    fns.iter().any(|f| {
+        f.ret.as_ref().is_some_and(type_expr_mentions_html)
+            || f.params
+                .iter()
+                .any(|(_, t)| t.as_ref().is_some_and(type_expr_mentions_html))
+    })
+}
+
+fn type_expr_mentions_html(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Named(n) => n == "Html",
+        TypeExpr::Nullable(inner) => type_expr_mentions_html(inner),
+        TypeExpr::Generic { args, .. } => args.iter().any(type_expr_mentions_html),
+        TypeExpr::Tuple(items) => items.iter().any(type_expr_mentions_html),
+        TypeExpr::Function { .. } => false,
+    }
+}
+
 fn emit_imported_fns(
     fns: &ImportedFnRegistry,
     nominals: &NominalRegistry,
@@ -3130,12 +3176,61 @@ fn emit_text(text: &str, parent_var: &str, ctx: &mut RenderCtx, out: &mut String
     .unwrap();
 }
 
+/// CW.9 (1b) — if `expr` is a call to the raw-HTML framework helper
+/// `raw_html(x)` or `html(x)` (single arg), return the inner markup-producing
+/// expression. Used by [`emit_interpolation`] to route it to `set_inner_html`
+/// instead of an escaping text node. Only the single-string form is a sink;
+/// `h_join`/`h_when`/`h_either` (List<Html> folding) have no wasm form and
+/// keep rejecting in `lower_call`.
+fn raw_html_sink_arg(expr: &Expr) -> Option<&Expr> {
+    if let Expr::Call { callee, args, .. } = expr {
+        if let Expr::Ident(name, _) = callee.as_ref() {
+            if (name == "raw_html" || name == "html") && args.len() == 1 {
+                return Some(&args[0]);
+            }
+        }
+    }
+    None
+}
+
 fn emit_interpolation(
     expr: &Expr,
     parent_var: &str,
     ctx: &mut RenderCtx,
     out: &mut String,
 ) -> EmitResult<()> {
+    // CW.9 (1b) — raw-HTML sink. `{raw_html(x)}` / `{html(x)}` as an element
+    // child injects UNescaped markup via `set_inner_html` on the parent
+    // element, instead of a text node (which escapes intrinsically). This is
+    // what unblocks the SSR companion components whose helpers build markup
+    // strings (`icon`, chart/grid helpers) on the client-WASM target. The
+    // parent element OWNS the injected markup: `set_inner_html` replaces all
+    // its children, so the raw-HTML interpolation must be the SOLE content of
+    // its parent (mirrors React's `dangerouslySetInnerHTML`). The
+    // List<Html>-folding helpers (`h_join`/`h_when`/`h_either`) still reject
+    // in `lower_call` — they have no single-string form. Not supported inside
+    // keep-node / hydratable components yet (they patch individual text nodes;
+    // a raw-HTML node has no in-place patch path).
+    if let Some(inner) = raw_html_sink_arg(expr) {
+        if ctx.keep.is_some() || ctx.hydrate {
+            return Err(EmitError {
+                message: "raw-HTML interpolation (`{raw_html(...)}` / `{html(...)}`) is not \
+                          yet supported inside a keep-node / hydratable component on the \
+                          client-WASM target — keep this component on naive re-render or \
+                          the SSR target"
+                    .to_string(),
+                context: "expression".to_string(),
+            });
+        }
+        let inner_rust = lower_expr(inner, ctx.state_names, &ctx.locals)?;
+        writeln!(
+            out,
+            "        {}.set_inner_html(&format!(\"{{}}\", {}));",
+            parent_var, inner_rust
+        )
+        .unwrap();
+        return Ok(());
+    }
     let var_interp = ctx.fresh("interp");
     let var_node = ctx.fresh("t");
     let expr_rust = lower_expr(expr, ctx.state_names, &ctx.locals)?;
@@ -3595,6 +3690,12 @@ fn lower_cond_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> Em
         // A bool state field / loop var used directly as a condition.
         // The checker guarantees it's Bool-typed.
         Expr::Ident(..) => lower_expr(expr, state_names, locals),
+        // CW.9 — a bool FIELD access as a condition (`{#if o.on}` where `o`
+        // is a `{#for}` loop var of nominal type and `.on` is Bool). Common
+        // in list-of-options components (`Select` / `RadioGroup`). The checker
+        // guarantees Bool; `lower_expr` emits `o.on.clone()` (bool is `Copy`,
+        // so the clone is a no-op).
+        Expr::Field { .. } => lower_expr(expr, state_names, locals),
         // Phase 11.7 R3.5b.1 — `payload.has("key")` as a guard condition
         // (`if (payload.has("title")) { ... }`). Delegates to `lower_expr`,
         // which routes the call to the `payload.has` special case
@@ -5705,7 +5806,15 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
             let mut arm_strs: Vec<String> = Vec::with_capacity(arms.len());
             for arm in arms {
                 let pat = lower_pattern_wasm(&arm.pattern)?;
-                let val = lower_single_expr_block(&arm.body, state_names, locals)?;
+                // CW.9 (1a) — bring the arm's pattern bindings (`Ok(v)`,
+                // `Err(e)`, a bare ident) into scope for the arm body.
+                let mut arm_locals = locals.to_vec();
+                for b in pattern_bindings(&arm.pattern) {
+                    if !arm_locals.iter().any(|l| l == &b) {
+                        arm_locals.push(b);
+                    }
+                }
+                let val = lower_single_expr_block(&arm.body, state_names, &arm_locals)?;
                 arm_strs.push(format!("{pat} => {val}"));
             }
             Ok(format!("match {} {{ {} }}", scrutinee, arm_strs.join(", ")))
@@ -5723,6 +5832,19 @@ fn lower_expr(expr: &Expr, state_names: &[String], locals: &[String]) -> EmitRes
         Expr::Try(inner, _) => {
             let base = lower_expr(inner, state_names, locals)?;
             Ok(format!("{base}?"))
+        }
+        // CW.9 (1a) — `Ok(v)` / `Err(e)` constructors in a helper-fn body.
+        // The enclosing fn returns `Result<T, String>` (see
+        // `type_expr_to_rust`), so these build that value directly. `Err`'s
+        // inner lowers to an owned `String` (a Str literal / interpolation),
+        // matching the pinned error type.
+        Expr::Ok(inner, _) => {
+            let base = lower_expr(inner, state_names, locals)?;
+            Ok(format!("Ok({base})"))
+        }
+        Expr::Err(inner, _) => {
+            let base = lower_expr(inner, state_names, locals)?;
+            Ok(format!("Err({base})"))
         }
         Expr::Null(_)
         | Expr::Bytes(_, _)
@@ -5930,26 +6052,27 @@ fn lower_call(
         Expr::Ident(name, _) if name == "flv" && args.len() == 1 => {
             lower_expr(&args[0], state_names, locals)
         }
-        // CW.6 (dual-target) — the raw-HTML / List<Html> framework helpers
-        // have NO client-WASM equivalent: `html`/`raw_html` inject
-        // deliberately-unescaped markup (a DOM text node cannot), and
-        // `h_join`/`h_when`/`h_either` fold `Html` values. Treating them as
-        // identity would silently render markup as escaped text (or fail to
-        // type-check), so a component using them stays SSR-only. Hard-error
-        // with a clear pointer rather than emitting a broken call.
-        Expr::Ident(name, _)
-            if matches!(
-                name.as_str(),
-                "html" | "raw_html" | "h_join" | "h_when" | "h_either"
-            ) =>
-        {
+        // CW.9 (1c) — the `Html` constructors `html(x)` / `raw_html(x)` in
+        // VALUE position (a helper body, e.g. `icon` returning
+        // `html("<svg>" + body + "</svg>")`). Both build a `__FlvHtml` via the
+        // per-bundle shim (see `HTML_SHIM`). In interpolation position
+        // `{raw_html(x)}` / `{html(x)}` is intercepted earlier by
+        // `emit_interpolation` (the `set_inner_html` sink), so this arm only
+        // fires inside expressions.
+        Expr::Ident(name, _) if matches!(name.as_str(), "html" | "raw_html") && args.len() == 1 => {
+            let arg = lower_expr(&args[0], state_names, locals)?;
+            Ok(format!("{name}({arg})"))
+        }
+        // CW.6 (dual-target) — the `List<Html>`-folding framework helpers
+        // (`h_join`/`h_when`/`h_either`) have no single-string form and no
+        // client-WASM equivalent. A component using them stays SSR-only;
+        // hard-error with a clear pointer rather than emitting a broken call.
+        Expr::Ident(name, _) if matches!(name.as_str(), "h_join" | "h_when" | "h_either") => {
             Err(EmitError {
                 message: format!(
-                    "`{name}(...)` is an SSR-only fitz-liveviews helper (raw/unescaped \
-                     HTML or List<Html> folding) with no client-WASM equivalent — a DOM \
-                     text node escapes intrinsically and cannot inject raw markup. Use \
-                     `{{expr}}` or `{{flv(expr)}}` for text content, or keep this \
-                     component on the SSR target."
+                    "`{name}(...)` is an SSR-only fitz-liveviews helper (List<Html> \
+                     folding) with no client-WASM equivalent. Keep this component on \
+                     the SSR target, or restructure to avoid folding `Html` values."
                 ),
                 context: "expression".to_string(),
             })
@@ -6136,12 +6259,34 @@ fn lower_pattern_wasm(pat: &crate::ast::Pattern) -> EmitResult<String> {
         Pattern::Bool(b) => Ok(b.to_string()),
         Pattern::Ident(name, _) => Ok(name.clone()),
         Pattern::Wildcard => Ok("_".to_string()),
+        // CW.9 (1a) — Result arms, so a helper's `Result<T>` can be matched:
+        // `match parse(s) { Ok(v) => v, Err(_) => 0 }`.
+        Pattern::OkBinding(name, _) => Ok(format!("Ok({name})")),
+        Pattern::ErrBinding(name, _) => Ok(format!("Err({name})")),
+        Pattern::OkWildcard => Ok("Ok(_)".to_string()),
+        Pattern::ErrWildcard => Ok("Err(_)".to_string()),
         _ => Err(EmitError {
             message: "`match` pattern — the client-WASM target supports literal patterns \
-                      (Int/Float/Str/Bool), an ident binding, and `_`"
+                      (Int/Float/Str/Bool), an ident binding, `_`, and Result arms \
+                      (`Ok(x)` / `Err(e)` / `Ok(_)` / `Err(_)`)"
                 .to_string(),
             context: "match pattern".to_string(),
         }),
+    }
+}
+
+/// The variable names a `match` pattern binds, so the arm body can see them.
+/// `Ok(v)` / `Err(e)` bind their inner; a bare `Ident` binds itself; literal
+/// and wildcard patterns bind nothing. (CW.9 1a — before this, an arm's bound
+/// var was never threaded into the arm body's scope, so binding patterns
+/// effectively couldn't be used on the wasm target.)
+fn pattern_bindings(pat: &crate::ast::Pattern) -> Vec<String> {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(n, _) | Pattern::OkBinding(n, _) | Pattern::ErrBinding(n, _) => {
+            vec![n.clone()]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -6346,26 +6491,33 @@ fn lower_stmt(
                     })
                 }
             };
-            let (start, end, inclusive) = match iter {
+            // The loop header: a range (`for n in a..b`) or a list
+            // (`for b in bars` — CW.9, e.g. `bar_scale`'s max scan). A list is
+            // iterated by cloned value (the loop var is owned, elements impl
+            // `Clone` under R3) so the list stays available afterwards — e.g.
+            // `bar_scale` does `bars.map(...)` after the loop.
+            match iter {
                 Expr::Range {
                     start,
                     end,
                     inclusive,
                     ..
-                } => (start.as_ref(), end.as_ref(), *inclusive),
-                _ => {
-                    return Err(EmitError {
-                        message: "`for` loop — the client-WASM target iterates a range \
-                                  (`for n in a..b`)"
-                            .to_string(),
-                        context: "statement".to_string(),
-                    })
+                } => {
+                    let s = lower_expr(start, state_names, locals)?;
+                    let e = lower_expr(end, state_names, locals)?;
+                    let op = if *inclusive { "..=" } else { ".." };
+                    writeln!(out, "{}for {} in {}{}{} {{", indent, var_name, s, op, e).unwrap();
                 }
-            };
-            let s = lower_expr(start, state_names, locals)?;
-            let e = lower_expr(end, state_names, locals)?;
-            let op = if inclusive { "..=" } else { ".." };
-            writeln!(out, "{}for {} in {}{}{} {{", indent, var_name, s, op, e).unwrap();
+                _ => {
+                    let it = lower_expr(iter, state_names, locals)?;
+                    writeln!(
+                        out,
+                        "{}for {} in ({}).iter().cloned() {{",
+                        indent, var_name, it
+                    )
+                    .unwrap();
+                }
+            }
             let inner_indent = format!("{indent}    ");
             let mut body_locals = locals.clone();
             if !body_locals.iter().any(|l| l == &var_name) {
@@ -6527,6 +6679,11 @@ fn type_expr_to_rust(ty: &TypeExpr, nominals: &NominalRegistry) -> EmitResult<St
             "Float" => Ok("f64".to_string()),
             "Bool" => Ok("bool".to_string()),
             "Str" => Ok("String".to_string()),
+            // CW.9 (1c) — fitz-liveviews's `Html` newtype maps to the
+            // per-bundle `__FlvHtml` shim (a struct over the raw markup
+            // string), so a helper returning `Html` (e.g. `icon`) transpiles
+            // and `.raw` field access yields the underlying String.
+            "Html" => Ok("__FlvHtml".to_string()),
             // Phase 11.7 R3 — an imported classic nominal maps to the
             // Rust struct the emitter synthesises for it (same name).
             // Requires the `from foo import Foo` sibling to have been
@@ -6564,6 +6721,16 @@ fn type_expr_to_rust(ty: &TypeExpr, nominals: &NominalRegistry) -> EmitResult<St
                 let k_rust = type_expr_to_rust(&args[0], nominals)?;
                 let v_rust = type_expr_to_rust(&args[1], nominals)?;
                 Ok(format!("Vec<({k_rust}, {v_rust})>"))
+            } else if name == "Result" && args.len() == 1 {
+                // CW.9 (1a) — `Result<T>` as an imported helper-fn return
+                // type maps to Rust `Result<T, String>` (Err pinned to
+                // String, matching classic Fitz + the @rpc stub). This lets
+                // a helper propagate failures with `?` and a caller `match`
+                // its Ok/Err arms. A `Result` STATE field stays unusable
+                // (no default lowering), so this is effectively
+                // return-type-only.
+                let inner_rust = type_expr_to_rust(&args[0], nominals)?;
+                Ok(format!("Result<{inner_rust}, String>"))
             } else {
                 Err(EmitError {
                     message: format!(
@@ -7134,23 +7301,146 @@ mod tests {
 
     #[test]
     fn cw6_raw_html_helpers_hard_error_as_ssr_only() {
-        // The raw-HTML / List<Html> framework helpers have no client-WASM
-        // equivalent — identity would silently render markup as escaped text
-        // (or fail to type-check). They must hard-error, naming themselves
-        // SSR-only, rather than emitting a broken call (CW.6 dual-target).
-        for helper in ["html", "raw_html", "h_join", "h_when", "h_either"] {
+        // The List<Html>-folding framework helpers have no client-WASM
+        // equivalent (no single-string form) — identity would fail to
+        // type-check. They must hard-error, naming themselves SSR-only,
+        // rather than emitting a broken call (CW.6 dual-target). NOTE:
+        // `raw_html`/`html` used to be in this list, but CW.9 (1b) turns
+        // them into a `set_inner_html` sink in interpolation position — see
+        // `cw9_1b_raw_html_sink_emits_set_inner_html`.
+        for helper in ["h_join", "h_when", "h_either"] {
             let src = format!(
                 "component tag {{\n  state {{\n    label: Str = \"\"\n  }}\n  \
                  <template><span>{{{helper}(label)}}</span></template>\n}}\n"
             );
             let err = emit_component(&parse_expand(&src).components[0])
-                .expect_err("raw-HTML helper must reject on the wasm target");
+                .expect_err("List<Html> helper must reject on the wasm target");
             assert!(
                 err.message.contains("SSR-only"),
                 "error for `{helper}` should name it SSR-only: {}",
                 err.message
             );
         }
+    }
+
+    #[test]
+    fn cw9_1b_raw_html_sink_emits_set_inner_html() {
+        // CW.9 (1b) — `{raw_html(x)}` / `{html(x)}` as an element child
+        // injects unescaped markup via `set_inner_html` on the parent,
+        // instead of an escaping text node. This unblocks SSR companion
+        // components whose helpers build markup strings.
+        for helper in ["raw_html", "html"] {
+            let src = format!(
+                "component tag {{\n  state {{\n    markup: Str = \"\"\n  }}\n  \
+                 <template><span>{{{helper}(markup)}}</span></template>\n}}\n"
+            );
+            let out = emit_component(&parse_expand(&src).components[0])
+                .unwrap_or_else(|e| panic!("`{helper}` sink must emit, not reject: {e}"));
+            assert!(
+                out.contains(".set_inner_html(&format!(\"{}\", (*self.markup.borrow())))"),
+                "`{helper}(markup)` must lower to set_inner_html on the parent:\n{out}"
+            );
+            assert!(
+                !out.contains("create_text_node"),
+                "the raw-HTML sink must NOT emit an escaping text node:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn cw9_1c_html_returning_fn_transpiles_with_shim() {
+        // CW.9 (1c) — a real markup helper returns `Html` (e.g. `icon`) and
+        // builds it via `html(...)`. The `Html` shim lets it transpile:
+        // `Html` -> `__FlvHtml`, `html(x)` -> the shim ctor, `.raw` field
+        // access -> the String, rendered as DOM by the raw-HTML sink.
+        let file = single_component_file(
+            r#"component App {
+  state { name: Str = "" }
+  <template><span>{raw_html(mk_svg(name).raw)}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic(
+            "fn mk_svg(n: Str) -> Html { return html(\"<svg>\" + n + \"</svg>\") }",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            out.contains("struct __FlvHtml {"),
+            "Html shim struct:\n{out}"
+        );
+        assert!(
+            out.contains("fn html(__s: String) -> __FlvHtml"),
+            "html constructor:\n{out}"
+        );
+        assert!(
+            out.contains("fn mk_svg(n: String) -> __FlvHtml {"),
+            "Html return type maps to __FlvHtml:\n{out}"
+        );
+        assert!(
+            out.contains("html(format!"),
+            "html() call lowers in the body:\n{out}"
+        );
+        assert!(
+            out.contains("set_inner_html(&format!(\"{}\", mk_svg((*self.name.borrow()).clone()).raw.clone()))"),
+            "the sink renders `.raw` of the Html value:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_1c_no_html_shim_when_html_unused() {
+        // Byte-compat: a bundle whose imported fns don't touch `Html` never
+        // emits the shim.
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic("fn double(n: Int) -> Int { return n * 2 }");
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            !out.contains("__FlvHtml"),
+            "no Html shim when no fn uses Html:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_bool_field_access_in_if_condition_lowers() {
+        // CW.9 — `{#if c.done}` (a Bool field on a `{#for}` loop var of
+        // nominal type) lowers as a condition. Unblocks the option-list
+        // components (`Select` / `RadioGroup`, which test `{#if o.on}`).
+        let expanded = parse_expand(
+            "from card import Card\n\ncomponent Board {\n  state { cards: List<Card> = [] }\n  <template><ul>{#for c in cards}<li>{#if c.done}<b>x</b>{#else}<i>y</i>{/if}</li>{/for}</ul></template>\n}",
+        );
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains("c.done.clone()"),
+            "the bool field access lowers in the condition:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_list_for_in_helper_body_lowers() {
+        // CW.9 — `for x in <list>` in a helper body (e.g. `bar_scale`'s max
+        // scan) iterates the list by cloned value, so the list stays
+        // available afterwards.
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic(
+            "fn max_of(xs: List<Int>) -> Int {\n  let m = 0\n  for x in xs {\n    if (x > m) { m = x }\n  }\n  return m\n}",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            out.contains("fn max_of(xs: Vec<i64>) -> i64 {"),
+            "List<Int> param maps to Vec<i64>:\n{out}"
+        );
+        assert!(
+            out.contains("for x in (xs).iter().cloned() {"),
+            "the list `for` iterates by cloned value:\n{out}"
+        );
     }
 
     #[test]
@@ -9756,6 +10046,89 @@ component Card {
         assert!(
             err.message.contains("needs a return-type annotation"),
             "a missing return type must reject:\n{err}"
+        );
+    }
+
+    #[test]
+    fn cw9_1a_imported_fn_result_return_with_try_and_ok() {
+        // CW.9 (1a) — a helper with a `Result<Int>` return type, `?`
+        // propagation on a `Result` param, and an `Ok(...)` constructor.
+        // `Result<T>` maps to `Result<T, String>`; `?` and `Ok` lower.
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic(
+            "fn checked_double(inner: Result<Int>) -> Result<Int> {\n  let n = inner?\n  return Ok(n * 2)\n}",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            out.contains("fn checked_double(inner: Result<i64, String>) -> Result<i64, String> {"),
+            "Result<T> must map to Result<T, String> in param + return:\n{out}"
+        );
+        assert!(
+            out.contains("let n = inner?;"),
+            "`?` must propagate:\n{out}"
+        );
+        assert!(
+            out.contains("return Ok((n * 2i64));"),
+            "`Ok(...)` constructor must lower:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_1a_imported_fn_match_ok_err_arms_bind_inner() {
+        // CW.9 (1a) — a `match` on a `Result` param whose arms bind the
+        // inner (`Ok(v)` / `Err(e)`) AND reference the binding in the arm
+        // body. The binding must be threaded into the arm-body scope.
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic(
+            "fn describe(r: Result<Int>) -> Str { return match r { Ok(v) => \"value {v}\", Err(e) => e } }",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            out.contains("Ok(v) => format!(\"value {}\", v)"),
+            "Ok(v) binding must be visible in the arm body:\n{out}"
+        );
+        assert!(
+            out.contains("Err(e) => e"),
+            "Err(e) binding must be visible in the arm body:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_1a_result_return_with_err_constructor_in_match_arm() {
+        // CW.9 (1a) — a guard helper that returns `Err("...")` in one arm
+        // and `Ok(...)` in the other. Exercises the `Err` constructor with
+        // a Str literal (owned `String`, matching the pinned error type).
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic(
+            "fn guard(n: Int) -> Result<Int> { return match n == 0 { true => Err(\"zero\"), false => Ok(n) } }",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            out.contains("-> Result<i64, String> {"),
+            "Result<Int> return maps to Result<i64, String>:\n{out}"
+        );
+        assert!(
+            out.contains("true => Err(\"zero\".to_string())"),
+            "Err(\"...\") lowers to an owned String:\n{out}"
+        );
+        assert!(
+            out.contains("false => Ok(n)"),
+            "Ok(n) lowers in the match arm:\n{out}"
         );
     }
 
