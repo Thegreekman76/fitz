@@ -9,6 +9,46 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.36.0] — 2026-08-06 — CW.9 iter2: tres fixes del emisor wasm (36/38 componentes de la companion UI dual-targetean)
+
+Continuación de CW.9 (v0.35.0). Tras un barrido de los componentes
+restantes de la companion UI de fitz-liveviews (16/18 ya compilaban a
+wasm), tres fixes chicos del emisor view (`src/view/codegen_wasm.rs`)
+cierran los gaps que quedaban para poblar los componentes lista-driven en
+el showcase. Cambio confinado a `src/view/` — no toca el pipeline clásico.
+Byte-compat: los `examples/view/` regeneran idéntico (`git status` limpio);
+sin sintaxis nueva del `.fitzv`; sin cambio de la extensión VSCode.
+
+### Added
+- **`for x in <list>` en cuerpos de helper (`.push`/`.clear` sobre local).**
+  `lower_stmt`/`lower_expr_stmt` iteran una lista además de un range, y
+  `<local>.push(x)` / `.clear()` en un cuerpo de helper lowerea a
+  `Vec::push`/`clear` (el local se declara `let mut`). Destraba helpers
+  como `page_range` (`let out = []; for n in 1..X { out.push(n) }`).
+- **Props interpoladas no-primitivas (no-nullable).** `<Select
+  options="{opts}" />` — un bare state field / loop var / field access
+  lowerea a un `.clone()` que sirve para cualquier target `Clone`
+  no-nullable (primitivo, `List<T>`, `Map<K,V>`, nominal). El checker
+  (`light_check_interpolated_prop`) ya validaba la compatibilidad. Un
+  target `Nullable<T>` sigue difiriendo (necesita el wrap `Some(...)` según
+  el tipo del field del parent, aún no threadeado).
+- **Defaults de state `List<nominal>`.** `default_expr_to_rust` acepta un
+  struct-literal nominal (`FieldOption { label: "Red", value: "red", on:
+  true }`), típicamente como elemento de `options: List<FieldOption> =
+  [ ... ]`. El tipo de cada campo se infiere del kind del literal. MVP:
+  todos los campos deben especificarse (rellenar omitidos con los defaults
+  del nominal necesita el registry de campos, deuda residual).
+
+### Notas / deuda residual
+- Con los tres fixes, **36 de 38** componentes de la companion UI
+  dual-targetean a wasm. Los 2 restantes — **Pager** y **ConfirmDialog** —
+  son componentes **controlados**: sus botones usan eventos fall-through al
+  parent (`data-flv-click="page_prev"` / `confirm_delete`, que no son
+  eventos locales del componente), que no tienen equivalente en un mount
+  wasm standalone sin wiring de event-bubbling. Quedan SSR-apropiados.
+- Deuda: props interpoladas a target `Nullable<T>` (wrap `Some`); rellenar
+  campos omitidos en defaults `List<nominal>` (necesita el registry).
+
 ## [v0.35.0] — 2026-08-06 — CW.9: expansión del envelope client-WASM (5 componentes markup/list de la companion UI dual-targetean)
 
 Cierre de los gaps del **envelope client-WASM** del `.fitzv` (CW.9, para

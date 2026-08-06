@@ -6213,7 +6213,20 @@ fn collect_reassigned_locals(stmts: &[Stmt]) -> std::collections::HashSet<String
                     walk_stmt(st, set);
                 }
             }
-            Stmt::Expr(e, _) | Stmt::Return(e, _) => walk_expr(e, set),
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => {
+                // CW.9 — a `<local>.push(...)` / `.clear()` mutates the local,
+                // so it must be declared `let mut` (e.g. `page_range`'s `out`).
+                if let Expr::Call { callee, .. } = e {
+                    if let Expr::Field { object, field, .. } = callee.as_ref() {
+                        if let Expr::Ident(name, _) = object.as_ref() {
+                            if field == "push" || field == "clear" {
+                                set.insert(name.clone());
+                            }
+                        }
+                    }
+                }
+                walk_expr(e, set)
+            }
             _ => {}
         }
     }
@@ -6331,16 +6344,24 @@ fn lower_child_prop_value(
     state_names: &[String],
     locals: &[String],
 ) -> EmitResult<String> {
-    if !is_wasm_prop_simple_target(target_type) {
+    // CW.9 — a bare parent state field / loop var / field access lowers to a
+    // `.clone()` that works for any non-nullable `Clone` target (primitive,
+    // `List<T>`, `Map<K,V>`, nominal). This unblocks passing a `List<nominal>`
+    // prop (`<Select options="{opts}" />`, `<BarChart bars="{bars}" />`), where
+    // the parent and child field types match exactly (the checker's
+    // `light_check_interpolated_prop` verifies compatibility). A `Nullable<T>`
+    // child target still defers: when the parent field is the bare `T` the
+    // value needs a `Some(...)` wrap, which requires the parent field's type
+    // here (not yet threaded). The numeric-arithmetic case below keeps its own
+    // primitive guard.
+    if matches!(target_type, TypeExpr::Nullable(_)) {
         return Err(EmitError {
             message: format!(
-                "interpolated prop `{field_name}={{...}}` targets a \
-                 non-primitive / nullable field — the client-WASM target \
-                 supports interpolated props into bare `Int`/`Float`/`Str`/`Bool` \
-                 fields in Phase 11.7.a; nominal / list / map / nullable prop \
-                 propagation lands in a later 11.7 slice. For the SSR target \
-                 (fitz-liveviews) these work today. Workaround: a static value \
-                 or the SSR backend."
+                "interpolated prop `{field_name}={{...}}` targets a `Nullable<T>` field \
+                 — the client-WASM target defers Nullable prop propagation (the value \
+                 may need a `Some(...)` wrap depending on the parent field's type). \
+                 Non-nullable `List`/`Map`/nominal + primitive targets work; for the \
+                 SSR target these work today."
             ),
             context: "interpolated child prop".to_string(),
         });
@@ -6633,6 +6654,23 @@ fn lower_expr_stmt(
                             }
                             _ => {}
                         }
+                    } else if locals.iter().any(|s| s == list_name) {
+                        // CW.9 — `<local_list>.push(x)` / `.clear()` in a helper
+                        // body (e.g. `page_range`'s `out.push(n)`). The local is
+                        // a plain `Vec<T>`, declared `let mut` because
+                        // `collect_reassigned_locals` flags a push/clear target.
+                        match (field.as_str(), args.len()) {
+                            ("push", 1) => {
+                                let arg = lower_expr(&args[0], state_names, locals)?;
+                                writeln!(out, "{indent}{list_name}.push({arg});").unwrap();
+                                return Ok(());
+                            }
+                            ("clear", 0) => {
+                                writeln!(out, "{indent}{list_name}.clear();").unwrap();
+                                return Ok(());
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -6849,6 +6887,36 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
             }
             Ok(format!("vec![{}]", lits.join(", ")))
         }
+        // CW.9 — a nominal struct-literal default (`FieldOption { label: "Red",
+        // value: "red", on: true }`), typically an element of a `List<nominal>`
+        // default (`options: List<FieldOption> = [ ... ]`). Each field value's
+        // type is inferred from its literal kind and lowered recursively. MVP:
+        // every field must be supplied (omitted fields would need the nominal's
+        // declared defaults, which aren't in the emit-side registry — rustc
+        // reports a missing field clearly); field values must be scalar
+        // literals or nested struct literals.
+        (
+            Expr::StructLit {
+                type_name, fields, ..
+            },
+            TypeExpr::Named(nom),
+        ) if type_name == nom => {
+            let mut parts: Vec<String> = Vec::with_capacity(fields.len());
+            for (fname, fexpr) in fields {
+                let fty = infer_literal_type(fexpr).ok_or_else(|| EmitError {
+                    message: format!(
+                        "state default `{type_name} {{ {fname}: ... }}` — a nominal \
+                         struct-literal default supports fields that are scalar \
+                         literals (Str/Int/Float/Bool) or nested struct literals on \
+                         the client-WASM target"
+                    ),
+                    context: "default".to_string(),
+                })?;
+                let fval = default_expr_to_rust(fexpr, &fty)?;
+                parts.push(format!("{fname}: {fval}"));
+            }
+            Ok(format!("{type_name} {{ {} }}", parts.join(", ")))
+        }
         // Everything else: not a literal, or a mismatch. The classic
         // checker catches literal-vs-type mismatch already; here we
         // reject with a generic message pointing at the composition
@@ -6862,6 +6930,26 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
             context: "default".to_string(),
         }),
     }
+}
+
+/// CW.9 — infer the `TypeExpr` of a scalar/struct literal used as a struct-lit
+/// field value in a nominal default, so [`default_expr_to_rust`] can lower it
+/// without the nominal's field-type registry. `None` for shapes that need a
+/// declared type (lists, maps, nulls, arbitrary expressions).
+fn infer_literal_type(expr: &Expr) -> Option<TypeExpr> {
+    Some(match expr {
+        Expr::Str(..) => TypeExpr::Named("Str".to_string()),
+        Expr::Int(..) => TypeExpr::Named("Int".to_string()),
+        Expr::Float(..) => TypeExpr::Named("Float".to_string()),
+        Expr::Bool(..) => TypeExpr::Named("Bool".to_string()),
+        Expr::StructLit { type_name, .. } => TypeExpr::Named(type_name.clone()),
+        Expr::UnaryOp {
+            op: crate::ast::UnaryOpKind::Neg,
+            operand,
+            ..
+        } => return infer_literal_type(operand),
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -7440,6 +7528,61 @@ mod tests {
         assert!(
             out.contains("for x in (xs).iter().cloned() {"),
             "the list `for` iterates by cloned value:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_local_list_push_in_helper_body() {
+        // CW.9 — `<local>.push(x)` in a helper body (e.g. `page_range`'s
+        // `out.push(n)`). The local is declared `let mut` and the push lowers
+        // to `Vec::push` (not the state-field `self.<f>.borrow_mut().push`).
+        let file = single_component_file(
+            r#"component App {
+  state { x: Int = 0 }
+  <template><span>{x}</span></template>
+}"#,
+        );
+        let fns = fns_from_classic(
+            "fn page_range(max: Int) -> List<Int> {\n  let out: List<Int> = []\n  for n in 1..(max + 1) {\n    out.push(n)\n  }\n  return out\n}",
+        );
+        let out = emit_module_with_imports(&file, &NominalRegistry::new(), &fns).unwrap();
+        assert!(
+            out.contains("let mut out"),
+            "local push target is let mut:\n{out}"
+        );
+        assert!(
+            out.contains("out.push(n);"),
+            "local list push lowers to Vec::push:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_interpolated_list_nominal_prop_lowers() {
+        // CW.9 — an interpolated NON-primitive prop (`<Board items="{rows}" />`
+        // where `rows`/`items` are `List<Card>`) lowers to a `.clone()` of the
+        // parent state field, dropped into the child's `RefCell<Vec<Card>>`.
+        let expanded = parse_expand(
+            "from card import Card\n\ncomponent App {\n  state { rows: List<Card> = [] }\n  <template><Board items=\"{rows}\" /></template>\n}\n\ncomponent Board {\n  state { items: List<Card> = [] }\n  <template><ul>{#for c in items}<li>{c.title}</li>{/for}</ul></template>\n}",
+        );
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains("(*self.rows.borrow()).clone()"),
+            "the List<Card> prop lowers to a clone of the parent state field:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_list_nominal_state_default_lowers() {
+        // CW.9 — a `List<nominal>` state default (`rows: List<Card> = [Card {
+        // ... }]`) lowers to a `vec![Card { ... }]` of struct literals; each
+        // field value's type is inferred from its literal kind.
+        let expanded = parse_expand(
+            "from card import Card\n\ncomponent App {\n  state { rows: List<Card> = [Card { id: 1, title: \"a\", done: false }] }\n  <template><ul>{#for c in rows}<li>{c.title}</li>{/for}</ul></template>\n}",
+        );
+        let out = emit_module_with_nominals(&expanded, &card_registry()).unwrap();
+        assert!(
+            out.contains("vec![Card { id: 1i64, title: \"a\".to_string(), done: false }]"),
+            "List<Card> default lowers to a vec of struct literals:\n{out}"
         );
     }
 
@@ -9500,10 +9643,10 @@ component Card {
 }"#;
         let file = parse_expand(src);
         let err = emit_module(&file)
-            .expect_err("nullable child target must defer on the WASM path in 11.7.a");
+            .expect_err("nullable child target must still defer on the WASM path (CW.9)");
         assert!(
-            err.message.contains("non-primitive / nullable") && err.message.contains("11.7"),
-            "message must cite the nullable/non-primitive deferral + 11.7: {}",
+            err.message.contains("Nullable"),
+            "message must cite the Nullable deferral: {}",
             err.message
         );
     }
