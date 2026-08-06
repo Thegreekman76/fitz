@@ -128,6 +128,14 @@ pub type EmitResult<T> = Result<T, EmitError>;
 #[derive(Debug, Clone, Default)]
 pub struct NominalRegistry {
     defs: std::collections::BTreeMap<String, Vec<(String, TypeExpr)>>,
+    /// CW.9 follow-up — per-nominal field defaults (`nominal → { field name →
+    /// default expr }`), stored only for fields that declare a `= <default>`
+    /// in their classic `.fitz` `type`. Lets a nominal struct-literal state
+    /// default with OMITTED fields (`options: List<FieldOption> = [
+    /// FieldOption { label: "Red" } ]`, dropping `on: Bool = true`) fill the
+    /// omitted fields with their declared default — byte-accurate with SSR /
+    /// classic Fitz — instead of rustc erroring "missing field `on`".
+    defaults: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Expr>>,
 }
 
 impl NominalRegistry {
@@ -139,9 +147,33 @@ impl NominalRegistry {
     }
 
     /// Register a nominal under its local binding name with its
-    /// ordered `(field_name, field_type)` list.
+    /// ordered `(field_name, field_type)` list. No field defaults —
+    /// convenience for tests / callers that don't carry them; the loader
+    /// uses [`insert_with_defaults`](Self::insert_with_defaults).
     pub fn insert(&mut self, name: String, fields: Vec<(String, TypeExpr)>) {
         self.defs.insert(name, fields);
+    }
+
+    /// Register a nominal with its ordered fields AND its per-field defaults
+    /// (`field name → default expr`, only for fields that declare one). CW.9
+    /// follow-up — see [`defaults`](Self::defaults).
+    pub fn insert_with_defaults(
+        &mut self,
+        name: String,
+        fields: Vec<(String, TypeExpr)>,
+        defaults: std::collections::BTreeMap<String, Expr>,
+    ) {
+        self.defs.insert(name.clone(), fields);
+        if !defaults.is_empty() {
+            self.defaults.insert(name, defaults);
+        }
+    }
+
+    /// The declared default expr for `nominal`'s `field`, if the field
+    /// declares one — used to fill an omitted field in a nominal
+    /// struct-literal state default (CW.9 follow-up).
+    fn field_default(&self, nominal: &str, field: &str) -> Option<&Expr> {
+        self.defaults.get(nominal).and_then(|m| m.get(field))
     }
 
     /// True when `name` names a registered nominal — the gate that
@@ -1884,8 +1916,8 @@ fn emit_component_keepnode(
     writeln!(out, "    pub fn new() -> Rc<Self> {{").unwrap();
     writeln!(out, "        Rc::new({} {{", name).unwrap();
     for field in &component.state {
-        let default_rust =
-            default_expr_to_rust(&field.default, &field.type_expr).map_err(|mut e| {
+        let default_rust = default_expr_to_rust(&field.default, &field.type_expr, nominals)
+            .map_err(|mut e| {
                 e.context = format!(
                     "state field `{}` of component `{}` (default)",
                     field.name, name
@@ -2213,8 +2245,8 @@ fn emit_struct_and_new(
     writeln!(out, "    pub fn new() -> Rc<Self> {{").unwrap();
     writeln!(out, "        Rc::new({} {{", name).unwrap();
     for field in &component.state {
-        let default_rust =
-            default_expr_to_rust(&field.default, &field.type_expr).map_err(|mut e| {
+        let default_rust = default_expr_to_rust(&field.default, &field.type_expr, nominals)
+            .map_err(|mut e| {
                 e.context = format!(
                     "state field `{}` of component `{}` (default)",
                     field.name, name
@@ -4361,6 +4393,7 @@ fn emit_child_props(
                 &prop.field_name,
                 &field.type_expr,
                 ctx.state_names,
+                ctx.state_fields,
                 &ctx.locals,
             )
             .map_err(|mut e| {
@@ -4853,12 +4886,54 @@ fn handler_takes_payload(ctx: &RenderCtx, handler_name: &str) -> EmitResult<bool
     Ok(handler_uses_payload(handler) || ctx.this_bubbled.contains(handler_name))
 }
 
+/// How a `@click` / `data-flv-click` (etc.) binding on an element inside a
+/// component resolves. CW.9 follow-up — a controlled component (Pager,
+/// ConfirmDialog) wires its buttons to handler names that are NOT its own
+/// declared events; those FALL THROUGH to the parent (SSR convention: the
+/// runtime dispatches the event to whoever composed the component).
+enum HandlerBinding {
+    /// A declared `event` of this component — call `Component::<name>(&self,
+    /// [payload])`. `takes_payload` per its body / bubbling status.
+    Local { takes_payload: bool },
+    /// Not a local event, but a parent binds `<ThisComp @<name>="..." />`, so
+    /// the element event fires the component's `__on_<name>` callback slot
+    /// (parallel to the `@event` bubbling of 11.7.c). This is how Pager /
+    /// ConfirmDialog reach their composing parent.
+    Bubbled,
+    /// Neither a local event nor bound by any parent in the file — a standalone
+    /// mount has nothing to call. Wire no listener (the control is inert until
+    /// composed under a parent that binds it).
+    Unbound,
+}
+
+/// Resolve an element-event handler name to its [`HandlerBinding`]. Local
+/// events take precedence (a component may both declare `event save()` AND be
+/// bubbled — the local body forwards to `__on_save` already, see the `bubbles`
+/// path of `emit_event_handler`).
+fn resolve_event_binding(ctx: &RenderCtx, handler_name: &str) -> HandlerBinding {
+    if let Some(h) = ctx.events.iter().find(|h| h.name == handler_name) {
+        HandlerBinding::Local {
+            takes_payload: handler_uses_payload(h) || ctx.this_bubbled.contains(handler_name),
+        }
+    } else if ctx.this_bubbled.contains(handler_name) {
+        HandlerBinding::Bubbled
+    } else {
+        HandlerBinding::Unbound
+    }
+}
+
 /// Emit a `data-flv-click="handler"` click listener (Phase 11.7
 /// R3.5b.1). Builds a `payload: HashMap<String, String>` by reading the
 /// element's `data-flv-value-*` attributes back from the DOM (the same
 /// element the SSR client runtime reads), then calls the target handler.
 /// A handler that doesn't read `payload` is called with no argument (and
 /// the payload build is skipped).
+///
+/// CW.9 follow-up — a handler name that is NOT a local `event` FALLS THROUGH:
+/// if a parent binds it (`<ThisComp @<name>="..." />`) the click fires the
+/// component's `__on_<name>` callback slot; otherwise (nobody binds it) no
+/// listener is wired (a standalone control is inert until composed). This is
+/// what lets controlled components (Pager, ConfirmDialog) compile + work.
 fn emit_data_flv_click(
     handler_name: &str,
     value_keys: &[String],
@@ -4866,60 +4941,121 @@ fn emit_data_flv_click(
     ctx: &RenderCtx,
     out: &mut String,
 ) -> EmitResult<()> {
-    let takes_payload = handler_takes_payload(ctx, handler_name)?;
     let component_name = ctx.component_name;
-
-    writeln!(out, "        {{").unwrap();
-    writeln!(out, "            let __self_clone = self.clone();").unwrap();
-    if takes_payload {
-        // Capture a handle to the element so the listener can read its
-        // `data-flv-value-*` attributes when the click fires.
-        writeln!(out, "            let __evt_el = {}.clone();", el_var).unwrap();
-    }
-    writeln!(
-        out,
-        "            let __closure = Closure::wrap(Box::new(move |_evt: Event| {{"
-    )
-    .unwrap();
-    if takes_payload {
-        writeln!(
-            out,
-            "                let mut __payload = std::collections::HashMap::<String, String>::new();"
-        )
-        .unwrap();
-        for key in value_keys {
-            let attr = format!("data-flv-value-{key}");
+    match resolve_event_binding(ctx, handler_name) {
+        HandlerBinding::Local { takes_payload } => {
+            writeln!(out, "        {{").unwrap();
+            writeln!(out, "            let __self_clone = self.clone();").unwrap();
+            if takes_payload {
+                // Capture a handle to the element so the listener can read its
+                // `data-flv-value-*` attributes when the click fires.
+                writeln!(out, "            let __evt_el = {}.clone();", el_var).unwrap();
+            }
             writeln!(
                 out,
-                "                __payload.insert({}.to_string(), __evt_el.get_attribute({}).unwrap_or_default());",
-                rust_string_literal(key),
-                rust_string_literal(&attr)
+                "            let __closure = Closure::wrap(Box::new(move |_evt: Event| {{"
+            )
+            .unwrap();
+            if takes_payload {
+                writeln!(
+                    out,
+                    "                let mut __payload = std::collections::HashMap::<String, String>::new();"
+                )
+                .unwrap();
+                for key in value_keys {
+                    let attr = format!("data-flv-value-{key}");
+                    writeln!(
+                        out,
+                        "                __payload.insert({}.to_string(), __evt_el.get_attribute({}).unwrap_or_default());",
+                        rust_string_literal(key),
+                        rust_string_literal(&attr)
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    out,
+                    "                {}::{}(&__self_clone, &__payload);",
+                    component_name, handler_name
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "                {}::{}(&__self_clone);",
+                    component_name, handler_name
+                )
+                .unwrap();
+            }
+            writeln!(out, "            }}) as Box<dyn FnMut(Event)>);").unwrap();
+            writeln!(
+                out,
+                "            {}.add_event_listener_with_callback(\"click\", __closure.as_ref().unchecked_ref()).unwrap();",
+                el_var
+            )
+            .unwrap();
+            writeln!(out, "            __closure.forget();").unwrap();
+            writeln!(out, "        }}").unwrap();
+        }
+        HandlerBinding::Bubbled => {
+            // CW.9 follow-up — fall through to the composing parent: fire the
+            // component's `__on_<name>` callback slot (set by the parent that
+            // binds `<ThisComp @<name>="..." />`). Build the payload from the
+            // element's `data-flv-value-*` attrs like the Local path, so a
+            // controlled component (Pager, ConfirmDialog) still forwards data.
+            let mut_kw = if value_keys.is_empty() { "" } else { "mut " };
+            writeln!(out, "        {{").unwrap();
+            writeln!(out, "            let __self_clone = self.clone();").unwrap();
+            if !value_keys.is_empty() {
+                writeln!(out, "            let __evt_el = {}.clone();", el_var).unwrap();
+            }
+            writeln!(
+                out,
+                "            let __closure = Closure::wrap(Box::new(move |_evt: Event| {{"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                let {mut_kw}__payload = std::collections::HashMap::<String, String>::new();"
+            )
+            .unwrap();
+            for key in value_keys {
+                let attr = format!("data-flv-value-{key}");
+                writeln!(
+                    out,
+                    "                __payload.insert({}.to_string(), __evt_el.get_attribute({}).unwrap_or_default());",
+                    rust_string_literal(key),
+                    rust_string_literal(&attr)
+                )
+                .unwrap();
+            }
+            writeln!(
+                out,
+                "                if let Some(__cb) = __self_clone.__on_{}.borrow().as_ref() {{ __cb(&__payload); }}",
+                handler_name
+            )
+            .unwrap();
+            writeln!(out, "            }}) as Box<dyn FnMut(Event)>);").unwrap();
+            writeln!(
+                out,
+                "            {}.add_event_listener_with_callback(\"click\", __closure.as_ref().unchecked_ref()).unwrap();",
+                el_var
+            )
+            .unwrap();
+            writeln!(out, "            __closure.forget();").unwrap();
+            writeln!(out, "        }}").unwrap();
+        }
+        HandlerBinding::Unbound => {
+            // CW.9 follow-up — `data-flv-click="<name>"` names neither a local
+            // event nor an event any parent binds in this file. A standalone
+            // mount has nothing to call, so wire no listener (the control is
+            // inert until composed under a parent that binds `@<name>`).
+            writeln!(
+                out,
+                "        // CW.9: `data-flv-click=\"{handler_name}\"` falls through to a parent; none composes this component with `@{handler_name}`, so it stays inert.",
             )
             .unwrap();
         }
-        writeln!(
-            out,
-            "                {}::{}(&__self_clone, &__payload);",
-            component_name, handler_name
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "                {}::{}(&__self_clone);",
-            component_name, handler_name
-        )
-        .unwrap();
     }
-    writeln!(out, "            }}) as Box<dyn FnMut(Event)>);").unwrap();
-    writeln!(
-        out,
-        "            {}.add_event_listener_with_callback(\"click\", __closure.as_ref().unchecked_ref()).unwrap();",
-        el_var
-    )
-    .unwrap();
-    writeln!(out, "            __closure.forget();").unwrap();
-    writeln!(out, "        }}").unwrap();
     Ok(())
 }
 
@@ -6319,6 +6455,22 @@ fn is_wasm_prop_simple_target(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::Named(n) if matches!(n.as_str(), "Int" | "Float" | "Str" | "Bool"))
 }
 
+/// CW.9 follow-up — is the lowered Rust value of an interpolated prop source
+/// already an `Option<...>` (so a `Nullable<T>` child target must NOT re-wrap
+/// it)? Only a bare parent state field declared `Nullable<...>` is; loop vars,
+/// arithmetic, and nominal field access are treated as non-nullable sources
+/// (documented assumption — see [`lower_child_prop_value`]).
+fn source_is_nullable(expr: &Expr, parent_fields: &[ExpandedStateField]) -> bool {
+    match expr {
+        Expr::Ident(name, _) => parent_fields
+            .iter()
+            .find(|f| &f.name == name)
+            .map(|f| matches!(f.type_expr, TypeExpr::Nullable(_)))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 /// Lower an interpolated child prop (`<Child field={expr} />`) into a
 /// Rust expression assignable to the child's `RefCell<T>` state field,
 /// reading the PARENT's state where the expression references it.
@@ -6342,30 +6494,34 @@ fn lower_child_prop_value(
     field_name: &str,
     target_type: &TypeExpr,
     state_names: &[String],
+    parent_fields: &[ExpandedStateField],
     locals: &[String],
 ) -> EmitResult<String> {
+    // CW.9 follow-up — a `Nullable<inner>` child target no longer defers.
+    // Lower the source value against `inner` (reusing every shape accepted
+    // below), then decide the wrap from the SOURCE's nullability: a bare parent
+    // state field that is itself `Nullable<inner>` is already `Option<inner>`
+    // in Rust → emit the clone directly; a non-nullable source (bare `inner`
+    // field, loop var, arithmetic, nominal field access) → wrap in `Some(...)`.
+    // A nominal field that is itself `Nullable` would double-wrap — a rare edge
+    // the loop-var → nominal type map (not threaded here) can't see, so it's a
+    // documented assumption; the mismatch surfaces as a clear rustc error.
+    if let TypeExpr::Nullable(inner) = target_type {
+        let value =
+            lower_child_prop_value(expr, field_name, inner, state_names, parent_fields, locals)?;
+        return Ok(if source_is_nullable(expr, parent_fields) {
+            value
+        } else {
+            format!("Some({value})")
+        });
+    }
     // CW.9 — a bare parent state field / loop var / field access lowers to a
     // `.clone()` that works for any non-nullable `Clone` target (primitive,
     // `List<T>`, `Map<K,V>`, nominal). This unblocks passing a `List<nominal>`
     // prop (`<Select options="{opts}" />`, `<BarChart bars="{bars}" />`), where
     // the parent and child field types match exactly (the checker's
-    // `light_check_interpolated_prop` verifies compatibility). A `Nullable<T>`
-    // child target still defers: when the parent field is the bare `T` the
-    // value needs a `Some(...)` wrap, which requires the parent field's type
-    // here (not yet threaded). The numeric-arithmetic case below keeps its own
-    // primitive guard.
-    if matches!(target_type, TypeExpr::Nullable(_)) {
-        return Err(EmitError {
-            message: format!(
-                "interpolated prop `{field_name}={{...}}` targets a `Nullable<T>` field \
-                 — the client-WASM target defers Nullable prop propagation (the value \
-                 may need a `Some(...)` wrap depending on the parent field's type). \
-                 Non-nullable `List`/`Map`/nominal + primitive targets work; for the \
-                 SSR target these work today."
-            ),
-            context: "interpolated child prop".to_string(),
-        });
-    }
+    // `light_check_interpolated_prop` verifies compatibility). The
+    // numeric-arithmetic case below keeps its own primitive guard.
     match expr {
         // Bare parent state-field ref — the dominant case (`{title}`,
         // `{count}`). `(*self.<name>.borrow()).clone()` works uniformly
@@ -6815,7 +6971,11 @@ fn type_expr_to_rust(ty: &TypeExpr, nominals: &NominalRegistry) -> EmitResult<St
 /// Non-literal defaults (function calls, arithmetic, etc.) still
 /// error — they need the classic-Fitz expression lowering which
 /// belongs to a future emitter refactor.
-fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
+fn default_expr_to_rust(
+    default: &Expr,
+    ty: &TypeExpr,
+    nominals: &NominalRegistry,
+) -> EmitResult<String> {
     match (default, ty) {
         (Expr::Int(n, _), TypeExpr::Named(name)) if name == "Int" => Ok(format!("{n}i64")),
         (Expr::Float(f, _), TypeExpr::Named(name)) if name == "Float" => Ok(format!("{f}f64")),
@@ -6847,7 +7007,7 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
         // Nullable dispatch: `null` → None, else recurse into inner.
         (Expr::Null(_), TypeExpr::Nullable(_)) => Ok("None".to_string()),
         (_, TypeExpr::Nullable(inner)) => {
-            let inner_rust = default_expr_to_rust(default, inner)?;
+            let inner_rust = default_expr_to_rust(default, inner, nominals)?;
             Ok(format!("Some({inner_rust})"))
         }
         // K-3: List<primitive> defaults. Accepts `Expr::List(items, _)`
@@ -6864,7 +7024,7 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
             let inner_ty = &args[0];
             let mut lits: Vec<String> = Vec::with_capacity(items.len());
             for item in items {
-                lits.push(default_expr_to_rust(item, inner_ty)?);
+                lits.push(default_expr_to_rust(item, inner_ty, nominals)?);
             }
             Ok(format!("vec![{}]", lits.join(", ")))
         }
@@ -6881,8 +7041,8 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
             let (k_ty, v_ty) = (&args[0], &args[1]);
             let mut lits: Vec<String> = Vec::with_capacity(entries.len());
             for (k, v) in entries {
-                let k_lit = default_expr_to_rust(k, k_ty)?;
-                let v_lit = default_expr_to_rust(v, v_ty)?;
+                let k_lit = default_expr_to_rust(k, k_ty, nominals)?;
+                let v_lit = default_expr_to_rust(v, v_ty, nominals)?;
                 lits.push(format!("({k_lit}, {v_lit})"));
             }
             Ok(format!("vec![{}]", lits.join(", ")))
@@ -6901,8 +7061,13 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
             },
             TypeExpr::Named(nom),
         ) if type_name == nom => {
+            // Supplied fields keep the exact pre-CW.9-follow-up emit (infer
+            // each value's type from its literal kind), so an all-fields
+            // struct literal is byte-for-byte identical.
             let mut parts: Vec<String> = Vec::with_capacity(fields.len());
+            let mut written: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for (fname, fexpr) in fields {
+                written.insert(fname.as_str());
                 let fty = infer_literal_type(fexpr).ok_or_else(|| EmitError {
                     message: format!(
                         "state default `{type_name} {{ {fname}: ... }}` — a nominal \
@@ -6912,8 +7077,37 @@ fn default_expr_to_rust(default: &Expr, ty: &TypeExpr) -> EmitResult<String> {
                     ),
                     context: "default".to_string(),
                 })?;
-                let fval = default_expr_to_rust(fexpr, &fty)?;
+                let fval = default_expr_to_rust(fexpr, &fty, nominals)?;
                 parts.push(format!("{fname}: {fval}"));
+            }
+            // CW.9 follow-up — fill OMITTED fields with the nominal's declared
+            // default (byte-accurate with SSR / classic Fitz), in declared
+            // order and appended after the user-written ones so the all-fields
+            // case above stays byte-identical. Only when the registry knows the
+            // nominal's fields; otherwise keep the legacy "all fields required"
+            // behavior and let rustc report the missing field.
+            if let Some(decl_fields) = nominals.fields(nom) {
+                // Clone to release the immutable borrow of `nominals` before the
+                // recursive lowering (which also borrows it immutably — fine —
+                // but `field_default` below reborrows, so keep it simple).
+                let decl: Vec<(String, TypeExpr)> = decl_fields.to_vec();
+                for (fname, fty) in &decl {
+                    if written.contains(fname.as_str()) {
+                        continue;
+                    }
+                    let def = nominals
+                        .field_default(nom, fname)
+                        .ok_or_else(|| EmitError {
+                            message: format!(
+                                "state default `{type_name} {{ ... }}` omits field `{fname}`, \
+                             which declares no default in `{nom}` — supply it, or add a \
+                             `= <default>` to the field in the `.fitz` type"
+                            ),
+                            context: "default".to_string(),
+                        })?;
+                    let fval = default_expr_to_rust(def, fty, nominals)?;
+                    parts.push(format!("{fname}: {fval}"));
+                }
             }
             Ok(format!("{type_name} {{ {} }}", parts.join(", ")))
         }
@@ -9451,7 +9645,10 @@ component Card {
             args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
         };
         let default = Expr::Map(Vec::new(), Span::new(1, 1));
-        assert_eq!(default_expr_to_rust(&default, &ty).unwrap(), "Vec::new()");
+        assert_eq!(
+            default_expr_to_rust(&default, &ty, &NominalRegistry::new()).unwrap(),
+            "Vec::new()"
+        );
     }
 
     #[test]
@@ -9475,7 +9672,7 @@ component Card {
             ],
             Span::new(1, 1),
         );
-        let lit = default_expr_to_rust(&default, &ty).unwrap();
+        let lit = default_expr_to_rust(&default, &ty, &NominalRegistry::new()).unwrap();
         assert!(lit.starts_with("vec!["), "got: {lit}");
         assert!(lit.contains("\"a\".to_string()"), "got: {lit}");
         assert!(lit.contains("1i64"), "got: {lit}");
@@ -9489,7 +9686,10 @@ component Card {
             args: vec![TypeExpr::Named("Str".into())],
         };
         let default = Expr::List(Vec::new(), Span::new(1, 1));
-        assert_eq!(default_expr_to_rust(&default, &ty).unwrap(), "Vec::new()");
+        assert_eq!(
+            default_expr_to_rust(&default, &ty, &NominalRegistry::new()).unwrap(),
+            "Vec::new()"
+        );
     }
 
     #[test]
@@ -9529,7 +9729,7 @@ component Card {
             Span::new(1, 1),
         );
         assert_eq!(
-            default_expr_to_rust(&default, &ty).unwrap(),
+            default_expr_to_rust(&default, &ty, &NominalRegistry::new()).unwrap(),
             "vec![1i64, 2i64, 3i64]"
         );
     }
@@ -9548,7 +9748,7 @@ component Card {
             ],
             Span::new(1, 1),
         );
-        let lit = default_expr_to_rust(&default, &ty).unwrap();
+        let lit = default_expr_to_rust(&default, &ty, &NominalRegistry::new()).unwrap();
         assert!(lit.starts_with("vec!["), "got: {lit}");
         assert!(lit.contains("\"a\".to_string()"), "got: {lit}");
         assert!(lit.contains("\"b\".to_string()"), "got: {lit}");
@@ -9570,8 +9770,137 @@ component Card {
             Span::new(1, 1),
         );
         assert_eq!(
-            default_expr_to_rust(&default, &ty).unwrap(),
+            default_expr_to_rust(&default, &ty, &NominalRegistry::new()).unwrap(),
             "vec![Some(1i64), None, Some(3i64)]"
+        );
+    }
+
+    /// Build a registry for a `FieldOption { label, value, on: Bool = true }`
+    /// nominal with a declared default on `on` (CW.9 follow-up).
+    fn field_option_registry() -> NominalRegistry {
+        use crate::ast::{Expr, Span, TypeExpr};
+        let mut r = NominalRegistry::new();
+        let mut defaults = std::collections::BTreeMap::new();
+        defaults.insert("on".to_string(), Expr::Bool(true, Span::default()));
+        r.insert_with_defaults(
+            "FieldOption".to_string(),
+            vec![
+                ("label".to_string(), TypeExpr::Named("Str".to_string())),
+                ("value".to_string(), TypeExpr::Named("Str".to_string())),
+                ("on".to_string(), TypeExpr::Named("Bool".to_string())),
+            ],
+            defaults,
+        );
+        r
+    }
+
+    #[test]
+    fn cw9_default_struct_lit_fills_omitted_field_with_declared_default() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        // `FieldOption { label: "Red", value: "red" }` omits `on` — filled with
+        // its declared default `true`, appended after the user-written fields.
+        let default = Expr::StructLit {
+            type_name: "FieldOption".to_string(),
+            fields: vec![
+                (
+                    "label".to_string(),
+                    Expr::Str("Red".to_string(), Span::default()),
+                ),
+                (
+                    "value".to_string(),
+                    Expr::Str("red".to_string(), Span::default()),
+                ),
+            ],
+            span: Span::default(),
+        };
+        let ty = TypeExpr::Named("FieldOption".to_string());
+        let out = default_expr_to_rust(&default, &ty, &field_option_registry()).unwrap();
+        assert_eq!(
+            out,
+            "FieldOption { label: \"Red\".to_string(), value: \"red\".to_string(), on: true }"
+        );
+    }
+
+    #[test]
+    fn cw9_default_struct_lit_all_fields_supplied_is_unchanged() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        // All fields supplied → the fill loop adds nothing, so the emit is
+        // byte-identical to the pre-follow-up behavior (user field order).
+        let default = Expr::StructLit {
+            type_name: "FieldOption".to_string(),
+            fields: vec![
+                (
+                    "label".to_string(),
+                    Expr::Str("Red".to_string(), Span::default()),
+                ),
+                (
+                    "value".to_string(),
+                    Expr::Str("red".to_string(), Span::default()),
+                ),
+                ("on".to_string(), Expr::Bool(false, Span::default())),
+            ],
+            span: Span::default(),
+        };
+        let ty = TypeExpr::Named("FieldOption".to_string());
+        let out = default_expr_to_rust(&default, &ty, &field_option_registry()).unwrap();
+        assert_eq!(
+            out,
+            "FieldOption { label: \"Red\".to_string(), value: \"red\".to_string(), on: false }"
+        );
+    }
+
+    #[test]
+    fn cw9_default_struct_lit_omitted_field_without_default_errors() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        // Omit `value`, which declares NO default → clear error (rather than a
+        // raw rustc "missing field").
+        let default = Expr::StructLit {
+            type_name: "FieldOption".to_string(),
+            fields: vec![(
+                "label".to_string(),
+                Expr::Str("Red".to_string(), Span::default()),
+            )],
+            span: Span::default(),
+        };
+        let ty = TypeExpr::Named("FieldOption".to_string());
+        let err = default_expr_to_rust(&default, &ty, &field_option_registry()).unwrap_err();
+        assert!(
+            err.message.contains("omits field `value`") && err.message.contains("no default"),
+            "must cite the omitted no-default field: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn cw9_default_list_of_nominal_fills_omitted_fields() {
+        use crate::ast::{Expr, Span, TypeExpr};
+        // The real shape: `options: List<FieldOption> = [ FieldOption { label:
+        // "Red", value: "red" } ]` — the item omits `on`, filled with `true`.
+        let ty = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("FieldOption".into())],
+        };
+        let default = Expr::List(
+            vec![Expr::StructLit {
+                type_name: "FieldOption".to_string(),
+                fields: vec![
+                    (
+                        "label".to_string(),
+                        Expr::Str("Red".to_string(), Span::default()),
+                    ),
+                    (
+                        "value".to_string(),
+                        Expr::Str("red".to_string(), Span::default()),
+                    ),
+                ],
+                span: Span::default(),
+            }],
+            Span::default(),
+        );
+        let out = default_expr_to_rust(&default, &ty, &field_option_registry()).unwrap();
+        assert_eq!(
+            out,
+            "vec![FieldOption { label: \"Red\".to_string(), value: \"red\".to_string(), on: true }]"
         );
     }
 
@@ -9632,7 +9961,9 @@ component Card {
     }
 
     #[test]
-    fn phase_11_7_a_wasm_interpolated_prop_nullable_target_rejects() {
+    fn cw9_wasm_interpolated_prop_nullable_target_wraps_some_for_non_nullable_source() {
+        // CW.9 follow-up — a non-nullable parent field flowing into a
+        // `Nullable<T>` child target wraps `Some(...)`.
         let src = r#"component Parent {
   state { title: Str = "hi" }
   <template><Card label="{title}" /></template>
@@ -9642,12 +9973,34 @@ component Card {
   <template><span>hi</span></template>
 }"#;
         let file = parse_expand(src);
-        let err = emit_module(&file)
-            .expect_err("nullable child target must still defer on the WASM path (CW.9)");
+        let out = emit_module(&file).expect("nullable child target must emit (CW.9 follow-up)");
         assert!(
-            err.message.contains("Nullable"),
-            "message must cite the Nullable deferral: {}",
-            err.message
+            out.contains(".label.borrow_mut() = Some((*self.title.borrow()).clone());"),
+            "non-nullable source into a Nullable target must wrap `Some(...)`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_wasm_interpolated_prop_nullable_target_direct_clone_for_nullable_source() {
+        // CW.9 follow-up — a parent field that is ALREADY `Nullable<T>` is
+        // `Option<T>` in Rust; a `Nullable<T>` child target must NOT re-wrap.
+        let src = r#"component Parent {
+  state { title: Str? = null }
+  <template><Card label="{title}" /></template>
+}
+component Card {
+  state { label: Str? = null }
+  <template><span>hi</span></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module(&file).expect("nullable→nullable prop must emit (CW.9 follow-up)");
+        assert!(
+            out.contains(".label.borrow_mut() = (*self.title.borrow()).clone();"),
+            "a nullable source must clone directly (no `Some(...)` wrap):\n{out}"
+        );
+        assert!(
+            !out.contains(".label.borrow_mut() = Some("),
+            "must NOT double-wrap a nullable source:\n{out}"
         );
     }
 
@@ -10711,16 +11064,55 @@ component Card {
     }
 
     #[test]
-    fn phase_11_7_r3_5_b1_data_flv_click_unknown_handler_rejects() {
+    fn cw9_data_flv_click_unbound_handler_is_inert_noop_not_error() {
+        // CW.9 follow-up — a `data-flv-click` handler that is neither a local
+        // event nor bound by any parent FALLS THROUGH; a standalone mount has
+        // nothing to call, so the emitter wires no listener (inert), matching
+        // SSR (which never validates `data-flv-click` at compile time) instead
+        // of erroring. Controlled components (Pager, ConfirmDialog) rely on
+        // this to compile standalone.
         let src = r#"component App {
   state { x: Int = 0 }
   event real() { x = 1 }
-  <template><button data-flv-click="typo">go</button></template>
+  <template><button data-flv-click="page_prev">go</button></template>
 }"#;
-        let err = emit_component(&parse_expand(src).components[0]).unwrap_err();
+        let out = emit_component(&parse_expand(src).components[0])
+            .expect("an unbound data-flv-click handler must NOT error (CW.9 fall-through)");
         assert!(
-            err.message.contains("typo") && err.message.contains("not an `event`"),
-            "a data-flv-click to an unknown handler must reject:\n{err}"
+            out.contains("falls through to a parent") && out.contains("page_prev"),
+            "an unbound data-flv-click must emit the inert fall-through comment:\n{out}"
+        );
+        // No click listener is wired for the inert control.
+        assert!(
+            !out.contains("add_event_listener_with_callback(\"click\""),
+            "an unbound data-flv-click must wire no click listener:\n{out}"
+        );
+    }
+
+    #[test]
+    fn cw9_data_flv_click_bubbled_handler_fires_parent_callback_slot() {
+        // CW.9 follow-up — when a parent composes the controlled component and
+        // binds `<Ctrl @page_prev="on_prev" />`, `page_prev` is in the child's
+        // bubbled set, so the child's `data-flv-click="page_prev"` fires its
+        // `__on_page_prev` callback slot (fall-through to the parent).
+        let src = r#"component Parent {
+  state { page: Int = 1 }
+  event on_prev() { page = 0 }
+  <template><Ctrl @page_prev="on_prev" /></template>
+}
+component Ctrl {
+  state {}
+  <template><button data-flv-click="page_prev">prev</button></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).expect("bubbled controlled component must emit");
+        assert!(
+            out.contains("if let Some(__cb) = __self_clone.__on_page_prev.borrow().as_ref() { __cb(&__payload); }"),
+            "a bubbled data-flv-click must fire the __on_<name> callback slot:\n{out}"
+        );
+        // The child gets the callback-slot field for the bubbled event.
+        assert!(
+            out.contains("__on_page_prev: RefCell<Option<Box<dyn Fn(&std::collections::HashMap<String, String>)>>>"),
+            "the controlled component must carry the bubbled callback slot:\n{out}"
         );
     }
 

@@ -9,6 +9,63 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.0] — 2026-08-06 — CW.9 follow-ups: cierra las 3 deudas residuales del emisor wasm (38/38 componentes de la companion UI dual-targetean)
+
+Cierre de las tres deudas residuales de CW.9 (v0.35.0 / v0.36.0). Cambio
+confinado a `src/view/` — no toca el pipeline clásico. Byte-compat: los
+`examples/view/` regeneran idéntico (`git status` limpio); sin sintaxis nueva
+del `.fitzv`; sin cambio de la extensión VSCode.
+
+### Added
+
+- **Props interpoladas a un target `Nullable<T>`.** `<Badge caption="{note}" />`
+  con `caption: Str?` en el hijo ya no difiere en wasm. `lower_child_prop_value`
+  recibe los fields del padre (`ctx.state_fields`) y decide el wrap por la
+  nulabilidad del SOURCE: un bare state field ya `Nullable<inner>` es
+  `Option<inner>` en Rust → clon directo; un source no-nullable (bare `inner`,
+  loop var, aritmética, field access de nominal) → wrap `Some(...)`. (Un field
+  nominal que sea a su vez `Nullable` doblaría el wrap — un edge raro sin el
+  mapa loop-var→nominal, documentado; la falla sale como error claro de rustc.)
+- **Relleno de campos omitidos en defaults `List<nominal>`.** `options:
+  List<FieldOption> = [ FieldOption { label: "Red", value: "red" } ]` que omite
+  `on: Bool = true` ya no rompe con "missing field `on`": el `NominalRegistry`
+  ahora carga el default declarado de cada field (`insert_with_defaults`,
+  poblado por `load_imported_nominals_with_deps`), y `default_expr_to_rust`
+  rellena los campos omitidos con su default en orden declarado — byte-accurate
+  con SSR / Fitz clásico. Los campos suministrados mantienen el emit exacto
+  previo (byte-idéntico para el caso all-fields). Un campo omitido SIN default
+  emite un error claro (no un "missing field" crudo de rustc).
+- **Fall-through de `data-flv-click` a un callback del padre (componentes
+  controlados).** Un `data-flv-click="page_prev"` cuyo nombre NO es un `event`
+  local del componente FALL-THROUGH: si un padre lo bindea (`<Ctrl
+  @page_prev="..." />`) el click dispara el slot `__on_page_prev` del componente
+  (paralelo al bubbling `@event` de 11.7.c); si nadie lo bindea (mount
+  standalone), no se cablea listener (el control queda inerte hasta componerse).
+  Nuevo `resolve_event_binding` con `HandlerBinding::{Local, Bubbled, Unbound}`.
+  Destraba los componentes controlados (Pager, ConfirmDialog) → **38/38** de la
+  companion UI de fitz-liveviews dual-targetean.
+
+### Changed
+
+- **El checker del `.fitzv` acepta `<Child @X="..." />` cuando el hijo EMITE `X`
+  vía `data-flv-*="X"`** (no solo cuando lo declara como `event`). Nuevo
+  `component_emits_fallthrough_event` en `src/view/check.rs`; un nombre que no
+  es ni event declarado ni emisor data-flv sigue siendo un typo y rechaza. Esto
+  hace alcanzable el path Bubbled end-to-end (sin la relajación, el checker
+  bloqueaba componer un componente controlado). Solo *relaja* — nada que pasaba
+  antes ahora falla (los 227 tests SSR de la ui-gallery siguen verdes).
+
+### Verificación
+
+- `cargo test --lib` **4020** (default) / **4181** (`--features lsp`) — 0 fallos.
+  fmt + clippy (`--lib --tests`, default y `--features lsp`) `-D warnings`
+  limpios. Los 24 view smokes regeneran `examples/view/` byte-idéntico
+  (`git status` limpio). `fitz test` de `fitz-liveviews/examples/ui-gallery`
+  **227/227** SSR verdes (la relajación del checker no rompe SSR).
+- Build wasm **real** (`fitz build --target wasm-client` → `wasm-pack` → `:-)
+  Done`) validó los tres fixes en un proyecto scratchpad + el showcase de la
+  companion UI (con Pager + ConfirmDialog sumados) compila a WASM real.
+
 ## [v0.36.0] — 2026-08-06 — CW.9 iter2: tres fixes del emisor wasm (36/38 componentes de la companion UI dual-targetean)
 
 Continuación de CW.9 (v0.35.0). Tras un barrido de los componentes

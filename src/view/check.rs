@@ -1276,6 +1276,56 @@ fn component_has_slot(component: &ExpandedComponent) -> bool {
         .is_some_and(|t| t.roots.iter().any(node_has_slot))
 }
 
+/// CW.9 follow-up — does `component` EMIT `event_name` as a fall-through event
+/// via a `data-flv-<verb>="<event_name>"` directive in its template? Controlled
+/// components (Pager, ConfirmDialog) don't declare their bubbled events as
+/// `event ...`; they fire them through a `data-flv-click` (etc.) directive whose
+/// value is the event name, so a composing parent can bind `<Ctrl @<name>=... />`.
+/// This lets that binding pass the checker even though the child has no matching
+/// `event` declaration, while a genuine typo (neither a declared event nor a
+/// data-flv emitter) is still caught.
+fn component_emits_fallthrough_event(component: &ExpandedComponent, event_name: &str) -> bool {
+    // The `data-flv-<verb>` directives that carry a handler NAME as their value
+    // (as opposed to `data-flv-value-*` = data, `data-flv-clear` = flag).
+    const HANDLER_DIRECTIVES: &[&str] = &[
+        "data-flv-click",
+        "data-flv-submit",
+        "data-flv-change",
+        "data-flv-input",
+        "data-flv-file",
+    ];
+    fn node_emits(node: &ExpandedTemplateNode, event_name: &str) -> bool {
+        match node {
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                attrs.iter().any(|a| {
+                    matches!(a, ExpandedAttr::Static { name, value, .. }
+                        if HANDLER_DIRECTIVES.contains(&name.as_str()) && value == event_name)
+                }) || children.iter().any(|c| node_emits(c, event_name))
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                children.iter().any(|c| node_emits(c, event_name))
+                    || else_children
+                        .as_ref()
+                        .is_some_and(|els| els.iter().any(|c| node_emits(c, event_name)))
+            }
+            ExpandedTemplateNode::For { children, .. } => {
+                children.iter().any(|c| node_emits(c, event_name))
+            }
+            _ => false,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().any(|n| node_emits(n, event_name)))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_child_site(
     child_name: &str,
@@ -1346,13 +1396,20 @@ fn validate_child_site(
     // must declare `event <event_name>`, and the parent must declare
     // `event <handler_name>` (the handler that runs when it bubbles).
     for binding in events {
-        if !child.events.iter().any(|e| e.name == binding.event_name) {
+        // The child must either DECLARE `event <name>` (11.7.c) or EMIT it as a
+        // fall-through via a `data-flv-<verb>="<name>"` directive (CW.9
+        // follow-up — controlled components like Pager / ConfirmDialog). A name
+        // that is neither is a genuine typo and still rejects.
+        if !child.events.iter().any(|e| e.name == binding.event_name)
+            && !component_emits_fallthrough_event(child, &binding.event_name)
+        {
             errors.push(CheckError {
                 message: format!(
-                    "`<{child_name} @{}=\"...\" />` binds an event the child does not \
-                     declare. Add `event {}() {{ ... }}` to component `{child_name}`, or \
-                     fix the event name.",
-                    binding.event_name, binding.event_name
+                    "`<{child_name} @{}=\"...\" />` binds an event the child neither \
+                     declares nor emits. Add `event {}() {{ ... }}` to component \
+                     `{child_name}` (or a `data-flv-*=\"{}\"` directive for a controlled \
+                     component), or fix the event name.",
+                    binding.event_name, binding.event_name, binding.event_name
                 ),
                 loc: binding.loc,
                 context: format!("component '{parent_name}': template `<{child_name} />`"),
@@ -3494,7 +3551,8 @@ component App {
 }"#;
         let errs = check_str_with_imported(parent, &[child]);
         assert!(
-            errs.iter().any(|e| e.message.contains("does not declare")),
+            errs.iter()
+                .any(|e| e.message.contains("neither declares nor emits")),
             "binding an event the imported child lacks must error: {errs:#?}"
         );
     }
@@ -3553,8 +3611,51 @@ component Kid {
 }"#;
         let errs = check_str(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("does not declare")),
-            "binding an event the child doesn't declare must error: {errs:#?}"
+            errs.iter()
+                .any(|e| e.message.contains("neither declares nor emits")),
+            "binding an event the child neither declares nor emits must error: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn cw9_check_controlled_child_fallthrough_event_binding_ok() {
+        // CW.9 follow-up — a controlled component (Pager-style) does NOT declare
+        // `event page_prev()`; it emits it via `data-flv-click="page_prev"`. A
+        // parent binding `<Pager @page_prev="on_prev" />` must still check clean.
+        let src = r#"component App {
+  state { page: Int = 1 }
+  event on_prev() { page = 0 }
+  <template><div><Pager @page_prev="on_prev" /></div></template>
+}
+component Pager {
+  state { page: Int = 1 }
+  <template><button data-flv-click="page_prev">prev</button></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.is_empty(),
+            "a fall-through (data-flv) child event binding must check clean: {errs:#?}"
+        );
+    }
+
+    #[test]
+    fn cw9_check_typo_child_event_still_errors_when_not_emitted() {
+        // A name that is neither a declared child event NOR emitted via
+        // `data-flv-*` is a genuine typo — still rejects.
+        let src = r#"component App {
+  state { page: Int = 1 }
+  event on_prev() { page = 0 }
+  <template><div><Pager @page_prevv="on_prev" /></div></template>
+}
+component Pager {
+  state { page: Int = 1 }
+  <template><button data-flv-click="page_prev">prev</button></template>
+}"#;
+        let errs = check_str(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("neither declares nor emits")),
+            "a typo'd child event (not declared, not emitted) must still error: {errs:#?}"
         );
     }
 

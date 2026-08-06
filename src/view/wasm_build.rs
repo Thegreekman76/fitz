@@ -361,7 +361,16 @@ pub fn load_imported_nominals_with_deps(
                             .iter()
                             .map(|f| (f.name.clone(), f.type_.clone()))
                             .collect();
-                        registry.insert(binding, field_list);
+                        // CW.9 follow-up — carry each field's declared default
+                        // so a nominal struct-literal state default can omit
+                        // fields and have them filled with the declared value
+                        // (byte-accurate with SSR / classic Fitz).
+                        let field_defaults: std::collections::BTreeMap<String, crate::ast::Expr> =
+                            fields
+                                .iter()
+                                .filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d)))
+                                .collect();
+                        registry.insert_with_defaults(binding, field_list, field_defaults);
                     }
                 }
             }
