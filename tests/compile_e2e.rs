@@ -10936,8 +10936,15 @@ fn main() => 0\n\
     let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
     if main_rs.exists() {
         let content = std::fs::read_to_string(&main_rs).expect("read main.rs");
+        // The has_many conditional scopes the `MutexGuard` in its own
+        // block (`let __is_empty = { let __g = ...; __g.is_empty() };`)
+        // so the lock is not held across the `__obj.insert(...)`. The
+        // guard-scoping refactor changed the literal from the older
+        // `if !__g.is_empty()` — the conditional is still emitted and
+        // functionally identical (skip the field when the relation is
+        // empty).
         assert!(
-            content.contains("if !__g.is_empty() { __obj.insert(\"posts\""),
+            content.contains("if !__is_empty { __obj.insert(\"posts\""),
             "main.rs must emit the has_many conditional for `posts` (#7 fix)"
         );
         assert!(
@@ -13151,6 +13158,77 @@ fn main() => 0\n\
     assert!(
         output.status.success(),
         "fitz build failed (B19 bug derivado):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+}
+
+#[test]
+fn cron_store_binding_in_imported_module_compila_b20() {
+    // B20 — `@cron(..., store=X)` AND `let X = db.connect(...).await`
+    // BOTH declared in the SAME imported module (not main). Pre-fix the
+    // codegen emitted `(&db).into_store()` in the crate-root `main()`
+    // where `db` was not in scope (E0425), and the module emitted a
+    // broken `pub fn db() { ...await }` (async body in a sync fn). Fix:
+    // `gen_module_top_let` hoists `let db = db.connect(...).await` to a
+    // crate-visible `OnceCell` + `pub(crate) async fn
+    // __fitz_init_state_db()`; `emit_cron_job_spawns` drives the init +
+    // materializes the local `db` before the spawn. This closes the
+    // workaround (declaring the `let db` in main) that TaskHub/fitzwatch
+    // used. Contrast with `cron_with_persistent_store_in_imported_module_b19_derived`
+    // where the `let db` lives in main (that path must stay green too).
+    let stem = "cron_store_in_module_b20";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // tasks.fitz — the store binding AND the cron live HERE (the module),
+    // not in main. `db` is referenced only by `store=db`.
+    std::fs::write(
+        dir.join("tasks.fitz"),
+        "let db = db.connect(\"postgres://x@h/d\").await\n\
+         \n\
+         @cron(\"*/30 * * * * *\", store=db, retry={\n    \
+                 max: 2,\n    \
+                 backoff: \"exponential\",\n    \
+                 initial_secs: 1,\n    \
+                 max_secs: 10,\n\
+             })\n\
+         async fn nightly() -> Null {\n  \
+             return null\n\
+         }\n",
+    )
+    .expect("escribir tasks.fitz");
+
+    // main.fitz — NO `let db` here; only `import tasks` + @server. Pre-B20
+    // this failed to compile because the store binding was unreachable.
+    let main_src = "\
+import tasks\n\
+\n\
+@server(43926)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B20 — store binding in imported module):\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

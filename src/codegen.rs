@@ -4155,6 +4155,14 @@ struct LoadedModule {
     /// and the user saw the [ready] banner (a user `print(...)`) but
     /// no actual cron activity.
     cron_fn_stmts: Vec<Stmt>,
+    /// B20 — names of top-level `let X = db.connect(...).await` bindings
+    /// in this module that were HOISTED to a crate-visible `OnceCell`
+    /// state var + `__fitz_init_state_X()` because a `@cron(store=X)` in
+    /// this same module references them (see `gen_module_top_let`). Main
+    /// drives the init + materializes each in `emit_cron_job_spawns`.
+    /// Empty for the b19_derived case where the `store` binding lives in
+    /// main instead of the module.
+    hoisted_cron_store_vars: Vec<String>,
     /// Mini-fase HTTP client (2026-06-18) —
     /// `program_uses_http_client(module_program)`. The main ORs it
     /// with its own flag so the `__fitz_http_*` prelude lives in the
@@ -4216,6 +4224,17 @@ enum NamedKind {
 
 struct ModuleLoader {
     base_dir: PathBuf,
+    /// `loader_absoluto` fix — the initial `base_dir` (parent of the
+    /// entry file), fixed for the whole loader lifetime. While
+    /// `base_dir` changes to the importing module's dir on each nested
+    /// load, `import_root` stays put and acts as a fallback: a nested
+    /// module (`src/data/users.fitz`) doing `from types.user import X`
+    /// resolves to the sibling `src/types/user.fitz` (relative to
+    /// `import_root`) when the relative-to-base_dir path
+    /// (`src/data/types/user.fitz`) does not exist. Mirrors the
+    /// evaluator's `import_root` (present in `fitz run` since the
+    /// 2026-05-22 mini-phase, ported to `fitz build` here).
+    import_root: PathBuf,
     /// Modules loaded in discovery order. Each `mod foo;` in
     /// main.rs is emitted in this order.
     modules: Vec<LoadedModule>,
@@ -4289,6 +4308,7 @@ struct ModuleLoader {
 impl ModuleLoader {
     fn new(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) -> Self {
         Self {
+            import_root: base_dir.clone(),
             base_dir,
             modules: Vec::new(),
             by_path: HashMap::new(),
@@ -4402,16 +4422,21 @@ impl ModuleLoader {
     /// Decision: deps shadow local files with the same name (the
     /// dep wins on conflict), same as in the evaluator. Behavior
     /// explicit by design.
-    fn resolve_path(&self, segments: &[String]) -> PathBuf {
+    /// Returns the candidate paths to try, in priority order.
+    /// `load_module` canonicalizes each and takes the first that exists;
+    /// the first candidate is what the not-found error cites.
+    fn resolve_path_candidates(&self, segments: &[String]) -> Vec<PathBuf> {
         // Step 1 — dep registry resolution. A single segment loads the
         // dep's lib entry; a dotted path (`from dep.sub.Mod import X`)
-        // resolves the rest under the dep's root (`.fitz`/`.fitzv`).
+        // resolves the rest under the dep's root (`.fitz`/`.fitzv`). No
+        // `import_root` fallback for deps — a dep resolves under its own
+        // root.
         if let Some(lib_entry) = self.dep_registry.get(&segments[0]) {
             if segments.len() == 1 {
-                return lib_entry.clone();
+                return vec![lib_entry.clone()];
             }
             if let Some(found) = crate::view::resolve_dep_subpath_file(lib_entry, &segments[1..]) {
-                return found;
+                return vec![found];
             }
             // Not found under the dep — cite the `.fitz` candidate so
             // `load_module`'s `not found` error points at the dep.
@@ -4421,33 +4446,42 @@ impl ModuleLoader {
                     classic.push(seg);
                 }
                 classic.push(format!("{}.fitz", segments[segments.len() - 1]));
-                return classic;
+                return vec![classic];
             }
         }
 
-        // Step 2 — relative path. Phase 11.6.d: try `.fitz`
-        // FIRST and `.fitzv` as fallback (backward-compat wins
-        // if both exist). The classic path is the fallback
-        // return value so error messages keep citing the
-        // classic `.fitz` filename (the more-common case) —
-        // when neither exists, `canonicalize` in `load_module`
-        // will raise the `not found` error with the classic
-        // path.
-        let mut dir = self.base_dir.clone();
-        let n = segments.len();
-        for seg in &segments[..n.saturating_sub(1)] {
-            dir.push(seg);
-        }
-        if let Some(stem) = segments.last() {
-            if let Some(hit) = crate::view::resolve_module_file_candidates(&dir, stem) {
-                return hit;
+        // Step 2 — relative candidates: `base_dir` (current importer)
+        // FIRST, then `import_root` (entry file's dir) as fallback
+        // (loader_absoluto fix, mirroring the evaluator). Within each
+        // dir, `.fitz` before `.fitzv` (Phase 11.6.d backward-compat).
+        // The first candidate (base_dir classic `.fitz`) is what
+        // `load_module` cites in the not-found error, preserving the
+        // historical message.
+        let build = |base: &Path| -> Vec<PathBuf> {
+            let n = segments.len();
+            let mut dir = base.to_path_buf();
+            for seg in &segments[..n.saturating_sub(1)] {
+                dir.push(seg);
             }
-            let mut classic = dir;
-            classic.push(format!("{}.fitz", stem));
-            classic
-        } else {
-            dir
+            match segments.last() {
+                Some(stem) => {
+                    let mut classic = dir.clone();
+                    classic.push(format!("{}.fitz", stem));
+                    let mut view = dir;
+                    view.push(format!("{}.fitzv", stem));
+                    vec![classic, view]
+                }
+                None => vec![dir],
+            }
+        };
+        let mut candidates = build(&self.base_dir);
+        // Only add the `import_root` fallback if it differs from the
+        // current base_dir (top-level imports from the entry file
+        // already have base_dir == import_root).
+        if self.base_dir != self.import_root {
+            candidates.extend(build(&self.import_root));
         }
+        candidates
     }
 
     /// Loads a module: if already cached by path, returns the
@@ -4458,31 +4492,46 @@ impl ModuleLoader {
         if segments.is_empty() {
             return Err(loader_err("`import` with empty path".to_string()));
         }
-        let path = self.resolve_path(segments);
-        let canonical = std::fs::canonicalize(&path).map_err(|_| {
-            let joined = segments.join(".");
-            // Phase 11.6.e — parallel enrichment to
-            // `evaluator::load_module`: when the missing module is
-            // `fitz_liveviews`, hint at the dep declaration in
-            // `fitz.toml` so users importing `.fitzv` files without
-            // the runtime library get a helpful diagnostic.
-            let base = format!(
-                "module `{}` not found (searched in `{}`)",
-                joined,
-                path.display()
-            );
-            let msg = if joined == "fitz_liveviews" {
-                format!(
-                    "{base}\n  hint: `fitz_liveviews` is the runtime library backing \
-                     `.fitzv` single-file components. Declare it in `fitz.toml`:\n\n  \
-                     [dependencies]\n  \
-                     fitz_liveviews = {{ git = \"https://github.com/Thegreekman76/fitz-liveviews\", tag = \"v0.4.2\" }}"
-                )
-            } else {
-                base
-            };
-            loader_err(msg)
-        })?;
+        // loader_absoluto fix — try each candidate (relative to the
+        // importer FIRST, then relative to `import_root`); the first
+        // that canonicalizes wins. If all fail, cite the first
+        // candidate (base_dir classic `.fitz`) to preserve the
+        // historical not-found message.
+        let candidates = self.resolve_path_candidates(segments);
+        let canonical = match candidates
+            .iter()
+            .find_map(|c| std::fs::canonicalize(c).ok())
+        {
+            Some(p) => p,
+            None => {
+                let path = candidates
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(segments.join("/")));
+                let joined = segments.join(".");
+                // Phase 11.6.e — parallel enrichment to
+                // `evaluator::load_module`: when the missing module is
+                // `fitz_liveviews`, hint at the dep declaration in
+                // `fitz.toml` so users importing `.fitzv` files without
+                // the runtime library get a helpful diagnostic.
+                let base = format!(
+                    "module `{}` not found (searched in `{}`)",
+                    joined,
+                    path.display()
+                );
+                let msg = if joined == "fitz_liveviews" {
+                    format!(
+                        "{base}\n  hint: `fitz_liveviews` is the runtime library backing \
+                         `.fitzv` single-file components. Declare it in `fitz.toml`:\n\n  \
+                         [dependencies]\n  \
+                         fitz_liveviews = {{ git = \"https://github.com/Thegreekman76/fitz-liveviews\", tag = \"v0.4.2\" }}"
+                    )
+                } else {
+                    base
+                };
+                return Err(loader_err(msg));
+            }
+        };
 
         if let Some(&idx) = self.by_path.get(&canonical) {
             return Ok(idx);
@@ -4717,6 +4766,31 @@ impl ModuleLoader {
             &self.dep_registry,
         );
         module_mw_names.extend(self.main_imported_middleware_fns.iter().cloned());
+        // B20 — store-var names referenced by `@cron(store=X)` in THIS
+        // module, so `gen_module_top_let` hoists `let X =
+        // db.connect(...).await` to a crate-visible OnceCell + init fn.
+        let module_cron_store_vars = collect_cron_store_var_names(&module_program);
+        // B20 — the subset ACTUALLY hoisted: a store var referenced by a
+        // cron here AND defined as an async top-level `let` here (same
+        // predicate as `gen_module_top_let`). Store vars whose binding
+        // lives in main (b19_derived) are NOT in this set. Main consults
+        // it in `emit_cron_job_spawns` to know which to init/materialize.
+        let module_hoisted_cron_store_vars: Vec<String> = module_cron_store_vars
+            .iter()
+            .filter(|v| {
+                module_program.iter().any(|s| {
+                    matches!(
+                        s,
+                        Stmt::Assign {
+                            target: AssignTarget::Ident(n, _),
+                            value,
+                            ..
+                        } if n == *v && expr_contains_await(value)
+                    )
+                })
+            })
+            .cloned()
+            .collect();
         let mut rust_content = generate_module_rs_with_bindings(
             &module_program,
             &module_env,
@@ -4725,6 +4799,7 @@ impl ModuleLoader {
             &module_python_imports,
             self.main_observability_enabled,
             &module_mw_names,
+            &module_cron_store_vars,
         )?;
 
         // W27 (v0.28.6) — the W23 gate emits `use crate::__FitzValue;`
@@ -4774,7 +4849,7 @@ impl ModuleLoader {
 
         // Extract sigs for importer use.
         let (type_sigs, fn_sigs, const_sigs, accessor_consts) =
-            collect_module_sigs(&module_program, &module_env)?;
+            collect_module_sigs(&module_program, &module_env, &module_cron_store_vars)?;
 
         // CM mini-batch — collect custom methods of each exported
         // `type`. The importer needs them for the
@@ -4931,6 +5006,7 @@ impl ModuleLoader {
             http_fn_stmts: module_http_fn_stmts,
             ws_fn_stmts: module_ws_fn_stmts,
             cron_fn_stmts: module_cron_fn_stmts,
+            hoisted_cron_store_vars: module_hoisted_cron_store_vars,
             uses_http_client: module_uses_http_client,
             uses_smtp: module_uses_smtp,
             uses_to_json: module_uses_to_json,
@@ -5435,6 +5511,10 @@ fn resolve_loader_import_file_path(
 /// `loaded_modules`: slice of already loaded modules, in the same
 /// order as the `ModuleLoader`. The `module_index` values in
 /// `local_bindings` are indices into this slice.
+// B20 — one more param (`cron_store_vars`) pushed this over clippy's
+// arg limit; a `ScopeCtx`-style struct refactor is deferrable (parallel
+// to the same allow on `lower_event_body_stmts`).
+#[allow(clippy::too_many_arguments)]
 fn generate_module_rs_with_bindings(
     program: &Program,
     env: &TypeEnv,
@@ -5451,6 +5531,11 @@ fn generate_module_rs_with_bindings(
     // = true` for `Stmt::ReturnStatus`). Empty when called from
     // pure-test paths via `generate_rust`.
     cross_module_middleware_fns: &[String],
+    // B20 — names of top-level bindings in THIS module referenced by a
+    // `@cron(..., store=X)` here. `gen_module_top_let` hoists the
+    // async ones (`let X = db.connect(...).await`) to a crate-visible
+    // `OnceCell` + init fn so the crate-root cron spawn can reach them.
+    cron_store_vars: &std::collections::HashSet<String>,
 ) -> Result<String, FitzError> {
     // Hpx.2 — for modules compiled via the loader, compute a fresh
     // TypeInfo. The loader ran `resolve_program` before but not
@@ -5458,6 +5543,9 @@ fn generate_module_rs_with_bindings(
     // side-table; the errors were already reported upstream.
     let (_e, type_info, _d, _errs) = crate::types::check_program(program);
     let mut ctx = CodegenCtx::new_for_module(env, &type_info);
+    // B20 — the cron-store hoist set is consulted by
+    // `gen_module_top_let` when emitting the module's top-level lets.
+    ctx.module_cron_store_vars = cron_store_vars.clone();
     // W18 (post-B8) — Propagate `@server(observability=...)` from
     // main. Default `true` (instrumentation on). When main has
     // `@server(observability=false)`, modules' HTTP wrappers also go
@@ -6185,6 +6273,14 @@ fn stmt_kind(s: &Stmt) -> &'static str {
 fn collect_module_sigs(
     program: &Program,
     env: &TypeEnv,
+    // B20 — store-var names referenced by a `@cron(store=X)` in this
+    // module. For these, a non-literal async RHS (`let db =
+    // db.connect(...).await`) is tolerated without a type annotation:
+    // `gen_module_top_let` hoists it to a crate-visible OnceCell (with
+    // full codegen inference), so the conservative F14 rejection below
+    // does not apply. The const_sig type is irrelevant (the binding is
+    // never imported by another module — it feeds `store=X` only).
+    cron_store_vars: &std::collections::HashSet<String>,
 ) -> Result<
     (
         HashMap<String, TypeSig>,
@@ -6317,17 +6413,25 @@ fn collect_module_sigs(
                 // do full inference (no codegen context).
                 let resolved_ty = match type_ {
                     Some(te) => resolve_type_expr(te, env).map_err(|e| {
-                        loader_err(format!(
-                            "module let `{}`: annotation: {}",
-                            name, e.message
-                        ))
+                        loader_err(format!("module let `{}`: annotation: {}", name, e.message))
                     })?,
-                    None => infer_literal_type(value).ok_or_else(|| {
-                        loader_err(format!(
-                            "module let `{}`: RHS is not a literal — annotate the type (`let {}: T = <expr>`).",
-                            name, name
-                        ))
-                    })?,
+                    None => match infer_literal_type(value) {
+                        Some(t) => t,
+                        // B20 — tolerate a non-literal async RHS when the
+                        // binding feeds a `@cron(store=X)` in this module
+                        // (`let db = db.connect(...).await`).
+                        // `gen_module_top_let` hoists it with full
+                        // inference; the const_sig type is unused here.
+                        None if cron_store_vars.contains(name) && expr_contains_await(value) => {
+                            Type::Any
+                        }
+                        None => {
+                            return Err(loader_err(format!(
+                                "module let `{}`: RHS is not a literal — annotate the type (`let {}: T = <expr>`).",
+                                name, name
+                            )));
+                        }
+                    },
                 };
                 const_sigs.insert(name.clone(), resolved_ty);
                 // F14 mini-batch — Str-literal stays as `pub static &str`,
@@ -7407,6 +7511,15 @@ fn emit_main_rs_body(
                 }
             }
         }
+        // B20 — record the store bindings this module HOISTED to a
+        // crate-visible OnceCell (co-located `@cron(store=X)` + `let X =
+        // db.connect(...).await`). `emit_cron_job_spawns` inits +
+        // materializes each `crate::<mod>::__FITZ_STATE_X`. Empty for
+        // the b19_derived case (store binding lives in main).
+        for var in &module.hoisted_cron_store_vars {
+            ctx.xmod_cron_store_hoists
+                .push((mod_name.clone(), var.clone()));
+        }
     }
 
     if has_http {
@@ -7540,6 +7653,37 @@ fn parse_cron_kwargs_into_info(
         }
     }
     Ok(())
+}
+
+/// B20 — collects the names of top-level bindings referenced by a
+/// `@cron(..., store=X)` decorator in `program`. When such a binding
+/// (`let X = db.connect(...).await`) lives inside an imported module,
+/// `gen_module_top_let` hoists it to a crate-visible `OnceCell` state
+/// var + `__fitz_init_state_<X>()` so the cron spawn emitted in the
+/// crate-root `async fn main()` can reach it cross-module (otherwise
+/// `(&X).into_store()` references a bare `X` not in scope → E0425).
+/// Only `store=<ident>` is recognized (MVP, parallel to
+/// `parse_cron_kwargs_into_info`).
+fn collect_cron_store_var_names(program: &Program) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for stmt in program {
+        let Stmt::FnDef { decorators, .. } = stmt else {
+            continue;
+        };
+        for d in decorators {
+            if d.name != "cron" {
+                continue;
+            }
+            for (k, v) in &d.kwargs {
+                if k == "store" {
+                    if let Expr::Ident(name, _) = v {
+                        out.insert(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 9.w.3.iter2.d — extracts the Map literal of `retry={...}` into
@@ -8424,6 +8568,20 @@ struct CodegenCtx<'a> {
     /// Keyed by name; the rest of the state vars (sync) do not
     /// appear in this map.
     state_var_async: HashMap<String, bool>,
+    /// B20 — names of module top-level bindings referenced by a
+    /// `@cron(..., store=X)` in this same module. Set only for module
+    /// codegen (`generate_module_rs_with_bindings`). When a binding in
+    /// this set has an async RHS (`db.connect(...).await`),
+    /// `gen_module_top_let` hoists it to a crate-visible `OnceCell`
+    /// state var + `pub(crate) async fn __fitz_init_state_<X>()` so the
+    /// crate-root cron spawn (`emit_cron_job_spawns`) can init +
+    /// materialize it cross-module.
+    module_cron_store_vars: std::collections::HashSet<String>,
+    /// B20 — `(mod_name, var)` pairs collected in the MAIN ctx from
+    /// `loader.modules[*].hoisted_cron_store_vars`. `emit_cron_job_spawns`
+    /// iterates it to drive `crate::<mod>::__fitz_init_state_<var>()` +
+    /// materialize the local `<var>` before the cron spawns.
+    xmod_cron_store_hoists: Vec<(String, String)>,
     /// F11: for each fn (top-level, helper, or handler), the names
     /// of the state vars its body references directly. We use it at
     /// the start of the body to emit `let <name> = __FITZ_STATE_<NAME>
@@ -8841,6 +8999,8 @@ impl<'a> CodegenCtx<'a> {
             break_value_stack: Vec::new(),
             state_var_types: HashMap::new(),
             state_var_async: HashMap::new(),
+            module_cron_store_vars: std::collections::HashSet::new(),
+            xmod_cron_store_hoists: Vec::new(),
             fn_state_deps: HashMap::new(),
             response_mode: false,
             in_middleware_fn: false,
@@ -10155,6 +10315,35 @@ impl<'a> CodegenCtx<'a> {
                     name, rust_ty, static_name
                 ));
             }
+        }
+        // B20 — materialize store bindings that an imported module
+        // HOISTED to a crate-visible `OnceCell` (co-located
+        // `@cron(store=X)` + `let X = db.connect(...).await` both in the
+        // same module). The module emitted `crate::<mod>::__FITZ_STATE_X`
+        // + `crate::<mod>::__fitz_init_state_X()` (see
+        // `gen_module_top_let`). We drive the init once and materialize
+        // the local `X` here so `(&X).into_store()` below resolves.
+        //
+        // We use `xmod_cron_store_hoists` (collected in the main ctx
+        // from `loader.modules[*].hoisted_cron_store_vars`) rather than
+        // the jobs' `module_path`/`store_var`: a cron in module `tasks`
+        // with `store=db` where `db` lives in MAIN (crate root, the
+        // b19_derived case) leaves that set empty — that `db` is emitted
+        // as a normal main local and reached as a bare `db` (mechanism
+        // 2), untouched by this loop.
+        let mut xmod_hoisted = self.xmod_cron_store_hoists.clone();
+        xmod_hoisted.sort();
+        xmod_hoisted.dedup();
+        for (mod_name, var) in &xmod_hoisted {
+            let static_name = state_var_static_name(var);
+            self.emit(&format!(
+                "    crate::{mod_name}::__fitz_init_state_{var}().await;\n    \
+                 let {var} = crate::{mod_name}::{static_name}.get()\n        \
+                     .expect(\"cron store `{var}` no inicializada (bug del codegen)\").clone();\n",
+                mod_name = mod_name,
+                var = var,
+                static_name = static_name,
+            ));
         }
         for job in &jobs {
             let escaped_expr = rust_str_literal(&job.expr);
@@ -15327,6 +15516,38 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             )
         })?;
         let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
+
+        // B20 — a module top-level `let X = db.connect(...).await`
+        // referenced by a `@cron(..., store=X)` in this same module
+        // must be reachable from the crate-root `async fn main()`
+        // (where the cron spawn lives). The plain `pub fn X() -> T`
+        // accessor below is illegal (async RHS with `.await` in a sync
+        // fn) and, even if legal, would live in the module namespace,
+        // unreachable as a bare `X` in main. We hoist it to a
+        // crate-visible `OnceCell` state var + async init fn, mirroring
+        // the crate-root state-var machinery (v0.15.12).
+        // `emit_cron_job_spawns` drives the init + materializes the
+        // local `X` before the spawn. Only async RHS reaches here;
+        // a sync module-level binding used as a store is rare and
+        // keeps the plain accessor.
+        if self.module_cron_store_vars.contains(name) && expr_contains_await(value) {
+            let static_name = state_var_static_name(name);
+            writeln!(
+                &mut self.output,
+                "pub(crate) static {static_name}: tokio::sync::OnceCell<{ret}> = \
+                 tokio::sync::OnceCell::const_new();\n\
+                 pub(crate) async fn __fitz_init_state_{name}() {{\n    \
+                     let __init: {ret} = {rhs};\n    \
+                     let _ = {static_name}.set(__init);\n\
+                 }}\n",
+                static_name = static_name,
+                ret = ret_rs,
+                name = name,
+                rhs = final_rhs,
+            )
+            .unwrap();
+            return Ok(());
+        }
 
         // v0.28.3 — reference/container globals (List / Map / Nominal, whose
         // Rust rep is `Arc<Mutex<...>>`) must be a SINGLE shared instance so
@@ -45669,6 +45890,7 @@ async fn get_u(id: Int) -> Result<U> {
             &[],
             main_observability_enabled,
             &[],
+            &std::collections::HashSet::new(),
         )
     }
 
