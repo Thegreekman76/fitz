@@ -97,12 +97,21 @@ para próximas iteraciones.
    no, porque depende de la adopción de regiones.
 
 4. **`use std::sync::atomic::{AtomicBool, Ordering};` sin usar en crates sin
-   `<style scoped>`** — el header del módulo emite ese `use` incondicionalmente;
-   un crate sin ningún componente con `<style scoped>` (p.ej. `hydrate`,
-   `hydrate-regions`, `hydrate-composition`) compila a WASM con una warning de
-   import sin usar. **Preexistente** (no lo introduce slice 4). **Fix futuro**:
-   gatear el import a "algún componente tiene style" (cambia el byte-output de los
-   crates style-less → requiere re-baselinar esos ejemplos).
+   `<style>` — 🟢 CERRADO 2026-08-07** — `emit_module_header` (`codegen_wasm.rs`)
+   ahora recibe un `has_style: bool` y emite ese `use` solo cuando algún
+   componente del árbol MERGEADO (local + `<Child />` importado) tiene un bloque
+   `<style>`. Gate por `style.is_some()` (scoped **o** global — el helper
+   `emit_style_helper` emite el `static INJECTED: AtomicBool` para ambos, así que
+   un crate `<style global>`-only conserva el import). Nuevo predicado
+   `any_component_has_style(file)`; `emit_module_with_components` computa el merge
+   ANTES del header para poder gatear (reorden de data pura, sin cambio de
+   emisión). Re-baselinados los 5 ejemplos style-less afectados (`hydrate`,
+   `hydrate-regions`, `hydrate-composition`, `hydrate-mixed`, `live-input`) — el
+   diff es únicamente la línea del import removida; los 19 con `<style>` quedan
+   byte-idénticos. Validado: `cargo build --target wasm32-unknown-unknown` del
+   crate `live-input` compila **sin warnings** (antes: `unused import`). Test
+   `atomic_import_gated_on_component_style` (styled → con import, style-less →
+   sin).
 
 5. **Render-a-string isomórfico del lado SSR — 🟢 CERRADO (v0.31.0, 2026-08-03)** —
    SSR-1 hizo que el render fn emita el `<script id="__flv_state_*">` de state,
