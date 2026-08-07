@@ -136,7 +136,7 @@
 
 **Bug derivado** (mismo release): al smoke-testear fitzwatch descubrí que `program_has_persistent_cron(program)` solo miraba el AST del main. `@cron(store=X)` cross-module → preludio emitía shape simple (sin field `store`), pero spawn emitía con `store: ...` → E0560. Fix: nueva fn `program_or_modules_has_persistent_cron(program, &loader)` que consulta también `loader.modules[i].cron_fn_stmts` + helper `stmt_is_persistent_cron`. Aplicada en 3 call sites.
 
-**Caso edge no cubierto** (deuda B20 documentada): cross-module `store=X` resolution cuando el binding también vive en el módulo importado (no en main). Requiere soporte para state vars async-init en módulos (~200-300 LoC). Workaround canónico pattern TaskHub: declarar todo en main; el módulo solo exporta helpers async sin decorator.
+**Caso edge — deuda B20 CERRADA (v0.37.1, 2026-08-07)**: cross-module `store=X` resolution cuando el binding también vive en el módulo importado (no en main). `gen_module_top_let` hoistea el `let X = db.connect(...).await` co-localizado a un `OnceCell` crate-visible + `__fitz_init_state_X()`; `emit_cron_job_spawns` drivea el init + materializa el local antes del spawn. Distingue el caso co-localizado del binding-en-main (b19_derived, sin regresión). Detalle en `docs/deudas-post-5b.md` → "🟢 B20".
 
 **Verificación pre-bump v0.18.2**:
 - `cargo test --lib` → **3171/3171** ✓
@@ -11341,16 +11341,19 @@ v0.12.1 cuando Tier3 sumó `metrics-exporter-prometheus = "0.18"`
   `docs/guide.md` cap 33.4. Trade-off aceptado: el opt-in
   compile-time cubre el 95% del caso real.
 
-**Decisión de scope confirmada**: las deps OTel siguen
-emitidas con `has_http` (sin cambio) — el wrapper HTTP del
-codegen emite `__fitz_with_span_context(...)` +
-`__fitz_log_info("http.access", ...)` + branches sobre
-`__fitz_otel_is_enabled()` sin opt-in del user (la línea
-`uses_logging = has_http || ...` fuerza el preludio entero
-cuando hay HTTP). Removerlas requiere también gatear el access
-log auto del wrapper — queda como deuda residual separada
-abierta en `docs/deudas-post-5b.md` ("Smoke compile_e2e —
-gating de OTel deps + access log auto").
+**Decisión de scope en v0.13.1**: las deps OTel seguían
+emitidas con `has_http` — el wrapper HTTP emitía
+`__fitz_with_span_context(...)` + `__fitz_log_info("http.access",
+...)` + branches OTel sin opt-in (la línea `uses_logging =
+has_http || ...` forzaba el preludio entero con HTTP). **CERRADO
+en v0.37.1 (2026-08-07)**: observability en `fitz build` es
+opt-in vía `log.X`; `uses_logging` deja de forzarse con
+`|| has_http`, el wrapper gatea por `observability_enabled &&
+uses_logging`, y las 3 deps OTel + `metrics` solo se linkean con
+`log.X` (o `@trace`/`@metric` para `metrics`). Asimetría dev/prod:
+`fitz run` mantiene el access-log auto en dev. Detalle en
+`docs/deudas-post-5b.md` → "🟢 Smoke compile_e2e — gating de OTel
+deps + access log auto".
 
 **Tests al cierre v0.13.1**: **3003 unit (+2 nuevos vs v0.13.0)** + 112
 LSP + 360 compile_e2e + 3 openapi. `cargo fmt --all --check` +

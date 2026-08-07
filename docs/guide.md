@@ -13306,8 +13306,9 @@ piezas nativas sobre el stack web first-class:
    endpoint `/metrics` Prometheus scrape (Tier3).
 
 Paridad bit-a-bit `fitz run` ↔ `fitz build` para los tres
-bloques. Activación dual (compile-time + env var). Decoradores
-nativos del lenguaje, no librerías opt-in.
+bloques (con una asimetría dev/prod en el auto access-log — ver
+el callout de abajo). Activación dual (compile-time + env var).
+Decoradores nativos del lenguaje, no librerías opt-in.
 
 ### Panorama vecino
 
@@ -13322,9 +13323,26 @@ nativos del lenguaje, no librerías opt-in.
 En FastAPI/Express/Go/Rust, sumar observability completa requiere
 ~3-5 libs distintas, glue manual, y conocer la matriz de
 compatibilidad entre versiones (típica fricción en producción).
-**En Fitz, observability viene activada de fábrica con HTTP**:
-escribís `@get("/users")` y ya tenés span, log estructurado de
-access, Counter + Histogram, todo correlacionado con `trace_id`.
+**En Fitz, observability viene incorporada al lenguaje**: escribís
+`@get("/users")` y ya tenés span, log estructurado de access,
+Counter + Histogram, todo correlacionado con `trace_id`, sin
+sumar ni una dep.
+
+> **`fitz build` — observability opt-in vía `log.X` (v0.37.1+)**.
+> En el binario nativo, la auto-observability (access-log + spans
+> + métricas + las deps OpenTelemetry) se activa cuando el programa
+> usa **al menos un** builtin `log.X(...)` (en el handler, en
+> cualquier fn, o en un módulo importado). Un servidor HTTP que no
+> llame a `log.X` compila a un binario **más liviano** que no
+> linkea las tres crates OTel (`opentelemetry`/`_sdk`/`-otlp`) ni
+> `metrics`/`tracing` — recorta el binario y el tiempo de compilación.
+> Con una sola línea `log.info("startup")` recuperás todo el stack.
+> **`fitz run` (intérprete) mantiene el auto access-log en desarrollo
+> sin condiciones** — es un binario fijo que ya trae todo compilado,
+> así que ver los requests en dev no cuesta nada. Es una asimetría
+> deliberada dev/prod: dev observa de fábrica, el binario prod opta
+> in. El **comportamiento del programa** (responses, tus `log.X`) es
+> idéntico en run y build.
 
 ### 33.1. `log.info/warn/error/debug` — structured logging
 
@@ -13522,9 +13540,11 @@ van a Prometheus en vez de OTLP.
 ### 33.5. `@trace` y `@metric` — instrumentación manual (Fase 12.7)
 
 La auto-instrumentation HTTP de Fase 12.3 cubre cada request con
-span + access log + métricas, sin tocar nada. Para funciones
-**business logic** que querés medir o nombrar como spans
-dedicados, Fitz tiene dos decoradores sobre fns user:
+span + access log + métricas (en `fitz run` siempre; en `fitz
+build` cuando el programa usa `log.X` — ver el callout de opt-in
+al inicio del capítulo). Para funciones **business logic** que
+querés medir o nombrar como spans dedicados, Fitz tiene dos
+decoradores sobre fns user:
 
 ```fitz
 @trace(name="risk_score")

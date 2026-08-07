@@ -107,6 +107,14 @@ Cada request HTTP abre un **span root** con `trace_id` (32 hex) y
 `span_id` (16 hex), OTel-compatibles. Todos los `log.*` adentro del
 handler heredan el contexto automático:
 
+> **`fitz build` — opt-in vía `log.X` (v0.37.1+)**: en el binario
+> nativo, el access-log/spans/métricas + las deps OpenTelemetry se
+> activan cuando el programa usa **al menos un** `log.X(...)`. Como
+> este servicio ya loguea (el ejemplo de abajo llama `log.info`),
+> tenés todo el stack. Un HTTP que no llame `log.X` compila a un
+> binario más liviano sin las crates OTel. `fitz run` (dev) muestra
+> el access-log siempre. Detalle en el cap 33 de la guía.
+
 ```fitz
 @get("/users/{id}")
 async fn get_user(id: Int) -> User {

@@ -245,14 +245,24 @@ pub fn generate_project(
     // see `cargo_toml_for`). Transitive: any loaded module with
     // `log.X(...)` also triggers the emission.
     //
-    // Phase 12.3.b.4 — Any HTTP program (`@get`/`@post`/`@put`/
-    // `@delete`) turns on the prelude automatically because the HTTP
-    // dispatch emits the access log `log.info("http.access", ...)` +
-    // spans + metrics with no user code. Opt-out with
-    // `@server(observability=false)` is deferred to 12.3.b.5.
-    let uses_logging = program_uses_logging(program)
-        || has_http
-        || loader.modules.iter().any(|m| m.uses_logging || m.has_http);
+    // OTel deps gating (2026-08-07) — observability in `fitz build` is
+    // OPT-IN via `log.X(...)`. Previously any HTTP program forced
+    // `uses_logging = true` (`|| has_http`), which emitted the auto
+    // access-log + spans + metrics AND linked the three heavy OTel
+    // crates (`opentelemetry`/`opentelemetry_sdk`/`opentelemetry-otlp`)
+    // for every HTTP binary — the compile_e2e smoke paid their
+    // cold-compile in ~290 examples. Now `uses_logging` is true only
+    // when the program (or a loaded module) actually calls a `log.X`
+    // builtin. An HTTP program with no `log.X` links no OTel deps and
+    // the wrapper's observability block is skipped (gated by
+    // `observability_enabled && uses_logging` in
+    // `gen_http_handler_wrapper`); with at least one `log.X` it
+    // recovers full observability. `fitz run` (interpreter) keeps the
+    // auto access-log in dev regardless — documented dev/prod asymmetry
+    // (the interpreter is a fixed binary, links no OTel deps, so there
+    // is no cost to keeping the dev request-log).
+    let uses_logging =
+        program_uses_logging(program) || loader.modules.iter().any(|m| m.uses_logging);
     // Phase 10.1.c — detect the `db` module (Postgres driver). Adds
     // `sha2`/`hmac`/`base64` + `tokio` with feature `net` to
     // Cargo.toml, emits the `__fitz_db_runtime` module (via
@@ -3873,7 +3883,12 @@ fn cargo_toml_for(
     // `metrics` is needed if there is `@metric` or if `has_http`
     // (Phase 12.3.b.4).
     let needs_tracing = uses_logging || uses_trace_metric;
-    let needs_metrics = has_http || uses_trace_metric;
+    // OTel deps gating (2026-08-07) — the HTTP `metrics::counter!`/
+    // `histogram!` live inside the wrapper's observability block (now
+    // gated by `uses_logging`), so the `metrics` dep is only needed for
+    // HTTP when `uses_logging`. `@metric` (uses_trace_metric) needs it
+    // independently.
+    let needs_metrics = (has_http && uses_logging) || uses_trace_metric;
     let logging_lines = if needs_tracing {
         let mut s = String::from("tracing = \"0.1\"\n");
         if uses_logging {
@@ -3914,7 +3929,14 @@ fn cargo_toml_for(
         // `trace`), with `default-features = false` to avoid
         // pulling `grpc-tonic` by accident (which drags its own
         // h2/hyper stack).
-        if has_http {
+        //
+        // OTel deps gating (2026-08-07) — `&& uses_logging`: the three
+        // heavy OTel crates are only linked when the HTTP program
+        // actually uses observability (`log.X`), matching the OTel
+        // prelude gate (`has_http && uses_logging`). An HTTP program
+        // with no `log.X` links none of them (the recorte the smoke
+        // needed). @trace/@metric-only programs don't need OTel either.
+        if has_http && uses_logging {
             // Phase 12.3.iter2.b — feature `logs` on the three OTel
             // crates so the LoggerProvider + LogExporter are
             // available. Enables `__fitz_log_emit` to export
@@ -6713,11 +6735,11 @@ fn generate_main_rs(
     // `generate_main_rs` is also called from unit-test paths that do
     // not go through `generate_project`.
     //
-    // Phase 12.3.b.4 — HTTP also activates implicit uses_logging (see
-    // generate_project for why).
-    let uses_logging = program_uses_logging(program)
-        || has_http
-        || loader.modules.iter().any(|m| m.uses_logging || m.has_http);
+    // OTel deps gating (2026-08-07) — observability is OPT-IN via
+    // `log.X(...)`; HTTP no longer forces `uses_logging`. See
+    // `generate_project` for the full rationale.
+    let uses_logging =
+        program_uses_logging(program) || loader.modules.iter().any(|m| m.uses_logging);
     // Phase 12.7 — `@trace`/`@metric` over user fns. MVP only detects
     // in main; cross-module is a minor debt (workaround: declare the
     // instrumented fn in main).
@@ -30010,7 +30032,16 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // flag inside both branches (open + close) without
         // recapturing between `emit_*` calls that take `&mut
         // self`.
-        let observability = self.observability_enabled;
+        // OTel deps gating (2026-08-07) — observability is OPT-IN via
+        // `log.X(...)`. The block below references the logging/OTel/
+        // metrics preludes, which are only emitted when
+        // `self.uses_logging`. Without `&& self.uses_logging`, an HTTP
+        // program with no `log.X` (uses_logging == false, no preludes)
+        // would reference `__fitz_log_info`/`__fitz_otel_is_enabled`/
+        // `metrics::*` that were never emitted → compile error. The
+        // `observability_enabled` half is the `@server(observability=
+        // false)` opt-out (still honored).
+        let observability = self.observability_enabled && self.uses_logging;
         if observability {
             // Phase 12.3.b.4 — open the span context scope
             // BEFORE any wrapper code (middlewares, auth,
@@ -41244,13 +41275,18 @@ async fn get_u(id: Int) -> Result<U> {
 
     #[test]
     fn iter2a_codegen_http_emits_with_ids_branch_derived_from_otel_span() {
-        // Phase 12.3.iter2.a — when there is an HTTP handler, the
-        // codegen wrapper must emit the pattern "open OTel span first,
-        // derive SpanContext with `with_ids` from its IDs". Without OTel
-        // active at runtime, the alternative branch (`new_root()`)
-        // fires and everything keeps working as before (bit-for-bit
-        // parity with `dispatch_request` of the interpreter).
-        let src = "@get(\"/hello\")\nfn h() -> Str => \"ok\"\n";
+        // Phase 12.3.iter2.a — when there is an HTTP handler WITH
+        // observability active, the codegen wrapper must emit the
+        // pattern "open OTel span first, derive SpanContext with
+        // `with_ids` from its IDs". Without OTel active at runtime, the
+        // alternative branch (`new_root()`) fires and everything keeps
+        // working as before (bit-for-bit parity with `dispatch_request`
+        // of the interpreter).
+        //
+        // OTel deps gating (2026-08-07) — observability in `fitz build`
+        // is now OPT-IN via `log.X(...)`; the handler calls `log.info`
+        // so `uses_logging == true` and the wrapper emits the block.
+        let src = "@get(\"/hello\")\nfn h() -> Str {\n  log.info(\"hit\")\n  return \"ok\"\n}\n";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         // The `with_ids` method must be defined in the prelude.
         assert!(

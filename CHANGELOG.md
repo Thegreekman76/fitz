@@ -9,6 +9,47 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.1] — 2026-08-07 — `@cron(store=X)` cross-module + `import_root` fallback en `fitz build` + observability opt-in
+
+Tres cierres de deuda del codegen (`fitz build`), sin sintaxis nueva. `fitz run`
+(intérprete) no cambia. La extensión VSCode no cambia (nada toca grammar/LSP).
+
+### Fixed
+
+- **`@cron(..., store=X)` cross-module compila a binario (B20).** Un cron con
+  `@cron(store=db)` y su `let db = db.connect(...).await` declarados **ambos en
+  un módulo importado** ahora compila con `fitz build` (antes: `E0425 cannot
+  find value 'db'` emitido en `main()` del crate root, + accessor async roto en
+  el módulo). El codegen hoistea el binding async co-localizado a un `OnceCell`
+  crate-visible + `__fitz_init_state_X()`; el spawn del cron drivea el init +
+  materializa el local antes de `(&db).into_store()`. Distingue el caso
+  co-localizado del binding-en-`main` (b19_derived, sin regresión). Smoke real
+  Postgres: el binario crea `fitz_cron_jobs`/`fitz_cron_runs` y persiste runs.
+  `fitz run` de cron+store persistente mantiene su limitación de lifecycle del
+  runtime tokio del intérprete (pre-existente, v0.11.2). Cierra la deuda B20.
+- **`from sub.mod import X` resuelve al `import_root` en `fitz build`
+  (loader_absoluto).** Un módulo en subcarpeta (`src/data/users.fitz`) que
+  importa un sibling del root del proyecto (`from types.user import User`) ahora
+  resuelve a `src/types/user.fitz` — el fallback `import_root` que ya tenía
+  `fitz run` se portó al loader de `fitz build` (`ModuleLoader` suma
+  `import_root`; `resolve_path` devuelve candidatos base_dir→import_root).
+  Paridad run↔build.
+
+### Changed
+
+- **`fitz build` — observability opt-in vía `log.X` (recorta deps OTel).** La
+  auto-observability del binario nativo (access-log HTTP + spans + métricas + las
+  tres crates OpenTelemetry `opentelemetry`/`_sdk`/`-otlp` + `metrics`/`tracing`)
+  se linkea cuando el programa usa **al menos un** builtin `log.X(...)`; un
+  servidor HTTP que no loguee compila a un binario **más liviano** sin esas deps
+  (recorta binario + ~3-5 min de compilación/CI sobre los ~290 ejemplos del
+  smoke). Con una línea `log.info("startup")` recuperás todo el stack.
+  **`fitz run` (dev) mantiene el access-log automático siempre** — asimetría
+  deliberada dev/prod (el intérprete es un binario fijo que no linkea deps OTel,
+  ver los requests en dev no cuesta nada). El comportamiento del programa
+  (responses, tus `log.X`) es idéntico en run y build. Cierra la deuda de gating
+  de OTel abierta desde v0.13.1.
+
 ## [v0.37.0] — 2026-08-06 — CW.9 follow-ups: cierra las 3 deudas residuales del emisor wasm (38/38 componentes de la companion UI dual-targetean)
 
 Cierre de las tres deudas residuales de CW.9 (v0.35.0 / v0.36.0). Cambio

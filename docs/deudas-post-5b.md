@@ -7629,47 +7629,17 @@ residual abierta (ver abajo).
 `v0_13_1_program_uses_prometheus_export_detecta_kwarg_true`,
 `v0_13_1_program_uses_prometheus_export_no_dispara_sin_kwarg`).
 
-## Smoke compile_e2e — gating de OTel deps + access log auto — **ABIERTO 2026-06-04**
+## 🟢 Smoke compile_e2e — gating de OTel deps + access log auto — **CERRADO 2026-08-07** (opción (a) opt-in)
 
-Deuda residual derivada del cierre parcial de la deuda anterior
-(v0.13.1 solo cerró Prometheus). Las 3 deps OTel
-(`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`)
-siguen emitidas con cualquier `has_http=true` porque
-`uses_logging` se fuerza a `true` cuando `has_http=true` (línea
-213-215 de `src/codegen.rs`) — el wrapper HTTP emite
-`__fitz_with_span_context(...)` + `__fitz_log_info("http.access",
-...)` + branches sobre `opentelemetry::trace::*` sin opt-in del
-user.
+Se eligió la **opción (a)**: la observability en `fitz build` es **opt-in vía `log.X(...)`**. `uses_logging` deja de forzarse con `|| has_http` — es `true` solo cuando el programa (o un módulo cargado) llama a un builtin `log.X`. Un programa HTTP sin `log.X` NO linkea las 3 deps OTel (ni `metrics`/`tracing`/`tracing-subscriber`/`uuid`) y el wrapper skipea el bloque de observability; con al menos un `log.X` recupera todo (access-log + spans + métricas + OTel export). Verificado a mano: `nolog.fitz` (HTTP simple) → Cargo.toml SIN deps de observability; `withlog.fitz` (mismo handler + `log.info(...)`) → CON las 3 OTel + metrics + tracing.
 
-**Fix futuro**: gatear las 3 deps + el access log auto del
-wrapper + el OTel branch del wrapper por
-`uses_logging_explicit` (es decir, `program_uses_logging` sin el
-forzado `|| has_http`). Programas HTTP que NO usen `log.X(...)`
-explícito pierden el access log auto + spans OTel — caso típico:
-ejemplos pedagógicos de la guía y CLIs HTTP triviales.
+**Cambios (solo `src/codegen.rs`)**: (1)(2) `uses_logging = program_uses_logging(program) || loader.modules.iter().any(|m| m.uses_logging)` en los dos sitios (`generate_project` + `generate_main_rs`), sin `|| has_http`/`|| m.has_http`. (3) el bloque de observability del wrapper HTTP (`gen_http_handler_wrapper`) gatea por `self.observability_enabled && self.uses_logging` (sin el `&& uses_logging` referenciaría `__fitz_log_info`/`__fitz_otel_is_enabled`/`metrics::*` no emitidos → error de compilación). (4) las 3 deps OTel en `cargo_toml_for` gatean por `has_http && uses_logging` (paralelo al gate del preludio OTel `has_http && uses_logging`). (5) `needs_metrics = (has_http && uses_logging) || uses_trace_metric`. El resto (`__fitz_log_init`/`__fitz_otel_init`/preludios) ya estaba gated por `uses_logging`; el bloque entero de deps de observability cuelga de `needs_tracing = uses_logging || uses_trace_metric`, así que un HTTP-sin-`log.X`-sin-`@trace`/`@metric` deja `needs_tracing=false` y skipea todo.
 
-**Trade-off del fix**: pierdes la auto-observability "free para
-todo handler HTTP" que se vendió en Fase 12.3.b.4. Quedan
-opciones:
+**Decisión dev/prod (asimetría, confirmada con el autor)**: solo cambia `fitz build`. **`fitz run` (intérprete) mantiene el auto access-log en desarrollo** — el intérprete es un binario fijo con TODO compilado adentro, no linkea deps OTel, así que no hay costo en conservar el request-log de dev. Paridad de *comportamiento del programa* (mismas responses, mismos `log.X` del user); la única diferencia es el auto access-log de HTTP-sin-`log.X`, presente en dev (`fitz run`) y ausente en el binario prod (`fitz build`). Documentado en la guía (cap Observability) + curso M8.C2.
 
-- (a) Default opt-in: si el user quiere access logs auto, declara
-  `log.info("startup")` en algún lugar del programa.
-- (b) Nuevo kwarg `@server(observability=true)` explicit
-  (rechazado por el prompt de v0.13.1, pero podría revisitarse
-  si la presión real aparece).
-- (c) Hacer noop el access log auto cuando no hay subscriber
-  instalado (probable — `tracing::info!` no allocates cuando no
-  hay subscriber). El span sigue emitiendo "in-process" sin
-  exportar, costo bajo.
+**Win real**: las 3 deps OTel (`opentelemetry-otlp` con `reqwest-blocking-client` pulla `reqwest`+`hyper`+chains) + `metrics` dejan de compilar en la mayoría de los ~290 ejemplos del smoke (casi todos HTTP-sin-`log.X` o CLI). Recorte estimado ~3-5 min de CI/release Linux fresh. Timeout CI ya en 25 min (no hace falta bumpearlo).
 
-**Estimación del win**: la dep `opentelemetry-otlp` con feature
-`reqwest-blocking-client` pulla `reqwest` que pulla `tokio` +
-`hyper` + chains varios. Es de las deps más pesadas del codegen.
-Probablemente otro ~3-5 min CI menos sobre Linux fresh si se
-gatea cleanly.
-
-**Bloqueante para arrancar**: decidir entre las 3 opciones de
-arriba o un sub-paso dedicado con su propio mini-roadmap.
+**Verificación**: fmt + clippy `--lib --tests -D warnings` (default + lsp) limpios; unit 4026 (default) / 4187 (lsp) — 1 test reapuntado (`iter2a_codegen_http_emits_with_ids_branch_derived_from_otel_span` ahora incluye `log.info(...)` en el handler para activar el bloque OTel que valida); smoke `GUIDE_EXAMPLES_COMPILE` (290 ejemplos) verde tras el cambio (los ejemplos HTTP pedagógicos sin `log.X` compilan igual, solo pierden la observability auto en el binario); acceptance manual `nolog`/`withlog` bit-a-bit.
 
 ## (HISTÓRICO) Fix temporal pre-v0.13.1 — timeout CI 15→25 min
 
