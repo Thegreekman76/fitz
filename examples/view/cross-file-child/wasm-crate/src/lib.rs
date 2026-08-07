@@ -31,12 +31,36 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement};
 
+// Phase 11.12 — hydration cursor helpers. Advance a sibling cursor to
+// the next element / text node so the adopt walk maps template nodes
+// onto the server-painted DOM in DFS order without re-creating them.
+fn __flv_next_element(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Element> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__el) = __n.dyn_ref::<web_sys::Element>() {
+            return Some(__el.clone());
+        }
+    }
+    None
+}
+fn __flv_next_text(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Text> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__t) = __n.dyn_ref::<web_sys::Text>() {
+            return Some(__t.clone());
+        }
+    }
+    None
+}
+
 pub struct Card {
     title: RefCell<String>,
     likes: RefCell<i64>,
     __on_like: RefCell<Option<Box<dyn Fn(&std::collections::HashMap<String, String>)>>>,
     __slot: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,
     __slot_badge: RefCell<Option<Rc<dyn Fn(&web_sys::Node)>>>,
+    __hslot: RefCell<Option<Rc<dyn Fn(&mut Option<web_sys::Node>)>>>,
+    __hslot_badge: RefCell<Option<Rc<dyn Fn(&mut Option<web_sys::Node>)>>>,
     root: RefCell<Option<HtmlElement>>,
 }
 
@@ -48,6 +72,8 @@ impl Card {
             __on_like: RefCell::new(None),
             __slot: RefCell::new(None),
             __slot_badge: RefCell::new(None),
+            __hslot: RefCell::new(None),
+            __hslot_badge: RefCell::new(None),
             root: RefCell::new(None),
         })
     }
@@ -132,6 +158,62 @@ impl Card {
         __el0.append_child(&__el8).unwrap();
         root.append_child(&__el0).unwrap();
     }
+    fn __apply_state_json(self: &Rc<Self>, __json: &str) {
+        let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
+        let _ = (&__v, self);
+        if let Some(__x) = __v.get("title").and_then(|__j| __j.as_str()) { *self.title.borrow_mut() = __x.to_string(); }
+        if let Some(__x) = __v.get("likes").and_then(|__j| __j.as_i64()) { *self.likes.borrow_mut() = __x; }
+    }
+
+    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_Card_card_c_0fb22f41();
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_Card") {
+            if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
+        }
+        let mut __cur_root = root.first_child();
+        *self.root.borrow_mut() = Some(root);
+        if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
+        let mut __hcur1 = __hel0.first_child();
+        if let Some(__hel2) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur3 = __hel2.first_child();
+        let __hcb = self.__hslot_badge.borrow().clone();
+        if let Some(__hcb) = __hcb {
+            __hcb(&mut __hcur3);
+        } else {
+        let _ = __flv_next_text(&mut __hcur3);
+        }
+        if let Some(__hel4) = __flv_next_element(&mut __hcur3) {
+        let mut __hcur5 = __hel4.first_child();
+        let _ = __flv_next_text(&mut __hcur5);
+        }
+        }
+        if let Some(__hel6) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur7 = __hel6.first_child();
+        let __hcb = self.__hslot.borrow().clone();
+        if let Some(__hcb) = __hcb {
+            __hcb(&mut __hcur7);
+        } else {
+        let _ = __flv_next_text(&mut __hcur7);
+        }
+        }
+        if let Some(__hel8) = __flv_next_element(&mut __hcur1) {
+        {
+            let __self_clone = self.clone();
+            let __closure = Closure::wrap(Box::new(move |_evt: Event| {
+                let __payload = std::collections::HashMap::<String, String>::new();
+                Card::like(&__self_clone, &__payload);
+            }) as Box<dyn FnMut(Event)>);
+            __hel8.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        let mut __hcur9 = __hel8.first_child();
+        let _ = __flv_next_text(&mut __hcur9);
+        let _ = __flv_next_text(&mut __hcur9);
+        }
+        }
+        Ok(())
+    }
+
 }
 
 fn __inject_style_Card_card_c_0fb22f41() {
@@ -281,6 +363,112 @@ impl App {
         let __t1 = document.create_text_node("This card fills only the default slot, so the badge above falls back to its own content.");
         __el0.append_child(&__t1).unwrap();
         __target.append_child(&__el0).unwrap();
+    }
+
+    fn __apply_state_json(self: &Rc<Self>, __json: &str) {
+        let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
+        let _ = (&__v, self);
+        if let Some(__x) = __v.get("heading").and_then(|__j| __j.as_str()) { *self.heading.borrow_mut() = __x.to_string(); }
+        if let Some(__x) = __v.get("total").and_then(|__j| __j.as_i64()) { *self.total.borrow_mut() = __x; }
+    }
+
+    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_App_app_c_1277fdb3();
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_App") {
+            if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
+        }
+        let mut __cur_root = root.first_child();
+        *self.root.borrow_mut() = Some(root);
+        if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
+        let mut __hcur1 = __hel0.first_child();
+        if let Some(__hel2) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur3 = __hel2.first_child();
+        let _ = __flv_next_text(&mut __hcur3);
+        }
+        if let Some(__hel4) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur5 = __hel4.first_child();
+        let _ = __flv_next_text(&mut __hcur5);
+        let _ = __flv_next_text(&mut __hcur5);
+        }
+        if let Some(__hchild6) = __flv_next_element(&mut __hcur1) {
+        let __child7 = {
+            let mut __slot = self.__child_slot_0.borrow_mut();
+            if __slot.is_none() { *__slot = Some(Card::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child7.title.borrow_mut() = "Patagonia".to_string();
+        {
+            let __parent = self.clone();
+            *__child7.__on_like.borrow_mut() = Some(Box::new(move |_: &std::collections::HashMap<String, String>| {
+                App::bump(&__parent);
+            }));
+        }
+        {
+            let __parent = self.clone();
+            *__child7.__slot.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_0(__t)));
+        }
+        {
+            let __parent = self.clone();
+            *__child7.__hslot.borrow_mut() = Some(Rc::new(move |__c: &mut Option<web_sys::Node>| __parent.__hydrate_slot_0(__c)));
+        }
+        {
+            let __parent = self.clone();
+            *__child7.__slot_badge.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_1(__t)));
+        }
+        {
+            let __parent = self.clone();
+            *__child7.__hslot_badge.borrow_mut() = Some(Rc::new(move |__c: &mut Option<web_sys::Node>| __parent.__hydrate_slot_1(__c)));
+        }
+        let __hchild6_html = __hchild6.clone().dyn_into::<HtmlElement>().unwrap();
+        __child7.hydrate(__hchild6_html).unwrap();
+        }
+        if let Some(__hchild8) = __flv_next_element(&mut __hcur1) {
+        let __child9 = {
+            let mut __slot = self.__child_slot_1.borrow_mut();
+            if __slot.is_none() { *__slot = Some(Card::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child9.title.borrow_mut() = "El Chaltén".to_string();
+        {
+            let __parent = self.clone();
+            *__child9.__on_like.borrow_mut() = Some(Box::new(move |_: &std::collections::HashMap<String, String>| {
+                App::bump(&__parent);
+            }));
+        }
+        {
+            let __parent = self.clone();
+            *__child9.__slot.borrow_mut() = Some(Rc::new(move |__t: &web_sys::Node| __parent.__render_slot_2(__t)));
+        }
+        {
+            let __parent = self.clone();
+            *__child9.__hslot.borrow_mut() = Some(Rc::new(move |__c: &mut Option<web_sys::Node>| __parent.__hydrate_slot_2(__c)));
+        }
+        let __hchild8_html = __hchild8.clone().dyn_into::<HtmlElement>().unwrap();
+        __child9.hydrate(__hchild8_html).unwrap();
+        }
+        }
+        Ok(())
+    }
+
+    fn __hydrate_slot_0(self: &Rc<Self>, __cursor: &mut Option<web_sys::Node>) {
+        if let Some(__hel0) = __flv_next_element(&mut (*__cursor)) {
+        let mut __hcur1 = __hel0.first_child();
+        let _ = __flv_next_text(&mut __hcur1);
+        }
+    }
+
+    fn __hydrate_slot_1(self: &Rc<Self>, __cursor: &mut Option<web_sys::Node>) {
+        if let Some(__hel0) = __flv_next_element(&mut (*__cursor)) {
+        let mut __hcur1 = __hel0.first_child();
+        let _ = __flv_next_text(&mut __hcur1);
+        }
+    }
+
+    fn __hydrate_slot_2(self: &Rc<Self>, __cursor: &mut Option<web_sys::Node>) {
+        if let Some(__hel0) = __flv_next_element(&mut (*__cursor)) {
+        let mut __hcur1 = __hel0.first_child();
+        let _ = __flv_next_text(&mut __hcur1);
+        }
     }
 
 }

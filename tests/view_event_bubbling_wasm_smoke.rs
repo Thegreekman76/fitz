@@ -115,7 +115,7 @@ fn regenerate_event_bubbling_lib_rs() {
     write_if_changed(&dst, &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("event-bubbling"),
+        &fitz::view::compose_cargo_toml_with_features("event-bubbling", &[], false, true),
     );
 }
 
@@ -126,7 +126,7 @@ fn build_event_bubbling_wasm() {
     write_if_changed(&lib_rs_path(), &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("event-bubbling"),
+        &fitz::view::compose_cargo_toml_with_features("event-bubbling", &[], false, true),
     );
 
     let crate_dir = example_dir().join("wasm-crate");

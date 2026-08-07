@@ -140,7 +140,7 @@ fn regenerate_named_slots_lib_rs() {
     write_if_changed(&dst, &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("named-slots"),
+        &fitz::view::compose_cargo_toml_with_features("named-slots", &[], false, true),
     );
 }
 
@@ -151,7 +151,7 @@ fn build_named_slots_wasm() {
     write_if_changed(&lib_rs_path(), &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("named-slots"),
+        &fitz::view::compose_cargo_toml_with_features("named-slots", &[], false, true),
     );
 
     let crate_dir = example_dir().join("wasm-crate");

@@ -31,6 +31,28 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement};
 
+// Phase 11.12 — hydration cursor helpers. Advance a sibling cursor to
+// the next element / text node so the adopt walk maps template nodes
+// onto the server-painted DOM in DFS order without re-creating them.
+fn __flv_next_element(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Element> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__el) = __n.dyn_ref::<web_sys::Element>() {
+            return Some(__el.clone());
+        }
+    }
+    None
+}
+fn __flv_next_text(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Text> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__t) = __n.dyn_ref::<web_sys::Text>() {
+            return Some(__t.clone());
+        }
+    }
+    None
+}
+
 pub struct Board {
     __child_slot_0: RefCell<Option<Rc<MetricCard>>>,
     __child_slot_1: RefCell<Option<Rc<MetricCard>>>,
@@ -124,6 +146,67 @@ impl Board {
         __el0.append_child(&__el3).unwrap();
         root.append_child(&__el0).unwrap();
     }
+    fn __apply_state_json(self: &Rc<Self>, __json: &str) {
+        let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
+        let _ = (&__v, self);
+    }
+
+    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_Board_board_c_44d94692();
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_Board") {
+            if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
+        }
+        let mut __cur_root = root.first_child();
+        *self.root.borrow_mut() = Some(root);
+        if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
+        let mut __hcur1 = __hel0.first_child();
+        if let Some(__hel2) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur3 = __hel2.first_child();
+        let _ = __flv_next_text(&mut __hcur3);
+        }
+        if let Some(__hel4) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur5 = __hel4.first_child();
+        if let Some(__hchild6) = __flv_next_element(&mut __hcur5) {
+        let __child7 = {
+            let mut __slot = self.__child_slot_0.borrow_mut();
+            if __slot.is_none() { *__slot = Some(MetricCard::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child7.title.borrow_mut() = "Requests".to_string();
+        *__child7.value.borrow_mut() = 1240i64;
+        *__child7.trend.borrow_mut() = "up".to_string();
+        let __hchild6_html = __hchild6.clone().dyn_into::<HtmlElement>().unwrap();
+        __child7.hydrate(__hchild6_html).unwrap();
+        }
+        if let Some(__hchild8) = __flv_next_element(&mut __hcur5) {
+        let __child9 = {
+            let mut __slot = self.__child_slot_1.borrow_mut();
+            if __slot.is_none() { *__slot = Some(MetricCard::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child9.title.borrow_mut() = "Errors".to_string();
+        *__child9.value.borrow_mut() = 7i64;
+        *__child9.trend.borrow_mut() = "down".to_string();
+        let __hchild8_html = __hchild8.clone().dyn_into::<HtmlElement>().unwrap();
+        __child9.hydrate(__hchild8_html).unwrap();
+        }
+        if let Some(__hchild10) = __flv_next_element(&mut __hcur5) {
+        let __child11 = {
+            let mut __slot = self.__child_slot_2.borrow_mut();
+            if __slot.is_none() { *__slot = Some(MetricCard::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child11.title.borrow_mut() = "Latency".to_string();
+        *__child11.value.borrow_mut() = 42i64;
+        *__child11.trend.borrow_mut() = "flat".to_string();
+        let __hchild10_html = __hchild10.clone().dyn_into::<HtmlElement>().unwrap();
+        __child11.hydrate(__hchild10_html).unwrap();
+        }
+        }
+        }
+        Ok(())
+    }
+
 }
 
 fn __inject_style_Board_board_c_44d94692() {
@@ -228,6 +311,55 @@ impl MetricCard {
         __el0.append_child(&__el11).unwrap();
         root.append_child(&__el0).unwrap();
     }
+    fn __apply_state_json(self: &Rc<Self>, __json: &str) {
+        let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
+        let _ = (&__v, self);
+        if let Some(__x) = __v.get("title").and_then(|__j| __j.as_str()) { *self.title.borrow_mut() = __x.to_string(); }
+        if let Some(__x) = __v.get("value").and_then(|__j| __j.as_i64()) { *self.value.borrow_mut() = __x; }
+        if let Some(__x) = __v.get("trend").and_then(|__j| __j.as_str()) { *self.trend.borrow_mut() = __x.to_string(); }
+        if let Some(__x) = __v.get("clicks").and_then(|__j| __j.as_i64()) { *self.clicks.borrow_mut() = __x; }
+    }
+
+    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_MetricCard_metric_card_c_dacff6a1();
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_MetricCard") {
+            if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
+        }
+        let mut __cur_root = root.first_child();
+        *self.root.borrow_mut() = Some(root);
+        if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
+        let mut __hcur1 = __hel0.first_child();
+        if let Some(__hel2) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur3 = __hel2.first_child();
+        let _ = __flv_next_text(&mut __hcur3);
+        }
+        if let Some(__hel4) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur5 = __hel4.first_child();
+        let _ = __flv_next_text(&mut __hcur5);
+        }
+        if let Some(__hel6) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur7 = __hel6.first_child();
+        let _ = __flv_next_text(&mut __hcur7);
+        let _ = __flv_next_text(&mut __hcur7);
+        }
+        if let Some(__hel8) = __flv_next_element(&mut __hcur1) {
+        {
+            let __self_clone = self.clone();
+            let __closure = Closure::wrap(Box::new(move |_evt: Event| {
+                MetricCard::tap(&__self_clone);
+            }) as Box<dyn FnMut(Event)>);
+            __hel8.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        let mut __hcur9 = __hel8.first_child();
+        let _ = __flv_next_text(&mut __hcur9);
+        let _ = __flv_next_text(&mut __hcur9);
+        let _ = __flv_next_text(&mut __hcur9);
+        }
+        }
+        Ok(())
+    }
+
 }
 
 fn __inject_style_MetricCard_metric_card_c_dacff6a1() {

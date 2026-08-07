@@ -75,14 +75,33 @@ con opt-in `component App hydrate`) y del render isomórfico SSR (SSR-1..4,
 CERRADO v0.31.0, ver #5). Ninguna bloquea el uso real; son mejoras/prioridades
 para próximas iteraciones.
 
-1. **Hidratación universal vs opt-in (mejora de UX/perf para el cliente)** — hoy
-   la hidratación de composición es **opt-in** (marcador `hydrate` en el root)
-   sólo para preservar byte-compat de los ~10 ejemplos de composición existentes.
-   Toda composición naive PODRÍA hidratar de forma segura (adopt-then-naive), lo
-   cual es estrictamente mejor para el cliente (sin flash en el primer paint, DOM
-   del server reusado). **Prioridad**: cuando aterrice el render-a-string
-   isomórfico SSR real, evaluar hacer la hidratación **automática** para toda
-   composición y re-baselinar los ejemplos (o gatearla por el shell SSR).
+1. **Hidratación de composición automática — 🟢 CERRADO 2026-08-07** — la
+   hidratación de composición ya NO requiere el marcador `hydrate`: un árbol de
+   composición **region-free** hidrata automáticamente (adopta el DOM del server
+   sin opt-in), lo cual es estrictamente mejor para el cliente (sin flash en el
+   primer paint, DOM del server reusado). **Runtime-safe**: el entry wrapper cae
+   a `mount` fresco cuando el root no tiene DOM del server (empty-mount sin
+   cambio de comportamiento — solo agrega el path de adopción cuando hay SSR
+   DOM). Implementación: predicado `tree_auto_hydratable` (el árbol tiene
+   composición Y cada componente es adoptable = keep-node o naive region-free) +
+   `component_has_regions` (over-aproximación segura); `emit_module_with_components`
+   setea `hydrate=true` en todo el árbol cuando `tree_auto_hydratable` y no hay
+   marcador; `file_uses_hydration` espeja la decisión para que el Cargo.toml gane
+   `serde_json`. El marcador `hydrate` se mantiene aceptado (back-compat, ahora
+   redundante para composición region-free). **Excluidas** las composiciones con
+   `{#if}`/`{#for}` (romperían con el EmitError de naive-region adopt — items 2/3
+   abajo): siguen fresh-mount. Re-baselinados los 7 ejemplos de composición
+   region-free (`slots`, `named-slots`, `cross-file-child`, `cross-file-transitive`,
+   `reactive-props`, `event-bubbling`, `showcase`) — ganan `hydrate()` + `serde_json`;
+   `hydrate-composition` (marcador) + `keyed-composition`/`nominal-list` (composición
+   + región, excluidas) quedan byte-idénticos. Validado: `cargo build --target
+   wasm32-unknown-unknown` de `slots` compila limpio (hidratación + serde_json).
+   Tests `phase_11_12_residual1_region_free_composition_auto_hydrates` +
+   `phase_11_12_residual1_composition_with_region_stays_fresh_mount`. **Scope**:
+   acotado a composición (un componente no-composición como `counter` mantiene su
+   fresh-mount); la maquinaria de hidratación es la misma validada en Chrome real
+   por slice 4 (`hydrate-composition` 10/10), así que los 7 usan un path ya
+   probado — no se re-validó en browser cada uno (empty-mount runtime idéntico).
 
 2. **`{#if}`/`{#for}` en un componente naive hidratable** — el adopt walk naive
    (slice 4) NO adopta regiones: emite un `EmitError` claro si un componente con

@@ -31,6 +31,28 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Event, HtmlElement};
 
+// Phase 11.12 — hydration cursor helpers. Advance a sibling cursor to
+// the next element / text node so the adopt walk maps template nodes
+// onto the server-painted DOM in DFS order without re-creating them.
+fn __flv_next_element(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Element> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__el) = __n.dyn_ref::<web_sys::Element>() {
+            return Some(__el.clone());
+        }
+    }
+    None
+}
+fn __flv_next_text(__cursor: &mut Option<web_sys::Node>) -> Option<web_sys::Text> {
+    while let Some(__n) = __cursor.clone() {
+        *__cursor = __n.next_sibling();
+        if let Some(__t) = __n.dyn_ref::<web_sys::Text>() {
+            return Some(__t.clone());
+        }
+    }
+    None
+}
+
 pub struct App {
     clicks: RefCell<i64>,
     last: RefCell<String>,
@@ -163,6 +185,88 @@ impl App {
         __el0.append_child(&__el10).unwrap();
         root.append_child(&__el0).unwrap();
     }
+    fn __apply_state_json(self: &Rc<Self>, __json: &str) {
+        let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
+        let _ = (&__v, self);
+        if let Some(__x) = __v.get("clicks").and_then(|__j| __j.as_i64()) { *self.clicks.borrow_mut() = __x; }
+        if let Some(__x) = __v.get("last").and_then(|__j| __j.as_str()) { *self.last.borrow_mut() = __x.to_string(); }
+    }
+
+    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_App_app_c_2358986f();
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_App") {
+            if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
+        }
+        let mut __cur_root = root.first_child();
+        *self.root.borrow_mut() = Some(root);
+        if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
+        let mut __hcur1 = __hel0.first_child();
+        if let Some(__hel2) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur3 = __hel2.first_child();
+        let _ = __flv_next_text(&mut __hcur3);
+        }
+        if let Some(__hel4) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur5 = __hel4.first_child();
+        let _ = __flv_next_text(&mut __hcur5);
+        let _ = __flv_next_text(&mut __hcur5);
+        let _ = __flv_next_text(&mut __hcur5);
+        let _ = __flv_next_text(&mut __hcur5);
+        }
+        if let Some(__hel6) = __flv_next_element(&mut __hcur1) {
+        let mut __hcur7 = __hel6.first_child();
+        if let Some(__hchild8) = __flv_next_element(&mut __hcur7) {
+        let __child9 = {
+            let mut __slot = self.__child_slot_0.borrow_mut();
+            if __slot.is_none() { *__slot = Some(Item::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child9.label.borrow_mut() = "Apple".to_string();
+        {
+            let __parent = self.clone();
+            *__child9.__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {
+                App::on_pick(&__parent, __pl);
+            }));
+        }
+        let __hchild8_html = __hchild8.clone().dyn_into::<HtmlElement>().unwrap();
+        __child9.hydrate(__hchild8_html).unwrap();
+        }
+        if let Some(__hchild10) = __flv_next_element(&mut __hcur7) {
+        let __child11 = {
+            let mut __slot = self.__child_slot_1.borrow_mut();
+            if __slot.is_none() { *__slot = Some(Item::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child11.label.borrow_mut() = "Banana".to_string();
+        {
+            let __parent = self.clone();
+            *__child11.__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {
+                App::on_pick(&__parent, __pl);
+            }));
+        }
+        let __hchild10_html = __hchild10.clone().dyn_into::<HtmlElement>().unwrap();
+        __child11.hydrate(__hchild10_html).unwrap();
+        }
+        if let Some(__hchild12) = __flv_next_element(&mut __hcur7) {
+        let __child13 = {
+            let mut __slot = self.__child_slot_2.borrow_mut();
+            if __slot.is_none() { *__slot = Some(Item::new()); }
+            __slot.as_ref().unwrap().clone()
+        };
+        *__child13.label.borrow_mut() = "Cherry".to_string();
+        {
+            let __parent = self.clone();
+            *__child13.__on_choose.borrow_mut() = Some(Box::new(move |__pl: &std::collections::HashMap<String, String>| {
+                App::on_pick(&__parent, __pl);
+            }));
+        }
+        let __hchild12_html = __hchild12.clone().dyn_into::<HtmlElement>().unwrap();
+        __child13.hydrate(__hchild12_html).unwrap();
+        }
+        }
+        }
+        Ok(())
+    }
+
 }
 
 fn __inject_style_App_app_c_2358986f() {
@@ -240,6 +344,37 @@ impl Item {
         __el0.append_child(&__t2).unwrap();
         root.append_child(&__el0).unwrap();
     }
+    fn __apply_state_json(self: &Rc<Self>, __json: &str) {
+        let __v: serde_json::Value = match serde_json::from_str(__json) { Ok(__j) => __j, Err(_) => return, };
+        let _ = (&__v, self);
+        if let Some(__x) = __v.get("label").and_then(|__j| __j.as_str()) { *self.label.borrow_mut() = __x.to_string(); }
+    }
+
+    pub fn hydrate(self: &Rc<Self>, root: HtmlElement) -> Result<(), JsValue> {
+        __inject_style_Item_item_c_db46fce0();
+        if let Some(__sel) = web_sys::window().unwrap().document().unwrap().get_element_by_id("__flv_state_Item") {
+            if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
+        }
+        let mut __cur_root = root.first_child();
+        *self.root.borrow_mut() = Some(root);
+        if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
+        {
+            let __self_clone = self.clone();
+            let __evt_el = __hel0.clone();
+            let __closure = Closure::wrap(Box::new(move |_evt: Event| {
+                let mut __payload = std::collections::HashMap::<String, String>::new();
+                __payload.insert("label".to_string(), __evt_el.get_attribute("data-flv-value-label").unwrap_or_default());
+                Item::choose(&__self_clone, &__payload);
+            }) as Box<dyn FnMut(Event)>);
+            __hel0.add_event_listener_with_callback("click", __closure.as_ref().unchecked_ref()).unwrap();
+            __closure.forget();
+        }
+        let mut __hcur1 = __hel0.first_child();
+        let _ = __flv_next_text(&mut __hcur1);
+        }
+        Ok(())
+    }
+
 }
 
 fn __inject_style_Item_item_c_db46fce0() {

@@ -118,7 +118,10 @@ fn regenerate_slots_lib_rs() {
         fs::create_dir_all(parent).unwrap();
     }
     write_if_changed(&dst, &lib_rs);
-    write_if_changed(&cargo_toml_path(), &fitz::view::compose_cargo_toml("slots"));
+    write_if_changed(
+        &cargo_toml_path(),
+        &fitz::view::compose_cargo_toml_with_features("slots", &[], false, true),
+    );
 }
 
 #[test]
@@ -126,7 +129,10 @@ fn regenerate_slots_lib_rs() {
 fn build_slots_wasm() {
     let lib_rs = generate_lib_rs_from_fitzv();
     write_if_changed(&lib_rs_path(), &lib_rs);
-    write_if_changed(&cargo_toml_path(), &fitz::view::compose_cargo_toml("slots"));
+    write_if_changed(
+        &cargo_toml_path(),
+        &fitz::view::compose_cargo_toml_with_features("slots", &[], false, true),
+    );
 
     let crate_dir = example_dir().join("wasm-crate");
     let status = std::process::Command::new("wasm-pack")

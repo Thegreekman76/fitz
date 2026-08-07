@@ -160,7 +160,7 @@ fn regenerate_cross_file_child_lib_rs() {
     write_if_changed(&dst, &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("cross-file-child"),
+        &fitz::view::compose_cargo_toml_with_features("cross-file-child", &[], false, true),
     );
 }
 
@@ -171,7 +171,7 @@ fn build_cross_file_child_wasm() {
     write_if_changed(&lib_rs_path(), &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("cross-file-child"),
+        &fitz::view::compose_cargo_toml_with_features("cross-file-child", &[], false, true),
     );
 
     let crate_dir = example_dir().join("wasm-crate");

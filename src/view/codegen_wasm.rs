@@ -562,6 +562,21 @@ pub fn emit_module_with_components(
     // 1–3); this only lifts the naive composition path.
     propagate_root_hydrate(&mut merged);
     let bubbled = collect_bubbled_events(&merged);
+    // Phase 11.12 residual #1 — automatic hydration of composition. The
+    // `hydrate` marker (above) is now redundant for a region-free composition
+    // tree: such a tree adopts its server-painted DOM safely without opt-in,
+    // which is strictly better for the client (no first-paint flash, server
+    // DOM reused). Runtime-safe because the entry wrapper falls back to a
+    // fresh `mount` when the root has no server DOM, so empty-mount
+    // deployments are unchanged. A composition tree with `{#if}`/`{#for}`
+    // regions is EXCLUDED (naive-region adopt is not modelled — it would hit
+    // the region EmitError), so it stays fresh-mount. Non-composition naive
+    // components are left as-is (this residual is scoped to composition).
+    if !merged.components.iter().any(|c| c.hydrate) && tree_auto_hydratable(&merged, &bubbled) {
+        for c in &mut merged.components {
+            c.hydrate = true;
+        }
+    }
     emit_module_header(&mut out, any_component_has_style(&merged));
     emit_nominal_structs(nominals, fns.has_rpc(), &mut out)?;
     // CW.9 (1c) — the `Html` shim, emitted once before the imported fns that
@@ -1366,6 +1381,60 @@ fn any_component_has_style(file: &ExpandedViewFile) -> bool {
     file.components.iter().any(|c| c.style.is_some())
 }
 
+/// `true` if a component's template contains any `{#if}`/`{#for}` region,
+/// at any depth reachable by the emit walk (element children, if/for/slot
+/// children, and `<Child>` slot content). Deliberately an OVER-approximation:
+/// used only to EXCLUDE a component from automatic composition hydration, so
+/// over-detecting a region errs on the safe side (fresh mount always works),
+/// whereas missing one would let the adopt walk hit the naive-region
+/// `EmitError` at build time.
+fn component_has_regions(component: &ExpandedComponent) -> bool {
+    fn walk(node: &ExpandedTemplateNode) -> bool {
+        match node {
+            ExpandedTemplateNode::If { .. } | ExpandedTemplateNode::For { .. } => true,
+            ExpandedTemplateNode::Element { children, .. } => children.iter().any(walk),
+            ExpandedTemplateNode::Slot { fallback, .. } => fallback.iter().any(walk),
+            ExpandedTemplateNode::ChildComponent { slot_content, .. } => {
+                slot_content.iter().any(walk)
+            }
+            _ => false,
+        }
+    }
+    component
+        .template
+        .as_ref()
+        .is_some_and(|t| t.roots.iter().any(walk))
+}
+
+/// Phase 11.12 residual #1 — `true` when the whole merged tree is a
+/// composition tree that can hydrate AUTOMATICALLY (without the `hydrate`
+/// marker). Requires:
+///
+/// - the tree has composition (some component renders `<Child />` / has a
+///   `<slot>`), so this stays scoped to composition (a plain non-composition
+///   component keeps its fresh-mount baseline), AND
+/// - every component is adoptable: either keep-node (its adopt walk handles
+///   regions itself) or a region-free naive component. A naive component WITH
+///   regions would hit the naive-region `EmitError`, so it blocks the whole
+///   tree (it stays fresh-mount).
+fn tree_auto_hydratable(
+    file: &ExpandedViewFile,
+    bubbled: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> bool {
+    let empty = std::collections::BTreeSet::new();
+    let has_composition = file
+        .components
+        .iter()
+        .any(|c| !template_has_no_composition(c));
+    if !has_composition {
+        return false;
+    }
+    file.components.iter().all(|c| {
+        let tb = bubbled.get(&c.name).unwrap_or(&empty);
+        use_keep_node_reconciliation(c, tb) || !component_has_regions(c)
+    })
+}
+
 /// Phase 11.12 slice 2 — `true` when some hydratable component in `file` has a
 /// `{#if}`/`{#for}` region, so its adopt walk calls `__flv_next_comment`. Gates
 /// the region-anchor cursor helper so a region-free hydratable crate carries no
@@ -1386,7 +1455,12 @@ fn any_component_hydratable_with_regions(
 /// Used by `wasm_build::write_wasm_crate_scaffold` to gate the Cargo.toml dep.
 pub fn file_uses_hydration(file: &ExpandedViewFile) -> bool {
     let bubbled = collect_bubbled_events(file);
-    any_component_hydratable(file, &bubbled)
+    // A crate hydrates when some component is hydratable via the marker or
+    // keep-node (`any_component_hydratable`), OR when the tree auto-hydrates as
+    // a region-free composition (Phase 11.12 residual #1). Mirror the emitter's
+    // decision in `emit_module_with_components` so the generated Cargo.toml gets
+    // `serde_json` (state restore) exactly when the crate emits `hydrate()`.
+    any_component_hydratable(file, &bubbled) || tree_auto_hydratable(file, &bubbled)
 }
 
 /// Phase 11.12 — the shared cursor helpers the adopt walk calls. Emitted once
@@ -9032,29 +9106,57 @@ component Card {
     }
 
     #[test]
-    fn phase_11_12_slice4_without_marker_stays_fresh_mount() {
-        // Same tree WITHOUT the `hydrate` marker → no hydration surface at all
-        // (composition still fresh-mounts via mount_into, byte-identical to the
-        // pre-11.12 path).
+    fn phase_11_12_residual1_region_free_composition_auto_hydrates() {
+        // Phase 11.12 residual #1 — a region-free composition tree now hydrates
+        // WITHOUT the `hydrate` marker (automatic). Same emitted surface as the
+        // opt-in version: App + Card both emit hydrate() + the slot adopt field.
+        // Runtime-safe: the entry wrapper falls back to a fresh `mount` when the
+        // root has no server DOM, so empty-mount deployments are unchanged.
         let no_marker =
             SLICE4_COMPOSITION_SRC.replace("component App hydrate {", "component App {");
         let out = emit_module(&parse_expand(&no_marker)).unwrap();
+        assert_eq!(
+            out.matches("pub fn hydrate(").count(),
+            2,
+            "region-free composition auto-hydrates (App + Card) without the marker:\n{out}"
+        );
+        assert!(
+            out.contains("__hslot"),
+            "auto-hydration still wires the slot adopt field:\n{out}"
+        );
+        // The naive build path is still present (the entry wrapper picks
+        // hydrate-vs-mount at runtime by the empty-root check).
+        assert!(
+            out.contains("__render_slot_0"),
+            "the slot renderer is still emitted for the build path:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_residual1_composition_with_region_stays_fresh_mount() {
+        // A composition tree that ALSO has a `{#if}`/`{#for}` region is EXCLUDED
+        // from automatic hydration (naive-region adopt is not modelled) — it
+        // stays fresh-mount. Without the exclusion the adopt walk would hit the
+        // naive-region EmitError. Emit must succeed with NO hydrate().
+        let src = r#"component App {
+  state { show: Bool = true, title: Str = "d" }
+  event go() { show = false }
+  <template>
+    <div>
+      {#if show}<p class="x">visible</p>{/if}
+      <Card title="{title}" />
+    </div>
+  </template>
+}
+
+component Card {
+  state { title: Str = "" }
+  <template><span class="c">{title}</span></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).unwrap();
         assert!(
             !out.contains("pub fn hydrate("),
-            "no marker -> no hydrate() emitted:\n{out}"
-        );
-        assert!(
-            !out.contains("__hslot"),
-            "no marker -> no __hslot field:\n{out}"
-        );
-        assert!(
-            !out.contains("__hydrate_slot_"),
-            "no marker -> no __hydrate_slot method:\n{out}"
-        );
-        // Composition still works via the naive build path.
-        assert!(
-            out.contains(".mount_into(") && out.contains("__render_slot_0"),
-            "composition still fresh-mounts:\n{out}"
+            "composition + region must NOT auto-hydrate (stays fresh mount):\n{out}"
         );
     }
 

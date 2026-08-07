@@ -94,7 +94,7 @@ fn generate_lib_rs_from_fitzv() -> String {
 /// its content changes matches how the counter's baseline is
 /// committed today.
 fn generate_cargo_toml() -> String {
-    fitz::view::compose_cargo_toml("showcase")
+    fitz::view::compose_cargo_toml_with_features("showcase", &[], false, true)
 }
 
 /// Only overwrite the destination when the new content differs

@@ -120,7 +120,7 @@ fn regenerate_reactive_props_lib_rs() {
     write_if_changed(&dst, &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("reactive-props"),
+        &fitz::view::compose_cargo_toml_with_features("reactive-props", &[], false, true),
     );
 }
 
@@ -131,7 +131,7 @@ fn build_reactive_props_wasm() {
     write_if_changed(&lib_rs_path(), &lib_rs);
     write_if_changed(
         &cargo_toml_path(),
-        &fitz::view::compose_cargo_toml("reactive-props"),
+        &fitz::view::compose_cargo_toml_with_features("reactive-props", &[], false, true),
     );
 
     let crate_dir = example_dir().join("wasm-crate");
