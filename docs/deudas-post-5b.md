@@ -4,7 +4,35 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🟡 Paso 0 SSR isomórfico — `to_json` en `fitz build` requiere HTTP (ABIERTA, 2026-08-03)
+## 🟢 Paso 0 SSR isomórfico — `to_json` en `fitz build` sin HTTP (CERRADO 2026-08-07)
+
+**Fix aplicado (2026-08-07)**: se extrajo el core de serialización JSON
+(axum-free) de `HTTP_RUNTIME_PRELUDE` a un `JSON_SERIALIZE_PRELUDE`
+independiente en `src/codegen.rs` — los dos traits `__ToFitzJson` /
+`__FromFitzJson` + los impls de primitivos/contenedores (`Option`, `Vec`,
+`Arc<Mutex>`, `Vec<(K,V)>`, `Result`) + `__MapKey`/`__MapKeyFromStr` +
+`__json_shape`. `HTTP_RUNTIME_PRELUDE` conserva solo los tipos de dominio
+HTTP (`Request`/`Response`/`File`) + el glue axum (`__apply_cors_and_respond`)
++ los parsers urlencoded/multipart. El JSON prelude se emite cuando
+`has_http || uses_to_json`, **antes** del HTTP prelude (los impls de dominio
+dependen de los traits; Rust resuelve impls sin importar orden, así que el
+output HTTP es funcionalmente idéntico). Nuevo detector `program_uses_to_json`
+(walk del AST, call de ident pelado — paralelo a `program_uses_smtp`), campo
+`CodegenCtx.uses_to_json` + transitividad por módulo (`LoadedModule`) + mirror
+lado-módulo (`use crate::{__ToFitzJson, __FromFitzJson}`), gating de los
+per-type impls (`gen_type_http_impls` + `emit_helpers_for_imported_types`) por
+`has_http || uses_to_json`, y `serde_json` (con `preserve_order`) al Cargo.toml
+generado cuando `uses_to_json` y ningún otro branch ya lo trajo (sin
+duplicar). Un `fitz build` de un CLI puro con `to_json` ahora solo linkea
+`serde_json` (sin axum ni tokio) y produce output **bit-a-bit idéntico** a
+`fitz run` (validado a mano + E2E `to_json_in_pure_cli_build_matches_interpreter`
+en `tests/compile_e2e.rs`). Tests: +5 unit codegen (`to_json_in_pure_cli_*`,
+`program_uses_to_json_*`, `cargo_toml_*_serde_json*`) + 1 E2E. 4024 lib
+(default) + 4185 (lsp) verdes; fmt + clippy `-D warnings` (default + lsp)
+limpios. **Divergencias run/build menores** siguen (Float NaN/Inf, `Bytes`,
+`Map` con clave nominal) — ver detalle histórico abajo.
+
+<details><summary>Detalle histórico (deuda original, 2026-08-03)</summary>
 
 El builtin nuevo `to_json(x) -> Str` (Paso 0 del render-a-string isomórfico
 SSR; alimenta el `<script id="__flv_state_*">` de la hidratación) funciona en
@@ -37,6 +65,8 @@ error; codegen → string), `Bytes` (runtime → base64; codegen `Vec<u8>` → a
 de ints), `Map` con clave nominal (codegen no compila vs runtime error). Un
 `to_json` sobre un tipo exótico no serializable da error de rustc (menos
 amigable que el error Fitz del intérprete).
+
+</details>
 
 ## 🟡 Fase 11.12 — deudas residuales de la hidratación de composición (ABIERTAS; render isomórfico SSR CERRADO en v0.31.0)
 

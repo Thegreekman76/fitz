@@ -236,6 +236,47 @@ print(double(x))
 }
 
 #[test]
+fn to_json_in_pure_cli_build_matches_interpreter() {
+    // Deuda cerrada: `to_json(x)` compila en `fitz build` para un
+    // programa CLI puro (sin @get/@post/@ws). El core de serialización
+    // JSON (`JSON_SERIALIZE_PRELUDE`) es axum-free y se emite via
+    // `uses_to_json`. Cubre primitivos + List + Map + nominal (con field
+    // List anidado). Output esperado = idéntico bit-a-bit a `fitz run`.
+    let src = "\
+type User {
+    id: Int
+    name: Str
+    active: Bool
+    tags: List<Str>
+}
+
+let u = User { id: 7, name: \"ada\", active: true, tags: [\"x\", \"y\"] }
+
+print(to_json(42))
+print(to_json(3.5))
+print(to_json(\"hola\"))
+print(to_json(true))
+print(to_json([1, 2, 3]))
+print(to_json({\"a\": 1, \"b\": 2}))
+print(to_json(u))
+";
+    let (stdout, exit) = build_and_run("to-json-cli", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &[
+            "42",
+            "3.5",
+            "\"hola\"",
+            "true",
+            "[1,2,3]",
+            "{\"a\":1,\"b\":2}",
+            "{\"id\":7,\"name\":\"ada\",\"active\":true,\"tags\":[\"x\",\"y\"]}",
+        ],
+    );
+}
+
+#[test]
 fn if_else_works_in_binary() {
     let src = "\
 let x = 5

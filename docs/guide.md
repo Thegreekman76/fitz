@@ -5208,12 +5208,11 @@ print(to_json({"a": 1, "b": 2}))                  // {"a":1,"b":2}
 print(to_json(User { id: 7, name: "Ada" }))       // {"id":7,"name":"Ada","active":true}
 ```
 
-> **`fitz build`**: hoy el preludio de serialización JSON se comparte con
-> la capa HTTP, así que `to_json` compila a binario nativo cuando el
-> programa tiene rutas HTTP (`@get`/`@post`/`@ws`). En un programa CLI
-> puro (sin HTTP) usá `fitz run` — el intérprete no tiene esa
-> restricción. Extraer el preludio a un módulo independiente es deuda
-> residual.
+> **`fitz build`**: `to_json` compila a binario nativo también en
+> programas CLI puros (sin rutas HTTP). El core de serialización JSON es
+> independiente de la capa HTTP — un programa sin `@get`/`@post`/`@ws`
+> solo linkea `serde_json` (sin axum ni tokio). Paridad bit-a-bit con
+> `fitz run`.
 
 **Métodos sobre `Str`**:
 

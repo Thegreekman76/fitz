@@ -337,6 +337,8 @@ pub fn generate_project(
     // dispatches mails, plus a main that only orchestrates with
     // `spawn(notify(...))`.
     let uses_smtp = program_uses_smtp(program) || loader.modules.iter().any(|m| m.uses_smtp);
+    let uses_to_json =
+        program_uses_to_json(program) || loader.modules.iter().any(|m| m.uses_to_json);
 
     // Phase 12.8 — feature flags: detects `@flag(...)` or builtins
     // `flag(...)`/`flags.X(...)`. The program can always use the
@@ -378,6 +380,7 @@ pub fn generate_project(
             uses_prometheus_export,
             uses_http_client,
             uses_smtp,
+            uses_to_json,
         ),
         main_rs,
         mod_files: {
@@ -1864,6 +1867,125 @@ fn program_uses_http_client(program: &Program) -> bool {
         }
     }
     program.iter().any(stmt_uses_http)
+}
+
+/// `true` if the program calls the `to_json(x) -> Str` builtin. Triggers
+/// emission of `JSON_SERIALIZE_PRELUDE` (the axum-free `__ToFitzJson` /
+/// `__FromFitzJson` core) + the per-type `impl __ToFitzJson` even when the
+/// program has no HTTP, and adds `serde_json` (with `preserve_order`) to
+/// the generated Cargo.toml. Recursive walk parallel to
+/// `program_uses_http_client`, but `to_json` is a BARE-identifier call
+/// (`Expr::Ident("to_json")`), not a `Field` call like `http.get`. The
+/// walk loses user-defined `to_json` shadowing — the callsite's codegen
+/// dispatch handles that via `!self.is_user_callable(name)`.
+fn program_uses_to_json(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_to_json(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident(fname, _) = callee.as_ref() {
+                    if fname == "to_json" {
+                        return true;
+                    }
+                }
+                expr_uses_to_json(callee) || args.iter().any(expr_uses_to_json)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_to_json(left) || expr_uses_to_json(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_to_json(operand),
+            Expr::Field { object, .. } => expr_uses_to_json(object),
+            Expr::Index { object, index, .. } => {
+                expr_uses_to_json(object) || expr_uses_to_json(index)
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_to_json(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_to_json(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_to_json(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_to_json(start) || expr_uses_to_json(end),
+            Expr::List(items, _) | Expr::Tuple(items, _) => items.iter().any(expr_uses_to_json),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_to_json(expr)
+                    || expr_uses_to_json(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_to_json(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_to_json(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_to_json(key)
+                    || expr_uses_to_json(value)
+                    || expr_uses_to_json(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_to_json(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_to_json(f))
+            }
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_to_json(k) || expr_uses_to_json(v)),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_to_json(v)),
+            Expr::TupleField { tuple, .. } => expr_uses_to_json(tuple),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_to_json(condition)
+                    || then.iter().any(stmt_uses_to_json)
+                    || else_
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(stmt_uses_to_json))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_to_json(value)
+                    || arms.iter().any(|a| a.body.iter().any(stmt_uses_to_json))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_to_json),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Lit(_) => false,
+                StrPart::Expr(inner, _) => expr_uses_to_json(inner),
+            }),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_to_json),
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_to_json(inner),
+            Expr::NamedArg { value, .. } => expr_uses_to_json(value),
+            _ => false,
+        }
+    }
+    fn stmt_uses_to_json(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_to_json),
+            Stmt::Assign { value, .. } => expr_uses_to_json(value),
+            Stmt::Expr(e, _) => expr_uses_to_json(e),
+            Stmt::Return(e, _) => expr_uses_to_json(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_to_json(status) || body.as_ref().is_some_and(expr_uses_to_json)
+            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_to_json(condition) || body.iter().any(stmt_uses_to_json),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_to_json),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_to_json(iter) || body.iter().any(stmt_uses_to_json)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_to_json)
 }
 
 /// Mini-tanda SMTP builtin (2026-06-19) — `true` if the program calls
@@ -3480,6 +3602,7 @@ fn cargo_toml_for(
     uses_prometheus_export: bool,
     uses_http_client: bool,
     uses_smtp: bool,
+    uses_to_json: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -3584,7 +3707,8 @@ fn cargo_toml_for(
         || uses_db
         || uses_date_or_uuid
         || uses_http_client
-        || uses_smtp;
+        || uses_smtp
+        || uses_to_json;
     if !needs_deps_section {
         return header;
     }
@@ -3850,8 +3974,22 @@ fn cargo_toml_for(
     } else {
         ""
     };
+    // `to_json(x)` (JSON_SERIALIZE_PRELUDE) needs `serde_json` with
+    // `preserve_order` (parity with the interpreter's
+    // `http::value_to_json`, which uses serde_json with preserve_order
+    // for field/insertion order). It needs neither tokio nor axum. Emit
+    // it only when no other branch already brought serde_json in
+    // (http/auth/db-jsonb/logging all emit it), to avoid a duplicate
+    // `[dependencies]` key.
+    let json_lines = if uses_to_json
+        && !(has_http || uses_auth || (uses_db && uses_fitz_value) || needs_tracing)
+    {
+        "serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
+    } else {
+        ""
+    };
     format!(
-        "{}\n[dependencies]\n{}{}{}{}{}{}{}{}{}{}",
+        "{}\n[dependencies]\n{}{}{}{}{}{}{}{}{}{}{}",
         header,
         http_lines,
         tokio_line,
@@ -3862,7 +4000,8 @@ fn cargo_toml_for(
         date_uuid_lines,
         logging_lines,
         http_client_lines,
-        smtp_lines
+        smtp_lines,
+        json_lines
     )
 }
 
@@ -4033,6 +4172,10 @@ struct LoadedModule {
     /// `async fn send_alert(addr, body) { smtp.send({...}).await? }`).
     /// The module's emitted code references `use crate::{__fitz_smtp_*}`.
     uses_smtp: bool,
+    /// `true` if this module calls `to_json(x)`. The crate root ORs it
+    /// with its own flag so `JSON_SERIALIZE_PRELUDE` + `serde_json` are
+    /// emitted when a module body serializes (parallel to `uses_smtp`).
+    uses_to_json: bool,
     /// Facet #1 (cross-module nominal identity) — `TypeId → canonical
     /// name` for EVERY nominal registered in this module's TypeEnv,
     /// both types DEFINED in the module and types the module IMPORTED
@@ -4691,6 +4834,7 @@ impl ModuleLoader {
         // `smtp.send(...)` so the main ORs the flag and emits the
         // prelude when at least one module references SMTP.
         let module_uses_smtp = program_uses_smtp(&module_program);
+        let module_uses_to_json = program_uses_to_json(&module_program);
         // W12 (v0.10.8) — detect `@auth_provider` declared IN this
         // module. If the module has it, we expose
         // `(fn_name, is_async, user_type_name)` to the main so
@@ -4789,6 +4933,7 @@ impl ModuleLoader {
             cron_fn_stmts: module_cron_fn_stmts,
             uses_http_client: module_uses_http_client,
             uses_smtp: module_uses_smtp,
+            uses_to_json: module_uses_to_json,
             nominal_names: module_nominal_names,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
@@ -5658,8 +5803,21 @@ fn generate_module_rs_with_bindings(
     // v0.19.5 — also import `__ToFitzJson`/`__FromFitzJson` for
     // imported middleware fns: `return <status> { body }` emits
     // `<rt as __ToFitzJson>::__to_fitz_json(&body)`.
+    // Also import the trait when the module body calls `to_json(x)`:
+    // the dispatch emits `<T as __ToFitzJson>::__to_fitz_json(...)`. The
+    // crate root owns the trait (emitted whenever `has_http ||
+    // uses_to_json` at the project level). Set `ctx.uses_to_json` so the
+    // module's `to_json` dispatch guard passes even without local HTTP.
     let module_uses_ws_broadcast_local = program_uses_ws_broadcast(program);
-    if module_has_http || module_uses_ws_broadcast_local || module_has_imported_middleware_fn {
+    let module_uses_to_json_local = program_uses_to_json(program);
+    if module_uses_to_json_local {
+        ctx.uses_to_json = true;
+    }
+    if module_has_http
+        || module_uses_ws_broadcast_local
+        || module_has_imported_middleware_fn
+        || module_uses_to_json_local
+    {
         ctx.emit(
             "#[allow(unused_imports)]\n\
              use crate::{__ToFitzJson, __FromFitzJson};\n\n",
@@ -6491,6 +6649,8 @@ fn generate_main_rs(
     // Mini-tanda SMTP builtin (2026-06-19) — `smtp.send(...)` calls
     // in main OR any loaded module. Same transitive pattern.
     let uses_smtp = program_uses_smtp(program) || loader.modules.iter().any(|m| m.uses_smtp);
+    let uses_to_json =
+        program_uses_to_json(program) || loader.modules.iter().any(|m| m.uses_to_json);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -6517,6 +6677,7 @@ fn generate_main_rs(
     ctx.uses_date_or_uuid = uses_date_or_uuid;
     ctx.uses_http_client = uses_http_client;
     ctx.uses_smtp = uses_smtp;
+    ctx.uses_to_json = uses_to_json;
     // 10.8.7 (v0.10.8) — pre-scan of the `ws_broadcast(endpoint, msg)`
     // builtin in main. Set BEFORE emit_prelude so that
     // `emit_http_runtime_prelude` emits the `__fitz_ws_broadcast`
@@ -7113,14 +7274,23 @@ fn emit_main_rs_body(
 
     // 5b.6: when there is HTTP we emit the serialization helpers
     // (`__ToFitzJson` / `__FromFitzJson`) before the custom types,
-    // because each `type`'s `impl` references them.
+    // because each `type`'s `impl` references them. The
+    // serialization core (axum-free) also fires when the program
+    // uses the `to_json(x)` builtin without HTTP — a pure-CLI
+    // program can then serialize any value/nominal to JSON. The
+    // HTTP-domain prelude (Request/Response/File + axum glue) only
+    // fires with real HTTP.
+    let needs_json_prelude = has_http || ctx.uses_to_json;
+    if needs_json_prelude {
+        ctx.emit_json_serialize_prelude();
+    }
     if has_http {
         ctx.emit_http_runtime_prelude();
     }
 
     for stmt in &p.type_defs {
         ctx.gen_type_def(stmt)?;
-        if has_http {
+        if needs_json_prelude {
             ctx.gen_type_http_impls(stmt)?;
         }
     }
@@ -7138,7 +7308,7 @@ fn emit_main_rs_body(
     // The helpers live in main as `pub(crate)`, accessible from
     // modules via `crate::__fitz_py_to_*` (the module-output
     // post-processing prefixes `crate::` automatically).
-    ctx.emit_helpers_for_imported_types(loader, true, has_http)?;
+    ctx.emit_helpers_for_imported_types(loader, true, has_http || ctx.uses_to_json)?;
 
     // Cd mini-batch (F12 fix) — hoist the top-level
     // `let X = <const-eval>` from the main file that top-level fns
@@ -8433,6 +8603,13 @@ struct CodegenCtx<'a> {
     /// without `smtp.send` calls pay nothing (no lettre in deps, no
     /// prelude in main).
     uses_smtp: bool,
+    /// `true` if the program calls the `to_json(x) -> Str` builtin.
+    /// Enables emission of `JSON_SERIALIZE_PRELUDE` (the axum-free
+    /// serialization core) + per-type `impl __ToFitzJson` even without
+    /// HTTP, and adds `serde_json` (with `preserve_order`) to the
+    /// generated Cargo.toml. Lets a pure-CLI program serialize any
+    /// value to JSON with parity to the interpreter.
+    uses_to_json: bool,
     /// Phase 9.w.3.c: info of each cron job, pre-collected. Each
     /// entry has the Rust name of the target fn, the cron-expression
     /// Str, and an `is_async` flag. `gen_main`/`gen_http_main` use
@@ -8693,6 +8870,7 @@ impl<'a> CodegenCtx<'a> {
             uses_date_or_uuid: false,
             uses_http_client: false,
             uses_smtp: false,
+            uses_to_json: false,
             cron_jobs_info: Vec::new(),
             ws_heartbeat_secs: 30,
             observability_enabled: true,
@@ -13637,7 +13815,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         do_http: bool,
     ) -> Result<(), FitzError> {
         let do_python = do_python && self.uses_python;
-        let do_http = do_http && self.has_http;
+        // `to_json(importedType)` in a pure-CLI program needs the
+        // imported type's `impl __ToFitzJson` too (parity with the
+        // interpreter). The JSON serialization core is emitted
+        // whenever `has_http || uses_to_json`, so gate the same way.
+        let do_http = do_http && (self.has_http || self.uses_to_json);
         if !do_python && !do_http {
             return Ok(());
         }
@@ -17510,12 +17692,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if name == "to_json" && !self.is_user_callable(name) && args.len() == 1 {
             let arg_span = args[0].span();
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-            if !self.has_http {
+            // The JSON serialization core (`__ToFitzJson`) lives in
+            // `JSON_SERIALIZE_PRELUDE`, emitted whenever `has_http ||
+            // uses_to_json`. `program_uses_to_json` sets `uses_to_json`
+            // for any program with a `to_json(...)` call, so this guard
+            // is effectively unreachable at a real callsite — it stays
+            // as a defensive assert against a codegen path that reaches
+            // here without the prelude having been emitted.
+            if !self.has_http && !self.uses_to_json {
                 return Err(self.err_at(
                     arg_span,
-                    "`to_json(...)` in `fitz build` currently requires a program with HTTP \
-                     (@get/@post/@ws): the JSON serialization prelude (`__ToFitzJson`) is \
-                     shared with the HTTP layer. Use `fitz run` for a pure-CLI program."
+                    "`to_json(...)` in `fitz build`: the JSON serialization prelude \
+                     (`__ToFitzJson`) was not emitted for this program. This is an \
+                     internal codegen invariant violation — please report it."
                         .to_string(),
                 ));
             }
@@ -28811,11 +29000,23 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     // 5b.6 — HTTP / @server / handlers
     // ------------------------------------------------------------------
 
-    /// Emits the HTTP prelude: traits `__ToFitzJson` and
-    /// `__FromFitzJson`, implementations for primitives / List /
-    /// Map / Option / Result, error response helpers. The
-    /// `type`-specific impls are emitted next to the struct (in
-    /// `gen_type_http_impls`).
+    /// Emits the axum-free JSON serialization core: the traits
+    /// `__ToFitzJson` / `__FromFitzJson`, impls for primitives / List /
+    /// Map / Option / Result, and the map-key helpers plus
+    /// `__json_shape`. Shared by the HTTP layer and the `to_json(x)`
+    /// builtin. Must be emitted BEFORE `emit_http_runtime_prelude` (the
+    /// HTTP-domain impls depend on these traits) and BEFORE the per-type
+    /// impls (`gen_type_http_impls`). Gated by `has_http || uses_to_json`.
+    fn emit_json_serialize_prelude(&mut self) {
+        self.emit(JSON_SERIALIZE_PRELUDE);
+    }
+
+    /// Emits the HTTP-domain prelude: the `Request` / `Response` / `File`
+    /// types with their `Display` / JSON impls, the axum glue
+    /// (`__apply_cors_and_respond`), the urlencoded / multipart parsers,
+    /// and the panic helper. Assumes `emit_json_serialize_prelude` ran
+    /// first (the domain impls reference `__ToFitzJson` and friends). The
+    /// `type`-specific impls are emitted by `gen_type_http_impls`.
     fn emit_http_runtime_prelude(&mut self) {
         self.emit(HTTP_RUNTIME_PRELUDE);
         // v0.10.22 — DB+HTTP integration prelude. Only when
@@ -33181,13 +33382,18 @@ fn parse_build_str_list(expr: &Expr, key: &str) -> Result<Vec<String>, FitzError
     Ok(out)
 }
 
-/// HTTP prelude: traits `__ToFitzJson` and `__FromFitzJson`
-/// with impls for primitives and generic combinators
-/// (`Option`, `Arc<Mutex<Vec<T>>>`,
-/// `Arc<Mutex<Vec<(K, V)>>>`, `Result<T, String>`). The impls
-/// specific to each `type Foo` are emitted by
-/// `gen_type_http_impls`.
-const HTTP_RUNTIME_PRELUDE: &str = r#"// --- 5b.6: HTTP runtime (JSON serialization) ---
+/// JSON serialization core (axum-free): the traits `__ToFitzJson`
+/// and `__FromFitzJson` plus impls for primitives and generic
+/// combinators (`Option`, `Arc<Mutex<Vec<T>>>`,
+/// `Arc<Mutex<Vec<(K, V)>>>`, `Result<T, String>`) and the map-key
+/// helpers. Extracted from `HTTP_RUNTIME_PRELUDE` so that pure-CLI
+/// programs that use the `to_json(x)` builtin (no `@get`/`@post`/
+/// `@ws`) can serialize without linking axum. Emitted whenever
+/// `has_http || uses_to_json`, BEFORE `HTTP_RUNTIME_PRELUDE` (which
+/// only carries the HTTP-domain types + axum glue and depends on
+/// these traits). The impls specific to each `type Foo` are emitted
+/// by `gen_type_http_impls`.
+const JSON_SERIALIZE_PRELUDE: &str = r#"// --- JSON serialization core (shared by HTTP + to_json) ---
 
 pub(crate) trait __ToFitzJson {
     fn __to_fitz_json(&self) -> serde_json::Value;
@@ -33196,6 +33402,240 @@ pub(crate) trait __ToFitzJson {
 pub(crate) trait __FromFitzJson: Sized {
     fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String>;
 }
+
+impl __ToFitzJson for i64 {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::from(*self)
+    }
+}
+impl __ToFitzJson for f64 {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        // R6 (v0.10.14) — parity with the runtime
+        // (http.rs::value_to_json): serde_json does NOT
+        // accept NaN/Inf. Before, the codegen silently
+        // converted them to `Value::Null` (the client
+        // received incorrect data without noticing). Now the
+        // best last thing we can do on this path is to
+        // serialize the value as a String with the same
+        // runtime format ("inf", "-inf", "NaN") — the client
+        // sees the textual representation and can detect the
+        // anomaly, instead of the silent null. For stronger
+        // validation, R6 also adds checks in the evaluator's
+        // Float arithmetic (`/`/`*`) that detect
+        // overflow/NaN at the moment of generating them.
+        match serde_json::Number::from_f64(*self) {
+            Some(n) => serde_json::Value::Number(n),
+            None => serde_json::Value::String(format!("{}", self)),
+        }
+    }
+}
+impl __ToFitzJson for String {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::String(self.clone())
+    }
+}
+impl __ToFitzJson for bool {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::Bool(*self)
+    }
+}
+impl __ToFitzJson for () {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for Option<T> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        match self {
+            Some(v) => v.__to_fitz_json(),
+            None => serde_json::Value::Null,
+        }
+    }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for std::sync::Arc<std::sync::Mutex<T>> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        self.lock().unwrap().__to_fitz_json()
+    }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for Vec<T> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::Array(self.iter().map(|v| v.__to_fitz_json()).collect())
+    }
+}
+
+impl<K: __MapKey, V: __ToFitzJson> __ToFitzJson for Vec<(K, V)> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        for (k, v) in self.iter() {
+            obj.insert(k.__as_map_key(), v.__to_fitz_json());
+        }
+        serde_json::Value::Object(obj)
+    }
+}
+
+/// Map keys in JSON must be strings. For K = String, we use
+/// the key as-is; for other primitive types (Int/Bool), we
+/// convert with Display. A Map with nominal/nested keys is
+/// not serializable and rustc will flag it if the codegen
+/// tries.
+trait __MapKey {
+    fn __as_map_key(&self) -> String;
+}
+impl __MapKey for String {
+    fn __as_map_key(&self) -> String { self.clone() }
+}
+impl __MapKey for i64 {
+    fn __as_map_key(&self) -> String { self.to_string() }
+}
+impl __MapKey for f64 {
+    fn __as_map_key(&self) -> String { self.to_string() }
+}
+impl __MapKey for bool {
+    fn __as_map_key(&self) -> String { self.to_string() }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for Result<T, String> {
+    /// Nested Result is tagged as an object. The main case
+    /// (handler that returns `Result<T, String>` directly)
+    /// is handled in the async wrapper, NOT here.
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        match self {
+            Ok(v) => serde_json::json!({ "Ok": v.__to_fitz_json() }),
+            Err(e) => serde_json::json!({ "Err": e }),
+        }
+    }
+}
+
+// FromFitzJson for primitives
+impl __FromFitzJson for i64 {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_i64()
+            .ok_or_else(|| format!("expected Int, got {}", __json_shape(json)))
+    }
+}
+impl __FromFitzJson for f64 {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_f64()
+            .ok_or_else(|| format!("expected Float, got {}", __json_shape(json)))
+    }
+}
+impl __FromFitzJson for String {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("expected Str, got {}", __json_shape(json)))
+    }
+}
+impl __FromFitzJson for bool {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_bool()
+            .ok_or_else(|| format!("expected Bool, got {}", __json_shape(json)))
+    }
+}
+
+impl<T: __FromFitzJson> __FromFitzJson for Option<T> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        if json.is_null() {
+            Ok(None)
+        } else {
+            T::__from_fitz_json(json).map(Some)
+        }
+    }
+}
+
+impl<T: __FromFitzJson> __FromFitzJson for std::sync::Arc<std::sync::Mutex<T>> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        T::__from_fitz_json(json).map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)))
+    }
+}
+
+/// Mini-batch UC — `List<T>` body deserialization from JSON
+/// Array.
+impl<T: __FromFitzJson> __FromFitzJson for Vec<T> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let arr = json
+            .as_array()
+            .ok_or_else(|| format!("expected Array, got {}", __json_shape(json)))?;
+        arr.iter()
+            .map(|v| T::__from_fitz_json(v))
+            .collect()
+    }
+}
+
+/// Mini-batch UC — `Map<K, V>` body deserialization from
+/// JSON Object. JSON Object keys are always `String`, so for
+/// `K` different from `String` we parse the key from the
+/// string. Enables the canonical urlencoded case: `Map<Str,
+/// Str>` with an Object `{"k": "v"}` from
+/// `__parse_urlencoded`.
+impl<K: __MapKeyFromStr, V: __FromFitzJson> __FromFitzJson for Vec<(K, V)> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let obj = json
+            .as_object()
+            .ok_or_else(|| format!("expected Object, got {}", __json_shape(json)))?;
+        let mut out = Vec::with_capacity(obj.len());
+        for (k_str, v) in obj.iter() {
+            let k = K::__from_map_key(k_str)?;
+            let v = V::__from_fitz_json(v)?;
+            out.push((k, v));
+        }
+        Ok(out)
+    }
+}
+
+/// Parsing of a Map key from the JSON Object string. Mirror
+/// of `__MapKey` (which goes the other way).
+trait __MapKeyFromStr: Sized {
+    fn __from_map_key(s: &str) -> Result<Self, String>;
+}
+impl __MapKeyFromStr for String {
+    fn __from_map_key(s: &str) -> Result<Self, String> { Ok(s.to_string()) }
+}
+impl __MapKeyFromStr for i64 {
+    fn __from_map_key(s: &str) -> Result<Self, String> {
+        s.parse::<i64>()
+            .map_err(|_| format!("expected Int in Map key, got '{}'", s))
+    }
+}
+impl __MapKeyFromStr for f64 {
+    fn __from_map_key(s: &str) -> Result<Self, String> {
+        s.parse::<f64>()
+            .map_err(|_| format!("expected Float in Map key, got '{}'", s))
+    }
+}
+impl __MapKeyFromStr for bool {
+    fn __from_map_key(s: &str) -> Result<Self, String> {
+        s.parse::<bool>()
+            .map_err(|_| format!("expected Bool in Map key, got '{}'", s))
+    }
+}
+
+fn __json_shape(json: &serde_json::Value) -> &'static str {
+    match json {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "Bool",
+        serde_json::Value::Number(_) => "Number",
+        serde_json::Value::String(_) => "Str",
+        serde_json::Value::Array(_) => "Array",
+        serde_json::Value::Object(_) => "Object",
+    }
+}
+
+"#;
+
+/// HTTP prelude: the HTTP-domain types (`Request`/`Response`/
+/// `File`) with their `Display`/`__ToFitzJson`/`__FromFitzJson`
+/// impls, plus the axum glue (`__apply_cors_and_respond`), the
+/// urlencoded/multipart parsers, and the panic helper. The JSON
+/// serialization core (the two traits, the primitive/container
+/// impls, the map-key helpers and `__json_shape`) lives in
+/// `JSON_SERIALIZE_PRELUDE`, which is emitted immediately before
+/// this one whenever HTTP is active. The impls specific to each
+/// `type Foo` are emitted by `gen_type_http_impls`.
+const HTTP_RUNTIME_PRELUDE: &str = r#"// --- 5b.6: HTTP runtime (domain types + axum glue) ---
 
 /// Custom status codes: response builder with status + JSON
 /// body. Produced by `return <status> { ... }` inside a
@@ -33698,227 +34138,6 @@ pub(crate) fn __parse_multipart(bytes: &[u8], boundary: &str) -> Result<serde_js
         map.insert(name, entry);
     }
     Ok(serde_json::Value::Object(map))
-}
-
-impl __ToFitzJson for i64 {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        serde_json::Value::from(*self)
-    }
-}
-impl __ToFitzJson for f64 {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        // R6 (v0.10.14) — parity with the runtime
-        // (http.rs::value_to_json): serde_json does NOT
-        // accept NaN/Inf. Before, the codegen silently
-        // converted them to `Value::Null` (the client
-        // received incorrect data without noticing). Now the
-        // best last thing we can do on this path is to
-        // serialize the value as a String with the same
-        // runtime format ("inf", "-inf", "NaN") — the client
-        // sees the textual representation and can detect the
-        // anomaly, instead of the silent null. For stronger
-        // validation, R6 also adds checks in the evaluator's
-        // Float arithmetic (`/`/`*`) that detect
-        // overflow/NaN at the moment of generating them.
-        match serde_json::Number::from_f64(*self) {
-            Some(n) => serde_json::Value::Number(n),
-            None => serde_json::Value::String(format!("{}", self)),
-        }
-    }
-}
-impl __ToFitzJson for String {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        serde_json::Value::String(self.clone())
-    }
-}
-impl __ToFitzJson for bool {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        serde_json::Value::Bool(*self)
-    }
-}
-impl __ToFitzJson for () {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
-}
-
-impl<T: __ToFitzJson> __ToFitzJson for Option<T> {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        match self {
-            Some(v) => v.__to_fitz_json(),
-            None => serde_json::Value::Null,
-        }
-    }
-}
-
-impl<T: __ToFitzJson> __ToFitzJson for std::sync::Arc<std::sync::Mutex<T>> {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        self.lock().unwrap().__to_fitz_json()
-    }
-}
-
-impl<T: __ToFitzJson> __ToFitzJson for Vec<T> {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        serde_json::Value::Array(self.iter().map(|v| v.__to_fitz_json()).collect())
-    }
-}
-
-impl<K: __MapKey, V: __ToFitzJson> __ToFitzJson for Vec<(K, V)> {
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        let mut obj = serde_json::Map::new();
-        for (k, v) in self.iter() {
-            obj.insert(k.__as_map_key(), v.__to_fitz_json());
-        }
-        serde_json::Value::Object(obj)
-    }
-}
-
-/// Map keys in JSON must be strings. For K = String, we use
-/// the key as-is; for other primitive types (Int/Bool), we
-/// convert with Display. A Map with nominal/nested keys is
-/// not serializable and rustc will flag it if the codegen
-/// tries.
-trait __MapKey {
-    fn __as_map_key(&self) -> String;
-}
-impl __MapKey for String {
-    fn __as_map_key(&self) -> String { self.clone() }
-}
-impl __MapKey for i64 {
-    fn __as_map_key(&self) -> String { self.to_string() }
-}
-impl __MapKey for f64 {
-    fn __as_map_key(&self) -> String { self.to_string() }
-}
-impl __MapKey for bool {
-    fn __as_map_key(&self) -> String { self.to_string() }
-}
-
-impl<T: __ToFitzJson> __ToFitzJson for Result<T, String> {
-    /// Nested Result is tagged as an object. The main case
-    /// (handler that returns `Result<T, String>` directly)
-    /// is handled in the async wrapper, NOT here.
-    fn __to_fitz_json(&self) -> serde_json::Value {
-        match self {
-            Ok(v) => serde_json::json!({ "Ok": v.__to_fitz_json() }),
-            Err(e) => serde_json::json!({ "Err": e }),
-        }
-    }
-}
-
-// FromFitzJson for primitives
-impl __FromFitzJson for i64 {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        json.as_i64()
-            .ok_or_else(|| format!("expected Int, got {}", __json_shape(json)))
-    }
-}
-impl __FromFitzJson for f64 {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        json.as_f64()
-            .ok_or_else(|| format!("expected Float, got {}", __json_shape(json)))
-    }
-}
-impl __FromFitzJson for String {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        json.as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("expected Str, got {}", __json_shape(json)))
-    }
-}
-impl __FromFitzJson for bool {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        json.as_bool()
-            .ok_or_else(|| format!("expected Bool, got {}", __json_shape(json)))
-    }
-}
-
-impl<T: __FromFitzJson> __FromFitzJson for Option<T> {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        if json.is_null() {
-            Ok(None)
-        } else {
-            T::__from_fitz_json(json).map(Some)
-        }
-    }
-}
-
-impl<T: __FromFitzJson> __FromFitzJson for std::sync::Arc<std::sync::Mutex<T>> {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        T::__from_fitz_json(json).map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)))
-    }
-}
-
-/// Mini-batch UC — `List<T>` body deserialization from JSON
-/// Array.
-impl<T: __FromFitzJson> __FromFitzJson for Vec<T> {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        let arr = json
-            .as_array()
-            .ok_or_else(|| format!("expected Array, got {}", __json_shape(json)))?;
-        arr.iter()
-            .map(|v| T::__from_fitz_json(v))
-            .collect()
-    }
-}
-
-/// Mini-batch UC — `Map<K, V>` body deserialization from
-/// JSON Object. JSON Object keys are always `String`, so for
-/// `K` different from `String` we parse the key from the
-/// string. Enables the canonical urlencoded case: `Map<Str,
-/// Str>` with an Object `{"k": "v"}` from
-/// `__parse_urlencoded`.
-impl<K: __MapKeyFromStr, V: __FromFitzJson> __FromFitzJson for Vec<(K, V)> {
-    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        let obj = json
-            .as_object()
-            .ok_or_else(|| format!("expected Object, got {}", __json_shape(json)))?;
-        let mut out = Vec::with_capacity(obj.len());
-        for (k_str, v) in obj.iter() {
-            let k = K::__from_map_key(k_str)?;
-            let v = V::__from_fitz_json(v)?;
-            out.push((k, v));
-        }
-        Ok(out)
-    }
-}
-
-/// Parsing of a Map key from the JSON Object string. Mirror
-/// of `__MapKey` (which goes the other way).
-trait __MapKeyFromStr: Sized {
-    fn __from_map_key(s: &str) -> Result<Self, String>;
-}
-impl __MapKeyFromStr for String {
-    fn __from_map_key(s: &str) -> Result<Self, String> { Ok(s.to_string()) }
-}
-impl __MapKeyFromStr for i64 {
-    fn __from_map_key(s: &str) -> Result<Self, String> {
-        s.parse::<i64>()
-            .map_err(|_| format!("expected Int in Map key, got '{}'", s))
-    }
-}
-impl __MapKeyFromStr for f64 {
-    fn __from_map_key(s: &str) -> Result<Self, String> {
-        s.parse::<f64>()
-            .map_err(|_| format!("expected Float in Map key, got '{}'", s))
-    }
-}
-impl __MapKeyFromStr for bool {
-    fn __from_map_key(s: &str) -> Result<Self, String> {
-        s.parse::<bool>()
-            .map_err(|_| format!("expected Bool in Map key, got '{}'", s))
-    }
-}
-
-fn __json_shape(json: &serde_json::Value) -> &'static str {
-    match json {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "Bool",
-        serde_json::Value::Number(_) => "Number",
-        serde_json::Value::String(_) => "Str",
-        serde_json::Value::Array(_) => "Array",
-        serde_json::Value::Object(_) => "Object",
-    }
 }
 
 "#;
@@ -39586,7 +39805,7 @@ async fn get_u(id: Int) -> Result<U> {
         // feature `time` (no axum).
         let toml = cargo_toml_for(
             "foo", false, true, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(toml.contains("tokio"), "expected tokio in deps");
         assert!(toml.contains("\"time\""), "expected feature `time`");
@@ -39597,7 +39816,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn cargo_toml_async_with_http_includes_tokio_time_and_axum() {
         let toml = cargo_toml_for(
             "foo", true, true, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
@@ -39608,7 +39827,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn cargo_toml_without_async_without_http_is_minimal() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
@@ -39628,7 +39847,7 @@ async fn get_u(id: Int) -> Result<U> {
         // tracing + tracing-subscriber + chrono + serde_json.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, true, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -39663,7 +39882,7 @@ async fn get_u(id: Int) -> Result<U> {
         // once (jobs_lines emits it; logging_lines skips it).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, true, true, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         let count_chrono = toml.matches("chrono = ").count();
         assert!(
@@ -39678,7 +39897,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn cargo_toml_without_logging_does_not_include_tracing() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             !toml.contains("tracing"),
@@ -39692,7 +39911,7 @@ async fn get_u(id: Int) -> Result<U> {
         // HTTP already brings serde_json; logging_lines must NOT duplicate.
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         let count = toml.matches("serde_json = ").count();
         assert!(
@@ -39714,7 +39933,7 @@ async fn get_u(id: Int) -> Result<U> {
         // if `uses_logging`).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, true, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -39737,7 +39956,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn cargo_toml_without_trace_metric_does_not_include_tracing_or_metrics() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(!toml.contains("tracing"), "should not include tracing");
         assert!(!toml.contains("metrics"), "should not include metrics");
@@ -39995,7 +40214,7 @@ async fn get_u(id: Int) -> Result<U> {
         // uses_prometheus_export).
         let cargo = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             !cargo.contains("metrics-exporter-prometheus"),
@@ -40043,7 +40262,7 @@ async fn get_u(id: Int) -> Result<U> {
         // uses_prometheus_export).
         let cargo = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false, true,
-            false, false,
+            false, false, false,
         );
         assert!(
             cargo.contains("metrics-exporter-prometheus"),
@@ -40183,7 +40402,7 @@ async fn get_u(id: Int) -> Result<U> {
         // 14th positional arg (uses_http_client) = true → reqwest in deps.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, true, false,
+            false, true, false, false,
         );
         assert!(
             toml.contains("reqwest = "),
@@ -40202,7 +40421,7 @@ async fn get_u(id: Int) -> Result<U> {
         // 14th positional arg = false → no reqwest.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             !toml.contains("reqwest"),
@@ -40262,7 +40481,7 @@ async fn get_u(id: Int) -> Result<U> {
         // 15th positional arg (uses_smtp) = true → lettre in deps.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, true,
+            false, false, true, false,
         );
         assert!(
             toml.contains("lettre = "),
@@ -40281,7 +40500,7 @@ async fn get_u(id: Int) -> Result<U> {
         // 15th positional arg = false → no lettre.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             !toml.contains("lettre"),
@@ -40296,7 +40515,7 @@ async fn get_u(id: Int) -> Result<U> {
         // `tokio::time::timeout` internally, so we need feature `time`.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, true,
+            false, false, true, false,
         );
         assert!(
             toml.contains("tokio = "),
@@ -40462,7 +40681,7 @@ async fn get_u(id: Int) -> Result<U> {
         // emitted `[dependencies]` section must include tokio.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, true, false,
+            false, true, false, false,
         );
         assert!(
             toml.contains("tokio = "),
@@ -40788,7 +41007,7 @@ async fn get_u(id: Int) -> Result<U> {
         // that emits the OTel + metrics + uuid + chrono + tracing deps.
         let cargo = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             cargo.contains("opentelemetry-otlp"),
@@ -40854,7 +41073,7 @@ async fn get_u(id: Int) -> Result<U> {
         // with `abi3-py310` + `auto-initialize`.
         let toml = cargo_toml_for(
             "foo", false, false, true, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(toml.contains("[dependencies]"), "expected deps section");
         assert!(toml.contains("pyo3"), "expected pyo3 in deps");
@@ -40874,7 +41093,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn cargo_toml_python_and_http_include_both() {
         let toml = cargo_toml_for(
             "foo", true, false, true, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
@@ -40885,7 +41104,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn cargo_toml_without_python_does_not_include_pyo3() {
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
@@ -42888,11 +43107,83 @@ async fn get_u(id: Int) -> Result<U> {
     }
 
     #[test]
-    fn to_json_without_http_is_rejected_in_codegen() {
-        // The serialization prelude is shared with the HTTP layer, so a
-        // pure-CLI build that uses `to_json` is rejected with a clear
-        // message (residual debt — `fitz run` has no such gate).
-        assert_err_contains("print(to_json(42))", &["to_json", "HTTP"]);
+    fn to_json_in_pure_cli_emits_ufcs_serialize() {
+        // Pure-CLI (no @get/@post/@ws) `to_json(x)` now compiles: the
+        // axum-free JSON serialization core (`JSON_SERIALIZE_PRELUDE`)
+        // is emitted via `uses_to_json`, WITHOUT the HTTP-domain prelude
+        // (no axum glue). Closes the "to_json requires HTTP" debt.
+        let rust = gen("let n = 42\nprint(to_json(n))").unwrap();
+        assert!(rust.contains("__to_fitz_json"));
+        assert!(rust.contains("serde_json::to_string"));
+        assert!(
+            rust.contains("JSON serialization core"),
+            "expected the JSON serialization prelude to be emitted"
+        );
+        assert!(
+            !rust.contains("__apply_cors_and_respond"),
+            "pure-CLI to_json must NOT pull in the axum HTTP-domain prelude"
+        );
+    }
+
+    #[test]
+    fn program_uses_to_json_detects_bare_call() {
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        // Bare-identifier call nested inside a fn body, `if`, etc.
+        let program =
+            parse(tokenize("fn f() {\n  if (true) { let s = to_json([1, 2, 3]) }\n}").unwrap())
+                .unwrap();
+        assert!(program_uses_to_json(&program));
+    }
+
+    #[test]
+    fn program_uses_to_json_does_not_trigger_without_call() {
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        let program = parse(tokenize("let x = 1\nprint(x)").unwrap()).unwrap();
+        assert!(!program_uses_to_json(&program));
+    }
+
+    #[test]
+    fn cargo_toml_emits_serde_json_when_uses_to_json_no_http() {
+        // uses_to_json (16th positional) = true, no HTTP → serde_json in
+        // deps with preserve_order, and NO axum/tokio.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, true,
+        );
+        assert!(
+            toml.contains("serde_json = { version = \"1\", features = [\"preserve_order\"] }"),
+            "expected serde_json with preserve_order, was: {}",
+            toml
+        );
+        assert!(
+            !toml.contains("axum"),
+            "should not include axum, was: {}",
+            toml
+        );
+        assert!(
+            !toml.contains("tokio"),
+            "should not include tokio, was: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn cargo_toml_uses_to_json_no_dup_serde_json_with_http() {
+        // has_http (2nd) = true AND uses_to_json (16th) = true →
+        // serde_json appears exactly once (http_lines brings it; the
+        // json_lines guard suppresses the duplicate).
+        let toml = cargo_toml_for(
+            "foo", true, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, true,
+        );
+        assert_eq!(
+            toml.matches("serde_json = ").count(),
+            1,
+            "serde_json should appear exactly once, was: {}",
+            toml
+        );
     }
 
     #[test]
@@ -46779,7 +47070,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn cargo_toml_with_jobs_includes_cron_and_chrono() {
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
@@ -46793,7 +47084,7 @@ async fn get_u(id: Int) -> Result<U> {
         // Cron-only mode needs `signal` for ctrl_c.
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             toml.contains("\"signal\""),
@@ -46811,7 +47102,7 @@ async fn get_u(id: Int) -> Result<U> {
         // `__fitz_shutdown_signal`, so it needs the `signal` feature.
         let toml = cargo_toml_for(
             "app", true, false, false, false, false, true, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(toml.contains("cron"));
         assert!(
@@ -47758,7 +48049,7 @@ async fn get_u(id: Int) -> Result<U> {
         // We use `cargo_toml_for` directly (parallel to existing tests).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, true, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             toml.contains("sha2 = \"0.10\""),
@@ -47813,7 +48104,7 @@ async fn get_u(id: Int) -> Result<U> {
     fn codegen_db_cargo_toml_without_db_does_not_add_deps() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             !toml.contains("sha2"),
@@ -49497,7 +49788,7 @@ async fn get_u(id: Int) -> Result<U> {
         // serde_json with preserve_order.
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, false, false, false, true, true, false,
-            false, false, false,
+            false, false, false, false,
         );
         assert!(
             toml.contains("serde_json"),
