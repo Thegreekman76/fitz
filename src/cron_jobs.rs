@@ -924,9 +924,25 @@ pub fn run_scheduler_only(registry: Arc<CronRegistry>) -> std::io::Result<()> {
     if !registry.has_jobs() {
         return Ok(());
     }
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    // Build our own runtime and delegate (backward-compat for any
+    // caller that does not already own a runtime).
+    let runtime = crate::http::build_server_runtime()?;
+    run_scheduler_on_runtime(&runtime, registry)
+}
+
+/// Same as [`run_scheduler_only`], but drives the scheduler on a
+/// caller-provided runtime instead of building its own. `run_file` uses
+/// this to share ONE runtime with the eval — so the DB connections the
+/// eval opened (for `@cron(store=db)`) stay bound to a live reactor when
+/// the scheduler runs its first query (`CREATE TABLE fitz_cron_jobs`).
+/// See `http::build_server_runtime`.
+pub fn run_scheduler_on_runtime(
+    runtime: &tokio::runtime::Runtime,
+    registry: Arc<CronRegistry>,
+) -> std::io::Result<()> {
+    if !registry.has_jobs() {
+        return Ok(());
+    }
     runtime.block_on(async move {
         spawn_cron_scheduler(registry);
         // We block until ctrl_c. When it arrives, we drop the

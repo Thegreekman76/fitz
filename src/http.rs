@@ -4486,7 +4486,46 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
 /// was F17's biggest piece of debt — it unblocks real HTTP
 /// parallelism (~300 fewer LoC in this file) and makes the evaluator
 /// reachable from axum without glue.
+/// Builds the shared multi-threaded tokio runtime for the interpreter's
+/// server + cron path. Single source of truth for the runtime config
+/// (16 MB worker stacks + `enable_all`).
+///
+/// `run_file` builds ONE of these up-front and drives the eval, the DB
+/// connections the eval opens, and `serve`/the scheduler all on it — so the
+/// TcpStream reactor stays alive across the whole `fitz run`. This fixes the
+/// "A Tokio 1.x context was found, but it is being shutdown" panic that hit
+/// `@cron(store=db)` when the eval ran on a separate `current_thread` runtime
+/// that was dropped before the scheduler started.
+pub fn build_server_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    // Worker stack size — the Fitz evaluator is tree-walking and
+    // `#[async_recursion]`, so each Fitz-level call consumes a
+    // sizable Rust stack frame. Rendering a real-world page (a data
+    // grid with nested rows, forms, and composed LiveComponents) can
+    // reach hundreds of nested evaluator frames, which overflows
+    // tokio's default 2 MB worker stack — especially on the WS path,
+    // where the handler wrapper leaves less headroom than a plain GET.
+    // Bump to 16 MB so non-trivial server apps render reliably.
+    const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_SIZE)
+        .build()
+}
+
 pub fn serve(
+    registry: HttpRegistry,
+    program: crate::ast::Program,
+    addr: std::net::SocketAddr,
+) -> std::io::Result<()> {
+    let runtime = build_server_runtime()?;
+    serve_on_runtime(&runtime, registry, program, addr)
+}
+
+/// Same as [`serve`], but drives the server on a caller-provided runtime
+/// instead of building its own. `run_file` uses this to share ONE runtime
+/// with the eval (see [`build_server_runtime`]).
+pub fn serve_on_runtime(
+    runtime: &tokio::runtime::Runtime,
     registry: HttpRegistry,
     program: crate::ast::Program,
     addr: std::net::SocketAddr,
@@ -4566,19 +4605,6 @@ pub fn serve(
     let draining_for_shutdown = registry.draining.clone();
     let shutdown_timeout_secs = resolved_config.shutdown_timeout_secs;
 
-    // Worker stack size — the Fitz evaluator is tree-walking and
-    // `#[async_recursion]`, so each Fitz-level call consumes a
-    // sizable Rust stack frame. Rendering a real-world page (a data
-    // grid with nested rows, forms, and composed LiveComponents) can
-    // reach hundreds of nested evaluator frames, which overflows
-    // tokio's default 2 MB worker stack — especially on the WS path,
-    // where the handler wrapper leaves less headroom than a plain GET.
-    // Bump to 16 MB so non-trivial server apps render reliably.
-    const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(WORKER_STACK_SIZE)
-        .build()?;
     runtime.block_on(async move {
         let router = build_router_with_asyncapi(&metas, registry, openapi_schema, asyncapi_schema);
         let listener = tokio::net::TcpListener::bind(addr).await?;

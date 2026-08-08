@@ -3337,8 +3337,29 @@ fn run_file(
     let cli_registry = std::sync::Arc::new(fitz::cli::CliRegistry::new());
     evaluator::install_cli_registry(std::sync::Arc::clone(&cli_registry));
     let program_for_server = program.clone();
+    // v0.37.3 — build ONE shared multi-thread runtime up-front and run the
+    // eval on it (instead of the eval building + dropping its own
+    // `current_thread` runtime via `eval_with_base_and_deps_sync`). The HTTP
+    // server / cron scheduler below reuse this SAME runtime, so any DB
+    // connection the eval opens (e.g. `let db = db.connect(...).await` used by
+    // `@cron(store=db)`) stays bound to a live reactor for the whole
+    // `fitz run`. Fixes the "A Tokio 1.x context was found, but it is being
+    // shutdown" panic that hit persistent cron in both cron-only and HTTP+cron
+    // modes. The eval future is polled on the current (main) thread by
+    // `block_on`, exactly as before — same stack, no behavior change.
+    let shared_runtime = match http::build_server_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error inicializando el runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
     let (eval_result, registry) = http::with_active_registry(|| {
-        evaluator::eval_with_base_and_deps_sync(program, base_dir, dep_registry)
+        shared_runtime.block_on(evaluator::eval_with_base_and_deps(
+            program,
+            base_dir,
+            dep_registry,
+        ))
     });
     evaluator::uninstall_cli_registry();
 
@@ -3368,7 +3389,8 @@ fn run_file(
                 std::process::exit(1);
             }
         };
-        if let Err(e) = http::serve(registry, program_for_server, addr) {
+        if let Err(e) = http::serve_on_runtime(&shared_runtime, registry, program_for_server, addr)
+        {
             eprintln!("Error del servidor HTTP: {}", e);
             std::process::exit(1);
         }
@@ -3379,7 +3401,7 @@ fn run_file(
         // (decision confirmed with the author: live blocking,
         // systemd-friendly mode).
         let cron_registry = registry.cron_registry.clone();
-        if let Err(e) = cron_jobs::run_scheduler_only(cron_registry) {
+        if let Err(e) = cron_jobs::run_scheduler_on_runtime(&shared_runtime, cron_registry) {
             eprintln!("Error del cron scheduler: {}", e);
             std::process::exit(1);
         }
