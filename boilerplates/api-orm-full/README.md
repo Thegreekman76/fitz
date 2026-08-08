@@ -423,14 +423,17 @@ en `src/models.fitz`:
 @table("comments") type Comment { ... } // 4to — companion Post + User
 ```
 
-## Deuda residual conocida
+## Sobre el schema
 
-Estos gaps están abiertos y se documentan en `docs/deudas-post-5b.md`
-del repo principal de Fitz:
-
-- **Migraciones automáticas**: `fitz db diff` / `fitz db migrate`
-  no existen todavía. El schema vive en `src/schema.fitz` como
-  DDL crudo idempotente (`CREATE TABLE IF NOT EXISTS`).
+Este boilerplate maneja el schema con `src/schema.fitz` como DDL crudo
+idempotente (`CREATE TABLE IF NOT EXISTS`), corrido al boot — la forma
+más simple para un showcase self-contained. Fitz **sí** tiene
+migraciones automáticas desde Fase 10.6: `fitz db diff` genera el SQL
+para sincronizar el schema declarado en tus `@table` types con la DB
+real, `fitz db migrate` las aplica, `fitz db check` es un drift-check
+para CI, y hay `rollback`/`new`/`status`/`history`/`squash`/`inspect`/
+`stamp` (`fitz db --help`). Para una app real preferí ese flujo sobre
+el `CREATE TABLE IF NOT EXISTS` — el cap M6.C6 del curso lo cubre.
 
 Los gaps cross-module destapados al construir este boilerplate
 (OpenAPI cross-module paths, WS Router cross-module, AsyncAPI

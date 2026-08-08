@@ -988,8 +988,11 @@ fn pre_scan_imported_auth_provider_lsp(
 }
 
 /// v0.37.3 — LSP variant of the codegen
-/// `resolve_role_field_across_module_imports`: follows a module's imports
-/// to find a sibling that declares `type <type_name> { ... role: Str }`.
+/// `resolve_role_field_across_module_imports`: follows a module's DIRECT
+/// imports to find a sibling that declares `type <type_name> { ... role:
+/// Str }`. Only direct imports: Fitz has no re-export, so the provider's
+/// `User` is always imported directly from its declaring module (a
+/// "transitive" `from A import User` where A only re-imported it errors).
 fn lsp_role_field_across_module_imports(
     module_program: &Program,
     type_name: &str,

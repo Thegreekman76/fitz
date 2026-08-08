@@ -1837,11 +1837,12 @@ fn pre_scan_imported_auth_provider(
     None
 }
 
-/// v0.37.4 — follows a module's imports to find a sibling that declares
-/// `type <type_name> { ... role: Str }`. Used to resolve `has_role_field`
-/// for an `@auth_provider` whose `User` type is imported into the provider's
-/// own module. Checker-path variant of the codegen
-/// `resolve_role_field_across_module_imports`.
+/// v0.37.4 — follows a module's DIRECT imports to find a sibling that
+/// declares `type <type_name> { ... role: Str }`. Used to resolve
+/// `has_role_field` for an `@auth_provider` whose `User` type is imported
+/// into the provider's own module. Checker-path variant of the codegen
+/// `resolve_role_field_across_module_imports`. Only direct imports — Fitz
+/// has no re-export, so the provider's `User` is always a direct import.
 fn role_field_across_module_imports_main(
     module_program: &ast::Program,
     type_name: &str,

@@ -9,6 +9,42 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.5] — 2026-08-08 — Gating del `use` de observability en módulos + drift de migraciones + `@admin` transitivo (moot)
+
+Tanda del inventario post-v0.37.4. Sin sintaxis nueva. Extensión VSCode: bump de
+versión (el LSP recibe la clarificación de los helpers de `@admin` cross-module,
+sin cambio de comportamiento).
+
+### Fixed
+
+- **Multi-módulo HTTP sin logging: `fitz build` rompía con E0432.** Un programa
+  con un handler HTTP en un módulo importado pero SIN ningún `log.X(...)` fallaba
+  con `unresolved import crate::__fitz_otel_*`/`__fitz_log_*`. v0.37.1 volvió la
+  observability opt-in (el crate root define esos símbolos solo con `uses_logging`),
+  pero el módulo emitía el `use` gated por `module_has_http` — mismatch. Fix: un
+  post-process strip en `generate_project` remueve los `use` de observability de los
+  módulos cuando `uses_logging` global es false (donde son garantizadamente
+  spurios).
+
+### Changed
+
+- **README de `api-orm-full`**: corregido el drift sobre migraciones — decía que
+  `fitz db diff`/`migrate` "no existen todavía", pero existen desde Fase 10.6
+  (`fitz db diff/migrate/status/new/rollback/check/history/squash/inspect/stamp`).
+  El boilerplate usa `schema.fitz` DDL como elección deliberada de showcase; el
+  README ahora apunta a `fitz db` + al cap M6.C6 del curso para el flujo real.
+- **Doc-comments de los helpers de resolución de `role` cross-module** (codegen +
+  LSP + checker): clarifican que solo siguen imports DIRECTOS — Fitz no tiene
+  re-export, así que el `User` de un `@auth_provider` es siempre un import directo
+  del módulo que lo declara (un `@admin` "transitivo" no puede darse).
+
+### Notes
+
+- El ítem "`@admin` transitivo" del inventario resultó MOOT: Fitz rechaza
+  `from A import User` cuando A solo re-importó `User` (no hay re-export), así que
+  el fix directo de v0.37.4 ya cubre todos los casos. Detalle en
+  `docs/deudas-post-5b.md`.
+
 ## [v0.37.4] — 2026-08-08 — Accessors `DbRow` en el intérprete + `@admin`/`@requires` cross-module (parity `fitz run` ↔ `fitz build`)
 
 Dos gaps de paridad `fitz run` ↔ `fitz build` descubiertos al enriquecer el

@@ -3076,6 +3076,18 @@ canónicos.
 
 ---
 
+## 🟢 v0.37.5 — gating del `use` de observability en módulos + `@admin` transitivo (moot) + drift de migraciones (2026-08-08)
+
+Tanda de tres ítems surgidos del inventario post-v0.37.4.
+
+**(1) Bug del gating de observability en módulos (regresión de v0.37.1) — CERRADO.** Un programa multi-módulo con un handler HTTP en un módulo importado pero **sin ningún `log.X(...)`** fallaba `fitz build` con `E0432 unresolved import` sobre `crate::__fitz_otel_*` / `crate::__fitz_log_*`. Causa: v0.37.1 volvió la observability **opt-in** — el crate root emite los preludios (que DEFINEN esos símbolos) solo cuando `uses_logging` global (`emit_logging_prelude`/`emit_otel_prelude`, ambos gated por `self.uses_logging`), pero el módulo emitía `use crate::{__fitz_otel_*, __fitz_log_*}` gated por `module_has_http && main_observability_enabled` (sin requerir `uses_logging`). El `.rs` del módulo se genera durante `collect_imports`, **antes** de que el `uses_logging` global se conozca, así que no se puede gatear ahí. Fix: los dos bloques de `use` se definen como consts (`MODULE_OBSERVABILITY_OTEL_USE_BLOCK`/`_LOG_USE_BLOCK`) y, en `generate_project` justo después de `into_mod_files` (donde `uses_logging` global YA se conoce), un **post-process strip** los remueve cuando `!uses_logging`. Es sound: `uses_logging == false` significa que NINGÚN módulo loguea, así que todo `use` de observability es spurio. Test E2E `compile_e2e::observability_use_stripped_when_no_logging_multi_module_http_v0_37_5`.
+
+**(2) `@admin`/`@requires` con `User` importado transitivamente — MOOT (no aplica en Fitz).** Investigado: **Fitz no tiene re-export** — un módulo que hace `from models import User` NO re-exporta `User`, así que `from reexport import User` falla con *"module `reexport` does not export `User`"*. Por lo tanto un `@auth_provider` que retorna `Result<User>` DEBE importar `User` directamente del módulo que lo DECLARA (no hay path transitivo posible). El fix directo de v0.37.4 (seguir los imports directos del módulo del provider) ya cubre el 100% de los casos reales. Se clarificaron los doc-comments de los 3 helpers (`resolve_role_field_across_module_imports` en codegen, `lsp_role_field_across_module_imports` en LSP, `role_field_across_module_imports_main` en main.rs) notando "direct only — Fitz has no re-export". Sin cambio de código funcional.
+
+**(3) Drift del README de `api-orm-full` sobre migraciones — CERRADO.** El README decía "Migraciones automáticas: `fitz db diff`/`migrate` no existen todavía" — **stale**: `fitz db diff/migrate/status/new/rollback/check/history/squash/inspect/stamp` existen desde Fase 10.6 (`fitz db --help` lo confirma; el cap M6.C6 del curso los documenta). El README se corrigió: el boilerplate usa `schema.fitz` DDL idempotente como elección deliberada para un showcase self-contained, y apunta a `fitz db` + M6.C6 para el flujo real de migraciones.
+
+---
+
 ## 🟢 v0.37.4 — parity de query-row en el intérprete + `@admin`/`@requires` cross-module (2026-08-08)
 
 Dos gaps descubiertos al enriquecer el boilerplate `api-orm-full` con cron persistente (`@cron(store=db)` + endpoint `@admin GET /jobs` que lee `fitz_cron_runs`). Ambos son divergencias `fitz run` ↔ `fitz build` (el checker + el codegen alineaban, el intérprete o la detección cross-module estaban fuera de línea).

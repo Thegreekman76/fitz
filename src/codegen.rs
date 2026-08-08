@@ -395,6 +395,25 @@ pub fn generate_project(
         main_rs,
         mod_files: {
             let mut files = loader.into_mod_files();
+            // v0.37.5 — observability `use`-import gating. Modules emit
+            // `use crate::{__fitz_otel_*, __fitz_log_*, ...}` at gen time
+            // (during `collect_imports`, before the global `uses_logging`
+            // is known), gated by `module_has_http &&
+            // main_observability_enabled`. But the crate root DEFINES
+            // those symbols only when `uses_logging` (global). When no
+            // module or main calls `log.X(...)`, an HTTP program with a
+            // handler in an imported module emitted a spurious `use
+            // crate::__fitz_*` → E0432 unresolved import. `uses_logging ==
+            // false` means NO module logs, so every such `use` is
+            // spurious — strip them here now that we know the global flag.
+            if !uses_logging {
+                for f in files.iter_mut() {
+                    f.content = f
+                        .content
+                        .replace(MODULE_OBSERVABILITY_OTEL_USE_BLOCK, "")
+                        .replace(MODULE_OBSERVABILITY_LOG_USE_BLOCK, "");
+                }
+            }
             if uses_db {
                 // Phase 10.1.c — embed the pure Postgres driver as a
                 // module of the generated crate. Source embedded in
@@ -5389,6 +5408,13 @@ fn pre_scan_imported_auth_provider_for_loader(
 /// `pre_scan_imported_auth_provider_for_loader`). Silent-fallback on any
 /// unreadable / unparseable import (parallel to the pre-scan itself); the
 /// real module loader surfaces genuine errors.
+///
+/// Only the provider module's DIRECT imports are scanned: Fitz has no
+/// re-export (a module that merely `from models import User` does NOT
+/// re-export `User`), so a `@auth_provider` that returns `User` must import
+/// `User` directly from the module that DECLARES it. A "transitive" path
+/// (provider imports A, A re-imports `User` from `models`) cannot arise —
+/// `from A import User` errors with "module `A` does not export `User`".
 fn resolve_role_field_across_module_imports(
     module_program: &Program,
     type_name: &str,
@@ -5600,6 +5626,24 @@ fn resolve_loader_import_file_path(
 /// referenced modules are installed in the ctx so that expressions
 /// can resolve `<ns>.<field>` and direct names to cross-module items.
 ///
+/// v0.37.5 — exact `use crate::{...}` blocks a module emits to import the
+/// crate-root observability symbols. Defined as consts so the emit site
+/// (`generate_module_rs_with_bindings`) and the strip pass
+/// (`generate_project`, after `into_mod_files`) stay in lock-step: when
+/// the global `uses_logging` is false the crate root defines none of
+/// these, and the strip removes the (then spurious) `use`s to avoid
+/// E0432. Must match byte-for-byte what `emit_logging_prelude` /
+/// `emit_otel_prelude` gate on.
+const MODULE_OBSERVABILITY_OTEL_USE_BLOCK: &str = "#[allow(unused_imports)]\n\
+     use crate::{__fitz_otel_is_enabled, __fitz_otel_tracer};\n\
+     #[allow(unused_imports)]\n\
+     use crate::__FitzSpanContext;\n\
+     #[allow(unused_imports)]\n\
+     use crate::__fitz_with_span_context;\n";
+
+const MODULE_OBSERVABILITY_LOG_USE_BLOCK: &str = "#[allow(unused_imports)]\n\
+     use crate::{__fitz_log_info, __fitz_log_warn, __fitz_log_error, __fitz_log_debug, __FitzLogValue};\n\n";
+
 /// `loaded_modules`: slice of already loaded modules, in the same
 /// order as the `ModuleLoader`. The `module_index` values in
 /// `local_bindings` are indices into this slice.
@@ -6027,31 +6071,33 @@ fn generate_module_rs_with_bindings(
     //       constructors. This is independent of observability_*
     //       — user code stays as-is.
     //
-    // Main always emits the corresponding preludes when there is HTTP
-    // or logging anywhere (transitive `uses_logging = has_http ||
-    // program_uses_logging || ...` at line 216-218 and 5135-5137).
-    // Without these `use crate::{...}` lines, modules fail to compile
-    // cross-module with E0425/E0433. Pattern parallel to W11/W16.
+    // v0.37.1 made observability OPT-IN: the crate root emits the log
+    // + OTel preludes (which DEFINE these symbols) only when
+    // `uses_logging` (global — main or any module calls `log.X(...)`),
+    // NOT for every HTTP program (see `emit_logging_prelude` /
+    // `emit_otel_prelude`, both gated by `self.uses_logging`). But the
+    // module `.rs` is generated during `collect_imports`, BEFORE the
+    // global `uses_logging` is known, so we can't gate these `use`s on
+    // it here. We emit them under the historical `module_has_http &&
+    // main_observability_enabled` condition and — when the global
+    // `uses_logging` turns out to be false — STRIP them in a post-pass
+    // over the module contents (see `generate_project`, right after
+    // `into_mod_files`). That's sound because `uses_logging == false`
+    // means NO module logs, so every observability `use` here is
+    // spurious. Without the strip, an HTTP program with a handler in an
+    // imported module but no `log.X(...)` anywhere failed with E0432
+    // (the `use` references symbols the crate root never defined).
+    // Pattern parallel to W11/W16.
     let module_uses_logging = program_uses_logging(program);
     if module_has_http && main_observability_enabled {
-        ctx.emit(
-            "#[allow(unused_imports)]\n\
-             use crate::{__fitz_otel_is_enabled, __fitz_otel_tracer};\n\
-             #[allow(unused_imports)]\n\
-             use crate::__FitzSpanContext;\n\
-             #[allow(unused_imports)]\n\
-             use crate::__fitz_with_span_context;\n",
-        );
+        ctx.emit(MODULE_OBSERVABILITY_OTEL_USE_BLOCK);
     }
     if (module_has_http && main_observability_enabled) || module_uses_logging {
         // Always import the four log fns + __FitzLogValue. Even if
         // the module only uses one level (`log.info` for example),
         // the unused ones are tolerated by `#[allow(unused_imports)]`.
         // This keeps the emission shape simple and stable.
-        ctx.emit(
-            "#[allow(unused_imports)]\n\
-             use crate::{__fitz_log_info, __fitz_log_warn, __fitz_log_error, __fitz_log_debug, __FitzLogValue};\n\n",
-        );
+        ctx.emit(MODULE_OBSERVABILITY_LOG_USE_BLOCK);
     }
 
     // W10 (v0.10.7) — if the module declares `@ws("/path")`, import

@@ -13701,6 +13701,32 @@ fn build_expect_ok_multi(
 }
 
 #[test]
+fn observability_use_stripped_when_no_logging_multi_module_http_v0_37_5() {
+    // v0.37.5 — a multi-module HTTP program with a handler in an imported
+    // module but NO `log.X(...)` anywhere used to fail `fitz build` with
+    // E0432: the module emitted `use crate::{__fitz_otel_*, __fitz_log_*}`
+    // (gated by module_has_http && main_observability_enabled) but the
+    // crate root DEFINES those symbols only when `uses_logging` (the v0.37.1
+    // observability opt-in). With no logging anywhere the strip pass removes
+    // the (spurious) `use`s so the module compiles.
+    let worker_src = "\
+@get(\"/ping\")\n\
+fn ping() -> Str => \"pong\"\n\
+";
+    let main_src = "\
+import worker\n\
+\n\
+@server(43972)\n\
+fn main() => 0\n\
+";
+    build_expect_ok_multi(
+        "observability_no_logging_multi_module_v0_37_5",
+        main_src,
+        &[("worker.fitz", worker_src)],
+    );
+}
+
+#[test]
 fn admin_cross_module_role_field_via_provider_module_imports_v0_37_3() {
     // v0.37.3 — `@admin`/`@requires` require the `@auth_provider`'s User
     // type to have a `role: Str` field. Before this fix, the cross-module
