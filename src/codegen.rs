@@ -10353,20 +10353,47 @@ impl<'a> CodegenCtx<'a> {
         // b19_derived case) leaves that set empty — that `db` is emitted
         // as a normal main local and reached as a bare `db` (mechanism
         // 2), untouched by this loop.
+        // Residual A fix (2026-08-07) — the materialized local carries a
+        // MODULE-QUALIFIED unique name (`__fitz_cron_store_<mod>_<var>`),
+        // not the bare `var`. Two imported modules can both hoist a
+        // `db` store (`crate::alpha::__FITZ_STATE_DB` and
+        // `crate::beta::__FITZ_STATE_DB`); a flat `let db = ...` for each
+        // shadowed the first, so both crons' `(&db).into_store()` bound
+        // to the LAST `db` (beta's) — alpha's cron silently ran on
+        // beta's connection. Unique names remove the shadowing; the
+        // per-job `store_field` below resolves to the right one via
+        // `(module_path, store_var)`.
         let mut xmod_hoisted = self.xmod_cron_store_hoists.clone();
         xmod_hoisted.sort();
         xmod_hoisted.dedup();
+        let hoist_set: std::collections::HashSet<(String, String)> =
+            xmod_hoisted.iter().cloned().collect();
         for (mod_name, var) in &xmod_hoisted {
             let static_name = state_var_static_name(var);
+            let local = format!("__fitz_cron_store_{}_{}", mod_name, var);
             self.emit(&format!(
                 "    crate::{mod_name}::__fitz_init_state_{var}().await;\n    \
-                 let {var} = crate::{mod_name}::{static_name}.get()\n        \
+                 let {local} = crate::{mod_name}::{static_name}.get()\n        \
                      .expect(\"cron store `{var}` no inicializada (bug del codegen)\").clone();\n",
                 mod_name = mod_name,
                 var = var,
                 static_name = static_name,
+                local = local,
             ));
         }
+        // Residual B (2026-08-07) — a `@cron(store=X)` in MAIN where `X`
+        // is imported from a module (`from mod import X`) is NOT
+        // supported, but it is *safe by failure*: the natural
+        // (unannotated) case fails loud at the module loader
+        // (`collect_module_sigs`: "module let `X`: RHS is not a literal")
+        // because a `db.connect(...).await` module-level `let` that no
+        // cron in ITS OWN module references is rejected; the annotated
+        // case fails at rustc (async accessor / E0599). Either way it is
+        // a compile-time error, never a silent wrong connection — so no
+        // codegen guard is needed here. Full support (materializing an
+        // imported store from main) would need a loader-ordering
+        // refactor and is deferred (rare topology; see
+        // `docs/deudas-post-5b.md`).
         for job in &jobs {
             let escaped_expr = rust_str_literal(&job.expr);
             let escaped_name = rust_str_literal(&job.fn_name);
@@ -10406,7 +10433,23 @@ impl<'a> CodegenCtx<'a> {
                     // String>` (case `let db = db.connect(...).await`
                     // without `?` top-level). Clear panic if the
                     // conn failed.
-                    Some(var) => format!("(&{}).into_store()", var),
+                    //
+                    // Residual A fix — for a cross-module co-located
+                    // hoist, reference the module-qualified unique local
+                    // (`__fitz_cron_store_<mod>_<var>`) so alpha's cron
+                    // gets alpha's connection, not the last-materialized
+                    // one. Main state vars (mechanism 1) and the bare
+                    // main local (mechanism 2 / b19_derived) keep the
+                    // bare `var` via the `_ =>` arm.
+                    Some(var) => {
+                        let name = match &job.module_path {
+                            Some(m) if hoist_set.contains(&(m.clone(), var.clone())) => {
+                                format!("__fitz_cron_store_{}_{}", m, var)
+                            }
+                            _ => var.clone(),
+                        };
+                        format!("(&{}).into_store()", name)
+                    }
                 };
                 format!(", store: {}", expr)
             } else {

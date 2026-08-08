@@ -13244,6 +13244,138 @@ fn main() => 0\n\
     );
 }
 
+#[test]
+fn cron_store_two_modules_same_name_use_distinct_locals_b20_residual_a() {
+    // B20 residual A — two imported modules each with `let db =
+    // db.connect(...).await` + `@cron(store=db)`. Pre-fix,
+    // `emit_cron_job_spawns` materialized `let db = crate::alpha::...`
+    // then `let db = crate::beta::...` (shadowing) so BOTH crons bound
+    // to beta's connection — alpha's cron silently ran on the wrong DB.
+    // Fix: module-qualified unique locals (`__fitz_cron_store_<mod>_db`)
+    // + per-job `(module_path, store_var)`-keyed store reference. This
+    // test builds the binary and inspects main.rs: each module's cron
+    // must reference ITS OWN unique local.
+    let stem = "cron_two_mod_same_store_b20a";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("alpha.fitz"),
+        "let db = db.connect(\"postgres://a@h/a\").await\n\
+         \n\
+         @cron(\"*/30 * * * * *\", store=db)\n\
+         async fn a() -> Null {\n  return null\n}\n",
+    )
+    .expect("escribir alpha.fitz");
+    std::fs::write(
+        dir.join("beta.fitz"),
+        "let db = db.connect(\"postgres://b@h/b\").await\n\
+         \n\
+         @cron(\"*/30 * * * * *\", store=db)\n\
+         async fn b() -> Null {\n  return null\n}\n",
+    )
+    .expect("escribir beta.fitz");
+    let main_src = "\
+import alpha\n\
+import beta\n\
+\n\
+@server(43928)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (B20 residual A):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Static inspection: main.rs must materialize TWO distinct locals
+    // and each job's store must reference the matching one.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let content = std::fs::read_to_string(&main_rs).expect("read main.rs");
+    assert!(
+        content.contains("let __fitz_cron_store_alpha_db = crate::alpha::__FITZ_STATE_DB"),
+        "main.rs must materialize alpha's store as a unique local: {}",
+        content
+    );
+    assert!(
+        content.contains("let __fitz_cron_store_beta_db = crate::beta::__FITZ_STATE_DB"),
+        "main.rs must materialize beta's store as a unique local: {}",
+        content
+    );
+    assert!(
+        content.contains("(&__fitz_cron_store_alpha_db).into_store()")
+            && content.contains("(&__fitz_cron_store_beta_db).into_store()"),
+        "each cron's store must reference ITS OWN unique local (no shadowing): {}",
+        content
+    );
+    // And there must be NO flat `let db = ...` for the cross-module
+    // stores (that was the shadowing bug).
+    assert!(
+        !content.contains("let db = crate::alpha::__FITZ_STATE_DB"),
+        "the flat shadowing `let db = ...` must be gone: {}",
+        content
+    );
+}
+
+#[test]
+fn cron_store_imported_binding_in_main_fails_loud_b20_residual_b() {
+    // B20 residual B — a `@cron(store=X)` in MAIN where `X` is imported
+    // from a module (`from mod import X`) is not supported, but it is
+    // SAFE BY FAILURE: it fails loud at compile time (never a silent
+    // wrong connection). The natural (unannotated) case is caught by the
+    // module loader (`collect_module_sigs`: "RHS is not a literal");
+    // annotated variants fail at rustc. This test guards that the case
+    // keeps failing loud and names the offending binding — full support
+    // for materializing an imported store from main is deferred.
+    let stem = "cron_store_imported_in_main_b20b";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("conns.fitz"),
+        "let shared_db = db.connect(\"postgres://x@h/d\").await\n",
+    )
+    .expect("escribir conns.fitz");
+    let main_src = "\
+from conns import shared_db\n\
+\n\
+@cron(\"*/30 * * * * *\", store=shared_db)\n\
+async fn tick() -> Null {\n  return null\n}\n\
+\n\
+@server(43930)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        !output.status.success(),
+        "fitz build should FAIL for @cron(store=<imported>) in main (B20 residual B) — never a silent success"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("shared_db"),
+        "the compile-time failure should name the offending binding `shared_db`, stderr was: {}",
+        stderr
+    );
+}
+
 // ---------------------------------------------------------------------------
 // v0.19.0 Block 3.d — smoke E2E del `Response` built-in (paridad fitz build
 // vs. fitz run validada bit-a-bit a mano en el desarrollo del bloque).

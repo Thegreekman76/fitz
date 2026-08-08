@@ -452,19 +452,21 @@ El runtime/codegen desempaca automáticamente vía el trait
 al arrancar el scheduler. Equivale al `expect()` que escribirías
 a mano.
 
-> **Limitación conocida** — `fitz run` en modo **cron-only**
-> (con `@cron(..., store=db)` y SIN `@server` ni handlers HTTP)
-> tiene un bug heredado del runtime tokio `current_thread` del
-> intérprete: la conn DB queda atada al runtime del evaluator y
-> el scheduler la pierde al pasar a `multi_thread`.
+> **Limitación conocida** — `fitz run` con `@cron(..., store=db)`
+> (persistencia del scheduler) tiene un bug heredado del flujo de
+> runtimes tokio del intérprete: el eval corre en un runtime
+> `current_thread` que abre la conexión DB; ese runtime se dropea
+> al terminar el eval, y el scheduler —en un runtime
+> `multi_thread` posterior— pierde el reactor de I/O de esa
+> conexión (*"A Tokio 1.x context was found, but it is being
+> shutdown"* al crear `fitz_cron_jobs`). **Afecta cron-only Y
+> HTTP+cron** — agregar un handler HTTP NO lo evita (`serve`
+> también construye el segundo runtime).
 >
-> **Workarounds**:
->
-> 1. Usar `fitz build` (el binario nativo arma su propio runtime
->    multi-thread limpio).
-> 2. Agregar al menos un handler HTTP trivial (como el `/health`
->    de arriba) que mantiene el runtime vivo durante el
->    desarrollo.
+> **Workaround: usar `fitz build`** — el binario nativo arma un
+> único runtime `#[tokio::main]` que vive todo el proceso. El fix
+> del intérprete (unificar los runtimes) es un refactor moderado
+> que queda como sub-paso dedicado.
 
 ---
 
@@ -543,8 +545,8 @@ docker-compose extra.
 | UI dashboard tipo Sidekiq Web | ❌ | ❌ |
 | Coordinación multi-instancia (locks distribuidos) | ❌ | ❌ |
 
-*Workaround documentado: agregar un handler HTTP trivial
-(`/health`) para mantener el runtime tokio vivo. Ver Paso 6.
+*Workaround documentado: usar `fitz build` (el binario nativo
+arma un único runtime tokio que vive todo el proceso). Ver Paso 6.
 
 ---
 
@@ -649,21 +651,16 @@ Verificá:
 
 ### `fitz run` con `store=db` pánico al arrancar el scheduler
 
-Bug conocido del runtime tokio `current_thread` del intérprete
-en modo cron-only. **Workarounds**:
+Bug conocido del flujo de runtimes tokio del intérprete: el eval
+abre la conexión DB en un runtime que se dropea antes de que el
+scheduler (en otro runtime posterior) haga su primera query.
+**Afecta cron-only Y HTTP+cron por igual** — agregar un handler
+HTTP NO lo evita.
 
-1. Compilar con `fitz build` y correr el binario.
-2. Agregar un handler HTTP trivial al programa:
-
-   ```fitz
-   @get("/health")
-   fn health() -> Str { return "ok" }
-
-   @server(3000, docs=false)
-   fn main() => 0
-   ```
-
-   Eso fuerza al runtime a multi-thread y el scheduler funciona.
+**Workaround: compilar con `fitz build` y correr el binario**
+(arma un único runtime `#[tokio::main]` que vive todo el proceso).
+El fix del intérprete (unificar los runtimes) queda como sub-paso
+dedicado.
 
 ### `fitz_cron_runs` se llena demasiado rápido
 

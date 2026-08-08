@@ -2148,11 +2148,19 @@ fn check_file(path: &PathBuf) {
 /// the race without serializing anything. No-op on the happy path
 /// (the first attempt succeeds).
 fn copy_binary_with_retry(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    // os error 32 = ERROR_SHARING_VIOLATION on Windows. On other
-    // platforms this code never matches, so the loop just returns the
-    // first result.
+    // os error 32 = ERROR_SHARING_VIOLATION on Windows: the AV /
+    // indexer / linker can hold a handle on the freshly-linked `.exe`
+    // for a moment after the build finishes. On other platforms this
+    // code never matches, so the loop returns the first result.
+    //
+    // Retry window widened (2026-08-07) from 8 attempts × linear 25ms
+    // (~700ms) to 20 attempts × exponential-capped backoff (50→400ms,
+    // ~6.7s worst case) because ~700ms wasn't enough on machines with
+    // an aggressive real-time AV — it left `compile_e2e` tests flaky
+    // (`os error 32`) even with `--test-threads=1`. The sleeps only
+    // happen on a SHARING_VIOLATION retry; the happy path is instant.
     const SHARING_VIOLATION: i32 = 32;
-    const MAX_ATTEMPTS: u32 = 8;
+    const MAX_ATTEMPTS: u32 = 20;
 
     let mut attempt = 0;
     loop {
@@ -2160,8 +2168,10 @@ fn copy_binary_with_retry(src: &std::path::Path, dst: &std::path::Path) -> std::
         match fs::copy(src, dst) {
             Ok(_) => return Ok(()),
             Err(e) if attempt < MAX_ATTEMPTS && e.raw_os_error() == Some(SHARING_VIOLATION) => {
-                // Backoff: 25ms, 50ms, 75ms, ... capped by MAX_ATTEMPTS.
-                std::thread::sleep(std::time::Duration::from_millis(25 * attempt as u64));
+                // Exponential backoff capped at 400ms: 50, 100, 200,
+                // 400, 400, ... (the exponent is clamped to 3).
+                let backoff_ms = 50u64 * 2u64.pow((attempt - 1).min(3));
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
             }
             Err(e) => return Err(e),
         }

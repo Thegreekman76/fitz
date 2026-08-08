@@ -9,6 +9,44 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.2] — 2026-08-07 — B20 residual A (cron store shadowing) + file-lock retry widening
+
+Tanda de quick wins post-v0.37.1. `fitz run` sin cambios; sin sintaxis nueva.
+Extensión VSCode sin cambios (solo bump de versión).
+
+### Fixed
+
+- **`@cron(store=X)` con el mismo nombre de store en dos módulos importados
+  (B20 residual A).** Dos módulos importados que cada uno declaran
+  `let db = db.connect(...).await` + `@cron(store=db)` emitían un
+  `let db = crate::alpha::...` seguido de `let db = crate::beta::...` en el mismo
+  scope de `main()` — el segundo shadoweaba al primero, así que AMBOS crons
+  corrían contra la conexión de beta (bug silencioso de conexión equivocada).
+  Ahora cada store hoisteado usa un local module-qualified único
+  (`__fitz_cron_store_<mod>_<var>`) y el `store` de cada job resuelve por
+  `(module_path, store_var)`. El caso canónico (un módulo / una conexión) no
+  cambia.
+
+### Changed
+
+- **`copy_binary_with_retry` — ventana de retry ampliada.** `fitz build` copia el
+  binario recién linkeado a destino con retry ante `os error 32`
+  (ERROR_SHARING_VIOLATION en Windows: el AV/indexer retiene el handle del
+  `.exe`). La ventana pasó de 8 intentos × backoff lineal 25ms (~700ms) a 20
+  intentos × backoff exponencial capeado (50→400ms, ~6.7s worst case). Los sleeps
+  solo ocurren en un retry; el happy path es instantáneo. Estabiliza dos tests de
+  `compile_e2e` que flakeaban en máquinas con AV agresivo.
+
+### Notes
+
+- **`@cron(store=X)` en main con `X` importado (B20 residual B)** falla loud en
+  compile-time (nunca conexión silenciosa equivocada); soporte completo diferido
+  (topología rara). Test guard agregado.
+- **`fitz run` de cron+store persistente** sigue con su limitación de lifecycle
+  del runtime tokio del intérprete (diagnóstico completo mapeado esta tanda; fix =
+  refactor moderado de unificación de runtimes, diferido a sub-paso dedicado).
+- **L2 (`with_temp_output` helper)** ya estaba hecho — deuda stale marcada CERRADA.
+
 ## [v0.37.1] — 2026-08-07 — `@cron(store=X)` cross-module + `import_root` fallback en `fitz build` + observability opt-in
 
 Tres cierres de deuda del codegen (`fitz build`), sin sintaxis nueva. `fitz run`
