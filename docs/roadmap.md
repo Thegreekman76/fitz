@@ -8079,10 +8079,13 @@ que tiene gaps obvios. Tiers definidos en `docs/curso-plan.md` →
       de cada kwarg + defaults + backoffs aceptados + schema
       DDL + queries de visibility manual con `psql` + notas
       sobre el binding `Result<DbConn>` top-level. Limitación
-      conocida documentada: `fitz run` con `store=db` tiene bug
+      conocida documentada: `fitz run` con `store=db` tenía un bug
       del flujo de runtimes tokio del intérprete (afecta cron-only
       Y HTTP+cron; workaround: `fitz build` — sumar un handler
-      HTTP NO lo evita). Sub-sección
+      HTTP NO lo evita). **[CERRADO en v0.37.3: `run_file` unifica
+      el eval + serve/scheduler en un único runtime compartido; el
+      bug de lifecycle ya no existe y `fitz run` tiene paridad con
+      `fitz build`.]** Sub-sección
       "Qué no está en el MVP" reescrita: salen los 3 items
       cerrados; entra `@background` con persistencia + retry
       (diferido a iter3). `examples/guide/30b-cron-persistente.

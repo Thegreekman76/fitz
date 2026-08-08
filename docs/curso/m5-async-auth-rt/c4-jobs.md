@@ -452,21 +452,15 @@ El runtime/codegen desempaca automáticamente vía el trait
 al arrancar el scheduler. Equivale al `expect()` que escribirías
 a mano.
 
-> **Limitación conocida** — `fitz run` con `@cron(..., store=db)`
-> (persistencia del scheduler) tiene un bug heredado del flujo de
-> runtimes tokio del intérprete: el eval corre en un runtime
-> `current_thread` que abre la conexión DB; ese runtime se dropea
-> al terminar el eval, y el scheduler —en un runtime
-> `multi_thread` posterior— pierde el reactor de I/O de esa
-> conexión (*"A Tokio 1.x context was found, but it is being
-> shutdown"* al crear `fitz_cron_jobs`). **Afecta cron-only Y
-> HTTP+cron** — agregar un handler HTTP NO lo evita (`serve`
-> también construye el segundo runtime).
->
-> **Workaround: usar `fitz build`** — el binario nativo arma un
-> único runtime `#[tokio::main]` que vive todo el proceso. El fix
-> del intérprete (unificar los runtimes) es un refactor moderado
-> que queda como sub-paso dedicado.
+> **Paridad `fitz run` ↔ `fitz build` (desde v0.37.3)** —
+> `@cron(..., store=db)` funciona igual con `fitz run` que con
+> `fitz build`, en ambos modos (cron-only y HTTP+cron). El
+> intérprete corre el eval y el scheduler/servidor sobre un único
+> runtime tokio compartido, así que la conexión DB que abrís al
+> boot sigue viva cuando el scheduler crea las tablas. (Antes de
+> v0.37.3 había un bug de lifecycle del runtime del intérprete que
+> dropeaba la conexión antes de arrancar el scheduler y solo dejaba
+> correr `store=db` vía `fitz build` — ya está cerrado.)
 
 ---
 
@@ -538,15 +532,12 @@ docker-compose extra.
 | `@cron(..., tz="IANA/Name")` | ✅ | ✅ |
 | `@cron(..., retry={...})` con 3 backoffs | ✅ | ✅ |
 | `@cron(..., catch_up=true)` | ✅ | ✅ |
-| `@cron(..., store=db)` con Postgres | ⚠ requiere `@server`* | ✅ |
+| `@cron(..., store=db)` con Postgres | ✅ | ✅ |
 | `@background` con `tz`/`retry` | ✅ | ✅ |
 | `@background` con `store`/`catch_up` | ❌ iter3 | ❌ iter3 |
 | Tablas `fitz_cron_jobs`/`fitz_cron_runs` auto-create | ✅ | ✅ |
 | UI dashboard tipo Sidekiq Web | ❌ | ❌ |
 | Coordinación multi-instancia (locks distribuidos) | ❌ | ❌ |
-
-*Workaround documentado: usar `fitz build` (el binario nativo
-arma un único runtime tokio que vive todo el proceso). Ver Paso 6.
 
 ---
 
@@ -649,18 +640,14 @@ Verificá:
 4. Tu reloj de sistema está OK. El scheduler usa
    `chrono::Utc::now()` + el offset de `tz`.
 
-### `fitz run` con `store=db` pánico al arrancar el scheduler
+### `fitz run` con `store=db` — ¿anda?
 
-Bug conocido del flujo de runtimes tokio del intérprete: el eval
-abre la conexión DB en un runtime que se dropea antes de que el
-scheduler (en otro runtime posterior) haga su primera query.
-**Afecta cron-only Y HTTP+cron por igual** — agregar un handler
-HTTP NO lo evita.
-
-**Workaround: compilar con `fitz build` y correr el binario**
-(arma un único runtime `#[tokio::main]` que vive todo el proceso).
-El fix del intérprete (unificar los runtimes) queda como sub-paso
-dedicado.
+Sí, desde **v0.37.3**. Si estás en una versión anterior y ves un
+pánico al arrancar el scheduler (*"A Tokio 1.x context was found,
+but it is being shutdown"* al crear `fitz_cron_jobs`), es el bug
+de lifecycle del runtime del intérprete que se cerró en v0.37.3:
+actualizá `fitz` o, como puente, corré el programa con `fitz build`
+(el binario nativo nunca tuvo el problema).
 
 ### `fitz_cron_runs` se llena demasiado rápido
 

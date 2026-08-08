@@ -9,6 +9,51 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.3] — 2026-08-08 — `fitz run` con `@cron(store=db)` persistente (runtime tokio unificado del intérprete)
+
+Fix del intérprete (`fitz run`). Sin sintaxis nueva. `fitz build` sin cambios.
+Extensión VSCode sin cambios (solo bump de versión, sin rebuild del `.vsix`).
+
+### Fixed
+
+- **`fitz run` con `@cron(..., store=db)` persistente ahora funciona** — cierra la
+  limitación residual (a) de B20. Antes, un programa con `@cron(store=db)` +
+  `let db = db.connect(...).await` fallaba al arrancar el scheduler con
+  *"A Tokio 1.x context was found, but it is being shutdown"* al crear
+  `fitz_cron_jobs`. Afectaba por igual cron-only y HTTP+cron. `fitz build` (binario
+  nativo) nunca lo sufrió. **Root cause**: el intérprete construía dos runtimes
+  tokio en secuencia — uno `current_thread` para el eval (que abría el `TcpStream`
+  de Postgres y se dropeaba al terminar el eval) y otro `multi_thread` para
+  serve/scheduler; la primera query del cron manejaba el `TcpStream` atado al
+  reactor del runtime ya cerrado. **Fix**: `run_file` ahora construye UN runtime
+  `multi_thread` compartido up-front, corre el eval sobre él (`block_on` en el main
+  thread, mismo stack que antes) y drivea serve/scheduler sobre el mismo runtime,
+  así el reactor del `TcpStream` vive todo el proceso. Paridad `fitz run` ↔
+  `fitz build`.
+
+### Changed
+
+- **`src/http.rs`**: nuevo `build_server_runtime()` (única fuente de la config del
+  runtime multi_thread + 16 MB de stack) + `serve_on_runtime(&Runtime, …)`.
+  `serve()` queda como wrapper que construye su propio runtime y delega.
+- **`src/cron_jobs.rs`**: nuevo `run_scheduler_on_runtime(&Runtime, …)`.
+  `run_scheduler_only()` queda como wrapper. Cron-only mode pasa a usar el runtime
+  con stacks de 16 MB (antes usaba el default de 2 MB).
+- **`src/main.rs` (`run_file`)**: único call site tocado — construye el runtime
+  compartido, corre el eval con `shared_runtime.block_on(eval_with_base_and_deps(…))`
+  y pasa `&shared_runtime` a las dos ramas. Los ~15 subcomandos restantes
+  (check/test/repl/dev/db.*) quedan intactos.
+
+### Notes
+
+- Efecto colateral menor: todo `fitz run` (incluido un CLI puro) construye ahora un
+  runtime `multi_thread` para el eval (antes `current_thread`). El eval se sigue
+  drivando en el main thread vía `block_on` → comportamiento idéntico; el único
+  costo es unos worker threads idle durante la (breve) vida de un CLI puro.
+- Test E2E nuevo `tests/cron_run_real_postgres.rs` (`#[ignore]` opt-in con
+  `FITZ_TEST_PG_URL`): spawnea `fitz run` real y verifica persistencia de runs en
+  cron-only y HTTP+cron contra Postgres.
+
 ## [v0.37.2] — 2026-08-07 — B20 residual A (cron store shadowing) + file-lock retry widening
 
 Tanda de quick wins post-v0.37.1. `fitz run` sin cambios; sin sintaxis nueva.

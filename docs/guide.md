@@ -12081,22 +12081,16 @@ paralelos `__FitzBackoffKind`/`__FitzRetryConfig`/
 `__FitzCronOptions` en el binario, con la misma lógica de
 `delay_for_attempt` y `invoke_with_retry`.
 
-**Limitación conocida** — `fitz run` con `@cron(..., store=db)`
-(persistencia del scheduler) tiene un bug heredado del flujo de
-runtimes tokio del intérprete: el eval corre en un runtime
-`current_thread` que abre la conexión DB; ese runtime se dropea
-al terminar el eval, y el scheduler —que corre en un runtime
-`multi_thread` posterior— pierde el reactor de I/O de esa
-conexión, así que la primera query del cron (`CREATE TABLE
-fitz_cron_jobs`) falla con *"A Tokio 1.x context was found, but
-it is being shutdown"*. **Afecta por igual el modo cron-only Y
-el modo HTTP+cron** — agregar un handler HTTP NO lo evita
-(`serve` también construye el segundo runtime). **Workaround:
-usar `fitz build`** (el binario nativo arma un único runtime
-`#[tokio::main]` que vive todo el proceso). El fix del intérprete
-(unificar el eval + serve/scheduler en un solo runtime) es un
-refactor moderado (~60-120 LoC) que queda como sub-paso dedicado
-— diagnóstico completo del root cause en `docs/deudas-post-5b.md`.
+**Paridad con `fitz run` (desde v0.37.3)** — `@cron(..., store=db)`
+(persistencia del scheduler) funciona igual con `fitz run` que con
+`fitz build`, en ambos modos (cron-only y HTTP+cron). Desde v0.37.3
+el intérprete corre el eval y el scheduler/servidor sobre un único
+runtime tokio compartido, así que la conexión DB que abrís al boot
+sigue viva cuando el scheduler crea `fitz_cron_jobs`. (Antes de
+v0.37.3 el eval usaba un runtime `current_thread` que se dropeaba
+antes de arrancar el scheduler, y la primera query del cron fallaba
+con *"A Tokio 1.x context was found, but it is being shutdown"* —
+ese bug de lifecycle del runtime del intérprete está cerrado.)
 
 ### Cron-only mode (sin server HTTP)
 
@@ -12190,9 +12184,6 @@ sección anterior). Lo que queda como deuda explícita:
 - **`spawn` con coordinación múltiple**: `spawn(...).await` solo
   awaitea un task; para `Promise.all([...])` style hace falta
   agregación manual con vectores de futures.
-- **`fitz run` con `store=db`**: ver la "Limitación conocida"
-  arriba. Afecta cron-only Y HTTP+cron. Workaround: usar `fitz
-  build` (agregar un handler HTTP NO lo evita).
 
 Detalle completo en `docs/roadmap.md` para refinamientos pendientes
 y planes de endurecimiento adicionales.
