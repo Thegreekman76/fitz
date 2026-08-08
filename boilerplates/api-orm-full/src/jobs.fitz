@@ -1,4 +1,4 @@
-// jobs.fitz — cron jobs sin Celery (Fase 9.w.3).
+// jobs.fitz — cron jobs sin Celery (Fase 9.w.3 + iter2 persistencia).
 //
 // **Patrón**: `@cron("expr")` registra una fn como tarea periódica
 // que el runtime de Fitz dispara según el schedule. NO necesita
@@ -18,32 +18,99 @@
 // **Cross-module via W16**: el `@cron` declarado acá se enchufa al
 // scheduler del main automáticamente cuando main hace `import jobs`.
 //
-// **Idempotencia**: el cron NO garantiza "exactly once" si el
-// proceso se reinicia entre el trigger y el commit del DELETE. Para
-// jobs sensibles, usar advisory locks de Postgres o un timestamp
-// "last_run" en una tabla de control. Para este cleanup de drafts
-// viejos, "as-most-once + retry next tick" es aceptable.
+// **Persistencia opcional (iter2, `store=cron_db`)**: el scheduler
+// crea `fitz_cron_jobs` + `fitz_cron_runs` (idempotente al boot) y
+// persiste cada attempt de cada run. El endpoint `@admin GET /jobs`
+// lee ese audit log. Paridad bit-a-bit `fitz run` ↔ `fitz build`
+// (v0.37.3 — el intérprete unificó su runtime tokio; antes `store=db`
+// solo andaba en el binario nativo).
 
 from config import db_url, max_drafts_age_days
 from models import User, Profile, Post, Comment
 
-// --- @cron("0 0 * * *") cleanup_old_drafts ----------------------
+// --- binding top-level SOLO para `@cron(store=...)` -----------------
+//
+// El scheduler usa `cron_db` para persistir el registry + los runs.
+// Los fn bodies NO lo usan: conectan per-request vía el builtin `db`
+// (que reusa la MISMA conexión del `POOL_CACHE`). El nombre es
+// `cron_db` (no `db`) justamente para no tapar el builtin `db` dentro
+// de este módulo. Queda como `Result<DbConn>`; `@cron(store=cron_db)`
+// lo desempaca solo con el trait `__FitzCronStoreFrom` — si la conn
+// falla al boot, el scheduler panea con un mensaje claro.
+let cron_db = db.connect(db_url()).await
+
+// --- @cron cleanup_old_drafts ---------------------------------------
 //
 // Todos los días a medianoche UTC: borra los posts en status "draft"
 // con `created_at` más viejo que MAX_DRAFTS_AGE_DAYS (configurable
-// vía env var, default "30").
+// vía env var, default "30"). Con `retry` + persistencia: si el
+// DELETE falla (DB caída un instante), reintenta hasta 3 veces con
+// backoff exponencial (30s, 60s, 120s), y cada attempt queda en
+// `fitz_cron_runs`.
+//
+// **Para ver runs sin esperar 24h**: cambiá el schedule a
+// `"*/30 * * * * *"` (cada 30s, 6 fields), arrancá, y pegale
+// `GET /jobs` (como admin) o `psql -c "SELECT * FROM fitz_cron_runs"`.
 //
 // SQL emitido (escape hatch via db.exec para INTERVAL paramétrico
 // que el ORM no expresa nativo todavía):
 //   DELETE FROM posts
 //   WHERE status = 'draft'
 //     AND created_at < NOW() - INTERVAL '<n> days'
-@cron("0 0 * * *")
+@cron("0 0 * * *",
+      tz="UTC",
+      retry={max: 3, backoff: "exponential", initial_secs: 30, max_secs: 300},
+      store=cron_db)
 async fn cleanup_old_drafts() -> Result<Null> {
     let conn = db.connect(db_url()).await?
     let days = max_drafts_age_days()
     let sql = "DELETE FROM posts WHERE status = 'draft' AND created_at < NOW() - (CAST($1 AS text) || ' days')::interval"
     let affected = conn.exec(sql, [days]).await?
-    print("[cron] cleanup_old_drafts: borró {affected} drafts (>{days} días)")
+    log.info("cleanup_old_drafts ran", deleted: affected, older_than_days: days)
     return Ok(null)
+}
+
+// --- @admin GET /jobs — audit log de cron runs ----------------------
+//
+// Lee `fitz_cron_runs` (la tabla que el scheduler crea + mantiene con
+// `store=cron_db`). Es query cruda porque `fitz_cron_runs` la maneja
+// el runtime, no la declaramos como `@table`. Las columnas se leen con
+// los accessors tipados de `DbRow` (`r.get_str`/`r.get_int`), que
+// devuelven `Result<T>` (Err si la col es NULL / no existe / el tipo
+// PG no matchea) — paridad `fitz run` ↔ `fitz build` (v0.37.3).
+//
+// `@admin` = `@authenticated` + `user.role == "admin"`. Un usuario
+// recién registrado tiene `role: "user"`; para probar el endpoint,
+// promovelo a admin con:
+//   UPDATE users SET role = 'admin' WHERE email = 'ada@example.com';
+type JobRun {
+    job_name: Str
+    started_at: Str
+    finished_at: Str
+    status: Str
+    attempt: Int
+    error: Str
+}
+
+@admin
+@get("/jobs")
+async fn list_job_runs(user: User) -> Result<List<JobRun>> {
+    let conn = db.connect(db_url()).await?
+
+    let sql = "SELECT job_name, started_at::text AS started_at, COALESCE(finished_at::text, '') AS finished_at, status, attempt, COALESCE(error, '') AS error FROM fitz_cron_runs ORDER BY started_at DESC LIMIT 50"
+    let rows = conn.query(sql, []).await?
+
+    let runs: List<JobRun> = []
+    for r in rows {
+        let run = JobRun {
+            job_name: r.get_str("job_name")?,
+            started_at: r.get_str("started_at")?,
+            finished_at: r.get_str("finished_at")?,
+            status: r.get_str("status")?,
+            attempt: r.get_int("attempt")?,
+            error: r.get_str("error")?,
+        }
+        runs.push(run)
+    }
+    return Ok(runs)
 }

@@ -9,6 +9,49 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.4] — 2026-08-08 — Accessors `DbRow` en el intérprete + `@admin`/`@requires` cross-module (parity `fitz run` ↔ `fitz build`)
+
+Dos gaps de paridad `fitz run` ↔ `fitz build` descubiertos al enriquecer el
+boilerplate `api-orm-full` con cron persistente + un endpoint de audit log. Sin
+sintaxis nueva. Extensión VSCode: bump de versión (el LSP recibe el fix de
+`@admin` cross-module; sin cambio de grammar).
+
+### Fixed
+
+- **`conn.query(...)` raw rows: `r.get_str/get_int/get_float/get_bool` ahora
+  andan en `fitz run`.** El checker tipa las filas como `List<DbRow>` y el
+  codegen emite `__FitzDbRow` con esos accessors tipados (`Result<T>`), pero el
+  intérprete devolvía `List<Map>` → `r.get_str("col")` moría en runtime con
+  *"`Map` has no method named `get_str`"* aunque `fitz check`/`fitz build` lo
+  aceptaran. Fix en el evaluator: nuevo `db_row_get` + 4 arms en el dispatch de
+  `Value::Map` (`len` ya existía). Semántica + mensajes de error espejo del
+  codegen (col ausente / NULL / tipo PG que no matchea → `Err`).
+- **`@admin`/`@requires` sobre un handler cuyo `@auth_provider` devuelve un
+  `User` importado a OTRO módulo.** El chequeo del campo `role: Str` sólo miraba
+  los `TypeDef` del módulo del provider; en el layout multi-archivo canónico el
+  provider importa su `User` (`auth.fitz` hace `from models import User`, `User`
+  vive en `models.fitz`), así que `role` era invisible y `@admin` fallaba en
+  `fitz build` (aunque `fitz check` en modo manifest pasara). Fix: helper
+  `type_decl_has_role_field` en `types.rs` + los tres pre-scans cross-module
+  (codegen, LSP, checker single-file) siguen los imports del módulo del provider
+  para resolver `role: Str` en el módulo hermano.
+
+### Changed
+
+- **Boilerplate `api-orm-full`**: su `@cron` pasó a persistente — `@cron("0 0 *
+  * *", tz="UTC", retry={...}, store=cron_db)` (binding top-level `cron_db` sólo
+  para el `store=`; los handlers conectan per-request vía el builtin `db`) — más
+  un endpoint nuevo `@admin GET /jobs` que lee `fitz_cron_runs` con los accessors
+  `DbRow`. Showcasea la persistencia de cron + el audit log con paridad `fitz
+  run` ↔ `fitz build`.
+
+### Notes
+
+- Tests nuevos: `evaluator::tests::db_row_get_typed_accessors_parity_v0_37_3` +
+  `compile_e2e::admin_cross_module_role_field_via_provider_module_imports_v0_37_3`.
+- Validado end-to-end contra Postgres local: `api-orm-full` boot → register →
+  promover a admin → login → `GET /jobs` devuelve el audit log; sin token → 401.
+
 ## [v0.37.3] — 2026-08-08 — `fitz run` con `@cron(store=db)` persistente (runtime tokio unificado del intérprete)
 
 Fix del intérprete (`fitz run`). Sin sintaxis nueva. `fitz build` sin cambios.

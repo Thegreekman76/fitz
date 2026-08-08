@@ -18,6 +18,7 @@ binario `fitz` mismo, paridad bit-a-bit `fitz run` ↔ `fitz build`.
 │ DELETE /posts/{id} (owner)  │       │  src/config.fitz (env)     │
 │ POST   /posts/{id}/comments │       │  src/main.fitz             │
 │ GET    /stats/posts-per-user│       │                            │
+│ GET    /jobs (admin)        │       │                            │
 │ WS     /feed (auth)         │       └─────────────┬──────────────┘
 └─────────────────────────────┘                     │ wire protocol v3.0
                                                     ▼
@@ -36,6 +37,8 @@ binario `fitz` mismo, paridad bit-a-bit `fitz run` ↔ `fitz build`.
 | **Auth nativa (JWT + Argon2id)**     | `@auth_provider`/`@authenticated` cross-module          |
 | **WebSockets tipados + AsyncAPI 3.0**| `@ws("/feed")` + broadcast + heartbeat + `/asyncapi.json` |
 | **Cron jobs sin broker**             | `@cron("0 0 * * *")` scheduler embebido en el binario   |
+| **Cron persistente + retry**         | `@cron(..., tz, retry, store=cron_db)` → `fitz_cron_jobs`/`fitz_cron_runs` |
+| **Audit log de cron runs**           | `@admin GET /jobs` lee `fitz_cron_runs` con accessors `DbRow` (`r.get_str`/`r.get_int`) |
 | **HTTP client outbound built-in**    | `http.post(WEBHOOK_URL, payload)` + `@background + spawn` |
 | **SMTP outbound built-in**           | `smtp.send({...})` cuando `SMTP_ENABLED=true` + `@background + spawn` |
 | **ORM declarativo sobre `type`**     | `@table`/`@primary`/`@belongs_to`/`@has_many`/`@has_one`|
@@ -217,15 +220,46 @@ wscat -c "ws://localhost:3000/feed" \
 # Otros clientes conectados al /feed reciben el broadcast.
 ```
 
-## Cron jobs
+## Cron jobs + persistencia (audit log)
 
-El `@cron("0 0 * * *")` en `src/jobs.fitz` ejecuta
-`cleanup_old_drafts()` todos los días a medianoche UTC. Borra
-posts en status `"draft"` con `created_at` más viejo que
-`MAX_DRAFTS_AGE_DAYS` (default 30, configurable vía env var).
+El `@cron` en `src/jobs.fitz` ejecuta `cleanup_old_drafts()` todos
+los días a medianoche UTC (borra posts en status `"draft"` más
+viejos que `MAX_DRAFTS_AGE_DAYS`, default 30). Va endurecido para
+producción con tres kwargs:
 
-Para testear sin esperar 24h, cambiar el schedule
-temporalmente a `"*/1 * * * *"` (cada minuto) y rebuild.
+- **`tz="UTC"`** — el schedule se interpreta en ese huso IANA.
+- **`retry={max: 3, backoff: "exponential", ...}`** — si el DELETE
+  falla (DB caída un instante), reintenta con backoff; cada attempt
+  queda registrado.
+- **`store=cron_db`** — el scheduler crea `fitz_cron_jobs` +
+  `fitz_cron_runs` (idempotente al boot) y persiste cada run.
+  `cron_db` es un binding top-level (`let cron_db =
+  db.connect(db_url()).await`) usado **sólo** para el `store=`; los
+  handlers conectan per-request vía el builtin `db` (POOL_CACHE
+  reusa la misma conexión).
+
+**`@admin GET /jobs`** lee ese audit log de `fitz_cron_runs` con los
+accessors tipados de `DbRow` (`r.get_str("...")`, `r.get_int("...")`,
+que devuelven `Result<T>`). Paridad bit-a-bit `fitz run` ↔ `fitz
+build` (v0.37.3 unificó el runtime tokio del intérprete; v0.37.4
+sumó los accessors `DbRow` al intérprete y el `@admin` cross-module
+sobre un `User` importado).
+
+```bash
+# Para ver runs sin esperar 24h: cambiá el schedule en jobs.fitz a
+# "*/30 * * * * *" (cada 30s) y rebuild. Después, como admin:
+
+# 1. Registrar + promover a admin (el registro da role "user").
+curl -sX POST localhost:3000/auth/register -H 'Content-Type: application/json' \
+     -d '{"email":"ada@example.com","name":"Ada","password":"secret-ada-123"}'
+psql "$DATABASE_URL" -c "UPDATE users SET role='admin' WHERE email='ada@example.com'"
+
+# 2. Login DESPUÉS de promover (el JWT lleva el role) → GET /jobs.
+TOKEN=$(curl -sX POST localhost:3000/auth/login -H 'Content-Type: application/json' \
+     -d '{"email":"ada@example.com","password":"secret-ada-123"}' | jq -r .token)
+curl localhost:3000/jobs -H "Authorization: Bearer $TOKEN" | jq .
+# → [{"job_name":"cleanup_old_drafts","status":"ok","attempt":1,...}, ...]
+```
 
 ## Webhook outbound al publicar un post
 

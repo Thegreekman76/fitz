@@ -5355,13 +5355,83 @@ fn pre_scan_imported_auth_provider_for_loader(
         let Ok(module_program) = crate::parser::parse(tokens) else {
             continue;
         };
-        if let Some(provider) =
+        if let Some(mut provider) =
             crate::types::extract_auth_provider_signature(&module_program, &module_binding_name)
         {
+            // v0.37.3 — the provider's `User` type may be imported into the
+            // provider's OWN module (multi-file layout: `auth.fitz` does
+            // `from models import User`, `User` lives in `models.fitz`). In
+            // that case `extract_auth_provider_signature` couldn't see the
+            // `role: Str` field (it only scans the provider module's own
+            // TypeDefs), so `@admin`/`@requires` wrongly failed at
+            // `fitz build`. Follow the provider module's imports to resolve it.
+            if !provider.has_role_field {
+                let provider_base = file_path.parent().unwrap_or(base_dir);
+                if resolve_role_field_across_module_imports(
+                    &module_program,
+                    &provider.user_type_name,
+                    provider_base,
+                    dep_registry,
+                ) {
+                    provider.has_role_field = true;
+                }
+            }
             return Some(provider);
         }
     }
     None
+}
+
+/// v0.37.3 — follows a module's `import` / `from ... import` statements to
+/// find a sibling module that declares `type <type_name> { ... role: Str }`.
+/// Used to resolve `has_role_field` for an `@auth_provider` whose `User`
+/// type is imported into the provider's own module (see
+/// `pre_scan_imported_auth_provider_for_loader`). Silent-fallback on any
+/// unreadable / unparseable import (parallel to the pre-scan itself); the
+/// real module loader surfaces genuine errors.
+fn resolve_role_field_across_module_imports(
+    module_program: &Program,
+    type_name: &str,
+    base_dir: &Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> bool {
+    for stmt in module_program {
+        let path_segments = match stmt {
+            Stmt::Import { path, .. } | Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) =
+            resolve_loader_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
+        };
+        let Ok(tokens) = crate::lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(imported_program) = crate::parser::parse(tokens) else {
+            continue;
+        };
+        if crate::types::type_decl_has_role_field(&imported_program, type_name) {
+            return true;
+        }
+    }
+    false
 }
 
 /// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — Mirror of

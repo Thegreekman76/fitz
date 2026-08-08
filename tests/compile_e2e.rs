@@ -13701,6 +13701,47 @@ fn build_expect_ok_multi(
 }
 
 #[test]
+fn admin_cross_module_role_field_via_provider_module_imports_v0_37_3() {
+    // v0.37.3 — `@admin`/`@requires` require the `@auth_provider`'s User
+    // type to have a `role: Str` field. Before this fix, the cross-module
+    // `has_role_field` detection only scanned the PROVIDER module's own
+    // `TypeDef`s. In the common multi-file layout the provider module
+    // imports its User (`auth.fitz` does `from models import User`, `User`
+    // lives in `models.fitz`), so `role` was invisible and `@admin` wrongly
+    // failed at `fitz build` — even though `fitz check` (enriched TypeEnv)
+    // passed, a run↔build divergence. The fix follows the provider module's
+    // own imports to resolve `role: Str` in the sibling module.
+    let models_src = "type User { id: Int, name: Str, role: Str }\n";
+    let auth_src = "\
+from models import User\n\
+\n\
+@auth_provider\n\
+fn check_token(headers: Map<Str, Str>) -> Result<User> {\n\
+    match headers.get(\"authorization\") {\n\
+        Ok(_) => return Ok(User { id: 1, name: \"Admin\", role: \"admin\" }),\n\
+        Err(_) => return Err(\"falta Authorization\"),\n\
+    }\n\
+}\n\
+";
+    let main_src = "\
+import auth\n\
+from models import User\n\
+\n\
+@server(43971)\n\
+fn main() => 0\n\
+\n\
+@admin\n\
+@get(\"/admin\")\n\
+fn admin_route(user: User) -> Str => \"hola admin\"\n\
+";
+    build_expect_ok_multi(
+        "admin_cross_module_role_field_v0_37_3",
+        main_src,
+        &[("models.fitz", models_src), ("auth.fitz", auth_src)],
+    );
+}
+
+#[test]
 fn v019_response_cross_module_emits_imports() {
     // Bug 1 — `Response`/`ResponseData` not imported in modules that
     // declare handlers returning the Response built-in. The emitted

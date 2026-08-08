@@ -1810,13 +1810,80 @@ fn pre_scan_imported_auth_provider(
         let Ok(module_program) = parser::parse(tokens) else {
             continue;
         };
-        if let Some(provider) =
+        if let Some(mut provider) =
             types::extract_auth_provider_signature(&module_program, &module_binding_name)
         {
+            // v0.37.4 — the provider's `User` type may be imported into the
+            // provider's own module (`auth.fitz` does `from models import
+            // User`). Follow the provider module's imports to resolve the
+            // `role: Str` field so `@admin`/`@requires` don't wrongly fail
+            // the checker in single-file mode. Parallel to the codegen +
+            // LSP fixes (`pre_scan_imported_auth_provider_for_loader`,
+            // `pre_scan_imported_auth_provider_lsp`).
+            if !provider.has_role_field {
+                let provider_base = file_path.parent().unwrap_or(base_dir);
+                if role_field_across_module_imports_main(
+                    &module_program,
+                    &provider.user_type_name,
+                    provider_base,
+                    dep_registry,
+                ) {
+                    provider.has_role_field = true;
+                }
+            }
             return Some(provider);
         }
     }
     None
+}
+
+/// v0.37.4 — follows a module's imports to find a sibling that declares
+/// `type <type_name> { ... role: Str }`. Used to resolve `has_role_field`
+/// for an `@auth_provider` whose `User` type is imported into the provider's
+/// own module. Checker-path variant of the codegen
+/// `resolve_role_field_across_module_imports`.
+fn role_field_across_module_imports_main(
+    module_program: &ast::Program,
+    type_name: &str,
+    base_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> bool {
+    for stmt in module_program {
+        let path_segments = match stmt {
+            ast::Stmt::Import { path, .. } | ast::Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) = resolve_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source_raw) = fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let source = if fitz::view::is_fitzv_extension(&file_path) {
+            match fitz::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
+        };
+        let Ok(tokens) = lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(imported_program) = parser::parse(tokens) else {
+            continue;
+        };
+        if types::type_decl_has_role_field(&imported_program, type_name) {
+            return true;
+        }
+    }
+    false
 }
 
 /// B10 (sub-paso 5 cosecha post-fitzwatch, 2026-06-19) — scans each

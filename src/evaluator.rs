@@ -6233,6 +6233,13 @@ async fn dispatch_method(
         (Value::Map(_), "with") => map_with(receiver, args, span),
         // Mini-batch Mb9 — has_value: checks if v is present as a value.
         (Value::Map(_), "has_value") => map_has_value(receiver, args, span),
+        // v0.37.3 — typed accessors on a raw `conn.query(...)` row
+        // (`Value::Map` at runtime, `DbRow` for the checker + codegen).
+        // Closes the run↔build parity gap for raw row access.
+        (Value::Map(_), "get_str") => db_row_get(receiver, args, span, "get_str"),
+        (Value::Map(_), "get_int") => db_row_get(receiver, args, span, "get_int"),
+        (Value::Map(_), "get_float") => db_row_get(receiver, args, span, "get_float"),
+        (Value::Map(_), "get_bool") => db_row_get(receiver, args, span, "get_bool"),
         // Mini-batch Bytes — methods on Value::Bytes.
         (Value::Bytes(_), "len") => bytes_len(receiver, args, span),
         (Value::Bytes(_), "is_empty") => bytes_is_empty(receiver, args, span),
@@ -9361,6 +9368,77 @@ fn map_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     };
     let n = pairs.lock().len() as i64;
     Ok(Value::Int(n))
+}
+
+/// v0.37.3 — `DbRow.get_str/get_int/get_float/get_bool(name) -> Result<T>`
+/// on a raw `conn.query(...)` row. In the interpreter a query row is a
+/// `Value::Map` (keys are the column-name `Str`, values already coerced
+/// by `pg_value_to_fitz`), while the checker types query rows as
+/// `List<DbRow>` and the codegen returns `__FitzDbRow` with these same
+/// typed accessors. Adding them here closes the `fitz run` ↔ `fitz build`
+/// parity gap for raw row access (before, `r.get_str(...)` errored at
+/// runtime with "`Map` has no method named `get_str`" even though the
+/// checker + codegen + docs all support it). `Err` semantics + messages
+/// mirror the codegen: NULL / wrong type / missing column each Err.
+fn db_row_get(receiver: Value, args: Vec<Value>, span: Span, method: &str) -> EvalResult<Value> {
+    expect_arity(method, &args, 1, span)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let name = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`DbRow.{}(name)` expects a Str column name, received `{}`",
+                    method,
+                    other.type_name()
+                ),
+            )));
+        }
+    };
+    let label = match method {
+        "get_str" => "Str",
+        "get_int" => "Int",
+        "get_float" => "Float",
+        "get_bool" => "Bool",
+        _ => unreachable!(),
+    };
+    let found = {
+        let guard = pairs.lock();
+        guard
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if *s == name))
+            .map(|(_, v)| v.clone())
+    };
+    let err = |msg: String| Value::Result(ResultVariant::Err(Box::new(Value::Str(msg))));
+    match found {
+        None => Ok(err(format!("col `{}` no existe en el row", name))),
+        Some(Value::Null) => Ok(err(format!("col `{}` es NULL", name))),
+        Some(v) => {
+            let ok = matches!(
+                (method, &v),
+                ("get_str", Value::Str(_))
+                    | ("get_int", Value::Int(_))
+                    | ("get_float", Value::Float(_))
+                    | ("get_bool", Value::Bool(_))
+            );
+            if ok {
+                Ok(Value::Result(ResultVariant::Ok(Box::new(v))))
+            } else {
+                Ok(err(format!(
+                    "col `{}` is {}, expected {}",
+                    name,
+                    v.type_name(),
+                    label
+                )))
+            }
+        }
+    }
 }
 
 /// Mini-batch Ex — `m.filter(pred)`: keeps pairs (k, v) where
@@ -32930,6 +33008,89 @@ f = to_json(true)
         let st = arc.downcast::<QueryBuilderState>().unwrap();
         assert_eq!(st.order_by_clauses.len(), 1);
         st.order_by_clauses[0].clone()
+    }
+
+    #[test]
+    fn db_row_get_typed_accessors_parity_v0_37_3() {
+        let sp = crate::ast::Span::ZERO;
+        // Row shaped like a raw `conn.query(...)` result (Value::Map in
+        // the interpreter): Str / Int / Float / Bool / Null columns.
+        let row = Value::new_map(vec![
+            (Value::Str("name".into()), Value::Str("ada".into())),
+            (Value::Str("count".into()), Value::Int(7)),
+            (Value::Str("ratio".into()), Value::Float(1.5)),
+            (Value::Str("active".into()), Value::Bool(true)),
+            (Value::Str("note".into()), Value::Null),
+        ]);
+        fn unwrap_ok(v: Value) -> Value {
+            match v {
+                Value::Result(ResultVariant::Ok(inner)) => *inner,
+                other => panic!("expected Ok, got {:?}", other),
+            }
+        }
+        fn err_msg(v: Value) -> String {
+            match v {
+                Value::Result(ResultVariant::Err(inner)) => match *inner {
+                    Value::Str(s) => s,
+                    o => panic!("err payload not Str: {:?}", o),
+                },
+                other => panic!("expected Err, got {:?}", other),
+            }
+        }
+
+        // Happy path — each accessor returns Ok with the right type.
+        assert_eq!(
+            unwrap_ok(
+                db_row_get(row.clone(), vec![Value::Str("name".into())], sp, "get_str").unwrap()
+            ),
+            Value::Str("ada".into())
+        );
+        assert_eq!(
+            unwrap_ok(
+                db_row_get(row.clone(), vec![Value::Str("count".into())], sp, "get_int").unwrap()
+            ),
+            Value::Int(7)
+        );
+        assert_eq!(
+            unwrap_ok(
+                db_row_get(
+                    row.clone(),
+                    vec![Value::Str("ratio".into())],
+                    sp,
+                    "get_float"
+                )
+                .unwrap()
+            ),
+            Value::Float(1.5)
+        );
+        assert_eq!(
+            unwrap_ok(
+                db_row_get(
+                    row.clone(),
+                    vec![Value::Str("active".into())],
+                    sp,
+                    "get_bool"
+                )
+                .unwrap()
+            ),
+            Value::Bool(true)
+        );
+
+        // Wrong type → Err (mirrors the codegen semantics).
+        assert!(err_msg(
+            db_row_get(row.clone(), vec![Value::Str("count".into())], sp, "get_str").unwrap()
+        )
+        .contains("expected Str"));
+        // NULL column → Err.
+        assert!(err_msg(
+            db_row_get(row.clone(), vec![Value::Str("note".into())], sp, "get_str").unwrap()
+        )
+        .contains("es NULL"));
+        // Missing column → Err.
+        assert!(err_msg(
+            db_row_get(row.clone(), vec![Value::Str("nope".into())], sp, "get_str").unwrap()
+        )
+        .contains("no existe"));
     }
 
     #[test]

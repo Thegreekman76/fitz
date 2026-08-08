@@ -10553,6 +10553,31 @@ pub struct ImportedAuthProvider {
 /// `module_name` is provided by the caller — typically the stem of
 /// the imported file (`auth.fitz` → `"auth"`), so codegen
 /// can emit module-qualified invocations.
+/// `true` if `program` declares `type <type_name> { ... role: Str ... }`
+/// with a non-nullable `Str` `role` field (a nullable `Str?` is NOT
+/// enough — parallel to the local validation in `collect_auth_provider`).
+/// Used to compute `has_role_field` for `@admin`/`@requires`.
+///
+/// v0.37.3 — exposed so the codegen + LSP cross-module pre-scans can
+/// follow a provider module's own imports to a `User` type declared in a
+/// SIBLING module (the common multi-file layout: the `@auth_provider`
+/// module does `from models import User`, and `User` lives in `models`).
+/// Before this, `has_role_field` only looked at the provider module's own
+/// `TypeDef`s, so `@admin` on a handler wrongly failed at `fitz build`.
+pub fn type_decl_has_role_field(program: &Program, type_name: &str) -> bool {
+    program.iter().any(|stmt| {
+        let Stmt::TypeDef { name, fields, .. } = stmt else {
+            return false;
+        };
+        if name != type_name {
+            return false;
+        }
+        fields
+            .iter()
+            .any(|f| f.name == "role" && matches!(&f.type_, TypeExpr::Named(n) if n == "Str"))
+    })
+}
+
 pub fn extract_auth_provider_signature(
     program: &Program,
     module_name: &str,
@@ -10595,23 +10620,12 @@ pub fn extract_auth_provider_signature(
     }
     let user_type_name = user_type_name?;
     let fn_name = fn_name?;
-    // 2) Determine `has_role_field` by looking at the `type <T> { ... }` of the
-    // same module. If T is not declared locally (unlikely —
-    // would mean the provider returns an imported type in turn,
-    // case out of the MVP), `has_role_field = false`.
-    let has_role_field = program.iter().any(|stmt| {
-        let Stmt::TypeDef { name, fields, .. } = stmt else {
-            return false;
-        };
-        if name != &user_type_name {
-            return false;
-        }
-        fields.iter().any(|f| {
-            // `role` non-nullable of type `Str`. Nullable Str is not enough
-            // (parallel to local validation of `collect_auth_provider`).
-            f.name == "role" && matches!(&f.type_, TypeExpr::Named(n) if n == "Str")
-        })
-    });
+    // 2) Determine `has_role_field` by looking at the `type <T> { ... }` of
+    // the same module. If T is not declared locally (the provider returns a
+    // type imported into its OWN module — the common multi-file layout where
+    // the `@auth_provider` module does `from models import User`), this stays
+    // `false` here and the caller's cross-import pre-scan resolves it (v0.37.3).
+    let has_role_field = type_decl_has_role_field(program, &user_type_name);
     Some(ImportedAuthProvider {
         module_name: module_name.to_string(),
         fn_name,
