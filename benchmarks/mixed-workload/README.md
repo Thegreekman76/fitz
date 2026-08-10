@@ -283,7 +283,7 @@ hardware anotado:
 
 ---
 
-## Última corrida publicable (2026-06-17)
+## Última corrida publicable (2026-08-10) — v0.37.8 (mediana de 3 corridas)
 
 **Hardware** (auto-detectado por `summarize.sh`):
 
@@ -292,37 +292,38 @@ hardware anotado:
 - OS: Windows 11 Pro
 - Docker: 29.2.1 (Desktop con WSL2 backend)
 
-**Versión Fitz**: binario actual del repo (post-v0.16.x) con
-`ghcr.io/thegreekman76/fitz:latest{,-python}`.
+**Versión Fitz**: `ghcr.io/thegreekman76/fitz:v0.37.8{,-python}` —
+mediana de 3 corridas.
 
 ### Headline
 
-> **Fitz domina las 3 dimensiones del bench: throughput, latencia
-> y eficiencia.** Bajo carga peak mixed workload (100 VUs ramping
-> 10→100→50, 60/40 reads/writes sostenidos 3 min), Fitz **mantiene
-> p95 de 11 ms** mientras Python+SQLAlchemy **satura a 503 ms p95**
-> y Node+Prisma queda en el medio con **69 ms p95** + 11.7x más
-> memoria que Fitz.
+> **Fitz domina en eficiencia de recursos y latencia tail.** Bajo
+> carga peak mixed workload (100 VUs ramping 10→100→50, 60/40
+> reads/writes sostenidos 3 min), Fitz **mantiene p95 de 16 ms** con
+> **14.6 MB de memoria** (4.2x menos que Python, 11.3x menos que
+> Node) y **menos CPU** que ambos, mientras Python+SQLAlchemy
+> **satura a 629 ms p95** y Node+Prisma lidera en throughput entre
+> los competidores pero paga 11x la memoria + p99 4x peor.
 
 ### Cold start, image, memory, CPU
 
 | Métrica | Fitz | Python | Node | Fitz vs Python | Fitz vs Node |
 |---|---:|---:|---:|---:|---:|
-| Cold start (s) | **0.15** | 0.81 | 2.22 | **5.4x** | **14.8x** |
-| Image size | **131 MB** | 268 MB | 437 MB | **2.0x** | **3.3x** |
-| Memory peak (MB) | **14.0** | 61.1 | 163.4 | **4.4x** | **11.7x** |
-| CPU peak (%) | 131.0 | 171.1 | 215.3 | 1.3x | 1.6x |
+| Cold start (s) | 0.33 | **0.30** | 2.59 | 0.91x | **7.85x** |
+| Image size | **134 MB** | 272 MB | 437 MB | **2.0x** | **3.3x** |
+| Memory peak (MB) | **14.6** | 60.6 | 165.0 | **4.2x** | **11.3x** |
+| CPU peak (%) | **108.5** | 178.9 | 215.3 | **1.6x** | **2.0x** |
 
 ### Mixed workload (3 min, ramp 10→50→100→50, 60/40 reads/writes)
 
 | Métrica | Fitz | Python | Node | Fitz vs Python | Fitz vs Node |
 |---|---:|---:|---:|---:|---:|
-| Total reqs | **97,303** | 34,466 | 82,486 | 2.82x | 1.18x |
-| Throughput (RPS) | **463.1** | 164.0 | 392.6 | **2.82x** | 1.18x |
-| p50 latency (ms) | **4.58** | 165.74 | 14.67 | **36.2x** | **3.20x** |
-| p95 latency (ms) | **11.07** | 502.75 | 69.32 | **45.4x** | **6.26x** |
-| p99 latency (ms) | **18.90** | 638.16 | 92.11 | **33.8x** | **4.87x** |
-| p99.9 latency (ms) | **45.22** | 839.33 | 172.78 | **18.6x** | **3.82x** |
+| Total reqs | **95,450** | 30,032 | 73,847 | 3.18x | 1.29x |
+| Throughput (RPS) | **454.3** | 142.8 | 351.5 | **3.18x** | 1.29x |
+| p50 latency (ms) | **5.61** | 200.69 | 23.57 | **35.8x** | **4.20x** |
+| p95 latency (ms) | **16.36** | 629.36 | 107.74 | **38.5x** | **6.59x** |
+| p99 latency (ms) | **37.12** | 807.77 | 149.67 | **21.8x** | **4.03x** |
+| p99.9 latency (ms) | **87.41** | 1010.67 | 299.24 | **11.6x** | **3.42x** |
 | Error rate (%) | 0.00 | 0.00 | 0.00 | empate | empate |
 
 > Python+SQLAlchemy **cruzó dos thresholds** (`p(50)<100ms` y
@@ -335,26 +336,26 @@ hardware anotado:
 
 | Métrica | Fitz | Python | Node | Fitz vs Python | Fitz vs Node |
 |---|---:|---:|---:|---:|---:|
-| Throughput (RPS) | **900.4** | 261.9 | 628.9 | **3.44x** | 1.43x |
-| p50 (ms) | **4.20** | 132.56 | 26.35 | **31.6x** | **6.27x** |
-| p95 (ms) | **8.64** | 235.50 | 57.74 | **27.3x** | **6.68x** |
-| p99 (ms) | **15.16** | 299.79 | 82.47 | **19.8x** | **5.44x** |
+| Throughput (RPS) | **861.1** | 203.9 | 574.3 | **4.22x** | 1.50x |
+| p50 (ms) | **5.56** | 187.27 | 34.43 | **33.7x** | **6.19x** |
+| p95 (ms) | **15.40** | 322.79 | 68.66 | **21.0x** | **4.46x** |
+| p99 (ms) | **26.77** | 398.63 | 93.01 | **14.9x** | **3.47x** |
 | Error rate (%) | 0.00 | 0.00 | 0.00 | empate | empate |
 
 ### Writes-only (1 min, 50 VUs sostenidos) ⭐
 
 > Este scenario **llena el gap del bench anterior** — el
 > `orm-vs-sqlalchemy` mide POST sequential con curl loop ("POST mide
-> el cliente, no el server"). Acá Fitz mantiene **5x mayor RPS y
-> 31x mejor p95** que Python+SQLAlchemy bajo escritura concurrente
+> el cliente, no el server"). Acá Fitz mantiene **6x mayor RPS y
+> 25x mejor p95** que Python+SQLAlchemy bajo escritura concurrente
 > real.
 
 | Métrica | Fitz | Python | Node | Fitz vs Python | Fitz vs Node |
 |---|---:|---:|---:|---:|---:|
-| Throughput (RPS) | **846.9** | 169.6 | 577.4 | **4.99x** | 1.47x |
-| p50 (ms) | **7.86** | 234.80 | 33.14 | **29.9x** | **4.22x** |
-| p95 (ms) | **12.54** | 392.73 | 69.19 | **31.3x** | **5.52x** |
-| p99 (ms) | **20.89** | 480.05 | 94.43 | **23.0x** | **4.52x** |
+| Throughput (RPS) | **811.1** | 136.1 | 541.6 | **5.96x** | 1.50x |
+| p50 (ms) | **8.88** | 310.62 | 38.66 | **35.0x** | **4.35x** |
+| p95 (ms) | **19.59** | 491.59 | 78.87 | **25.1x** | **4.03x** |
+| p99 (ms) | **40.09** | 573.75 | 107.49 | **14.3x** | **2.68x** |
 | Error rate (%) | 0.00 | 0.00 | 0.00 | empate | empate |
 
 ### Cómo se reproduce

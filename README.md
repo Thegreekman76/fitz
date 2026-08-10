@@ -97,18 +97,18 @@ mantenemos un **bench reproducible cabeza-a-cabeza** entre los dos
 boilerplates equivalentes
 ([`api-postgres-fitz`](boilerplates/api-postgres-fitz/) vs
 [`api-postgres-python`](boilerplates/api-postgres-python/)) — mismo
-Postgres, mismos endpoints, misma firma. **Headline numbers en v0.10.13**
-(Intel Core Ultra 7 155H, Docker 29.2.1, sustained 30s c=10):
+Postgres, mismos endpoints, misma firma. **Headline numbers en v0.37.8**
+(Intel Core Ultra 7 155H, Docker 29.2.1, sustained 30s c=10, mediana de 3 corridas):
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
 |---|---:|---:|---:|
-| Memory peak | **9.2 MB** | 51 MB | **5.5x más eficiente** |
-| GET /users p50 | **4.88 ms** | 37.85 ms | **7.76x** |
-| GET /users RPS | **1944** | 246 | **7.91x** |
-| GET /users/{id} p50 | **3.60 ms** | 31.87 ms | **8.85x** |
-| GET /users/{id} RPS | **2604** | 296 | **8.80x** |
-| Cold start | **0.14 s** | 0.22 s | 1.57x |
-| Image size | 131 MB | 258 MB | 2x más liviano |
+| Memory peak | **9.0 MB** | 53.4 MB | **5.9x más eficiente** |
+| GET /users p50 | **4.94 ms** | 39.89 ms | **8.07x** |
+| GET /users RPS | **1693** | 232 | **7.30x** |
+| GET /users/{id} p50 | **3.76 ms** | 32.02 ms | **8.52x** |
+| GET /users/{id} RPS | **2244** | 282 | **7.96x** |
+| Cold start | 0.29 s | **0.24 s** | 0.83x (~empate) |
+| Image size | 134 MB | 272 MB | 2x más liviano |
 
 **Reproducí los números** con [`bash benchmarks/orm-vs-sqlalchemy/run.sh`](benchmarks/orm-vs-sqlalchemy/)
 (~5-8 min con cache Docker caliente; requiere `oha` + `jq`). Resultados
@@ -123,19 +123,20 @@ Bajo carga peak realista (60% reads + 40% writes, VUs rampeando
 
 | Métrica | Fitz | Python+SQLAlchemy | Node+Prisma | Fitz vs Python | Fitz vs Node |
 |---|---:|---:|---:|---:|---:|
-| Memory peak | **14 MB** | 61 MB | 163 MB | **4.4x** | **11.7x** |
-| Mixed p50 | **4.58 ms** | 165 ms | 14.7 ms | **36.2x** | **3.2x** |
-| Mixed p95 | **11.07 ms** | 502 ms | 69.3 ms | **45.4x** | **6.3x** |
-| Mixed p99.9 | **45.22 ms** | 839 ms | 173 ms | **18.6x** | **3.8x** |
-| Mixed RPS | **463.1** | 164.0 | 392.6 | **2.82x** | 1.18x |
-| Writes-only p95 | **12.5 ms** | 392 ms | 69.2 ms | **31.3x** | **5.5x** |
-| Writes-only RPS | **846.9** | 169.6 | 577.4 | **4.99x** | 1.47x |
-| Cold start | **0.15 s** | 0.81 s | 2.22 s | 5.4x | **14.8x** |
+| Memory peak | **14.6 MB** | 60.6 MB | 165 MB | **4.2x** | **11.3x** |
+| Mixed p50 | **5.61 ms** | 201 ms | 23.6 ms | **35.8x** | **4.2x** |
+| Mixed p95 | **16.36 ms** | 629 ms | 108 ms | **38.5x** | **6.6x** |
+| Mixed p99.9 | **87.41 ms** | 1011 ms | 299 ms | **11.6x** | **3.4x** |
+| Mixed RPS | **454.3** | 142.8 | 351.5 | **3.18x** | 1.29x |
+| Writes-only p95 | **19.6 ms** | 492 ms | 78.9 ms | **25.1x** | **4.0x** |
+| Writes-only RPS | **811.1** | 136.1 | 541.6 | **5.96x** | 1.50x |
+| Cold start | 0.33 s | **0.30 s** | 2.59 s | 0.91x | **7.85x** |
 
-Bajo el peak de 100 VUs, **Python+SQLAlchemy satura** (p95 = 503 ms,
-cola de medio segundo por requests CRUD triviales — sin timeouts
-pero con cola). **Fitz mantiene <50 ms hasta el p99.9** y **Node+Prisma
-queda en el medio** con 11.7x más memoria. **Reproducí** con
+Bajo el peak de 100 VUs, **Python+SQLAlchemy satura** (p95 = 629 ms,
+cola de más de medio segundo por requests CRUD triviales — sin timeouts
+pero con cola). **Fitz mantiene <90 ms hasta el p99.9** y **Node+Prisma
+lidera en throughput entre los competidores pero paga 11.3x la memoria
+de Fitz** y una latencia tail (p99) 4x peor. **Reproducí** con
 [`bash benchmarks/mixed-workload/run.sh`](benchmarks/mixed-workload/)
 (~25-35 min; requiere `k6` + `jq`). Detalle reproducible en
 [`benchmarks/mixed-workload/README.md`](benchmarks/mixed-workload/README.md).
