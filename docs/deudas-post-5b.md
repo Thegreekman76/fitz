@@ -7442,16 +7442,24 @@ está en el MVP"):
   codegen (`__fitz_bg_*` + trait `__FitzBgStoreFrom`). Paridad
   bit-a-bit `fitz run` ↔ `fitz build` validada contra Postgres
   real (persistencia + catch_up + retry). **Deuda residual
-  derivada**: (a) cross-module `@background(store=db)` en `fitz
-  build` — el intérprete lo persiste (registry global), el
-  binario solo persiste los declarados en el main (paralelo a
-  cómo `@cron` arrancó antes de B20); un worker persistido en un
-  módulo importado cae al path in-memory en el binario. (b) El
-  valor de retorno de un spawn persistido se descarta (resuelve a
-  `Null`) — es fire-and-forget; si necesitás el valor, no uses
-  `store`. (c) El `@background(store=db)` fn debe retornar
-  `Null`/`Result<Null>` (como `@cron`); otros returns requieren
-  ampliar `__FitzCronReturn`.
+  derivada**: (a) 🟢 cross-module `@background(store=db)` en `fitz
+  build` — **CERRADO v0.37.8** (port de B20 a background): un
+  `@background(store=db)` fn + su `let db = db.connect(...).await`
+  co-localizados en un módulo importado, con el `spawn(...)` en el
+  main, compilan y persisten con paridad ante `fitz run`
+  (`LoadedModule` gana `background_fn_stmts` +
+  `hoisted_background_store_vars`; `gen_module_top_let` +
+  `collect_module_sigs` hoistean/toleran el store binding async
+  co-localizado vía `module_background_store_vars`;
+  `emit_background_boot` materializa `crate::<mod>::__FITZ_STATE_DB`
+  → `__FITZ_BG_STORE_DB`). Sub-deuda que queda: el `spawn(...)` DEBE
+  estar en el main (spawn desde un módulo requiere que el ctx del
+  módulo pueble `bg_persistent_fns` — diferido). (b) El valor de
+  retorno de un spawn persistido se descarta (resuelve a `Null`) —
+  es fire-and-forget; si necesitás el valor, no uses `store`. (c)
+  El `@background(store=db)` fn debe retornar `Null`/`Result<Null>`
+  (como `@cron`); otros returns requieren ampliar
+  `__FitzCronReturn`.
 - `fitz run` **cron-only** (programa con `@cron(..., store=db)`
   sin `@server` ni handlers HTTP) tiene bug heredado del runtime
   tokio `current_thread` del intérprete: la conn DB queda atada

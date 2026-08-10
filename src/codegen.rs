@@ -4233,6 +4233,13 @@ struct LoadedModule {
     /// and the user saw the [ready] banner (a user `print(...)`) but
     /// no actual cron activity.
     cron_fn_stmts: Vec<Stmt>,
+    /// v0.37.8 — parallel to `cron_fn_stmts` but for `@background`: the
+    /// FnDef stmts with a `@background(...)` decorator declared in this
+    /// module. Main scans these to populate `bg_persistent_fns`
+    /// cross-module (with `module_path: Some(mod)`) so `gen_spawn_call`
+    /// of a `spawn(...)` in main emits the persisted path for a worker
+    /// declared in an imported module.
+    background_fn_stmts: Vec<Stmt>,
     /// B20 — names of top-level `let X = db.connect(...).await` bindings
     /// in this module that were HOISTED to a crate-visible `OnceCell`
     /// state var + `__fitz_init_state_X()` because a `@cron(store=X)` in
@@ -4241,6 +4248,13 @@ struct LoadedModule {
     /// Empty for the b19_derived case where the `store` binding lives in
     /// main instead of the module.
     hoisted_cron_store_vars: Vec<String>,
+    /// v0.37.8 — parallel to `hoisted_cron_store_vars` but for
+    /// `@background(store=X)`: co-located store bindings hoisted to a
+    /// crate-visible `OnceCell`. Main drives the init + materializes each
+    /// in `emit_background_boot` (kept separate from the cron set so the
+    /// materialization targets `__FITZ_BG_STORE_<VAR>`, not the cron
+    /// local). Empty when the store binding lives in main.
+    hoisted_background_store_vars: Vec<String>,
     /// 5b.6 — async shared-state vars (`let X = db.connect(...).await`) of
     /// this module referenced by its own HTTP handlers. Hoisted to
     /// `__FITZ_STATE_X` + `__fitz_init_state_X()` (same as cron stores).
@@ -4875,6 +4889,28 @@ impl ModuleLoader {
             })
             .cloned()
             .collect();
+        // v0.37.8 — parallel to the cron block: store-var names
+        // referenced by `@background(store=X)` in THIS module + the
+        // subset hoisted (async co-located `let X = ...`). Kept separate
+        // from the cron set so main materializes them into
+        // `__FITZ_BG_STORE_<VAR>` in `emit_background_boot`.
+        let module_background_store_vars = collect_background_store_var_names(&module_program);
+        let module_hoisted_background_store_vars: Vec<String> = module_background_store_vars
+            .iter()
+            .filter(|v| {
+                module_program.iter().any(|s| {
+                    matches!(
+                        s,
+                        Stmt::Assign {
+                            target: AssignTarget::Ident(n, _),
+                            value,
+                            ..
+                        } if n == *v && expr_contains_await(value)
+                    )
+                })
+            })
+            .cloned()
+            .collect();
         // 5b.6 — async shared-state vars referenced by this module's HTTP
         // handlers (same predicate as `gen_module_top_let`: in
         // `detect_shared_state` with an async RHS). Mirrors
@@ -4908,6 +4944,7 @@ impl ModuleLoader {
             self.main_observability_enabled,
             &module_mw_names,
             &module_cron_store_vars,
+            &module_background_store_vars,
         )?;
 
         // W27 (v0.28.6) — the W23 gate emits `use crate::__FitzValue;`
@@ -4956,8 +4993,12 @@ impl ModuleLoader {
         };
 
         // Extract sigs for importer use.
-        let (type_sigs, fn_sigs, const_sigs, accessor_consts) =
-            collect_module_sigs(&module_program, &module_env, &module_cron_store_vars)?;
+        let (type_sigs, fn_sigs, const_sigs, accessor_consts) = collect_module_sigs(
+            &module_program,
+            &module_env,
+            &module_cron_store_vars,
+            &module_background_store_vars,
+        )?;
 
         // CM mini-batch — collect custom methods of each exported
         // `type`. The importer needs them for the
@@ -5060,6 +5101,10 @@ impl ModuleLoader {
         // B19 (v0.18.2) — parallel to W16/10.8.6: capture FnDef stmts
         // with `@cron(...)` so main can register them in the scheduler.
         let mut module_cron_fn_stmts: Vec<Stmt> = Vec::new();
+        // v0.37.8 — parallel to cron: capture FnDef stmts with
+        // `@background(...)` so main can populate `bg_persistent_fns`
+        // cross-module (`module_path: Some(mod)`).
+        let mut module_background_fn_stmts: Vec<Stmt> = Vec::new();
         for stmt in &module_program {
             if let Stmt::FnDef { decorators, .. } = stmt {
                 // Phase 11.11.b — `@rpc` counts as HTTP for the
@@ -5078,6 +5123,10 @@ impl ModuleLoader {
                 let is_cron = decorators.iter().any(|d| d.name == "cron");
                 if is_cron {
                     module_cron_fn_stmts.push(stmt.clone());
+                }
+                let is_background = decorators.iter().any(|d| d.name == "background");
+                if is_background {
+                    module_background_fn_stmts.push(stmt.clone());
                 }
             }
         }
@@ -5114,7 +5163,9 @@ impl ModuleLoader {
             http_fn_stmts: module_http_fn_stmts,
             ws_fn_stmts: module_ws_fn_stmts,
             cron_fn_stmts: module_cron_fn_stmts,
+            background_fn_stmts: module_background_fn_stmts,
             hoisted_cron_store_vars: module_hoisted_cron_store_vars,
+            hoisted_background_store_vars: module_hoisted_background_store_vars,
             hoisted_state_vars: module_hoisted_state_vars,
             uses_http_client: module_uses_http_client,
             uses_smtp: module_uses_smtp,
@@ -5740,6 +5791,10 @@ fn generate_module_rs_with_bindings(
     // async ones (`let X = db.connect(...).await`) to a crate-visible
     // `OnceCell` + init fn so the crate-root cron spawn can reach them.
     cron_store_vars: &std::collections::HashSet<String>,
+    // v0.37.8 — parallel to `cron_store_vars` but for
+    // `@background(..., store=X)` here. Same hoist path in
+    // `gen_module_top_let`; `emit_background_boot` materializes them.
+    bg_store_vars: &std::collections::HashSet<String>,
 ) -> Result<String, FitzError> {
     // Hpx.2 — for modules compiled via the loader, compute a fresh
     // TypeInfo. The loader ran `resolve_program` before but not
@@ -5750,6 +5805,10 @@ fn generate_module_rs_with_bindings(
     // B20 — the cron-store hoist set is consulted by
     // `gen_module_top_let` when emitting the module's top-level lets.
     ctx.module_cron_store_vars = cron_store_vars.clone();
+    // v0.37.8 — parallel set consulted by `gen_module_top_let` +
+    // `collect_module_sigs` to hoist a `@background(store=X)` co-located
+    // binding.
+    ctx.module_background_store_vars = bg_store_vars.clone();
     // W18 (post-B8) — Propagate `@server(observability=...)` from
     // main. Default `true` (instrumentation on). When main has
     // `@server(observability=false)`, modules' HTTP wrappers also go
@@ -6495,6 +6554,9 @@ fn collect_module_sigs(
     // does not apply. The const_sig type is irrelevant (the binding is
     // never imported by another module — it feeds `store=X` only).
     cron_store_vars: &std::collections::HashSet<String>,
+    // v0.37.8 — parallel to `cron_store_vars` for `@background(store=X)`
+    // co-located here: same tolerance for the async non-literal RHS.
+    bg_store_vars: &std::collections::HashSet<String>,
 ) -> Result<
     (
         HashMap<String, TypeSig>,
@@ -6650,7 +6712,9 @@ fn collect_module_sigs(
                         // B20 + 5b.6 — tolerate a non-literal async RHS when
                         // the binding feeds a `@cron(store=X)` OR is
                         // shared state referenced by handlers of this module.
-                        None if (cron_store_vars.contains(name) || shared_async.contains(name))
+                        None if (cron_store_vars.contains(name)
+                            || bg_store_vars.contains(name)
+                            || shared_async.contains(name))
                             && expr_contains_await(value) =>
                         {
                             Type::Any
@@ -6670,7 +6734,9 @@ fn collect_module_sigs(
                 // emits an OnceCell, NOT a `pub fn X()` accessor, so it must
                 // NOT be registered here (else refs would resolve to `X()`).
                 let is_async_hoisted = expr_contains_await(value)
-                    && (cron_store_vars.contains(name) || shared_async.contains(name));
+                    && (cron_store_vars.contains(name)
+                        || bg_store_vars.contains(name)
+                        || shared_async.contains(name));
                 if !is_literal_expr(value) && !is_const_eval_expr(value) && !is_async_hoisted {
                     accessor_consts.insert(name.clone());
                 }
@@ -7579,6 +7645,37 @@ fn emit_main_rs_body(
             }
         }
     }
+    // v0.37.8 — cross-module (port of B20): scan each imported module's
+    // `@background(store=db)` fns with `module_path: Some(mod)`, and
+    // record the co-located store hoists so `emit_background_boot`
+    // inits + materializes each `crate::<mod>::__FITZ_STATE_<VAR>` and
+    // sets the crate-root `__FITZ_BG_STORE_<VAR>` global.
+    for module in &loader.modules {
+        let mod_name = module.mod_name.clone();
+        for stmt in &module.background_fn_stmts {
+            if let Stmt::FnDef {
+                name, decorators, ..
+            } = stmt
+            {
+                if let Some(deco) = decorators.iter().find(|d| d.name == "background") {
+                    let store_var = deco.kwargs.iter().find_map(|(k, v)| match (k.as_str(), v) {
+                        ("store", Expr::Ident(n, _)) => Some(n.clone()),
+                        _ => None,
+                    });
+                    if let Some(store_var) = store_var {
+                        let info =
+                            parse_bg_kwargs_into_info(&deco.kwargs, name, store_var.clone())?;
+                        ctx.bg_store_vars.push(store_var);
+                        ctx.bg_persistent_fns.insert(name.clone(), info);
+                    }
+                }
+            }
+        }
+        for var in &module.hoisted_background_store_vars {
+            ctx.xmod_bg_store_hoists
+                .push((mod_name.clone(), var.clone()));
+        }
+    }
     ctx.bg_store_vars.sort();
     ctx.bg_store_vars.dedup();
     ctx.emit_jobs_prelude(any_persistent_cron);
@@ -8014,6 +8111,36 @@ fn collect_cron_store_var_names(program: &Program) -> std::collections::HashSet<
     out
 }
 
+/// v0.37.8 — parallel to `collect_cron_store_var_names` but for
+/// `@background(..., store=X)`. When a `@background(store=db)` fn AND
+/// its `let db = db.connect(...).await` live co-located in an imported
+/// module, `gen_module_top_let` hoists `db` to a crate-visible
+/// `OnceCell` + `__fitz_init_state_db()` so `emit_background_boot`
+/// (emitted in the crate-root `async fn main()`) can init +
+/// materialize it cross-module. Only `store=<ident>` (MVP, parallel to
+/// `@cron`).
+fn collect_background_store_var_names(program: &Program) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for stmt in program {
+        let Stmt::FnDef { decorators, .. } = stmt else {
+            continue;
+        };
+        for d in decorators {
+            if d.name != "background" {
+                continue;
+            }
+            for (k, v) in &d.kwargs {
+                if k == "store" {
+                    if let Expr::Ident(name, _) = v {
+                        out.insert(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 9.w.3.iter2.d — extracts the Map literal of `retry={...}` into
 /// the build-time `CronJobRetryArgs`. Rules parallel to the
 /// interpreter runtime.
@@ -8184,6 +8311,11 @@ struct BgPersistInfo {
     retry: Option<CronJobRetryArgs>,
     /// `true` = mark orphaned rows as failed at boot.
     catch_up: bool,
+    // v0.37.8 — no `module_path` field: a cross-module `@background` fn
+    // is spawned from main via `from mod import fn`, so `gen_spawn_call`
+    // resolves the name through the emitted `use crate::mod::fn` (B10).
+    // The cross-module STORE binding is handled separately by
+    // `xmod_bg_store_hoists` + `emit_background_boot`.
 }
 
 /// Parsed values of `@server(port?, host?)`. Defaults applied (port
@@ -8921,11 +9053,21 @@ struct CodegenCtx<'a> {
     /// crate-root cron spawn (`emit_cron_job_spawns`) can init +
     /// materialize it cross-module.
     module_cron_store_vars: std::collections::HashSet<String>,
+    /// v0.37.8 — parallel to `module_cron_store_vars` for
+    /// `@background(store=X)` co-located in this module. Consulted by
+    /// `gen_module_top_let` (hoist) + `collect_module_sigs` (tolerate
+    /// the async non-literal RHS).
+    module_background_store_vars: std::collections::HashSet<String>,
     /// B20 — `(mod_name, var)` pairs collected in the MAIN ctx from
     /// `loader.modules[*].hoisted_cron_store_vars`. `emit_cron_job_spawns`
     /// iterates it to drive `crate::<mod>::__fitz_init_state_<var>()` +
     /// materialize the local `<var>` before the cron spawns.
     xmod_cron_store_hoists: Vec<(String, String)>,
+    /// v0.37.8 — parallel to `xmod_cron_store_hoists` for
+    /// `@background(store=X)`. `emit_background_boot` iterates it to
+    /// init `crate::<mod>::__fitz_init_state_<var>()` + set the global
+    /// `__FITZ_BG_STORE_<VAR>` cross-module.
+    xmod_bg_store_hoists: Vec<(String, String)>,
     /// 5b.6 — `(mod_name, var)` of async shared-state vars referenced by
     /// HTTP handlers of that module, hoisted to a crate-visible OnceCell +
     /// `__fitz_init_state_X()`. `gen_http_main` initializes them before
@@ -9362,7 +9504,9 @@ impl<'a> CodegenCtx<'a> {
             state_var_types: HashMap::new(),
             state_var_async: HashMap::new(),
             module_cron_store_vars: std::collections::HashSet::new(),
+            module_background_store_vars: std::collections::HashSet::new(),
             xmod_cron_store_hoists: Vec::new(),
+            xmod_bg_store_hoists: Vec::new(),
             xmod_state_hoists: Vec::new(),
             fn_state_deps: HashMap::new(),
             response_mode: false,
@@ -10856,8 +11000,39 @@ impl<'a> CodegenCtx<'a> {
         if self.bg_persistent_fns.is_empty() {
             return Ok(());
         }
+        // v0.37.8 — cross-module (B20 port): for a `@background(store=db)`
+        // fn co-located with `let db = db.connect(...).await` in an
+        // imported module, init `crate::<mod>::__fitz_init_state_db()` +
+        // materialize `crate::<mod>::__FITZ_STATE_DB` and set the
+        // crate-root `__FITZ_BG_STORE_DB` global. Their binding lives in
+        // the module, so the main-local loop below skips them.
+        let mut xmod_hoists = self.xmod_bg_store_hoists.clone();
+        xmod_hoists.sort();
+        xmod_hoists.dedup();
+        let mut xmod_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (mod_name, var) in &xmod_hoists {
+            let static_name = state_var_static_name(var);
+            let bg_static = bg_store_static_name(var);
+            self.emit(&format!(
+                "    crate::{mod_name}::__fitz_init_state_{var}().await;\n    \
+                 {{ use crate::__FitzBgStoreFrom; \
+                 let __src = crate::{mod_name}::{static_name}.get()\n        \
+                     .expect(\"@background store `{var}` no inicializada (bug del codegen)\").clone();\n    \
+                 if let Some(__c) = (&__src).into_bg_store() {{ let _ = {bg_static}.set(__c); }} }}\n",
+                mod_name = mod_name,
+                var = var,
+                static_name = static_name,
+                bg_static = bg_static
+            ));
+            xmod_vars.insert(var.clone());
+        }
         let store_vars = self.bg_store_vars.clone();
         for var in &store_vars {
+            // v0.37.8 — cross-module store vars are handled above (their
+            // binding lives in the module, not as a main local).
+            if xmod_vars.contains(var) {
+                continue;
+            }
             // Materialize the store var as a local (from its main state
             // static), same pattern as `emit_cron_job_spawns`. If it is
             // not a tracked state var, it is a bare main local already in
@@ -16040,7 +16215,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // handlers materialize the local via `gen_top_fn` (fn_state_deps).
         let is_shared_state = self.state_var_types.contains_key(name);
         if expr_contains_await(value)
-            && (self.module_cron_store_vars.contains(name) || is_shared_state)
+            && (self.module_cron_store_vars.contains(name)
+                || self.module_background_store_vars.contains(name)
+                || is_shared_state)
         {
             let static_name = state_var_static_name(name);
             writeln!(
@@ -46711,6 +46888,7 @@ async fn get_u(id: Int) -> Result<U> {
             &[],
             main_observability_enabled,
             &[],
+            &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
         )
     }

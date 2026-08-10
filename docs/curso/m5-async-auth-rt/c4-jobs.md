@@ -540,11 +540,11 @@ docker-compose extra.
 | UI dashboard tipo Sidekiq Web | ❌ | ❌ |
 | Coordinación multi-instancia (locks distribuidos) | ❌ | ❌ |
 
-¹ En `fitz build`, `@background(store=db)` persiste cuando el worker
-se declara en el archivo main. Un worker persistido en un módulo
-importado cae al path in-memory en el binario (funciona, pero sin
-persistir); en `fitz run` persiste desde cualquier módulo. Paralelo a
-cómo `@cron(store=db)` arrancó acotado al main antes de B20.
+¹ En `fitz build` (v0.37.8, port de B20), `@background(store=db)`
+persiste cuando el worker se declara en el main O en un módulo
+importado (co-localizado con su `let db = ...`), con el `spawn(...)`
+en el main. Lo único diferido es el `spawn(...)` ubicado dentro de un
+módulo; en `fitz run` persiste desde cualquier lado (registry global).
 
 ---
 

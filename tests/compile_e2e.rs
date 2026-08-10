@@ -13462,6 +13462,97 @@ fn main() => 0\n\
     );
 }
 
+#[test]
+fn background_persistent_cross_module_compiles_to_binary_v0_37_8() {
+    // v0.37.8 — port of B20 to @background: a `@background(store=db)` fn
+    // AND its `let db = db.connect(...).await` co-located in an imported
+    // module compile with `fitz build`, with the spawn in main. Pre-fix
+    // this failed with `module let 'db': RHS is not a literal`. The db
+    // conn is fictitious — `fitz build` only emits Rust + delegates to
+    // cargo, it does not run anything.
+    let stem = "bg_persistent_xmod_v0_37_8";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // worker.fitz: @background(store=db) fn + db co-located.
+    std::fs::write(
+        dir.join("worker.fitz"),
+        "let db = db.connect(\"postgres://x@h/d\").await\n\
+         \n\
+         @background(store=db, catch_up=true, retry={max: 2, backoff: \"exponential\", initial_secs: 1, max_secs: 5})\n\
+         async fn send_email(user_id: Int, subject: Str) -> Null {\n  \
+             return null\n\
+         }\n",
+    )
+    .expect("escribir worker.fitz");
+
+    // main.fitz: imports the worker fn + spawns it from a handler.
+    let main_src = "\
+from worker import send_email\n\
+\n\
+@get(\"/notify/{id}\")\n\
+fn notify(id: Int) -> Str {\n  \
+    let _ = spawn(send_email(id, \"Welcome\"))\n  \
+    return \"queued\"\n\
+}\n\
+\n\
+@server(43980)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (cross-module background persistence):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+
+    // Inspect the emitted main.rs: cross-module store init + set global.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let generated = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
+    // The store binding hoisted in the module is inited + set into the
+    // crate-root global from `crate::worker::__FITZ_STATE_DB`.
+    assert!(
+        generated.contains("crate::worker::__fitz_init_state_db().await"),
+        "el boot debe inicializar el store co-localizado del módulo worker"
+    );
+    assert!(
+        generated.contains("crate::worker::__FITZ_STATE_DB"),
+        "el boot debe leer el OnceCell del store del módulo worker"
+    );
+    assert!(
+        generated.contains("__FITZ_BG_STORE_DB.set"),
+        "el boot debe setear el global __FITZ_BG_STORE_DB cross-module"
+    );
+    // The worker module emitted the hoisted OnceCell + init fn.
+    let worker_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/worker.rs", stem));
+    let worker_gen = std::fs::read_to_string(&worker_rs).expect("leer worker.rs generado");
+    assert!(
+        worker_gen.contains("pub(crate) static __FITZ_STATE_DB")
+            && worker_gen.contains("pub(crate) async fn __fitz_init_state_db"),
+        "el módulo worker debe hoistear `db` a OnceCell + init fn"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // v0.19.0 Block 3.d — smoke E2E del `Response` built-in (paridad fitz build
 // vs. fitz run validada bit-a-bit a mano en el desarrollo del bloque).

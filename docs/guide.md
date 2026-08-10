@@ -12234,16 +12234,14 @@ sección anterior). Lo que queda como deuda explícita:
   `fitz_cron_jobs` / `fitz_cron_runs` — los querés con `psql`
   o un dashboard externo (Grafana, Metabase). Una UI dedicada
   estilo Sidekiq Web podría llegar como sub-paso futuro.
-- **Cross-module `@background(store=db)` en `fitz build`**. El
-  intérprete (`fitz run`) persiste un `@background(store=db)`
-  declarado en cualquier módulo (el registry es global). El
-  binario nativo (`fitz build`) hoy solo persiste los
-  `@background(store=db)` declarados en el archivo main —
-  un worker persistido que vive en un módulo importado cae al
-  path in-memory en el binario (funciona, pero sin persistir).
-  Paralelo a cómo `@cron(store=db)` arrancó acotado al main
-  antes de B20. Diferido a un sub-paso futuro si aparece
-  demanda concreta.
+- **`spawn(...)` de un `@background(store=db)` desde un módulo**
+  (no desde el main). Desde v0.37.8, un `@background(store=db)` fn
+  + su `let db = ...` co-localizados en un módulo importado
+  persisten con `fitz build` cuando el `spawn(...)` está en el
+  main (port de B20). Lo que queda diferido es el `spawn(...)`
+  ubicado DENTRO de un módulo (requiere que el ctx del módulo
+  también resuelva el store global). En `fitz run` funciona desde
+  cualquier lado (el registry es global).
 - **Coordinación entre múltiples instancias** (locks distribuidos
   para que un cron solo corra en un nodo). Hoy cada instancia
   corre todos sus jobs — si tenés 3 réplicas detrás de un load

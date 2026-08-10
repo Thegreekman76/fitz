@@ -9,6 +9,41 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.8] — 2026-08-10 — `@background(store=db)` cross-module en `fitz build` (port de B20)
+
+Cierra la deuda residual de v0.37.7: un `@background(store=db)` fn + su
+`let db = db.connect(...).await` co-localizados en un módulo importado ahora
+compilan y persisten con `fitz build` (antes fallaba con `module let 'db':
+RHS is not a literal`). Paridad bit-a-bit `fitz run` ↔ `fitz build`. Sin
+sintaxis nueva; solo codegen.
+
+### Fixed
+
+- **Cross-module `@background(store=db)` no compilaba a binario.** El
+  intérprete (`fitz run`) ya persistía un worker declarado en cualquier
+  módulo (el registry es global), pero el binario nativo solo persistía los
+  `@background(store=db)` declarados en el main. Es exactamente el gap que
+  `@cron(store=db)` tenía antes de **B20 (v0.37.1)**. Fix = port de esa
+  maquinaria: `LoadedModule` gana `background_fn_stmts` +
+  `hoisted_background_store_vars`; `gen_module_top_let` +
+  `collect_module_sigs` hoistean/toleran el `let db = db.connect(...).await`
+  co-localizado del módulo (a `crate::<mod>::__FITZ_STATE_DB` +
+  `__fitz_init_state_db()`) vía un set `module_background_store_vars`
+  paralelo al de cron; `bg_persistent_fns` se puebla cross-module con
+  `module_path: Some(mod)`; `emit_background_boot` inicializa +
+  materializa el store del módulo y setea el global `__FITZ_BG_STORE_DB`.
+- Validado contra Postgres local: un `worker.fitz` con `@background(store=db)`
+  + `let db`, importado por un `main.fitz` que hace `spawn(send_email(...))`
+  en un handler, compila a binario y persiste + catch_up con paridad ante
+  `fitz run`.
+
+### Notas
+
+- **Deuda residual restante**: el `spawn(...)` debe estar en el MAIN. Un
+  `spawn(...)` ubicado dentro de un módulo requiere que el ctx del módulo
+  también resuelva el store global — diferido. En `fitz run` funciona desde
+  cualquier lado.
+
 ## [v0.37.7] — 2026-08-10 — `@background(store=db)` persistente: jobs fire-and-forget que sobreviven reinicios
 
 Los background jobs (`@background` + `spawn(...)`) ganan persistencia opt-in sobre
