@@ -5,9 +5,9 @@
 // compilation). Here we only import what the CLI consumes.
 
 use fitz::{
-    ast, codegen, cron_jobs, db, deploy, docker, error, evaluator, fmt, http, launcher_template,
-    lexer, lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, templates,
-    testing, types, view,
+    ast, background_jobs, codegen, cron_jobs, db, deploy, docker, error, evaluator, fmt, http,
+    launcher_template, lexer, lint, lockfile, manifest, migrations, openapi, parser, pbs,
+    pyi_loader, templates, testing, types, view,
 };
 
 // `fitz py-types` sub-command (Phase 8.5) — only with the `python` feature.
@@ -3434,6 +3434,42 @@ fn run_file(
     if let Err(e) = eval_result {
         eprintln!("{}", e);
         std::process::exit(1);
+    }
+
+    // v0.37.7 — Install the background registry globally so `spawn(...)`
+    // from an HTTP handler / cron job (running on a tokio worker
+    // without the eval's thread-local) resolves the persistence config.
+    // Cheap even when there are no `@background(store=db)` fns.
+    http::install_background_registry(registry.background_registry.clone());
+
+    // v0.37.7 — `@background(store=db, catch_up=true)`: at boot, mark
+    // orphaned rows (`running`/`retrying` left mid-flight by a crash)
+    // as `failed`. Best-effort — never aborts the process. Runs before
+    // the serve/cron branch so it covers HTTP, cron-only, and plain
+    // script modes.
+    if !registry.background_registry.is_empty() {
+        let stores = registry.background_registry.catch_up_stores();
+        if !stores.is_empty() {
+            shared_runtime.block_on(async {
+                for s in &stores {
+                    if background_jobs::ensure_bg_storage_initialized(s)
+                        .await
+                        .is_ok()
+                    {
+                        match background_jobs::mark_orphaned_failed(s).await {
+                            Ok(n) if n > 0 => {
+                                eprintln!(
+                                    "⚙️  @background catch_up: marked {} orphaned job(s) as failed",
+                                    n
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("⚙️  @background catch_up failed: {}", e),
+                        }
+                    }
+                }
+            });
+        }
     }
 
     // v0.11.0 — CLI mode takes priority over HTTP server / cron.

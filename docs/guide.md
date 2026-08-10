@@ -12125,6 +12125,70 @@ Es exactamente lo que necesitás para un service `systemd`:
 `ExecStart=/usr/local/bin/cleanup`, sin scripts extra ni
 intérpretes embebidos.
 
+### `@background` persistente (store + catch_up + retry)
+
+Los mismos kwargs de persistencia que `@cron` aplican a
+`@background` (v0.37.7). Con `store=db` cada `spawn(...)` de un
+worker persistido queda registrado en la tabla `fitz_bg_jobs` —
+así los jobs sobreviven un reinicio del proceso (visibilidad de
+qué corrió, con qué args, qué falló, cuántos reintentos), sin
+broker externo.
+
+```fitz
+let db = db.connect(env_or("DATABASE_URL", "postgres://...")).await
+
+@background(store=db, catch_up=true,
+            retry={max: 2, backoff: "exponential", initial_secs: 1, max_secs: 10})
+async fn send_welcome(user_id: Int, channel: Str) -> Result<Null> {
+    // ... trabajo diferido; un `return Err(...)` cuenta como fallo
+    // del job y dispara el retry ...
+    return Ok(null)
+}
+
+@post("/users/{id}/notify")
+fn notify(id: Int) -> Str {
+    let _ = spawn(send_welcome(id, "email"))   // no-bloqueante
+    return "queued"
+}
+```
+
+Qué persiste cada spawn en `fitz_bg_jobs`:
+
+- `fn_name` + `args_json` — los args serializados a JSON
+  (`[42,"email"]`). Soporta **primitivos + compuestos** (nominales,
+  `List`, `Map`). El args_json es solo para **visibilidad** — nunca
+  se deserializa de vuelta.
+- `status` — `running` → `retrying` → `ok`/`failed`. Los retries
+  actualizan la MISMA fila (una tabla, un job = un spawn = una fila,
+  a diferencia de las dos tablas de `@cron`).
+- `attempt` + `error` + `created_at` + `finished_at`.
+
+**best-effort**: el INSERT es el primer paso *dentro* de la task
+spawneada, así que `spawn(...)` sigue siendo fire-and-forget
+no-bloqueante. Si la DB está caída al momento del spawn, el job
+igual corre (la persistencia es aditiva, nunca traga el trabajo).
+
+**catch_up**: `catch_up=true` marca al boot las filas huérfanas
+(`running`/`retrying` que un crash dejó a medias) como `failed`
+con `error = 'orphaned by restart'`. NO las re-ejecuta — el
+trabajo se perdió; el operador decide re-dispararlas. (A
+diferencia del `catch_up` de `@cron`, que sí re-ejecuta el último
+tick perdido.)
+
+Visibilidad con `psql`:
+
+```sql
+SELECT id, fn_name, args_json, status, attempt, error
+FROM fitz_bg_jobs ORDER BY id DESC LIMIT 10;
+```
+
+El binding `store=db` se resuelve al boot (top-level `let db =
+db.connect(...).await`, mismo timing que `@cron`). Sin `store` el
+`@background` sigue siendo fire-and-forget in-memory como siempre
+(backward-compat total). Paridad bit-a-bit `fitz run` ↔ `fitz
+build`. Ejemplo runnable completo en
+`examples/guide/30c-background-persistente.fitz`.
+
 ### Por qué Fitz hace esto distinto
 
 Cinco diferenciales que vuelven a Fitz único en este espacio:
@@ -12170,12 +12234,16 @@ sección anterior). Lo que queda como deuda explícita:
   `fitz_cron_jobs` / `fitz_cron_runs` — los querés con `psql`
   o un dashboard externo (Grafana, Metabase). Una UI dedicada
   estilo Sidekiq Web podría llegar como sub-paso futuro.
-- **`@background` con persistencia + retry**. El runtime
-  intérprete y el codegen aceptan los kwargs `tz` y `retry`
-  sobre `@background` pero NO `store` ni `catch_up` (los args
-  del `spawn(...)` requieren serialización JSON estable + tabla
-  `fitz_bg_jobs` separada). Diferido a iter3 cuando aparezca
-  presión real.
+- **Cross-module `@background(store=db)` en `fitz build`**. El
+  intérprete (`fitz run`) persiste un `@background(store=db)`
+  declarado en cualquier módulo (el registry es global). El
+  binario nativo (`fitz build`) hoy solo persiste los
+  `@background(store=db)` declarados en el archivo main —
+  un worker persistido que vive en un módulo importado cae al
+  path in-memory en el binario (funciona, pero sin persistir).
+  Paralelo a cómo `@cron(store=db)` arrancó acotado al main
+  antes de B20. Diferido a un sub-paso futuro si aparece
+  demanda concreta.
 - **Coordinación entre múltiples instancias** (locks distribuidos
   para que un cron solo corra en un nodo). Hoy cada instancia
   corre todos sus jobs — si tenés 3 réplicas detrás de un load

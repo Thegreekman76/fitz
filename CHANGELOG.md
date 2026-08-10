@@ -9,6 +9,46 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.7] — 2026-08-10 — `@background(store=db)` persistente: jobs fire-and-forget que sobreviven reinicios
+
+Los background jobs (`@background` + `spawn(...)`) ganan persistencia opt-in sobre
+Postgres, paralela a la que `@cron` tiene desde v0.11.2. Sin broker externo. Paridad
+bit-a-bit `fitz run` ↔ `fitz build`. Extensión VSCode: LSP completion de `@background`
+cita los kwargs nuevos (grammar sin cambios).
+
+### Added
+
+- **`@background(store=db, catch_up=true, retry={...})`.** Con `store=db`, cada
+  `spawn(worker(args))` de un `@background` persistido queda registrado en la tabla
+  única `fitz_bg_jobs` (auto-creada al boot con `CREATE TABLE IF NOT EXISTS`):
+  `fn_name`, `args_json` (los args serializados a JSON — **primitivos + compuestos**
+  vía `value_to_json` / `__ToFitzJson`, solo para visibilidad, nunca se deserializan),
+  `status` (`running` → `retrying` → `ok`/`failed`), `attempt`, `error`, timestamps.
+  Un job = un spawn = una fila (los retries actualizan la misma fila, a diferencia de
+  las dos tablas de `@cron`).
+- **best-effort**: el INSERT es el primer paso *dentro* de la task spawneada, así que
+  `spawn(...)` sigue fire-and-forget no-bloqueante. Si la DB está caída al momento del
+  spawn, el job igual corre.
+- **`catch_up=true`**: al boot marca los huérfanos (`running`/`retrying` que un crash
+  dejó a medias) como `failed` con `error = 'orphaned by restart'`. NO los re-ejecuta
+  (menos riesgo de doble-ejecución de jobs no-idempotentes; el operador re-dispara).
+- **`retry={max, backoff, initial_secs, max_secs}`**: retry con backoff aplicado en el
+  path persistente; un `return Err(...)` del worker cuenta como fallo del job.
+- Módulo nuevo `src/background_jobs.rs` (registry + helpers SQL + `run_persisted_spawn`)
+  + prelude paralelo bit-a-bit en el codegen (`__fitz_bg_*` + trait `__FitzBgStoreFrom`).
+- Ejemplo runnable `examples/guide/30c-background-persistente.fitz`. Sub-sección nueva
+  en el cap 30 de la guía + tabla del curso M5.C4 actualizada.
+
+### Notas
+
+- Sin `store`, `@background` sigue siendo fire-and-forget in-memory (backward-compat).
+- El valor de retorno de un spawn persistido se descarta (fire-and-forget; resuelve a
+  `Null`). El `@background(store=db)` fn debe retornar `Null`/`Result<Null>` (como `@cron`).
+- **Deuda residual**: cross-module `@background(store=db)` en `fitz build` — el
+  intérprete lo persiste (registry global), el binario solo persiste los declarados en
+  el main (paralelo a cómo `@cron` arrancó antes de B20). Documentado en
+  `docs/deudas-post-5b.md`.
+
 ## [v0.37.6] — 2026-08-08 — State compartido entre handlers HTTP de un MÓDULO (deuda 5b.6) CERRADA
 
 La deuda más impactante del stack web: un `let db = db.connect(...).await` top-level

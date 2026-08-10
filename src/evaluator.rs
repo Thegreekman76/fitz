@@ -463,12 +463,15 @@ fn process_decorator(
     }
 
     // Phase 9.w.3 — `@background`: marks the fn as authorized for
-    // `spawn(...)`. Does NOT require additional registration at runtime — the
-    // checker (9.w.3.a) already validated it. The fn remains defined in the env
-    // like any other; the callsite `spawn(call)` invokes it via
-    // `tokio::spawn`. No-op decorator at runtime.
+    // `spawn(...)`. The fn remains defined in the env like any other;
+    // the callsite `spawn(call)` invokes it via `tokio::spawn`.
+    //
+    // v0.37.7 — `@background(store=db)` additionally registers the fn
+    // for persistence: each `spawn(...)` is recorded in `fitz_bg_jobs`.
+    // Without `store` it's a no-op at runtime (in-memory fire-and-forget,
+    // backward-compat).
     if deco.name == "background" {
-        return Ok(());
+        return register_background_fn_decorator(deco, fn_name, env, fn_def_span);
     }
 
     // Phase 12.1.b — `@healthz` and `@readyz`: K8s liveness/readiness
@@ -708,6 +711,74 @@ fn register_cron_job(
         options,
     )
     .map_err(err)
+}
+
+/// v0.37.7 — Processes `@background`. When the decorator carries
+/// `store=db`, resolves the store against the env (top-level `db`
+/// binding, same timing as `@cron`) and registers the fn in the
+/// `BackgroundRegistry` so each `spawn(...)` gets persisted. Without
+/// `store` it's a no-op (in-memory fire-and-forget, backward-compat).
+///
+/// The checker (v0.37.7) already validated the kwarg shape; here we
+/// resolve the runtime values (`store` must be a `DbConn`, reusing
+/// `resolve_store_kwarg`). `tz` is accepted by the checker but has no
+/// effect on `@background` (it does not schedule) — we ignore it.
+fn register_background_fn_decorator(
+    deco: &Decorator,
+    fn_name: &str,
+    env: &EnvRef,
+    fn_def_span: Span,
+) -> Result<(), EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            fn_def_span.line,
+            fn_def_span.column,
+            msg,
+        ))
+    };
+    let mut store: Option<std::sync::Arc<crate::db::DbConnHandle>> = None;
+    let mut retry: Option<crate::cron_jobs::RetryConfig> = None;
+    let mut catch_up = false;
+    for (k, v) in &deco.kwargs {
+        match k.as_str() {
+            // Accepted by the checker for shape parity with @cron but
+            // background does not schedule — no runtime effect.
+            "tz" => {}
+            "retry" => {
+                retry = Some(parse_retry_kwarg(v, "@background", fn_name).map_err(&err)?);
+            }
+            "catch_up" => {
+                catch_up = match v {
+                    Expr::Bool(b, _) => *b,
+                    _ => {
+                        return Err(err(format!(
+                            "@background on fn '{}': kwarg `catch_up` must be a Bool literal.",
+                            fn_name
+                        )));
+                    }
+                };
+            }
+            "store" => {
+                store = Some(resolve_store_kwarg(v, "@background", fn_name, env).map_err(&err)?);
+            }
+            other => {
+                return Err(err(format!(
+                    "@background on fn '{}': kwarg `{}` not recognized. \
+                     Accepted: `tz`, `retry`, `catch_up`, `store`.",
+                    fn_name, other
+                )));
+            }
+        }
+    }
+    match store {
+        Some(store) => {
+            crate::http::register_background_fn(fn_name.to_string(), store, retry, catch_up)
+                .map_err(err)
+        }
+        // No `store` → in-memory fire-and-forget, nothing to register.
+        None => Ok(()),
+    }
 }
 
 /// 9.w.3.iter2 — Converts the `Decorator`'s kwargs (validated by the
@@ -5723,6 +5794,96 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
         };
         arg_values.push(v);
     }
+    // v0.37.7 — Persistence branch: if the target fn is registered as
+    // `@background(store=db)`, record each spawn in `fitz_bg_jobs`
+    // (best-effort) + apply the retry policy. The persisted spawn is
+    // fire-and-forget: its value is discarded (the `.await` resolves to
+    // `Null`), because a persisted background job produces a DB record
+    // (ok/failed), not a value to consume. Fns without `store` fall to
+    // the in-memory path below (unchanged, backward-compat).
+    if let Some(entry) = crate::http::current_background_registry().and_then(|r| r.entry(&fn_name))
+    {
+        // Serialize the args to a JSON array (visibility only — never
+        // deserialized back). Best-effort: an arg that fails to
+        // serialize (impossible by the checker) degrades to `null`.
+        let args_json = serde_json::Value::Array(
+            arg_values
+                .iter()
+                .map(|v| crate::http::value_to_json(v).unwrap_or(serde_json::Value::Null))
+                .collect(),
+        )
+        .to_string();
+        let handler_pers = handler;
+        let fn_name_reg = fn_name.clone();
+        let fn_name_invoke = fn_name.clone();
+        let join_handle = tokio::spawn(async move {
+            crate::background_jobs::run_persisted_spawn(
+                entry.store,
+                fn_name_reg,
+                args_json,
+                entry.retry,
+                move || {
+                    // FnMut: clone the handler + args per attempt so
+                    // retries re-invoke with fresh values.
+                    let h = handler_pers.clone();
+                    let a = arg_values.clone();
+                    let name = fn_name_invoke.clone();
+                    async move {
+                        match invoke_value(h, a, &name, Span::ZERO).await {
+                            Ok(value) => {
+                                // Await the Future if the fn was async so
+                                // the coroutine actually runs.
+                                let resolved: Result<Value, FitzError> =
+                                    if let Value::Future(cell) = value {
+                                        let inner = cell.0.lock().take();
+                                        match inner {
+                                            Some(future) => future.await,
+                                            None => Ok(Value::Null),
+                                        }
+                                    } else {
+                                        Ok(value)
+                                    };
+                                // Parity with codegen's `into_result()`: a
+                                // runtime error OR a `return Err(...)` value
+                                // counts as a job failure that triggers
+                                // retry. Any other value is a success.
+                                match resolved {
+                                    Ok(Value::Result(crate::value::ResultVariant::Err(e))) => {
+                                        Err(match *e {
+                                            Value::Str(s) => s,
+                                            other => format!("{}", other),
+                                        })
+                                    }
+                                    Ok(_) => Ok(()),
+                                    Err(e) => Err(format!("{}", e)),
+                                }
+                            }
+                            Err(EvalSignal::Error(e)) => Err(format!("{}", e)),
+                            Err(_) => Err(
+                                "spawn: the persisted task emitted an unexpected non-Error signal"
+                                    .to_string(),
+                            ),
+                        }
+                    }
+                },
+            )
+            .await;
+            Ok::<Value, FitzError>(Value::Null)
+        });
+        let fut: FitzFuture = Box::pin(async move {
+            match join_handle.await {
+                Ok(result) => result,
+                Err(join_err) => Err(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!("spawn: spawned task failed: {}", join_err),
+                )),
+            }
+        });
+        return Ok(Value::Future(FutureCell(Arc::new(Mutex::new(Some(fut))))));
+    }
+
     // We spawn the invoke on a tokio task. The JoinHandle is wrapped
     // in `Value::Future` so the caller can await it.
     let handler_clone = handler;

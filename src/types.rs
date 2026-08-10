@@ -12103,18 +12103,21 @@ fn check_background_decorator(
         Some(d) => d,
         None => return,
     };
-    // 9.w.3.iter2 — `@background` now accepts optional kwargs `tz`
-    // and `retry` (same shape as `@cron`). `store` and `catch_up` are NOT
-    // accepted on `@background` (persistence of spawn jobs is
-    // deferred to iter3 — spawn args require JSON serialization
-    // + separate `fitz_bg_jobs` table).
+    // 9.w.3.iter2 — `@background` accepts optional kwargs `tz` and
+    // `retry` (same shape as `@cron`). Since v0.37.7 it also accepts
+    // `store` and `catch_up` for persistence: a `@background(store=db)`
+    // fn records each `spawn(...)` in the `fitz_bg_jobs` table (best
+    // effort), and `catch_up=true` marks orphaned rows as `failed` at
+    // boot. The kwarg shape validation lives in `check_job_kwargs`; the
+    // real type of `store` (must resolve to a `DbConn`) is checked at
+    // runtime, same as `@cron`.
     if !bg_deco.args.is_empty() {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
             fn_span.line,
             fn_span.column,
             format!(
-                "@background on fn '{}': does not accept positional args. Syntax: `@background` or `@background(tz=\"America/Buenos_Aires\", retry={{max: 3, backoff: \"exponential\"}})`.",
+                "@background on fn '{}': does not accept positional args. Syntax: `@background` or `@background(store=db, catch_up=true, retry={{max: 3, backoff: \"exponential\"}})`.",
                 fn_name
             ),
         ));
@@ -12124,7 +12127,7 @@ fn check_background_decorator(
         "@background",
         fn_name,
         &bg_deco.kwargs,
-        &["tz", "retry"],
+        &["tz", "retry", "catch_up", "store"],
         fn_span,
     ) {
         // If the kwargs shape is invalid, we still continue with the
@@ -19360,30 +19363,47 @@ print(total)
     }
 
     #[test]
-    fn background_with_store_is_error() {
-        // `store` is NOT valid in `@background` (spawn job persistence
-        // is deferred to iter3).
+    fn background_with_store_passes_checker() {
+        // v0.37.7 — `store` IS now valid in `@background` (spawn job
+        // persistence). The checker only validates the kwarg shape; the
+        // real type of `db` (must be a DbConn) is checked at runtime,
+        // same as `@cron`. So `store=db` with `db` = Int passes the
+        // checker.
         let src = "let db = 1\n@background(store=db)\nfn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
-        assert!(
-            errors.iter().any(|e| e.message.contains("@background")
-                && e.message.contains("`store`")
-                && e.message.contains("unrecognized")),
-            "expected msg about store not accepted in @background: {:?}",
-            errors
-        );
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
     }
 
     #[test]
-    fn background_with_catch_up_is_error() {
-        // `catch_up` also doesn't apply to `@background` (it's not scheduling).
+    fn background_with_catch_up_passes_checker() {
+        // v0.37.7 — `catch_up` is now accepted on `@background` (boot
+        // marks orphaned rows as failed).
         let src = "@background(catch_up=true)\nfn send(addr: Str) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
+    }
+
+    #[test]
+    fn background_with_store_catch_up_and_retry_passes_checker() {
+        // v0.37.7 — the full persistent shape parallel to @cron.
+        let src = "let db = 1\n\
+                   @background(store=db, catch_up=true, retry={max: 3, backoff: \"exponential\", initial_secs: 1, max_secs: 30})\n\
+                   fn send(addr: Str) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "expected 0 errors: {:?}", errors);
+    }
+
+    #[test]
+    fn background_with_unknown_kwarg_still_is_error() {
+        // Guard: an unrecognized kwarg still errors after widening the
+        // allowlist to tz/retry/catch_up/store.
+        let src = "@background(bogus=true)\nfn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
         assert!(
             errors.iter().any(|e| e.message.contains("@background")
-                && e.message.contains("`catch_up`")
+                && e.message.contains("`bogus`")
                 && e.message.contains("unrecognized")),
-            "expected msg about catch_up not accepted in @background: {:?}",
+            "expected msg about unrecognized kwarg: {:?}",
             errors
         );
     }

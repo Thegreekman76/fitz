@@ -283,6 +283,7 @@ pub fn generate_project(
     // `program_uses_db` over the full module_program.
     let uses_db = program_uses_db(program)
         || program_or_modules_has_persistent_cron(program, &loader)
+        || program_has_persistent_background(program)
         || loader
             .modules
             .iter()
@@ -347,8 +348,10 @@ pub fn generate_project(
     // dispatches mails, plus a main that only orchestrates with
     // `spawn(notify(...))`.
     let uses_smtp = program_uses_smtp(program) || loader.modules.iter().any(|m| m.uses_smtp);
-    let uses_to_json =
-        program_uses_to_json(program) || loader.modules.iter().any(|m| m.uses_to_json);
+    let uses_to_json = program_uses_to_json(program)
+            || loader.modules.iter().any(|m| m.uses_to_json)
+            // v0.37.7 — persisted @background serializes spawn args to JSON.
+            || program_has_persistent_background(program);
 
     // Phase 12.8 — feature flags: detects `@flag(...)` or builtins
     // `flag(...)`/`flags.X(...)`. The program can always use the
@@ -1660,6 +1663,31 @@ fn stmt_is_persistent_cron(s: &Stmt) -> bool {
         }),
         _ => false,
     }
+}
+
+/// v0.37.7 — `true` if the stmt is a `@background(..., store=<ident>)`
+/// fn. Parallel to `stmt_is_persistent_cron`. Persisted background
+/// jobs link the db driver (uses_db) + JSON serialization
+/// (uses_to_json) for the args snapshot.
+fn stmt_is_persistent_background(s: &Stmt) -> bool {
+    match s {
+        Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| {
+            d.name == "background"
+                && d.kwargs
+                    .iter()
+                    .any(|(k, v)| k == "store" && matches!(v, Expr::Ident(_, _)))
+        }),
+        _ => false,
+    }
+}
+
+/// v0.37.7 — `true` if the program declares at least one
+/// `@background(..., store=<ident>)` fn. MVP: only scans the main
+/// program (cross-module persisted `@background` in `fitz build` is
+/// deferred — the interpreter `fitz run` supports it via the global
+/// registry). See `docs/deudas-post-5b.md`.
+fn program_has_persistent_background(program: &Program) -> bool {
+    program.iter().any(stmt_is_persistent_background)
 }
 
 fn program_uses_db(program: &Program) -> bool {
@@ -3516,6 +3544,15 @@ fn walk_expr_for_state_refs(
 /// identifiers as var names, this helper must adapt (residual debt).
 fn state_var_static_name(var_name: &str) -> String {
     format!("__FITZ_STATE_{}", var_name.to_ascii_uppercase())
+}
+
+/// v0.37.7 — name of the `OnceCell<__FitzDbConn>` static that holds a
+/// `@background(store=<var>)` store binding. Uppercased so clippy's
+/// `non_upper_case_globals` is happy (parallel to
+/// `state_var_static_name`). Consulted by `emit_jobs_prelude` (declare),
+/// `emit_background_boot` (init), and `gen_spawn_call` (read).
+fn bg_store_static_name(var_name: &str) -> String {
+    format!("__FITZ_BG_STORE_{}", var_name.to_ascii_uppercase())
 }
 
 /// Normalizes a `.fitz` file stem to a valid identifier for
@@ -6935,6 +6972,7 @@ fn generate_main_rs(
     // `m.uses_db` (db.connect/query/exec without @table).
     let uses_db = program_uses_db(program)
         || program_or_modules_has_persistent_cron(program, loader)
+        || program_has_persistent_background(program)
         || loader
             .modules
             .iter()
@@ -6951,8 +6989,10 @@ fn generate_main_rs(
     // Mini-tanda SMTP builtin (2026-06-19) — `smtp.send(...)` calls
     // in main OR any loaded module. Same transitive pattern.
     let uses_smtp = program_uses_smtp(program) || loader.modules.iter().any(|m| m.uses_smtp);
-    let uses_to_json =
-        program_uses_to_json(program) || loader.modules.iter().any(|m| m.uses_to_json);
+    let uses_to_json = program_uses_to_json(program)
+        || loader.modules.iter().any(|m| m.uses_to_json)
+        // v0.37.7 — persisted @background serializes spawn args to JSON.
+        || program_has_persistent_background(program);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -7511,6 +7551,36 @@ fn emit_main_rs_body(
     // emits the simple struct shape but the spawn emits with
     // `store: ...` → E0560.
     let any_persistent_cron = program_or_modules_has_persistent_cron(program, loader);
+    // v0.37.7 — pre-collect `@background(store=db)` fns from the main
+    // program BEFORE `emit_jobs_prelude` so the prelude can emit the
+    // `static __FITZ_BG_STORE_<var>` declarations (which need
+    // `bg_store_vars`). `gen_spawn_call` (later, during
+    // `gen_http_main`/`gen_main`) consults `bg_persistent_fns` to emit
+    // the persisted spawn path; `emit_background_boot` initializes the
+    // statics + catch_up. MVP: only the main program is scanned (a
+    // persisted `@background` in an imported module is deferred in `fitz
+    // build`; `fitz run` covers it via the global registry — see
+    // `docs/deudas-post-5b.md`).
+    for stmt in program {
+        if let Stmt::FnDef {
+            name, decorators, ..
+        } = stmt
+        {
+            if let Some(deco) = decorators.iter().find(|d| d.name == "background") {
+                let store_var = deco.kwargs.iter().find_map(|(k, v)| match (k.as_str(), v) {
+                    ("store", Expr::Ident(n, _)) => Some(n.clone()),
+                    _ => None,
+                });
+                if let Some(store_var) = store_var {
+                    let info = parse_bg_kwargs_into_info(&deco.kwargs, name, store_var.clone())?;
+                    ctx.bg_store_vars.push(store_var);
+                    ctx.bg_persistent_fns.insert(name.clone(), info);
+                }
+            }
+        }
+    }
+    ctx.bg_store_vars.sort();
+    ctx.bg_store_vars.dedup();
     ctx.emit_jobs_prelude(any_persistent_cron);
     // Phase 12.3.a.3 — structured logging prelude: enum
     // `__FitzLogValue` + `__fitz_log_init/info/warn/error/debug`. Only
@@ -7859,6 +7929,60 @@ fn parse_cron_kwargs_into_info(
     Ok(())
 }
 
+/// v0.37.7 — parses the kwargs of a `@background(store=db, ...)`
+/// decorator into a `BgPersistInfo`. `store_var` is already extracted
+/// by the caller (it decides whether the fn is persisted at all). The
+/// checker (v0.37.7) validated the kwarg shape; here we convert to the
+/// build-time struct. `tz` is accepted for shape parity with `@cron`
+/// but has no effect (background does not schedule) — ignored.
+fn parse_bg_kwargs_into_info(
+    kwargs: &[(String, Expr)],
+    fn_name: &str,
+    store_var: String,
+) -> Result<BgPersistInfo, FitzError> {
+    let err = |msg: String| FitzError::new(ErrorKind::TypeError, 0, 0, msg);
+    let mut info = BgPersistInfo {
+        store_var,
+        retry: None,
+        catch_up: false,
+    };
+    for (k, v) in kwargs {
+        match k.as_str() {
+            // `store` handled by the caller; `tz` no-op for background.
+            "store" | "tz" => {}
+            "catch_up" => match v {
+                Expr::Bool(b, _) => info.catch_up = *b,
+                _ => {
+                    return Err(err(format!(
+                        "@background on fn '{}': kwarg `catch_up` must be a Bool literal.",
+                        fn_name
+                    )));
+                }
+            },
+            "retry" => {
+                let entries = match v {
+                    Expr::Map(es, _) => es,
+                    _ => {
+                        return Err(err(format!(
+                            "@background on fn '{}': kwarg `retry` must be a Map literal.",
+                            fn_name
+                        )));
+                    }
+                };
+                info.retry = Some(parse_cron_retry_map(entries, fn_name)?);
+            }
+            other => {
+                return Err(err(format!(
+                    "@background on fn '{}': kwarg `{}` not recognized. \
+                     Accepted: `tz`, `retry`, `catch_up`, `store`.",
+                    fn_name, other
+                )));
+            }
+        }
+    }
+    Ok(info)
+}
+
 /// B20 — collects the names of top-level bindings referenced by a
 /// `@cron(..., store=X)` decorator in `program`. When such a binding
 /// (`let X = db.connect(...).await`) lives inside an imported module,
@@ -8044,6 +8168,22 @@ struct CronJobRetryArgs {
     backoff: String,
     initial_secs: u64,
     max_secs: u64,
+}
+
+/// v0.37.7 — build-time persistence config of a `@background(store=db)`
+/// fn. Collected in `generate_main_rs` by scanning the main program.
+/// `gen_spawn_call` consults `bg_persistent_fns` to emit the persisted
+/// spawn path; `emit_background_boot` initializes the store statics +
+/// catch_up.
+#[derive(Debug, Clone)]
+struct BgPersistInfo {
+    /// The identifier passed to `store=<ident>` — materialized to a
+    /// `static __FITZ_BG_STORE_<var>` at boot.
+    store_var: String,
+    /// Retry policy. `None` = single attempt.
+    retry: Option<CronJobRetryArgs>,
+    /// `true` = mark orphaned rows as failed at boot.
+    catch_up: bool,
 }
 
 /// Parsed values of `@server(port?, host?)`. Defaults applied (port
@@ -8984,6 +9124,17 @@ struct CodegenCtx<'a> {
     /// Str, and an `is_async` flag. `gen_main`/`gen_http_main` use
     /// it to emit `tokio::spawn(__fitz_run_cron_job(...))` per job.
     cron_jobs_info: Vec<CronJobInfo>,
+    /// v0.37.7: persistence config of each `@background(store=db)` fn,
+    /// keyed by fn name. `gen_spawn_call` consults it to emit the
+    /// persisted spawn path (INSERT + retry into `fitz_bg_jobs`);
+    /// `emit_background_boot` initializes the store statics + catch_up.
+    /// Empty = no persisted background jobs (in-memory only). MVP: only
+    /// scanned from the main program.
+    bg_persistent_fns: std::collections::HashMap<String, BgPersistInfo>,
+    /// v0.37.7: distinct `store=<var>` names across all persisted
+    /// `@background` fns. Each materializes to a `static
+    /// __FITZ_BG_STORE_<var>` initialized at boot.
+    bg_store_vars: Vec<String>,
     /// Phase 9.w.2.e: WebSocket heartbeat ping interval in seconds.
     /// Default 30; `@server(ws_heartbeat_secs=N)` overrides. Set
     /// by `emit_main_rs_body` BEFORE invoking
@@ -9244,6 +9395,8 @@ impl<'a> CodegenCtx<'a> {
             uses_smtp: false,
             uses_to_json: false,
             cron_jobs_info: Vec::new(),
+            bg_persistent_fns: std::collections::HashMap::new(),
+            bg_store_vars: Vec::new(),
             ws_heartbeat_secs: 30,
             observability_enabled: true,
             python_bindings: HashMap::new(),
@@ -10688,6 +10841,78 @@ impl<'a> CodegenCtx<'a> {
         Ok(())
     }
 
+    /// v0.37.7 — Emits the background-persistence boot code: materialize
+    /// each `store=<var>` binding into its global `__FITZ_BG_STORE_<VAR>`
+    /// static so handlers/cron jobs (which run without the store local
+    /// in scope) can reach it from `spawn(...)`; then, for each store
+    /// whose fn declared `catch_up=true`, mark orphaned rows as failed.
+    ///
+    /// Called from `gen_main` / `gen_http_main` right before
+    /// `emit_cron_job_spawns`. MVP: the store binding must be a MAIN
+    /// state var (e.g. `let db = db.connect(...).await` top-level) or a
+    /// bare main local — cross-module stores are deferred (see
+    /// `docs/deudas-post-5b.md`).
+    fn emit_background_boot(&mut self) -> Result<(), FitzError> {
+        if self.bg_persistent_fns.is_empty() {
+            return Ok(());
+        }
+        let store_vars = self.bg_store_vars.clone();
+        for var in &store_vars {
+            // Materialize the store var as a local (from its main state
+            // static), same pattern as `emit_cron_job_spawns`. If it is
+            // not a tracked state var, it is a bare main local already in
+            // scope — reference it directly.
+            if let Some(ty) = self.state_var_types.get(var).cloned() {
+                let static_name = state_var_static_name(var);
+                let rust_ty = rust_type_for(&ty, self.env)?;
+                let is_async_init = self.state_var_async.get(var).copied().unwrap_or(false);
+                if is_async_init {
+                    self.emit(&format!(
+                        "    let {var}: {ty} = {sn}.get().expect(\"state var `{var}` no inicializada (bug del codegen)\").clone();\n",
+                        var = var, ty = rust_ty, sn = static_name
+                    ));
+                } else {
+                    self.emit(&format!(
+                        "    let {var}: {ty} = (*{sn}).clone();\n",
+                        var = var,
+                        ty = rust_ty,
+                        sn = static_name
+                    ));
+                }
+            }
+            let bg_static = bg_store_static_name(var);
+            self.emit(&format!(
+                "    {{ use crate::__FitzBgStoreFrom; if let Some(__c) = (&{var}).into_bg_store() {{ let _ = {bg_static}.set(__c); }} }}\n",
+                var = var, bg_static = bg_static
+            ));
+        }
+        // catch_up: for each distinct store whose fn declared
+        // catch_up=true, mark orphaned rows (running/retrying) as failed.
+        let mut cu_vars: Vec<String> = self
+            .bg_persistent_fns
+            .values()
+            .filter(|i| i.catch_up)
+            .map(|i| i.store_var.clone())
+            .collect();
+        cu_vars.sort();
+        cu_vars.dedup();
+        for var in &cu_vars {
+            let bg_static = bg_store_static_name(var);
+            self.emit(&format!(
+                "    if let Some(__c) = {bg_static}.get().cloned() {{\n        \
+                     let _ = __fitz_bg_init_storage(&__c).await;\n        \
+                     match __fitz_bg_mark_orphaned(&__c).await {{\n            \
+                         Ok(n) if n > 0 => eprintln!(\"\\u{{2699}} @background catch_up: marcados {{}} job(s) huérfano(s) como failed\", n),\n            \
+                         Ok(_) => {{}}\n            \
+                         Err(e) => eprintln!(\"\\u{{2699}} @background catch_up falló: {{}}\", e),\n        \
+                     }}\n    \
+                     }}\n",
+                bg_static = bg_static
+            ));
+        }
+        Ok(())
+    }
+
     /// `any_persistent`: true if the program declares at least one
     /// `@cron(..., store=<ident>)`. Computed in `generate_project`
     /// before `partition_program_stmts` via
@@ -10766,6 +10991,22 @@ impl __FitzRetryConfig {
             self.emit(JOBS_RUN_PRELUDE_PERSISTENT);
         } else {
             self.emit(JOBS_RUN_PRELUDE_SIMPLE);
+        }
+        // v0.37.7 — background-persistence prelude + one store static
+        // per distinct `store=<var>`. Emitted after the cron prelude so
+        // it can reuse `__FitzDbConn`/`__FitzPgValue` (db prelude) and
+        // `__FitzRetryConfig` (emitted above). The `__fitz_bg_*` helpers
+        // + `__FitzBgStoreFrom` trait have their own names (no collision
+        // with cron's `__fitz_cron_*` / `__FitzCronStoreFrom`).
+        if !self.bg_persistent_fns.is_empty() {
+            self.emit(BG_JOBS_SQL_HELPERS_PRELUDE);
+            let vars = self.bg_store_vars.clone();
+            for var in &vars {
+                self.emit(&format!(
+                    "static {name}: tokio::sync::OnceCell<__FitzDbConn> = tokio::sync::OnceCell::const_new();\n",
+                    name = bg_store_static_name(var)
+                ));
+            }
         }
     }
 
@@ -12584,6 +12825,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             self.gen_stmt(stmt)?;
         }
+        // v0.37.7 — install @background stores + catch_up before the
+        // cron spawns (both run after the user's main_stmts so any
+        // top-level `let db = ...` state var is already initialized).
+        self.emit_background_boot()?;
         self.emit_cron_job_spawns()?;
         // Phase 9.w.3.c — if there are cron jobs in CLI mode (no
         // HTTP), we block on `signal::ctrl_c()` so the process
@@ -18488,6 +18733,99 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         sorted.sort();
         for name in &sorted {
             shadow_decls.push_str(&format!("let {} = {}.clone(); ", name, name));
+        }
+        // v0.37.7 — persisted spawn path: the target is a
+        // `@background(store=db)` fn. Record the spawn in `fitz_bg_jobs`
+        // (best-effort) + apply the retry policy. Fire-and-forget: the
+        // value is DISCARDED (the future resolves to `()`), because a
+        // persisted background job produces a DB record, not a value to
+        // consume. Parity with the interpreter's `run_persisted_spawn`.
+        // MVP: only fns declared in the main program are persisted here
+        // (cross-module deferred in `fitz build`; `fitz run` covers it).
+        if let Some(info) = self.bg_persistent_fns.get(target_name).cloned() {
+            // Pre-compute each coerced arg into a local so we can both
+            // serialize it (JSON snapshot for visibility) and clone it
+            // per retry attempt.
+            let mut arg_lets = String::new();
+            let mut json_elems: Vec<String> = Vec::with_capacity(args_code.len());
+            let mut arg_names: Vec<String> = Vec::with_capacity(args_code.len());
+            for (i, arg_code) in args_code.iter().enumerate() {
+                let rust_ty = rust_type_for(&sig.params[i], self.env)?;
+                let name = format!("__bg_a{}", i);
+                arg_lets.push_str(&format!("let {} = {}; ", name, arg_code));
+                // `__ToFitzJson` blanket impls cover primitives, Option,
+                // nominal (Arc<Mutex<T>>), List (Vec<T>), Map (Vec<(K,V)>)
+                // — matches the "primitives + compound" scope.
+                json_elems.push(format!(
+                    "<{} as __ToFitzJson>::__to_fitz_json(&{})",
+                    rust_ty, name
+                ));
+                arg_names.push(name);
+            }
+            let args_json_expr = format!(
+                "serde_json::Value::Array(vec![{}]).to_string()",
+                json_elems.join(", ")
+            );
+            let call_args = arg_names.join(", ");
+            // Same call in both arms: in the `Some` arm the `clone_lets`
+            // shadow the `__bg_aN` with fresh clones; in the `None` arm
+            // (store not installed — a bug the boot prevents) the
+            // originals are used. `into_result()` maps the fn return to
+            // `Result<(), String>` (a `return Err(...)` counts as a job
+            // failure → retry), parallel to `__FitzCronReturn` in cron.
+            let invoke_call = if matches!(target_ret, Type::Future(_)) {
+                format!("{}({}).await.into_result()", target_name, call_args)
+            } else {
+                format!("{}({}).into_result()", target_name, call_args)
+            };
+            let clone_lets: String = arg_names
+                .iter()
+                .map(|n| format!("let {} = {}.clone(); ", n, n))
+                .collect();
+            let retry_expr = match &info.retry {
+                None => "None".to_string(),
+                Some(r) => format!(
+                    "Some(__FitzRetryConfig {{ max: {max}, backoff: __FitzBackoffKind::{backoff}, initial_secs: {initial}, max_secs: {max_secs} }})",
+                    max = r.max,
+                    backoff = match r.backoff.as_str() {
+                        "exponential" => "Exponential",
+                        "linear" => "Linear",
+                        "constant" => "Constant",
+                        _ => "Exponential",
+                    },
+                    initial = r.initial_secs,
+                    max_secs = r.max_secs,
+                ),
+            };
+            let bg_static = bg_store_static_name(&info.store_var);
+            let name_lit = rust_str_literal(target_name);
+            let code = format!(
+                "{{ {shadow}{arg_lets}\
+                    let __bg_args_json = {json}; \
+                    let __bg_store = {bg_static}.get().cloned(); \
+                    let __jh = tokio::spawn(async move {{ \
+                        match __bg_store {{ \
+                            Some(__s) => {{ \
+                                __fitz_run_persisted_spawn(__s, {name}.to_string(), __bg_args_json, {retry}, move || {{ \
+                                    {clone_lets}async move {{ use crate::__FitzCronReturn; {invoke} }} \
+                                }}).await; \
+                            }} \
+                            None => {{ use crate::__FitzCronReturn; let _ = {invoke}; }} \
+                        }} \
+                    }}); \
+                    Box::pin(async move {{ __jh.await.unwrap() }}) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> \
+                }}",
+                shadow = shadow_decls,
+                arg_lets = arg_lets,
+                json = args_json_expr,
+                bg_static = bg_static,
+                name = name_lit,
+                retry = retry_expr,
+                clone_lets = clone_lets,
+                invoke = invoke_call,
+            );
+            // The persisted spawn discards the value → resolves to `Null`.
+            return Ok((code, Type::Future(Box::new(Type::Null))));
         }
         // The JoinHandle resolves to `Result<T, JoinError>`.
         // `.unwrap()` panics if the task panicked — parallel to
@@ -33228,6 +33566,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit(
             "let __listener = tokio::net::TcpListener::bind(__addr).await.expect(\"bind\");\n",
         );
+        // v0.37.7 — install @background stores + catch_up before the
+        // cron spawns / `axum::serve`. State vars (e.g. `let db = ...`)
+        // are eagerly initialized earlier in this async fn main.
+        self.emit_background_boot()?;
         // Phase 9.w.3.c — spawns cron jobs BEFORE `axum::serve`.
         // The tasks run in the HTTP's tokio multi_thread
         // runtime; when the server ends (Ctrl+C), the tasks
@@ -35188,6 +35530,155 @@ where
                 eprintln!("\u{1F550} cron job '{}' failed (attempt {}/{}): {} — retry in {:?}", name, attempt, max_attempts, msg, delay);
                 tokio::time::sleep(delay).await;
                 attempt += 1;
+            }
+        }
+    }
+}
+
+"##;
+
+/// v0.37.7 — SQL helpers + persisted-spawn runtime for
+/// `@background(store=db)`. Emitted when the main program declares at
+/// least one persisted `@background`. Single table `fitz_bg_jobs`.
+/// Bit-by-bit parallel to the interpreter's
+/// `background_jobs.rs::{init_bg_storage, insert_bg_job_running,
+/// update_bg_job_finish, update_bg_job_retrying, mark_orphaned_failed,
+/// run_persisted_spawn}`. Uses `__FitzDbConn`/`__FitzPgValue` (from the
+/// db prelude) + `__FitzRetryConfig` (from the jobs prelude). The
+/// `__FitzBgStoreFrom` trait is a background-owned copy of cron's
+/// `__FitzCronStoreFrom` (distinct name — no collision when both cron
+/// and background persistence are active).
+const BG_JOBS_SQL_HELPERS_PRELUDE: &str = r##"
+// --- v0.37.7: persistence runtime for @background(store=db) ---
+
+const __FITZ_SQL_CREATE_BG_JOBS: &str = "CREATE TABLE IF NOT EXISTS fitz_bg_jobs (id BIGSERIAL PRIMARY KEY, fn_name TEXT NOT NULL, args_json TEXT NOT NULL, status TEXT NOT NULL, attempt INT NOT NULL DEFAULT 1, error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ)";
+
+const __FITZ_SQL_CREATE_INDEX_BG: &str = "CREATE INDEX IF NOT EXISTS idx_fitz_bg_jobs_status ON fitz_bg_jobs (status, created_at DESC)";
+
+// Global OnceCell serializing the first init (pg_type catalog race).
+static __FITZ_BG_INIT_STORAGE_ONCE: tokio::sync::OnceCell<Result<(), String>> =
+    tokio::sync::OnceCell::const_new();
+
+pub(crate) async fn __fitz_bg_init_storage_inner(conn: &__FitzDbConn) -> Result<(), String> {
+    conn.exec(__FITZ_SQL_CREATE_BG_JOBS, &[]).await
+        .map_err(|e| format!("initializing table fitz_bg_jobs: {}", e))?;
+    conn.exec(__FITZ_SQL_CREATE_INDEX_BG, &[]).await
+        .map_err(|e| format!("initializing index fitz_bg_jobs: {}", e))?;
+    Ok(())
+}
+
+pub(crate) async fn __fitz_bg_init_storage(conn: &__FitzDbConn) -> Result<(), String> {
+    __FITZ_BG_INIT_STORAGE_ONCE
+        .get_or_init(|| async { __fitz_bg_init_storage_inner(conn).await })
+        .await
+        .clone()
+}
+
+pub(crate) async fn __fitz_bg_insert_running(conn: &__FitzDbConn, fn_name: &str, args_json: &str) -> Result<i64, String> {
+    let res = conn.query(
+        "INSERT INTO fitz_bg_jobs (fn_name, args_json, status, attempt) VALUES ($1, $2, 'running', 1) RETURNING id",
+        &[__FitzPgValue::Text(fn_name.to_string()), __FitzPgValue::Text(args_json.to_string())],
+    ).await.map_err(|e| format!("insert fitz_bg_jobs '{}': {}", fn_name, e))?;
+    let row = res.rows.first().ok_or_else(|| format!("fitz_bg_jobs insert did not return id for '{}'", fn_name))?;
+    match row.get_at(0) {
+        Some(__FitzPgValue::Int(n)) => Ok(*n),
+        Some(__FitzPgValue::Text(s)) => s.parse::<i64>().map_err(|_| format!("fitz_bg_jobs id `{}` does not parse to Int", s)),
+        other => Err(format!("fitz_bg_jobs id with unexpected shape: {:?}", other)),
+    }
+}
+
+pub(crate) async fn __fitz_bg_update_finish(conn: &__FitzDbConn, job_id: i64, status: &str, error: Option<&str>) -> Result<(), String> {
+    let err_val = match error { Some(s) => __FitzPgValue::Text(s.to_string()), None => __FitzPgValue::Null };
+    conn.exec(
+        "UPDATE fitz_bg_jobs SET status = $1, finished_at = now(), error = $2 WHERE id = $3",
+        &[__FitzPgValue::Text(status.to_string()), err_val, __FitzPgValue::Int(job_id)],
+    ).await.map_err(|e| format!("update fitz_bg_jobs id={}: {}", job_id, e))?;
+    Ok(())
+}
+
+pub(crate) async fn __fitz_bg_update_retrying(conn: &__FitzDbConn, job_id: i64, attempt: u32, error: Option<&str>) -> Result<(), String> {
+    let err_val = match error { Some(s) => __FitzPgValue::Text(s.to_string()), None => __FitzPgValue::Null };
+    conn.exec(
+        "UPDATE fitz_bg_jobs SET status = 'retrying', attempt = $1, error = $2 WHERE id = $3",
+        &[__FitzPgValue::Int(attempt as i64), err_val, __FitzPgValue::Int(job_id)],
+    ).await.map_err(|e| format!("update fitz_bg_jobs id={} retrying: {}", job_id, e))?;
+    Ok(())
+}
+
+pub(crate) async fn __fitz_bg_mark_orphaned(conn: &__FitzDbConn) -> Result<u64, String> {
+    conn.exec(
+        "UPDATE fitz_bg_jobs SET status = 'failed', finished_at = now(), error = 'orphaned by restart' WHERE status IN ('running', 'retrying')",
+        &[],
+    ).await.map_err(|e| format!("marking orphaned fitz_bg_jobs: {}", e))
+}
+
+/// Polymorphic store adapter (parallel to `__FitzCronStoreFrom`).
+/// Accepts `__FitzDbConn` direct or `Result<__FitzDbConn, String>`
+/// (idiomatic `let db = db.connect(...).await` without `?`). The
+/// method is named `into_bg_store` (not `into_store`) so it never
+/// collides with cron's `__FitzCronStoreFrom::into_store` when a
+/// program has BOTH persistent cron and persistent background jobs.
+pub(crate) trait __FitzBgStoreFrom { fn into_bg_store(&self) -> Option<__FitzDbConn>; }
+impl __FitzBgStoreFrom for __FitzDbConn {
+    fn into_bg_store(&self) -> Option<__FitzDbConn> { Some(self.clone()) }
+}
+impl __FitzBgStoreFrom for Result<__FitzDbConn, String> {
+    fn into_bg_store(&self) -> Option<__FitzDbConn> {
+        match self {
+            Ok(c) => Some(c.clone()),
+            Err(e) => panic!("@background(store=db): db.connect() failed at startup: {}", e),
+        }
+    }
+}
+
+/// Runs a persisted `spawn(...)`: records one `fitz_bg_jobs` row and
+/// applies the retry policy, updating the SAME row per attempt.
+/// Best-effort: if init/insert fail, the job still runs. Bit-by-bit
+/// parallel to the interpreter's `run_persisted_spawn`.
+pub(crate) async fn __fitz_run_persisted_spawn<F, Fut>(
+    store: __FitzDbConn,
+    fn_name: String,
+    args_json: String,
+    retry: Option<__FitzRetryConfig>,
+    mut invoke: F,
+)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send,
+{
+    let storage_ok = match __fitz_bg_init_storage(&store).await {
+        Ok(()) => true,
+        Err(e) => { eprintln!("\u{2699} @background '{}' storage init failed: {}", fn_name, e); false }
+    };
+    let job_id = if storage_ok {
+        match __fitz_bg_insert_running(&store, &fn_name, &args_json).await {
+            Ok(id) => Some(id),
+            Err(e) => { eprintln!("\u{2699} @background '{}' insert failed: {}", fn_name, e); None }
+        }
+    } else { None };
+    let max_attempts = 1 + retry.map(|r| r.max).unwrap_or(0);
+    let mut attempt: u32 = 1;
+    loop {
+        let result = invoke().await;
+        let is_last_attempt = attempt >= max_attempts;
+        match result {
+            Ok(()) => {
+                if let Some(id) = job_id { let _ = __fitz_bg_update_finish(&store, id, "ok", None).await; }
+                return;
+            }
+            Err(msg) => {
+                if is_last_attempt {
+                    eprintln!("\u{2699} @background '{}' failed definitively after {} attempt(s): {}", fn_name, attempt, msg);
+                    if let Some(id) = job_id { let _ = __fitz_bg_update_finish(&store, id, "failed", Some(&msg)).await; }
+                    return;
+                }
+                let retry_cfg = retry.expect("max_attempts > 1 implies retry.is_some()");
+                let next_attempt = attempt + 1;
+                if let Some(id) = job_id { let _ = __fitz_bg_update_retrying(&store, id, next_attempt, Some(&msg)).await; }
+                let delay = retry_cfg.delay_for_attempt(attempt);
+                eprintln!("\u{2699} @background '{}' failed (attempt {}/{}): {} — retry in {:?}", fn_name, attempt, max_attempts, msg, delay);
+                tokio::time::sleep(delay).await;
+                attempt = next_attempt;
             }
         }
     }
@@ -52021,5 +52512,62 @@ async fn get_u(id: Int) -> Result<U> {
             code.contains("serde_json::Value::Array(arr)"),
             "missing serde_json::Value::Array(arr) for body_bytes Some"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // v0.37.7 — @background persistence
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn v0_37_7_program_has_persistent_background_detects_store_kwarg() {
+        let with_store = "let db = db.connect(\"postgres://x@h/d\").await\n\
+             @background(store=db)\nasync fn w() -> Null { return null }\n";
+        let program = parse(tokenize(with_store).unwrap()).unwrap();
+        assert!(program_has_persistent_background(&program));
+
+        let without = "@background\nasync fn w() -> Null { return null }\n";
+        let program2 = parse(tokenize(without).unwrap()).unwrap();
+        assert!(!program_has_persistent_background(&program2));
+    }
+
+    #[test]
+    fn v0_37_7_background_persistent_emits_full_machinery() {
+        let src = "\
+let db = db.connect(\"postgres://x@h/d\").await\n\
+@background(store=db, catch_up=true, retry={max: 2, backoff: \"exponential\", initial_secs: 1, max_secs: 5})\n\
+async fn send_email(user_id: Int, subject: Str) -> Null { return null }\n\
+@get(\"/notify/{id}\")\n\
+fn notify(id: Int) -> Str {\n  let _ = spawn(send_email(id, \"Welcome\"))\n  return \"queued\"\n}\n\
+@server(43971) fn main() => 0\n";
+        let rust = gen(src).expect("codegen ok");
+        // Table + runtime + store static + catch_up + retry config.
+        assert!(rust.contains("CREATE TABLE IF NOT EXISTS fitz_bg_jobs"));
+        assert!(rust.contains("__fitz_run_persisted_spawn"));
+        assert!(rust.contains("__FITZ_BG_STORE_DB"));
+        assert!(rust.contains("__fitz_bg_mark_orphaned")); // catch_up=true
+        assert!(rust.contains("__FitzRetryConfig { max: 2")); // retry parsed
+                                                              // Args serialized to JSON via __ToFitzJson (compound-capable).
+        assert!(rust.contains("__to_fitz_json"));
+        // The store adapter uses the bg-specific method (no cron collision).
+        assert!(rust.contains("into_bg_store"));
+    }
+
+    #[test]
+    fn v0_37_7_background_without_store_stays_in_memory() {
+        // `@background` WITHOUT `store=` must NOT emit the persistence
+        // prelude — the spawn stays in-memory (backward-compat).
+        let src = "\
+@background\nasync fn worker(n: Int) -> Null { return null }\n\
+@get(\"/go/{n}\")\n\
+fn go(n: Int) -> Str {\n  let _ = spawn(worker(n))\n  return \"ok\"\n}\n\
+@server(43972) fn main() => 0\n";
+        let rust = gen(src).expect("codegen ok");
+        assert!(
+            !rust.contains("fitz_bg_jobs"),
+            "no persistence prelude without store"
+        );
+        assert!(!rust.contains("__fitz_run_persisted_spawn"));
+        // The plain tokio::spawn path is still emitted.
+        assert!(rust.contains("tokio::spawn"));
     }
 }

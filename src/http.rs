@@ -601,6 +601,12 @@ pub struct HttpRegistry {
     /// (`run_scheduler_only`). `Arc` to share with the tokio workers
     /// that run the jobs.
     pub cron_registry: std::sync::Arc<crate::cron_jobs::CronRegistry>,
+    /// v0.37.7 — Registry of `@background(store=db)` fns. Populated
+    /// during evaluation (`process_decorator`); consulted per
+    /// `spawn(...)` by `eval_spawn_call` to decide whether to persist
+    /// the job in `fitz_bg_jobs`. Fns without `store` stay in-memory.
+    /// `Arc` to share with the eval + boot catch_up.
+    pub background_registry: std::sync::Arc<crate::background_jobs::BackgroundRegistry>,
     /// Phase 12.1.b — `@healthz` handler (K8s liveness probe). `None`
     /// if the program did not declare it → auto-mount serves a
     /// default 200 "ok" response. `Some(h)` → the Fitz handler is
@@ -627,6 +633,9 @@ impl HttpRegistry {
             auth_provider: None,
             ws_broadcaster: std::sync::Arc::new(WsBroadcaster::new()),
             cron_registry: std::sync::Arc::new(crate::cron_jobs::CronRegistry::new()),
+            background_registry: std::sync::Arc::new(
+                crate::background_jobs::BackgroundRegistry::new(),
+            ),
             healthz_handler: None,
             readyz_handler: None,
             draining: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -931,6 +940,69 @@ pub fn registry_has_cron_jobs() -> bool {
 /// (cron-only mode uses it for `run_scheduler_only`).
 pub fn current_cron_registry() -> Option<std::sync::Arc<crate::cron_jobs::CronRegistry>> {
     HTTP_REGISTRY.with(|cell| cell.borrow().as_ref().map(|reg| reg.cron_registry.clone()))
+}
+
+/// v0.37.7 — Registers a `@background(store=db)` fn in the active
+/// registry's `BackgroundRegistry`. Without an active registry →
+/// `Err` ("no registry"), same context rule as `register_cron_job`.
+pub fn register_background_fn(
+    fn_name: String,
+    store: std::sync::Arc<crate::db::DbConnHandle>,
+    retry: Option<crate::cron_jobs::RetryConfig>,
+    catch_up: bool,
+) -> Result<(), String> {
+    HTTP_REGISTRY.with(|cell| {
+        let borrow = cell.borrow();
+        let reg = borrow.as_ref().ok_or_else(|| {
+            "@background(store=...) sin contexto activo: solo aplica ejecutando con `fitz run` un archivo del programa.".to_string()
+        })?;
+        reg.background_registry.register(fn_name, store, retry, catch_up);
+        Ok(())
+    })
+}
+
+/// v0.37.7 — Global slot for the background registry so HTTP handlers
+/// (running on tokio workers WITHOUT the thread-local) can reach it
+/// from `spawn(...)`. The thread-local `HTTP_REGISTRY` is only active
+/// during the initial eval; request handling runs on separate worker
+/// threads. `install_background_registry` (called from `run_file`
+/// after the eval, before serving) sets this to the same `Arc` the
+/// registry holds.
+static INSTALLED_BG_REGISTRY: std::sync::OnceLock<
+    parking_lot::Mutex<Option<std::sync::Arc<crate::background_jobs::BackgroundRegistry>>>,
+> = std::sync::OnceLock::new();
+
+fn bg_registry_slot(
+) -> &'static parking_lot::Mutex<Option<std::sync::Arc<crate::background_jobs::BackgroundRegistry>>>
+{
+    INSTALLED_BG_REGISTRY.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// v0.37.7 — Installs the global background registry. `run_file` calls
+/// this after the eval (with `registry.background_registry.clone()`)
+/// so `spawn(...)` from an HTTP handler / cron job — which runs on a
+/// tokio worker without the thread-local — can still resolve the
+/// persistence config.
+pub fn install_background_registry(
+    reg: std::sync::Arc<crate::background_jobs::BackgroundRegistry>,
+) {
+    *bg_registry_slot().lock() = Some(reg);
+}
+
+/// v0.37.7 — Returns a clone of the active `Arc<BackgroundRegistry>`,
+/// or `None`. Prefers the thread-local (active during eval — e.g. a
+/// top-level `spawn`); falls back to the global installed at serve
+/// boot (request handling runs on workers without the thread-local).
+/// `eval_spawn_call` uses it to decide whether a `spawn(...)` is
+/// persisted.
+pub fn current_background_registry(
+) -> Option<std::sync::Arc<crate::background_jobs::BackgroundRegistry>> {
+    let from_tl = HTTP_REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|reg| reg.background_registry.clone())
+    });
+    from_tl.or_else(|| bg_registry_slot().lock().clone())
 }
 
 // ---------------------------------------------------------------------------

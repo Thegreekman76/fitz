@@ -2903,6 +2903,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "29c-ws-bidir.fitz",
     "30-cron-background.fitz",
     "30b-cron-persistente.fitz",
+    "30c-background-persistente.fitz",
     "31-orm.fitz",
     "31b-orm-crud-http.fitz",
     "31c-transactions.fitz",
@@ -13373,6 +13374,91 @@ fn main() => 0\n\
         stderr.contains("shared_db"),
         "the compile-time failure should name the offending binding `shared_db`, stderr was: {}",
         stderr
+    );
+}
+
+#[test]
+fn background_persistent_store_compiles_to_binary_v0_37_7() {
+    // v0.37.7 — `@background(store=db, catch_up=true, retry={...})` +
+    // `spawn(...)` from an HTTP handler compiles to a native binary
+    // with the persistence machinery: a `fitz_bg_jobs` table, the
+    // `__FITZ_BG_STORE_<VAR>` global, the `__fitz_run_persisted_spawn`
+    // runtime, and the args serialized via `__ToFitzJson`. The db conn
+    // is fictitious — `fitz build` only emits Rust + delegates to
+    // `cargo build`, it does not run anything.
+    let stem = "bg_persistent_v0_37_7";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let src = "\
+let db = db.connect(\"postgres://x@h/d\").await\n\
+\n\
+@background(store=db, catch_up=true, retry={max: 2, backoff: \"exponential\", initial_secs: 1, max_secs: 5})\n\
+async fn send_email(user_id: Int, subject: Str) -> Null {\n  \
+    return null\n\
+}\n\
+\n\
+@get(\"/notify/{id}\")\n\
+fn notify(id: Int) -> Str {\n  \
+    let _ = spawn(send_email(id, \"Welcome\"))\n  \
+    return \"queued\"\n\
+}\n\
+\n\
+@server(43970)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir .fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (background persistence):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+
+    // Inspect the emitted main.rs: the persistence machinery must be
+    // present (parity with `fitz run`, validated by hand + the
+    // background_jobs_real_postgres E2E tests).
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let generated = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
+    assert!(
+        generated.contains("CREATE TABLE IF NOT EXISTS fitz_bg_jobs"),
+        "el main.rs generado debe crear la tabla fitz_bg_jobs"
+    );
+    assert!(
+        generated.contains("__fitz_run_persisted_spawn"),
+        "el main.rs generado debe emitir el runtime __fitz_run_persisted_spawn"
+    );
+    assert!(
+        generated.contains("__FITZ_BG_STORE_DB"),
+        "el main.rs generado debe emitir el static del store __FITZ_BG_STORE_DB"
+    );
+    assert!(
+        generated.contains("__fitz_bg_mark_orphaned"),
+        "catch_up=true debe emitir el mark_orphaned al boot"
+    );
+    // Args are serialized to JSON via __ToFitzJson (compound-capable).
+    assert!(
+        generated.contains("__to_fitz_json"),
+        "los args del spawn persistido se serializan con __ToFitzJson"
     );
 }
 

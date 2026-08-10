@@ -23,6 +23,7 @@
 
 pub mod ast; // Phase 2.2 — AST definition
 pub mod asyncapi; // Phase 9.w.2.d — AsyncAPI 3.0 generator (WebSockets)
+pub mod background_jobs; // v0.37.7 — registry + persistence for `@background` jobs
 pub mod cli; // Phase 13 (v0.11.0) — native CLI builder (`@command`)
 pub mod codegen; // Phase 5b.1 — transpile AST → Rust → binary
 pub mod cron_jobs; // Phase 9.w.3 — registry + scheduler for `@cron` jobs

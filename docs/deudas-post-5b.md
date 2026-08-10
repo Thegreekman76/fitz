@@ -7426,10 +7426,32 @@ top-level sin `?`.
 arranque de M5, todas documentadas en cap 30 sub-sección "Qué no
 está en el MVP"):
 
-- `@background` con persistencia + retry sobre `spawn(...)` —
-  diferido a iter3. Los args del spawn requieren serialización
-  JSON estable + tabla `fitz_bg_jobs` separada. `@background`
-  acepta `tz`/`retry` en memoria pero no `store`/`catch_up`.
+- 🟢 `@background` con persistencia + retry sobre `spawn(...)` —
+  **CERRADO v0.37.7** (2026-08-10). `@background(store=db,
+  catch_up=true, retry={...})` persiste cada `spawn(...)` en la
+  tabla única `fitz_bg_jobs` (best-effort: el INSERT es el primer
+  paso dentro de la task, `spawn` sigue no-bloqueante). Los args
+  se serializan a JSON (primitivos + compuestos vía `value_to_json`
+  / `__ToFitzJson`) solo para visibilidad — nunca se deserializan.
+  `catch_up=true` al boot marca los huérfanos (`running`/`retrying`)
+  como `failed` sin re-ejecutar (decisión: menos riesgo de
+  doble-ejecución de jobs no-idempotentes). Retry con backoff
+  actualiza la misma fila; un `return Err(...)` cuenta como fallo.
+  Módulo nuevo `src/background_jobs.rs` (registry + helpers SQL +
+  `run_persisted_spawn`) + prelude paralelo bit-a-bit en el
+  codegen (`__fitz_bg_*` + trait `__FitzBgStoreFrom`). Paridad
+  bit-a-bit `fitz run` ↔ `fitz build` validada contra Postgres
+  real (persistencia + catch_up + retry). **Deuda residual
+  derivada**: (a) cross-module `@background(store=db)` en `fitz
+  build` — el intérprete lo persiste (registry global), el
+  binario solo persiste los declarados en el main (paralelo a
+  cómo `@cron` arrancó antes de B20); un worker persistido en un
+  módulo importado cae al path in-memory en el binario. (b) El
+  valor de retorno de un spawn persistido se descarta (resuelve a
+  `Null`) — es fire-and-forget; si necesitás el valor, no uses
+  `store`. (c) El `@background(store=db)` fn debe retornar
+  `Null`/`Result<Null>` (como `@cron`); otros returns requieren
+  ampliar `__FitzCronReturn`.
 - `fitz run` **cron-only** (programa con `@cron(..., store=db)`
   sin `@server` ni handlers HTTP) tiene bug heredado del runtime
   tokio `current_thread` del intérprete: la conn DB queda atada

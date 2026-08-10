@@ -2292,8 +2292,9 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "background",
             "@background — marks fn as spawnable via spawn(fn(...))",
             "Opt-in marker. Enables the fire-and-forget `spawn(fn(args))` call typed as Future<T>. \
-             Optional kwargs (iter2): `tz=\"IANA/Name\"`, \
-             `retry={...}` (same shape as @cron).",
+             Optional kwargs: `tz=\"IANA/Name\"`, `retry={...}` (same shape as @cron), and (v0.37.7) \
+             `store=db` + `catch_up=true|false` — persist each spawn in fitz_bg_jobs, catch_up marks \
+             orphaned rows failed at boot.",
         ),
         (
             "test",

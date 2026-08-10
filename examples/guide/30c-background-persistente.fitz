@@ -1,0 +1,57 @@
+// Cap 30 (v0.37.7) — @background persistente con store + catch_up + retry.
+//
+// Los background jobs de Fitz (`@background` + `spawn(...)`) son
+// fire-and-forget in-memory por default. Con `store=db` cada
+// `spawn(...)` queda registrado en la tabla `fitz_bg_jobs` — así
+// sobreviven a un reinicio del proceso (visibilidad de qué corrió, qué
+// falló, cuántos reintentos), sin broker externo.
+//
+// - `store=db` — persiste cada spawn en `fitz_bg_jobs` (best-effort:
+//   el INSERT es el primer paso dentro de la task, así que `spawn(...)`
+//   sigue siendo no-bloqueante). Los args se serializan a JSON (para
+//   visibilidad — nunca se deserializan de vuelta).
+// - `retry={max: 2, backoff: "exponential", initial_secs: 1,
+//   max_secs: 10}` — si el worker falla (error de runtime o
+//   `return Err(...)`), hasta 2 reintentos con backoff. Cada attempt
+//   actualiza la misma fila (status running → retrying → ok/failed).
+// - `catch_up=true` — al boot, las filas huérfanas (`running`/
+//   `retrying` que un crash dejó a medias) se marcan `failed`. NO se
+//   re-ejecutan (el trabajo se perdió; el operador decide re-disparar).
+//
+// El handler HTTP `POST /users/{id}/notify` dispara el spawn. El
+// runtime tokio multi-thread del server mantiene vivas las tasks.
+//
+// Setup:
+//   $env:DATABASE_URL = "postgres://user:pass@localhost:5432/db?sslmode=disable"
+//   fitz build examples/guide/30c-background-persistente.fitz
+//   ./30c-background-persistente
+//   # En otra terminal:
+//   curl -X POST http://127.0.0.1:43970/users/42/notify
+//   psql -c "SELECT id, fn_name, args_json, status, attempt, error FROM fitz_bg_jobs ORDER BY id DESC LIMIT 10"
+
+// Conn DB top-level. El binding queda como `Result<DbConn>`;
+// `@background(..., store=db)` lo desempaca automáticamente (panic con
+// mensaje claro si la conn falló al inicio).
+let db = db.connect(env_or("DATABASE_URL", "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable")).await
+
+// El worker persistido. Recibe un `Int` + un `Str` (ambos se
+// serializan al args_json de la fila). Retorna `Result<Null>`: un
+// `return Err(...)` cuenta como fallo del job y dispara el retry.
+@background(store=db, catch_up=true, retry={max: 2, backoff: "exponential", initial_secs: 1, max_secs: 10})
+async fn send_welcome(user_id: Int, channel: Str) -> Result<Null> {
+    print("[bg] send_welcome user={user_id} via {channel}")
+    return Ok(null)
+}
+
+@post("/users/{id}/notify")
+fn notify(id: Int) -> Str {
+    // Fire-and-forget: `spawn(...)` retorna al toque; el INSERT + la
+    // ejecución del worker corren en background y quedan en fitz_bg_jobs.
+    let _ = spawn(send_welcome(id, "email"))
+    return "queued"
+}
+
+@server(43970, docs=false)
+fn main() => 0
+
+print("Listo. POST a /users/<id>/notify o pegale psql a fitz_bg_jobs.")

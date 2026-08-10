@@ -534,10 +534,17 @@ docker-compose extra.
 | `@cron(..., catch_up=true)` | ✅ | ✅ |
 | `@cron(..., store=db)` con Postgres | ✅ | ✅ |
 | `@background` con `tz`/`retry` | ✅ | ✅ |
-| `@background` con `store`/`catch_up` | ❌ iter3 | ❌ iter3 |
-| Tablas `fitz_cron_jobs`/`fitz_cron_runs` auto-create | ✅ | ✅ |
+| `@background(store=db)` persiste spawns en `fitz_bg_jobs` (v0.37.7) | ✅ | ✅¹ |
+| `@background(..., catch_up=true)` marca huérfanos failed | ✅ | ✅ |
+| Tablas `fitz_cron_jobs`/`fitz_cron_runs`/`fitz_bg_jobs` auto-create | ✅ | ✅ |
 | UI dashboard tipo Sidekiq Web | ❌ | ❌ |
 | Coordinación multi-instancia (locks distribuidos) | ❌ | ❌ |
+
+¹ En `fitz build`, `@background(store=db)` persiste cuando el worker
+se declara en el archivo main. Un worker persistido en un módulo
+importado cae al path in-memory en el binario (funciona, pero sin
+persistir); en `fitz run` persiste desde cualquier módulo. Paralelo a
+cómo `@cron(store=db)` arrancó acotado al main antes de B20.
 
 ---
 
