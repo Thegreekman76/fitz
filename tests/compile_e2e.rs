@@ -13727,6 +13727,103 @@ fn main() => 0\n\
 }
 
 #[test]
+fn module_async_shared_state_compiles_v0_37_6() {
+    // 5b.6 (v0.37.6) — un módulo con un `let db = db.connect(...).await`
+    // top-level referenciado por sus propios handlers HTTP compila con
+    // `fitz build`. Antes: E0728 (accessor `pub fn db()` con RHS async) o
+    // E0425 (materialización faltante) — el intérprete lo capturaba del env
+    // del módulo, el binario no. Fix: el ctx de módulo corre la detección de
+    // shared state, `gen_module_top_let` emite `__FITZ_STATE_db` OnceCell +
+    // init, main lo inicializa antes de servir, y cada handler materializa el
+    // local vía `gen_top_fn`.
+    let store_src = "\
+let db = db.connect(\"postgres://x:x@localhost:5432/x?sslmode=disable\").await\n\
+\n\
+@get(\"/a\")\n\
+async fn handler_a() -> Result<Str> {\n\
+    let conn = match db {\n\
+        Ok(c) => c,\n\
+        Err(_) => return Err(\"no db\"),\n\
+    }\n\
+    let _ = conn.exec(\"SELECT 1\", []).await?\n\
+    return Ok(\"a\")\n\
+}\n\
+\n\
+@get(\"/b\")\n\
+async fn handler_b() -> Result<Str> {\n\
+    let conn = match db {\n\
+        Ok(c) => c,\n\
+        Err(_) => return Err(\"no db\"),\n\
+    }\n\
+    let _ = conn.exec(\"SELECT 1\", []).await?\n\
+    return Ok(\"b\")\n\
+}\n\
+";
+    let main_src = "\
+import store\n\
+\n\
+@server(43974)\n\
+fn main() => 0\n\
+";
+    build_expect_ok_multi(
+        "module_async_shared_state_v0_37_6",
+        main_src,
+        &[("store.fitz", store_src)],
+    );
+}
+
+#[test]
+fn module_shared_db_both_cron_store_and_handler_no_double_init_v0_37_6() {
+    // 5b.6 (v0.37.6) — un `let db = db.connect(...).await` de módulo que es
+    // AMBOS: `@cron(store=db)` (persiste runs) Y referenciado por un handler
+    // HTTP. Compila, y main emite UNA sola `__fitz_init_state_db().await`
+    // (el driver de gen_http_main excluye los cron-store vars; los inicializa
+    // emit_cron_job_spawns) — sin doble `db.connect`.
+    let store_src = "\
+let db = db.connect(\"postgres://x:x@localhost:5432/x?sslmode=disable\").await\n\
+\n\
+@cron(\"0 0 * * *\", store=db)\n\
+async fn nightly() -> Result<Null> {\n\
+    let conn = match db {\n\
+        Ok(c) => c,\n\
+        Err(_) => return Err(\"no db\"),\n\
+    }\n\
+    let _ = conn.exec(\"DELETE FROM t WHERE false\", []).await?\n\
+    return Ok(null)\n\
+}\n\
+\n\
+@get(\"/runs\")\n\
+async fn runs() -> Result<Str> {\n\
+    let conn = match db {\n\
+        Ok(c) => c,\n\
+        Err(_) => return Err(\"no db\"),\n\
+    }\n\
+    let _ = conn.query(\"SELECT 1\", []).await?\n\
+    return Ok(\"ok\")\n\
+}\n\
+";
+    let main_src = "\
+import store\n\
+\n\
+@server(43975)\n\
+fn main() => 0\n\
+";
+    let stem = "module_shared_db_both_v0_37_6";
+    build_expect_ok_multi(stem, main_src, &[("store.fitz", store_src)]);
+    // Grep del main.rs generado: exactamente UNA init call (no double-init).
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
+        let count = content.matches("__fitz_init_state_db().await").count();
+        assert_eq!(
+            count, 1,
+            "esperaba exactamente 1 `__fitz_init_state_db().await` en main.rs (no double-init), fue {}",
+            count
+        );
+    }
+}
+
+#[test]
 fn admin_cross_module_role_field_via_provider_module_imports_v0_37_3() {
     // v0.37.3 — `@admin`/`@requires` require the `@auth_provider`'s User
     // type to have a `role: Str` field. Before this fix, the cross-module

@@ -4204,6 +4204,12 @@ struct LoadedModule {
     /// Empty for the b19_derived case where the `store` binding lives in
     /// main instead of the module.
     hoisted_cron_store_vars: Vec<String>,
+    /// 5b.6 — async shared-state vars (`let X = db.connect(...).await`) of
+    /// this module referenced by its own HTTP handlers. Hoisted to
+    /// `__FITZ_STATE_X` + `__fitz_init_state_X()` (same as cron stores).
+    /// Main inits them in `gen_http_main` before serving. Empty for modules
+    /// without HTTP or without async shared state.
+    hoisted_state_vars: Vec<String>,
     /// Mini-fase HTTP client (2026-06-18) —
     /// `program_uses_http_client(module_program)`. The main ORs it
     /// with its own flag so the `__fitz_http_*` prelude lives in the
@@ -4832,6 +4838,30 @@ impl ModuleLoader {
             })
             .cloned()
             .collect();
+        // 5b.6 — async shared-state vars referenced by this module's HTTP
+        // handlers (same predicate as `gen_module_top_let`: in
+        // `detect_shared_state` with an async RHS). Mirrors
+        // `module_hoisted_cron_store_vars`. Main inits these before serving.
+        let module_hoisted_state_vars: Vec<String> = if has_http_routes(&module_program) {
+            let (state_order, _deps) = detect_shared_state(&module_program);
+            state_order
+                .into_iter()
+                .filter(|v| {
+                    module_program.iter().any(|s| {
+                        matches!(
+                            s,
+                            Stmt::Assign {
+                                target: AssignTarget::Ident(n, _),
+                                value,
+                                ..
+                            } if n == v && expr_contains_await(value)
+                        )
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut rust_content = generate_module_rs_with_bindings(
             &module_program,
             &module_env,
@@ -5048,6 +5078,7 @@ impl ModuleLoader {
             ws_fn_stmts: module_ws_fn_stmts,
             cron_fn_stmts: module_cron_fn_stmts,
             hoisted_cron_store_vars: module_hoisted_cron_store_vars,
+            hoisted_state_vars: module_hoisted_state_vars,
             uses_http_client: module_uses_http_client,
             uses_smtp: module_uses_smtp,
             uses_to_json: module_uses_to_json,
@@ -6195,6 +6226,14 @@ fn generate_module_rs_with_bindings(
             _ => false,
         })
         .collect();
+    // 5b.6 — populate the MODULE ctx with the shared-state detection BEFORE
+    // emitting the handlers: `gen_top_fn` materializes each shared-state var
+    // (`let db = __FITZ_STATE_DB.get()...clone()`) at the start of the
+    // handler body by consulting `fn_state_deps`/`state_var_types`/
+    // `state_var_async`. Gated by `module_has_http` inside
+    // `resolve_state_var_types`. `top_lets` are the module's top-level
+    // `Stmt::Assign`s (the "main_stmts" equivalent for this pass).
+    resolve_state_var_types(&mut ctx, program, &top_lets, env, module_has_http)?;
     for stmt in top_fns {
         ctx.gen_top_fn(stmt)?;
     }
@@ -6433,6 +6472,17 @@ fn collect_module_sigs(
     let mut const_sigs: HashMap<String, Type> = HashMap::new();
     let mut accessor_consts: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // 5b.6 — async shared-state vars referenced by this module's handlers.
+    // Same treatment as `cron_store_vars`: a non-literal async RHS is
+    // tolerated without an annotation (`gen_module_top_let` hoists it to an
+    // OnceCell), and the (nonexistent) `X()` accessor is NOT registered.
+    let shared_async: std::collections::HashSet<String> = if has_http_routes(program) {
+        let (order, _deps) = detect_shared_state(program);
+        order.into_iter().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
     for stmt in program {
         match stmt {
             Stmt::TypeDef { name, fields, .. } => {
@@ -6560,7 +6610,12 @@ fn collect_module_sigs(
                         // (`let db = db.connect(...).await`).
                         // `gen_module_top_let` hoists it with full
                         // inference; the const_sig type is unused here.
-                        None if cron_store_vars.contains(name) && expr_contains_await(value) => {
+                        // B20 + 5b.6 — tolerate a non-literal async RHS when
+                        // the binding feeds a `@cron(store=X)` OR is
+                        // shared state referenced by handlers of this module.
+                        None if (cron_store_vars.contains(name) || shared_async.contains(name))
+                            && expr_contains_await(value) =>
+                        {
                             Type::Any
                         }
                         None => {
@@ -6574,7 +6629,12 @@ fn collect_module_sigs(
                 const_sigs.insert(name.clone(), resolved_ty);
                 // F14 mini-batch — Str-literal stays as `pub static &str`,
                 // Rust const-eval → `pub const`, the rest → accessor fn.
-                if !is_literal_expr(value) && !is_const_eval_expr(value) {
+                // 5b.6 — but an async hoisted var (cron-store or shared-state)
+                // emits an OnceCell, NOT a `pub fn X()` accessor, so it must
+                // NOT be registered here (else refs would resolve to `X()`).
+                let is_async_hoisted = expr_contains_await(value)
+                    && (cron_store_vars.contains(name) || shared_async.contains(name));
+                if !is_literal_expr(value) && !is_const_eval_expr(value) && !is_async_hoisted {
                     accessor_consts.insert(name.clone());
                 }
             }
@@ -7658,6 +7718,12 @@ fn emit_main_rs_body(
             ctx.xmod_cron_store_hoists
                 .push((mod_name.clone(), var.clone()));
         }
+        // 5b.6 — record async shared-state vars this module hoisted for its
+        // HTTP handlers. Main inits each `crate::<mod>::__fitz_init_state_X()`
+        // before `axum::serve` (de-duped against the cron-store set).
+        for var in &module.hoisted_state_vars {
+            ctx.xmod_state_hoists.push((mod_name.clone(), var.clone()));
+        }
     }
 
     if has_http {
@@ -8720,6 +8786,13 @@ struct CodegenCtx<'a> {
     /// iterates it to drive `crate::<mod>::__fitz_init_state_<var>()` +
     /// materialize the local `<var>` before the cron spawns.
     xmod_cron_store_hoists: Vec<(String, String)>,
+    /// 5b.6 — `(mod_name, var)` of async shared-state vars referenced by
+    /// HTTP handlers of that module, hoisted to a crate-visible OnceCell +
+    /// `__fitz_init_state_X()`. `gen_http_main` initializes them before
+    /// `axum::serve`. A var that is also a cron-store appears in
+    /// `xmod_cron_store_hoists` too; the init is de-duped by set difference
+    /// (that path already inits it in `emit_cron_job_spawns`).
+    xmod_state_hoists: Vec<(String, String)>,
     /// F11: for each fn (top-level, helper, or handler), the names
     /// of the state vars its body references directly. We use it at
     /// the start of the body to emit `let <name> = __FITZ_STATE_<NAME>
@@ -9139,6 +9212,7 @@ impl<'a> CodegenCtx<'a> {
             state_var_async: HashMap::new(),
             module_cron_store_vars: std::collections::HashSet::new(),
             xmod_cron_store_hoists: Vec::new(),
+            xmod_state_hoists: Vec::new(),
             fn_state_deps: HashMap::new(),
             response_mode: false,
             in_middleware_fn: false,
@@ -15711,7 +15785,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // local `X` before the spawn. Only async RHS reaches here;
         // a sync module-level binding used as a store is rare and
         // keeps the plain accessor.
-        if self.module_cron_store_vars.contains(name) && expr_contains_await(value) {
+        // B20 + 5b.6 — an async `let X = db.connect(...).await` referenced by
+        // a `@cron(store=X)` (B20) OR by HTTP handlers (5b.6) of this same
+        // module is hoisted to a crate-visible OnceCell + async init fn. The
+        // plain `pub fn X()` accessor would be illegal (async RHS in a sync
+        // fn, E0728). A var that is BOTH emits ONE OnceCell + ONE init fn
+        // (same names via `state_var_static_name`). `gen_http_main` /
+        // `emit_cron_job_spawns` drive the init before serving/spawning; the
+        // handlers materialize the local via `gen_top_fn` (fn_state_deps).
+        let is_shared_state = self.state_var_types.contains_key(name);
+        if expr_contains_await(value)
+            && (self.module_cron_store_vars.contains(name) || is_shared_state)
+        {
             let static_name = state_var_static_name(name);
             writeln!(
                 &mut self.output,
@@ -15746,10 +15831,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             declared_ty,
             Type::List(_) | Type::Map(_, _) | Type::Nominal(_)
         ) {
+            // 5b.6 — if this sync container is ALSO shared state referenced by
+            // handlers of this module, the backing static is named
+            // `__FITZ_STATE_X` so `gen_top_fn`'s materialization
+            // (`(*__FITZ_STATE_X).clone()`) resolves. The `X()` accessor is
+            // still emitted (cross-module / non-handler refs); both alias the
+            // SAME LazyLock. Module globals that are NOT shared state (e.g.
+            // liveviews' `COMPONENT_REGISTRY`, accessed via `X()` not by bare
+            // name in a handler) keep `__FITZ_GLOBAL_X` → no regression.
+            let backing = if is_shared_state {
+                state_var_static_name(name)
+            } else {
+                format!("__FITZ_GLOBAL_{name}")
+            };
             writeln!(
                 &mut self.output,
-                "static __FITZ_GLOBAL_{name}: std::sync::LazyLock<{ret}> = std::sync::LazyLock::new(|| {{ {rhs} }});\n\
-                 pub fn {name}() -> {ret} {{ __FITZ_GLOBAL_{name}.clone() }}\n",
+                "static {backing}: std::sync::LazyLock<{ret}> = std::sync::LazyLock::new(|| {{ {rhs} }});\n\
+                 pub fn {name}() -> {ret} {{ {backing}.clone() }}\n",
+                backing = backing,
                 name = name,
                 ret = ret_rs,
                 rhs = final_rhs
@@ -16725,21 +16824,32 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // by name — Rust resolves. F14 mini-batch: if it is
                 // an accessor fn (RHS non const-eval), we reference
                 // as `name()` instead of `name`.
-                if let Some(ty) = self.own_consts.get(name).cloned() {
-                    let is_accessor = self.accessor_consts.contains(name);
-                    let access = if is_accessor {
-                        format!("{}()", name)
-                    } else {
-                        name.clone()
-                    };
-                    let code = match &ty {
-                        // For Str pub static (pure literal) it stays
-                        // &str → String. For Str accessor fn, the fn
-                        // already returns String.
-                        Type::Str if !is_accessor => format!("String::from({})", name),
-                        _ => access,
-                    };
-                    return Ok((code, ty));
+                // 5b.6 — gated by `!var_in_any_scope`: a local (e.g. the
+                // materialized shared-state `let db = __FITZ_STATE_DB.get()...`
+                // that `gen_top_fn` emits at the start of a module handler)
+                // MUST shadow a module-level const/accessor of the same name.
+                // Without the guard, `db` resolved to the accessor `db()`
+                // (which is illegal for an async-hoisted state var) instead of
+                // the local. Mirrors the main-file path, where state vars are
+                // never registered in `own_consts`. Standard scoping: locals
+                // shadow module globals.
+                if !self.var_in_any_scope(name) {
+                    if let Some(ty) = self.own_consts.get(name).cloned() {
+                        let is_accessor = self.accessor_consts.contains(name);
+                        let access = if is_accessor {
+                            format!("{}()", name)
+                        } else {
+                            name.clone()
+                        };
+                        let code = match &ty {
+                            // For Str pub static (pure literal) it stays
+                            // &str → String. For Str accessor fn, the fn
+                            // already returns String.
+                            Type::Str if !is_accessor => format!("String::from({})", name),
+                            _ => access,
+                        };
+                        return Ok((code, ty));
+                    }
                 }
                 // Higher-order (F12): if the ident is a top-level fn
                 // referenced as a **value** (not as a callee), we emit
@@ -32797,6 +32907,31 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 rust_ty, init_expr, static_name, name
             )
             .unwrap();
+        }
+        // 5b.6 — init of async shared-state vars of MODULES referenced by
+        // their own handlers, BEFORE `axum::serve` (handlers may hit the
+        // OnceCell on the first request). We EXCLUDE those that are also
+        // cron-store (`xmod_cron_store_hoists`): `emit_cron_job_spawns`
+        // (also before serve) inits those → avoids a double `db.connect`.
+        // `__fitz_init_state_X` is idempotent (`let _ = set(...)`) anyway.
+        {
+            let cron_set: std::collections::HashSet<(String, String)> =
+                self.xmod_cron_store_hoists.iter().cloned().collect();
+            let mut state_hoists = self.xmod_state_hoists.clone();
+            state_hoists.sort();
+            state_hoists.dedup();
+            for (mod_name, var) in &state_hoists {
+                if cron_set.contains(&(mod_name.clone(), var.clone())) {
+                    continue;
+                }
+                writeln!(
+                    &mut self.output,
+                    "    crate::{mod_name}::__fitz_init_state_{var}().await;",
+                    mod_name = mod_name,
+                    var = var,
+                )
+                .unwrap();
+            }
         }
         // We emit the main_stmts that are NOT state (not in
         // state_var_types). Those that ARE state already live

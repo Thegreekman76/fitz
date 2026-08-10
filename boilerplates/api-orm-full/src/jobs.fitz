@@ -28,16 +28,18 @@
 from config import db_url, max_drafts_age_days
 from models import User, Profile, Post, Comment
 
-// --- binding top-level SOLO para `@cron(store=...)` -----------------
+// --- conexión DB compartida del módulo (v0.37.6, deuda 5b.6) --------
 //
-// El scheduler usa `cron_db` para persistir el registry + los runs.
-// Los fn bodies NO lo usan: conectan per-request vía el builtin `db`
-// (que reusa la MISMA conexión del `POOL_CACHE`). El nombre es
-// `cron_db` (no `db`) justamente para no tapar el builtin `db` dentro
-// de este módulo. Queda como `Result<DbConn>`; `@cron(store=cron_db)`
-// lo desempaca solo con el trait `__FitzCronStoreFrom` — si la conn
-// falla al boot, el scheduler panea con un mensaje claro.
-let cron_db = db.connect(db_url()).await
+// Un único `let db = db.connect(...).await` top-level que usan TANTO el
+// `@cron(store=db)` para persistir sus runs COMO los handlers HTTP de
+// este módulo (que lo referencian directo, sin `db.connect` per-request).
+// El codegen la hoistea a un `OnceCell` crate-visible + init fn, la
+// inicializa una vez al boot (antes de servir / spawnear el cron), y la
+// materializa como local al inicio de cada handler/cron que la usa —
+// paridad bit-a-bit con `fitz run` (que captura el env del módulo). El
+// nombre `db` tapa el builtin `db` DESPUÉS de este `let`; el RHS
+// `db.connect(...)` usa el builtin (se evalúa antes del shadow).
+let db = db.connect(db_url()).await
 
 // --- @cron cleanup_old_drafts ---------------------------------------
 //
@@ -60,9 +62,15 @@ let cron_db = db.connect(db_url()).await
 @cron("0 0 * * *",
       tz="UTC",
       retry={max: 3, backoff: "exponential", initial_secs: 30, max_secs: 300},
-      store=cron_db)
+      store=db)
 async fn cleanup_old_drafts() -> Result<Null> {
-    let conn = db.connect(db_url()).await?
+    // Usa el `db` compartido del módulo — sin `db.connect` per-request
+    // (deuda 5b.6 cerrada en v0.37.6). `db` es `Result<DbConn>` (el
+    // `.await` top-level no lleva `?`); lo desempacamos con `match`.
+    let conn = match db {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
     let days = max_drafts_age_days()
     let sql = "DELETE FROM posts WHERE status = 'draft' AND created_at < NOW() - (CAST($1 AS text) || ' days')::interval"
     let affected = conn.exec(sql, [days]).await?
@@ -73,7 +81,7 @@ async fn cleanup_old_drafts() -> Result<Null> {
 // --- @admin GET /jobs — audit log de cron runs ----------------------
 //
 // Lee `fitz_cron_runs` (la tabla que el scheduler crea + mantiene con
-// `store=cron_db`). Es query cruda porque `fitz_cron_runs` la maneja
+// `store=db`). Es query cruda porque `fitz_cron_runs` la maneja
 // el runtime, no la declaramos como `@table`. Las columnas se leen con
 // los accessors tipados de `DbRow` (`r.get_str`/`r.get_int`), que
 // devuelven `Result<T>` (Err si la col es NULL / no existe / el tipo
@@ -95,8 +103,11 @@ type JobRun {
 @admin
 @get("/jobs")
 async fn list_job_runs(user: User) -> Result<List<JobRun>> {
-    let conn = db.connect(db_url()).await?
-
+    // Usa el `db` compartido del módulo (deuda 5b.6, v0.37.6).
+    let conn = match db {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
     let sql = "SELECT job_name, started_at::text AS started_at, COALESCE(finished_at::text, '') AS finished_at, status, attempt, COALESCE(error, '') AS error FROM fitz_cron_runs ORDER BY started_at DESC LIMIT 50"
     let rows = conn.query(sql, []).await?
 

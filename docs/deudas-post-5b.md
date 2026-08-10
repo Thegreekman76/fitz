@@ -3076,6 +3076,27 @@ canónicos.
 
 ---
 
+## 🟢 v0.37.6 — state compartido entre handlers HTTP de un MÓDULO (deuda 5b.6) CERRADA (2026-08-08)
+
+**La deuda más impactante del stack web.** Un módulo (no el main) con un `let db = db.connect(db_url()).await` top-level referenciado por HANDLERS HTTP de ese mismo módulo NO compilaba con `fitz build`: los handlers son fns Rust top-level que no capturan el env del módulo, así que `gen_module_top_let` emitía un `pub fn db()` roto (E0728: RHS async en fn sync) o, si `db` era cron-store, un OnceCell sin materialización en los handlers (E0425). `fitz run` sí andaba (el intérprete captura el env del módulo). El boilerplate `api-orm-full` workaroundeaba con `db.connect(db_url()).await?` per-request en cada handler + un `cron_db` aparte para `@cron(store=...)`.
+
+**El caso MAIN ya lo resolvía** (F11/F17.4b/v0.15.12): `detect_shared_state` → `resolve_state_var_types` puebla `fn_state_deps`/`state_var_types`/`state_var_async` → `gen_http_main` emite `static __FITZ_STATE_X: OnceCell<T>` (async) / `LazyLock<T>` (sync) + init eager en `async fn main()` → `gen_top_fn` materializa `let mut X = __FITZ_STATE_X.get()...clone()` al inicio de cada handler que lo referencia. **Solo el ctx de MÓDULO no corría esa maquinaria.**
+
+**Fix (~90 LoC, solo `src/codegen.rs`)** — portar el mecanismo al ctx de módulo, mapeado por Explore + Plan agents:
+1. **Detección en el ctx de módulo**: `generate_module_rs_with_bindings` ahora llama `resolve_state_var_types(&mut ctx, program, &top_lets, env, module_has_http)` ANTES de emitir los handlers → puebla `fn_state_deps`/`state_var_types`/`state_var_async` del módulo.
+2. **`gen_module_top_let`**: el branch async (OnceCell + `__fitz_init_state_X`) generaliza su predicado de solo cron-stores a `module_cron_store_vars.contains(name) || state_var_types.contains_key(name)` (shared state). El branch sync (List/Map) usa `__FITZ_STATE_X` como backing static cuando es shared-state (para que la materialización lo encuentre), preservando el accessor `X()`; los globals NO-shared-state (liveviews `COMPONENT_REGISTRY`) conservan `__FITZ_GLOBAL_X` → sin regresión.
+3. **`collect_module_sigs`**: tolera el RHS async no-literal también para shared-state vars (no solo cron-stores) y NO registra el accessor roto para ellos.
+4. **Registro + driver del init**: `LoadedModule.hoisted_state_vars` (async shared-state hoisted) + `ctx.xmod_state_hoists`; `gen_http_main` emite `crate::<mod>::__fitz_init_state_X().await` antes de `axum::serve`, **excluyendo** los que también son cron-store (los inicializa `emit_cron_job_spawns`, también antes de serve) → sin doble `db.connect`.
+5. **Bug de shadowing colateral CERRADO** (`gen_expr` Ident): el check de `own_consts`/accessor de un módulo NO estaba gateado por `!var_in_any_scope`, así que un const de módulo `db` (registrado por `pre_register_top_lets`) resolvía a `db()` (accessor) ANTES del scope local, tapando el local materializado. Ahora gateado por `!var_in_any_scope` — los locales shadowean los globals de módulo (semántica estándar, igual que el caso main). Esto era el motivo raíz por el que la materialización no "ganaba" en módulos.
+
+**Patrón resultante** (el boilerplate `api-orm-full` refactorizado): `let db = db.connect(db_url()).await` top-level del módulo (queda `Result<DbConn>`), usado por `@cron(store=db)` Y por los handlers que lo desempacan con `let conn = match db { Ok(c) => c, Err(_) => ... }` (patrón taskhub) — sin `db.connect` per-request ni `cron_db` separado.
+
+**Tests**: `compile_e2e::module_async_shared_state_compiles_v0_37_6` (módulo con async shared state + 2 handlers, build) + `compile_e2e::module_shared_db_both_cron_store_and_handler_no_double_init_v0_37_6` (var que es cron-store ∧ handler-referenced; build + grep de UNA sola `__fitz_init_state_db().await` en main.rs). **Smoke real Postgres local**: `api-orm-full` con `db` compartido → build verde, `GET /jobs` (admin) lee `fitz_cron_runs` vía el `db` compartido, cron persiste runs, 401 sin token. **Regresión**: smoke guía 290 verde (guard del cambio de gating de `own_consts`, un path core de `gen_expr`).
+
+**Limitaciones conocidas** (documentadas): (a) el shared state de módulo debe ser referenciado por HANDLERS del MISMO módulo (no cross-module — `db` en jobs.fitz no lo comparten los handlers de posts.fitz; cada módulo declara su propio `let db`, que POOL_CACHE dedupea a la misma conexión); (b) sync shared-state primitivo (Int/Bool) mutable compartido cae a const/accessor y no a `__FITZ_STATE_X` — mismo límite que el caso main (LazyLock de primitivo no comparte mutación), caso irreal.
+
+---
+
 ## 🟢 v0.37.5 — gating del `use` de observability en módulos + `@admin` transitivo (moot) + drift de migraciones (2026-08-08)
 
 Tanda de tres ítems surgidos del inventario post-v0.37.4.

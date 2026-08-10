@@ -9,6 +9,48 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.6] — 2026-08-08 — State compartido entre handlers HTTP de un MÓDULO (deuda 5b.6) CERRADA
+
+La deuda más impactante del stack web: un `let db = db.connect(...).await` top-level
+de un MÓDULO (no el main) referenciado por los handlers HTTP de ese módulo ahora
+compila con `fitz build`, con paridad ante `fitz run`. Sin sintaxis nueva. Extensión
+VSCode: bump de versión (sin cambio de comportamiento).
+
+### Fixed
+
+- **Módulo con `let db = db.connect(...).await` usado por sus handlers rompía
+  `fitz build`.** Los handlers son fns Rust top-level que no capturan el env del
+  módulo → el codegen emitía un `pub fn db()` roto (E0728 async en fn sync) o un
+  OnceCell sin materialización (E0425). El intérprete sí andaba. Fix: el ctx de
+  módulo ahora corre la maquinaria de shared state del caso main
+  (`detect_shared_state` + `resolve_state_var_types`); `gen_module_top_let` emite
+  `__FITZ_STATE_X` (OnceCell async / LazyLock sync) para shared-state vars, main
+  inicializa los async antes de `axum::serve` (de-dup vs cron-stores), y cada
+  handler materializa el local vía `gen_top_fn`.
+- **Bug de shadowing colateral** (`gen_expr` Ident): un const/accessor de módulo
+  ya no tapa a un local del mismo nombre — el check de `own_consts` quedó gateado
+  por `!var_in_any_scope` (los locales shadowean los globals de módulo, semántica
+  estándar). Era el motivo raíz por el que la materialización no "ganaba" en
+  módulos (el shared `db` resolvía al accessor `db()` en vez del local).
+
+### Changed
+
+- **Boilerplate `api-orm-full`**: `jobs.fitz` pasó del workaround (un `cron_db`
+  aparte + `db.connect(db_url()).await?` per-request en cada handler) al diseño
+  natural: un único `let db = db.connect(db_url()).await` compartido que usan TANTO
+  el `@cron(store=db)` COMO el handler `@admin GET /jobs` (que lo desempaca con
+  `match`). Sin connect per-request.
+
+### Notes
+
+- Tests nuevos: `compile_e2e::module_async_shared_state_compiles_v0_37_6` +
+  `compile_e2e::module_shared_db_both_cron_store_and_handler_no_double_init_v0_37_6`
+  (build + grep de una sola init call → sin doble `db.connect`).
+- Smoke real Postgres local + smoke guía 290 (guard del cambio de gating de
+  `own_consts`, un path core de `gen_expr`) verde.
+- Límite: el shared state se comparte por MÓDULO (no cross-module); cada módulo
+  declara su `let db`, que POOL_CACHE dedupea a la misma conexión.
+
 ## [v0.37.5] — 2026-08-08 — Gating del `use` de observability en módulos + drift de migraciones + `@admin` transitivo (moot)
 
 Tanda del inventario post-v0.37.4. Sin sintaxis nueva. Extensión VSCode: bump de
