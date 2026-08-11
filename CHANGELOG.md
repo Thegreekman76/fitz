@@ -9,6 +9,37 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.10] — 2026-08-11 — LSP: falso positivo cross-module de `@middleware` cerrado
+
+El LSP ya no marca un falso positivo de "return con status fuera de
+contexto HTTP" sobre una fn middleware DECLARADA en un módulo cuando la
+aplicación `@middleware(fn)` vive en otro módulo. Solo diagnostics del
+LSP — cero impacto en runtime/build (el `fitz build` ya compilaba bien
+desde v0.19.5).
+
+### Fixed
+
+- **Falso positivo cross-module de `@middleware` en el LSP.** Abrir el
+  archivo que DECLARA una middleware fn (`rate_limit.fitz` con
+  `fn mw_strict() { return 429 {...} }`) mostraba squiggle rojo "only
+  allowed inside HTTP handler" cuando la aplicación (`@middleware(mw_strict)`)
+  vivía en otro módulo. A diferencia de `@auth_provider`/`@background`
+  (v0.19.3), no alcanza seguir las imports del documento abierto: el
+  falso positivo está en el DECLARANTE, cuyas imports no llegan al módulo
+  aplicante (la dependencia va al revés). El codegen lo resuelve porque
+  `main` pre-escanea todo el árbol de imports; el LSP no tiene `main`.
+  Fix: `pre_scan_project_middleware_fns_lsp` camina el ÁRBOL del proyecto
+  acotado por el `fitz.toml` ancestro (walk-up con `manifest::find_manifest`;
+  fallback a `base_dir`), extrae las refs `@middleware(name)` de cada
+  `.fitz`/`.fitzv` y las alimenta al checker vía `add_imported_middleware_fns`.
+  Silent fallback en read/parse; sin cache en el MVP (barato para
+  proyectos típicos). Cero riesgo runtime.
+
+### Tests
+
+- `lsp::tests::cross_module_middleware_declared_fn_no_false_positive`
+  (sin `base_dir` el falso positivo aparece; con `base_dir` desaparece).
+
 ## [v0.37.9] — 2026-08-11 — `spawn(@background(store=db))` desde un módulo en `fitz build`
 
 Cierra la última sub-deuda de la persistencia de `@background`: un

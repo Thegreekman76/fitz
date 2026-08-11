@@ -1973,12 +1973,31 @@ Tres fixes adicionales colaterales:
    awaitear el Future cuando la fn middleware es async (paralelo
    a `await_if_future` de Fase 9.w.3.b).
 
-2. **LSP cross-module pre-scan de `@middleware`** — paralelo a la
-   deuda residual que v0.19.3 cerró para `@auth_provider`/
-   `@background`. El LSP abriendo un módulo aislado de middleware
-   (`rate_limit.fitz`) muestra falso positivo "only allowed inside
-   HTTP handler". Refinable cuando aparezca presión real (el binario
-   compila bien; el squiggle rojo es solo en el IDE).
+2. **LSP cross-module pre-scan de `@middleware`** — 🟢 **CERRADO
+   v0.37.10 (2026-08-11)**. El LSP abriendo el módulo que DECLARA la
+   middleware fn (`rate_limit.fitz` con `fn mw_strict() { return 429
+   {...} }`) mostraba falso positivo "only allowed inside HTTP handler"
+   cuando la aplicación (`@middleware(mw_strict)`) vivía en otro módulo.
+   **A diferencia de `@auth_provider`/`@background` (v0.19.3), NO alcanza
+   copiar el hermano**: el falso positivo está en el archivo DECLARANTE,
+   cuyas imports no llegan al módulo aplicante (la dependencia va al
+   revés). El codegen lo resuelve porque `main` pre-escanea todo el árbol
+   de imports (`pre_scan_imported_middleware_fns_for_loader`); el LSP no
+   tiene `main`. **Fix**: `pre_scan_project_middleware_fns_lsp(base_dir)`
+   camina el ÁRBOL del proyecto acotado por el `fitz.toml` ancestro
+   (`manifest::find_manifest` walk-up; fallback a `base_dir` para docs
+   sueltos), parsea cada `.fitz`/`.fitzv` con `parse_strict`, extrae
+   `extract_middleware_fn_names` y alimenta el set al checker vía
+   `add_imported_middleware_fns` en `check_source_with_types_and_base_dir`
+   (después del bloque `@background`). Walker recursivo nuevo
+   `collect_project_fitz_files_lsp` (saltea `.`/`target`, incluye
+   `.fitzv`; el `collect_fitz_recursive` del bin no es reusable — vive
+   en `main.rs`, hace `process::exit`, y filtra solo `.fitz`). Silent
+   fallback en read/parse (política de los hermanos). Sin cache en el MVP
+   (walk + parse por keystroke, barato para proyectos típicos; `TODO(perf)`
+   dejado por si se vuelve caliente). Cero riesgo runtime — solo
+   diagnostics del LSP. Test `lsp::tests::cross_module_middleware_declared_
+   fn_no_false_positive`.
 
 3. **Wrap-style middleware (`Fn() -> Response` second param)** —
    sigue siendo deuda pre-existente; rechazada en codegen con

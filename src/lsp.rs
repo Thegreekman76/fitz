@@ -11,7 +11,7 @@ use crate::lexer::tokenize;
 use crate::parser::{parse as parse_strict, parse_with_recovery};
 use crate::types::{
     check_program, check_with_env, extract_auth_provider_signature, extract_background_fn_names,
-    resolve_program_with_env, DefinitionInfo, Type, TypeEnv, TypeInfo,
+    extract_middleware_fn_names, resolve_program_with_env, DefinitionInfo, Type, TypeEnv, TypeInfo,
 };
 
 use tower_lsp::lsp_types::{
@@ -894,6 +894,15 @@ pub fn check_source_with_types_and_base_dir(
         if !bg_names.is_empty() {
             env.add_imported_background_fns(bg_names);
         }
+        // v0.37.10 — project-wide `@middleware(name)` refs. Unlike auth /
+        // background (which follow the open doc's imports), the middleware
+        // false positive is in the DECLARING file, whose imports don't
+        // reach the applying module — so we walk the project tree. Closes
+        // the LSP cross-module `@middleware` false positive.
+        let mw_names = pre_scan_project_middleware_fns_lsp(bd);
+        if !mw_names.is_empty() {
+            env.add_imported_middleware_fns(mw_names);
+        }
         let (env, type_info, def_info, mut type_errors) =
             check_with_env(&program, env, resolve_errors);
         errors.append(&mut type_errors);
@@ -1107,6 +1116,92 @@ fn resolve_import_file_path_lsp(
     // Phase 11.6.d — try `.fitz` first, `.fitzv` as fallback.
     let last = segments.last()?;
     crate::view::resolve_module_file_candidates(&dir, last)
+}
+
+/// v0.37.10 — LSP-only recursive walker of the project's `.fitz` /
+/// `.fitzv` files. Parallel to `main.rs::collect_fitz_recursive` but
+/// lives in the lib (the bin's copy isn't reachable), also picks up
+/// `.fitzv`, and never exits on unreadable dirs. Skips hidden dirs
+/// (`.git`, `.fitz`) and `target/`. Read errors are silently ignored
+/// (best-effort — the "unreadable file" diagnostic is the loader's job).
+fn collect_project_fitz_files_lsp(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Skip hidden dirs (`.git`, `.fitz`) and `target/`.
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_project_fitz_files_lsp(&path, out);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("fitz") | Some("fitzv")
+        ) {
+            out.push(path);
+        }
+    }
+}
+
+/// v0.37.10 — Project-wide pre-scan for `@middleware(name)` references,
+/// for the LSP's cross-module middleware diagnostic. Unlike the auth /
+/// background pre-scans (which only follow the open document's DIRECT
+/// imports), the `@middleware` false positive lives in the file that
+/// DECLARES the middleware fn (with `return <status>`), while the
+/// APPLICATION (`@middleware(fn)`) lives in another module that imports
+/// it — the dependency goes the OTHER way, so the declaring file's
+/// imports don't help. The codegen resolves this because `main`
+/// pre-scans the whole import tree
+/// (`pre_scan_imported_middleware_fns_for_loader`); the LSP has no
+/// `main`, so it walks the project tree instead.
+///
+/// Root = directory of the ancestor `fitz.toml` (Cargo-style walk-up
+/// via `manifest::find_manifest`); a loose document without a manifest
+/// falls back to `base_dir`. Silent fallback on read/parse errors (same
+/// policy as `pre_scan_imported_background_fns_lsp`).
+///
+/// TODO(perf): cache by (root_dir + modtimes) if the walk becomes hot.
+/// Today it re-walks + reparses on each keystroke, which is cheap for
+/// typical projects (a few dozen small `.fitz`, parse-only, no
+/// type-check — parallel to the existing sibling pre-scans).
+fn pre_scan_project_middleware_fns_lsp(base_dir: &std::path::Path) -> Vec<String> {
+    // `find_manifest` returns the manifest FILE path; its parent is the
+    // project root. No manifest → loose document → scan `base_dir`.
+    let root = crate::manifest::find_manifest(base_dir)
+        .and_then(|m| m.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| base_dir.to_path_buf());
+
+    let mut files = Vec::new();
+    collect_project_fitz_files_lsp(&root, &mut files);
+
+    let mut out: Vec<String> = Vec::new();
+    for file_path in files {
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        // Phase 11.6.d — `.fitzv` transparent handling.
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
+        };
+        let Ok(tokens) = tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = parse_strict(tokens) else {
+            continue;
+        };
+        out.extend(extract_middleware_fn_names(&module_program));
+    }
+    out
 }
 
 /// Converts a list of `FitzError` into LSP `Diagnostic`s. Pure
@@ -7326,6 +7421,72 @@ fn make_resp() -> Response {
                 e.message
             );
         }
+    }
+
+    #[test]
+    fn cross_module_middleware_declared_fn_no_false_positive() {
+        // v0.37.10 — the `@middleware` false positive lives in the file
+        // that DECLARES the middleware fn (with `return <status>`), while
+        // the APPLICATION (`@middleware(fn)`) lives in another module that
+        // imports it. The declaring file's imports don't reach the
+        // applying module (dependency goes the OTHER way), so the fix
+        // walks the project tree instead of the open doc's imports.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // A `fitz.toml` anchors the project root at `tmp` so the scan
+        // doesn't escalate to the real FS (find_manifest only checks the
+        // file exists — no parsing).
+        std::fs::write(
+            tmp.path().join("fitz.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // DECLARING file (the one open in the editor). Does NOT import
+        // the applying module.
+        let rate_limit_src = "fn mw_strict() -> Null {\n\
+             return 429 { \"error\": \"rate limited\" }\n\
+         }\n";
+        std::fs::write(tmp.path().join("rate_limit.fitz"), rate_limit_src).unwrap();
+
+        // APPLYING file: imports `mw_strict` and applies it as middleware.
+        std::fs::write(
+            tmp.path().join("auth.fitz"),
+            "from rate_limit import mw_strict\n\
+             @middleware(mw_strict)\n\
+             @post(\"/login\")\n\
+             async fn login() -> Result<Str> {\n\
+                 return Ok(\"ok\")\n\
+             }\n",
+        )
+        .unwrap();
+
+        // Without base_dir: the return-status false positive shows up.
+        let errors_no_base = check_source(rate_limit_src);
+        assert!(
+            errors_no_base
+                .iter()
+                .any(|e| e.message.contains("is only allowed inside an HTTP handler")),
+            "expected the return-status false positive without base_dir, got: {:?}",
+            errors_no_base
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+
+        // With base_dir: the project-tree scan finds `@middleware(mw_strict)`
+        // in auth.fitz and the diagnostic disappears.
+        let (_program, _env, _ti, _di, errors_with_base) =
+            check_source_with_types_and_base_dir(rate_limit_src, Some(tmp.path()));
+        assert!(
+            !errors_with_base
+                .iter()
+                .any(|e| e.message.contains("is only allowed inside an HTTP handler")),
+            "expected false positive to disappear with base_dir, got: {:?}",
+            errors_with_base
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
     }
 
     // -----------------------------------------------------------------------
