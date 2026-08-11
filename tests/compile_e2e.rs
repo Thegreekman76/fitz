@@ -13553,6 +13553,198 @@ fn main() => 0\n\
     );
 }
 
+#[test]
+fn background_persistent_spawn_in_module_compiles_to_binary_v0_37_9() {
+    // v0.37.9 — closes v0.37.8 residual (a): the `spawn(...)` lives INSIDE
+    // an imported module (not main). Pre-fix, the module's codegen ctx had
+    // an empty `bg_persistent_fns`, so `gen_spawn_call` fell to the
+    // fire-and-forget arm (silent drop of persistence). Now the module's
+    // ctx is populated and the persisted-path symbols are `crate::`-
+    // qualified so they resolve from `src/worker.rs`. The db conn is
+    // fictitious — `fitz build` only emits Rust + delegates to cargo.
+    let stem = "bg_persistent_spawn_in_mod_v0_37_9";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // worker.fitz: @background(store=db) fn + db co-located + a fn that
+    // does the spawn HERE (inside the module).
+    std::fs::write(
+        dir.join("worker.fitz"),
+        "let db = db.connect(\"postgres://x@h/d\").await\n\
+         \n\
+         @background(store=db, catch_up=true, retry={max: 2, backoff: \"exponential\", initial_secs: 1, max_secs: 5})\n\
+         async fn send_email(user_id: Int, subject: Str) -> Null {\n  \
+             return null\n\
+         }\n\
+         \n\
+         fn enqueue(id: Int) -> Null {\n  \
+             let _ = spawn(send_email(id, \"Welcome\"))\n  \
+             return null\n\
+         }\n",
+    )
+    .expect("escribir worker.fitz");
+
+    // main.fitz: imports the enqueue helper (the spawn is NOT in main).
+    let main_src = "\
+from worker import enqueue\n\
+\n\
+@get(\"/notify/{id}\")\n\
+fn notify(id: Int) -> Str {\n  \
+    let _ = enqueue(id)\n  \
+    return \"queued\"\n\
+}\n\
+\n\
+@server(43981)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (spawn inside module):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+
+    // Inspect the emitted worker.rs: the spawn took the PERSISTED path
+    // with `crate::`-qualified symbols (not the fire-and-forget arm).
+    let worker_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/worker.rs", stem));
+    let worker_gen = std::fs::read_to_string(&worker_rs).expect("leer worker.rs generado");
+    // `__fitz_run_persisted_spawn` is emitted ONLY by the persisted arm →
+    // its presence proves persistence, and the `crate::` prefix proves the
+    // qualification fix (bare would be E0425 from a non-root module file).
+    assert!(
+        worker_gen.contains("crate::__fitz_run_persisted_spawn"),
+        "el spawn del módulo debe tomar el path persistente calificado con crate::"
+    );
+    assert!(
+        worker_gen.contains("crate::__FITZ_BG_STORE_DB"),
+        "el spawn del módulo debe leer el store global calificado con crate::"
+    );
+    assert!(
+        worker_gen.contains("crate::__FitzRetryConfig")
+            && worker_gen.contains("crate::__FitzBackoffKind"),
+        "el retry config del spawn del módulo debe ir calificado con crate::"
+    );
+    assert!(
+        worker_gen.contains("as crate::__ToFitzJson>"),
+        "la serialización de args del spawn del módulo debe ir calificada con crate::"
+    );
+    // main.rs still wires the boot (store init + set global) — parity
+    // preserved even though the spawn moved out of main.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let generated = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
+    assert!(
+        generated.contains("crate::worker::__fitz_init_state_db().await")
+            && generated.contains("__FITZ_BG_STORE_DB.set"),
+        "el boot en main debe seguir inicializando + seteando el store cross-module"
+    );
+}
+
+#[test]
+fn background_persistent_spawn_cross_module_def_v0_37_9() {
+    // v0.37.9 — the harder shape: the `spawn(...)` lives in module A
+    // (`notifier.fitz`) and the `@background` def + store live in module B
+    // (`emails.fitz`), which A imports. Module A's pre-scan of its own
+    // imports (`pre_scan_imported_background_persist_for_loader`) is what
+    // populates its ctx `bg_persistent_fns` for `send_email`. Main only
+    // imports the enqueue helper; `emails.fitz` is loaded transitively.
+    let stem = "bg_persistent_xmod_def_v0_37_9";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // emails.fitz (module B): the def + store.
+    std::fs::write(
+        dir.join("emails.fitz"),
+        "let db = db.connect(\"postgres://x@h/d\").await\n\
+         \n\
+         @background(store=db)\n\
+         async fn send_email(user_id: Int, subject: Str) -> Null {\n  \
+             return null\n\
+         }\n",
+    )
+    .expect("escribir emails.fitz");
+
+    // notifier.fitz (module A): imports the def, does the spawn HERE.
+    std::fs::write(
+        dir.join("notifier.fitz"),
+        "from emails import send_email\n\
+         \n\
+         fn enqueue(id: Int) -> Null {\n  \
+             let _ = spawn(send_email(id, \"Hi\"))\n  \
+             return null\n\
+         }\n",
+    )
+    .expect("escribir notifier.fitz");
+
+    let main_src = "\
+from notifier import enqueue\n\
+\n\
+@get(\"/notify/{id}\")\n\
+fn notify(id: Int) -> Str {\n  \
+    let _ = enqueue(id)\n  \
+    return \"queued\"\n\
+}\n\
+\n\
+@server(43982)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (spawn in A, def in B):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+
+    // notifier.rs (module A) emitted the persisted path for send_email.
+    let notifier_rs =
+        std::path::PathBuf::from(format!("target/fitz-build/{}/src/notifier.rs", stem));
+    let notifier_gen = std::fs::read_to_string(&notifier_rs).expect("leer notifier.rs generado");
+    assert!(
+        notifier_gen.contains("crate::__fitz_run_persisted_spawn")
+            && notifier_gen.contains("crate::__FITZ_BG_STORE_DB"),
+        "el spawn de un def cross-module debe tomar el path persistente calificado"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // v0.19.0 Block 3.d — smoke E2E del `Response` built-in (paridad fitz build
 // vs. fitz run validada bit-a-bit a mano en el desarrollo del bloque).

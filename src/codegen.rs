@@ -163,6 +163,15 @@ pub fn generate_project(
     let main_imp_bg =
         pre_scan_imported_background_fns_for_loader(program, &base_dir, &loader.dep_registry);
     loader.set_main_imported_background_fns(main_imp_bg);
+    // v0.37.9 — pre-scan main's imports for the FULL `@background(store=db)`
+    // persistence config (store_var/retry/catch_up), not just names. This
+    // is what lets a `spawn(<bg>(...))` living inside a module (def in
+    // another module imported from main) emit the persisted path. MUST run
+    // before `collect_imports` so each module's `.rs` (generated during
+    // `collect_imports`) sees a populated map. Closes v0.37.8 residual (a).
+    let main_imp_bg_persist =
+        pre_scan_imported_background_persist_for_loader(program, &base_dir, &loader.dep_registry);
+    loader.set_main_imported_background_persist(main_imp_bg_persist);
     // v0.19.5 (post-fitzwatch 2026-06-26) — pre-scan main's imports
     // for `@middleware(name)` references across main + all reachable
     // modules. Parallel to `main_imp_bg` (B10) and `main_imp_auth`
@@ -4401,6 +4410,16 @@ struct ModuleLoader {
     /// module's ctx is empty → `gen_top_fn` doesn't classify the fn
     /// as middleware → `Stmt::ReturnStatus` rejected at emit time).
     main_imported_middleware_fns: Vec<String>,
+    /// v0.37.9 — FULL persistence config (`BgPersistInfo`) of every
+    /// `@background(store=db)` fn reachable from main's imports.
+    /// Parallel to `main_imported_background_fns` (which carries only
+    /// names, for the checker) but keyed by fn name → carries
+    /// store_var/retry/catch_up so a module that SPAWNS an imported bg
+    /// fn (spawn in module A, def in module B) can emit the persisted
+    /// path. Pre-scanned BEFORE `collect_imports`, then merged into each
+    /// module's `bg_persistent_fns` in `load_module`. Closes the
+    /// residual of v0.37.8 (a).
+    main_imported_background_persist: HashMap<String, BgPersistInfo>,
 }
 
 impl ModuleLoader {
@@ -4417,6 +4436,7 @@ impl ModuleLoader {
             main_imported_auth_provider: None,
             main_imported_background_fns: Vec::new(),
             main_imported_middleware_fns: Vec::new(),
+            main_imported_background_persist: HashMap::new(),
         }
     }
 
@@ -4444,6 +4464,13 @@ impl ModuleLoader {
     /// pre-scanned from main's imports.
     fn set_main_imported_background_fns(&mut self, names: Vec<String>) {
         self.main_imported_background_fns = names;
+    }
+
+    /// v0.37.9 — see field docs. Called by `generate_project` BEFORE
+    /// `collect_imports` with the full persistence config of every
+    /// `@background(store=db)` fn reachable from main's imports.
+    fn set_main_imported_background_persist(&mut self, map: HashMap<String, BgPersistInfo>) {
+        self.main_imported_background_persist = map;
     }
 
     /// v0.19.5 — see field docs. Called by `generate_project` BEFORE
@@ -4864,6 +4891,24 @@ impl ModuleLoader {
             &self.dep_registry,
         );
         module_mw_names.extend(self.main_imported_middleware_fns.iter().cloned());
+        // v0.37.9 — FULL persistence config (`BgPersistInfo`) seen by
+        // this module: its own imports + main's pre-scanned set (covers
+        // "spawn in module A, `@background` def in module B imported from
+        // main"). The module's OWN local `@background(store=X)` defs are
+        // added inside `generate_module_rs_with_bindings` (they win on
+        // collision). This is what makes a `spawn(<bg>(...))` INSIDE a
+        // module emit the persisted path in `fitz build` (parity with
+        // `fitz run`). Same union semantics as the checker's `bg_names`.
+        let mut module_bg_persist = pre_scan_imported_background_persist_for_loader(
+            &module_program,
+            &module_base_dir,
+            &self.dep_registry,
+        );
+        for (k, v) in &self.main_imported_background_persist {
+            module_bg_persist
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
         // B20 — store-var names referenced by `@cron(store=X)` in THIS
         // module, so `gen_module_top_let` hoists `let X =
         // db.connect(...).await` to a crate-visible OnceCell + init fn.
@@ -4945,6 +4990,7 @@ impl ModuleLoader {
             &module_mw_names,
             &module_cron_store_vars,
             &module_background_store_vars,
+            &module_bg_persist,
         )?;
 
         // W27 (v0.28.6) — the W23 gate emits `use crate::__FitzValue;`
@@ -5637,6 +5683,92 @@ fn pre_scan_imported_background_fns_for_loader(
     out
 }
 
+/// v0.37.9 — Collects `@background(store=X)` fns of `program` into
+/// `out` as `BgPersistInfo` (store_var + retry + catch_up), mirroring
+/// the main scan in `generate_main_rs`. Best-effort: a fn whose kwargs
+/// fail to parse is skipped here (the genuine error surfaces when that
+/// module is generated for real). Non-persistent `@background` (no
+/// `store=`) is ignored — it stays fire-and-forget. Later inserts win
+/// on key collision, so the caller controls precedence (imported
+/// first, local defs last).
+fn collect_background_persist_into(program: &Program, out: &mut HashMap<String, BgPersistInfo>) {
+    for stmt in program {
+        if let Stmt::FnDef {
+            name, decorators, ..
+        } = stmt
+        {
+            if let Some(deco) = decorators.iter().find(|d| d.name == "background") {
+                let store_var = deco.kwargs.iter().find_map(|(k, v)| match (k.as_str(), v) {
+                    ("store", Expr::Ident(n, _)) => Some(n.clone()),
+                    _ => None,
+                });
+                if let Some(store_var) = store_var {
+                    if let Ok(info) = parse_bg_kwargs_into_info(&deco.kwargs, name, store_var) {
+                        out.insert(name.clone(), info);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// v0.37.9 — Mirror of `pre_scan_imported_background_fns_for_loader`
+/// but collecting the FULL persistence config (`BgPersistInfo`), not
+/// just names. Populates a module's codegen ctx `bg_persistent_fns` so
+/// a `spawn(<bg>(...))` living INSIDE a module (not main) emits the
+/// persisted path with `crate::`-qualified symbols. Closes the residual
+/// of v0.37.8 (a): the spawn no longer has to live in main. Best-effort
+/// (parse errors on an imported file are skipped; the genuine error
+/// surfaces at that module's real generation).
+fn pre_scan_imported_background_persist_for_loader(
+    program: &Program,
+    base_dir: &Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> HashMap<String, BgPersistInfo> {
+    let mut out: HashMap<String, BgPersistInfo> = HashMap::new();
+    for stmt in program {
+        let path_segments = match stmt {
+            Stmt::Import { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        let Some(file_path) =
+            resolve_loader_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let source = if crate::view::is_fitzv_extension(&file_path) {
+            match crate::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
+        };
+        let Ok(tokens) = crate::lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = crate::parser::parse(tokens) else {
+            continue;
+        };
+        collect_background_persist_into(&module_program, &mut out);
+    }
+    out
+}
+
 /// v0.19.5 (post-fitzwatch 2026-06-26) — Mirror of
 /// `pre_scan_imported_background_fns_for_loader` for `@middleware`.
 /// Scans each `Stmt::Import` / `Stmt::FromImport`, parses the
@@ -5795,6 +5927,12 @@ fn generate_module_rs_with_bindings(
     // `@background(..., store=X)` here. Same hoist path in
     // `gen_module_top_let`; `emit_background_boot` materializes them.
     bg_store_vars: &std::collections::HashSet<String>,
+    // v0.37.9 — FULL persistence config of `@background(store=db)` fns
+    // reachable from this module (its imports + main's pre-scan). Merged
+    // into `ctx.bg_persistent_fns` so a `spawn(<bg>(...))` living in THIS
+    // module emits the persisted path (parity with `fitz run`). The
+    // module's OWN local defs are scanned + inserted below (they win).
+    imported_bg_persist: &HashMap<String, BgPersistInfo>,
 ) -> Result<String, FitzError> {
     // Hpx.2 — for modules compiled via the loader, compute a fresh
     // TypeInfo. The loader ran `resolve_program` before but not
@@ -5809,6 +5947,16 @@ fn generate_module_rs_with_bindings(
     // `collect_module_sigs` to hoist a `@background(store=X)` co-located
     // binding.
     ctx.module_background_store_vars = bg_store_vars.clone();
+    // v0.37.9 — populate this module's `bg_persistent_fns` so a
+    // `spawn(<bg>(...))` emitted HERE (in `gen_spawn_call`) takes the
+    // persisted path with `crate::`-qualified symbols, instead of falling
+    // to the fire-and-forget arm. Imported/main-reachable defs come from
+    // the param; the module's OWN local `@background(store=X)` defs are
+    // scanned last so they win on collision. Closes v0.37.8 residual (a).
+    for (name, info) in imported_bg_persist {
+        ctx.bg_persistent_fns.insert(name.clone(), info.clone());
+    }
+    collect_background_persist_into(program, &mut ctx.bg_persistent_fns);
     // W18 (post-B8) — Propagate `@server(observability=...)` from
     // main. Default `true` (instrumentation on). When main has
     // `@server(observability=false)`, modules' HTTP wrappers also go
@@ -18917,9 +19065,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // value is DISCARDED (the future resolves to `()`), because a
         // persisted background job produces a DB record, not a value to
         // consume. Parity with the interpreter's `run_persisted_spawn`.
-        // MVP: only fns declared in the main program are persisted here
-        // (cross-module deferred in `fitz build`; `fitz run` covers it).
+        // v0.37.9 — this arm now also fires when the `spawn(...)` lives
+        // INSIDE a module (not just main): `bg_persistent_fns` is populated
+        // per-module in `generate_module_rs_with_bindings`. The crate-root
+        // symbols are `crate::`-qualified via `cr` so they resolve from a
+        // non-root module file (in main, `cr == ""` → bytes unchanged).
         if let Some(info) = self.bg_persistent_fns.get(target_name).cloned() {
+            let cr = self.mod_path_prefix();
             // Pre-compute each coerced arg into a local so we can both
             // serialize it (JSON snapshot for visibility) and clone it
             // per retry attempt.
@@ -18934,8 +19086,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // nominal (Arc<Mutex<T>>), List (Vec<T>), Map (Vec<(K,V)>)
                 // — matches the "primitives + compound" scope.
                 json_elems.push(format!(
-                    "<{} as __ToFitzJson>::__to_fitz_json(&{})",
-                    rust_ty, name
+                    "<{} as {}__ToFitzJson>::__to_fitz_json(&{})",
+                    rust_ty, cr, name
                 ));
                 arg_names.push(name);
             }
@@ -18962,7 +19114,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             let retry_expr = match &info.retry {
                 None => "None".to_string(),
                 Some(r) => format!(
-                    "Some(__FitzRetryConfig {{ max: {max}, backoff: __FitzBackoffKind::{backoff}, initial_secs: {initial}, max_secs: {max_secs} }})",
+                    "Some({cr}__FitzRetryConfig {{ max: {max}, backoff: {cr}__FitzBackoffKind::{backoff}, initial_secs: {initial}, max_secs: {max_secs} }})",
+                    cr = cr,
                     max = r.max,
                     backoff = match r.backoff.as_str() {
                         "exponential" => "Exponential",
@@ -18974,7 +19127,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     max_secs = r.max_secs,
                 ),
             };
-            let bg_static = bg_store_static_name(&info.store_var);
+            let bg_static = format!("{}{}", cr, bg_store_static_name(&info.store_var));
             let name_lit = rust_str_literal(target_name);
             let code = format!(
                 "{{ {shadow}{arg_lets}\
@@ -18983,7 +19136,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     let __jh = tokio::spawn(async move {{ \
                         match __bg_store {{ \
                             Some(__s) => {{ \
-                                __fitz_run_persisted_spawn(__s, {name}.to_string(), __bg_args_json, {retry}, move || {{ \
+                                {cr}__fitz_run_persisted_spawn(__s, {name}.to_string(), __bg_args_json, {retry}, move || {{ \
                                     {clone_lets}async move {{ use crate::__FitzCronReturn; {invoke} }} \
                                 }}).await; \
                             }} \
@@ -18992,6 +19145,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }}); \
                     Box::pin(async move {{ __jh.await.unwrap() }}) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> \
                 }}",
+                cr = cr,
                 shadow = shadow_decls,
                 arg_lets = arg_lets,
                 json = args_json_expr,
@@ -46890,6 +47044,7 @@ async fn get_u(id: Int) -> Result<U> {
             &[],
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
+            &HashMap::new(),
         )
     }
 

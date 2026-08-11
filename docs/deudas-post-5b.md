@@ -7452,9 +7452,24 @@ está en el MVP"):
   `collect_module_sigs` hoistean/toleran el store binding async
   co-localizado vía `module_background_store_vars`;
   `emit_background_boot` materializa `crate::<mod>::__FITZ_STATE_DB`
-  → `__FITZ_BG_STORE_DB`). Sub-deuda que queda: el `spawn(...)` DEBE
-  estar en el main (spawn desde un módulo requiere que el ctx del
-  módulo pueble `bg_persistent_fns` — diferido). (b) El valor de
+  → `__FITZ_BG_STORE_DB`). Sub-deuda (a.1) 🟢 **CERRADA v0.37.9**: el
+  `spawn(...)` ya NO tiene que vivir en el main — un `spawn(<bg>(...))`
+  ubicado DENTRO de un módulo importado emite el path persistente en
+  `fitz build` (paridad con `fitz run`). Fix: se pre-escanea la config
+  completa (`BgPersistInfo`: store_var/retry/catch_up) de los
+  `@background(store=db)` alcanzables (nuevo `ModuleLoader.
+  main_imported_background_persist` + `pre_scan_imported_background_
+  persist_for_loader`, ANTES de `collect_imports`), se puebla el
+  `ctx.bg_persistent_fns` de CADA módulo en
+  `generate_module_rs_with_bindings` (imports + defs locales, locales
+  ganan), y la arm persistente de `gen_spawn_call` califica con
+  `crate::` los 5 símbolos crate-root (`__fitz_run_persisted_spawn`,
+  `__FITZ_BG_STORE_<VAR>`, `__FitzRetryConfig`/`__FitzBackoffKind`,
+  `__ToFitzJson`) cuando `mode == Module` (en Main `mod_path_prefix()`
+  → `""`, main.rs byte-idéntico). Cubre spawn+def co-localizados en un
+  módulo y spawn-en-A/def-en-B. Tests E2E
+  `background_persistent_spawn_in_module_compiles_to_binary_v0_37_9` +
+  `background_persistent_spawn_cross_module_def_v0_37_9`. (b) El valor de
   retorno de un spawn persistido se descarta (resuelve a `Null`) —
   es fire-and-forget; si necesitás el valor, no uses `store`. (c)
   El `@background(store=db)` fn debe retornar `Null`/`Result<Null>`

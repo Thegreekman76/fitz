@@ -9,6 +9,52 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.9] — 2026-08-11 — `spawn(@background(store=db))` desde un módulo en `fitz build`
+
+Cierra la última sub-deuda de la persistencia de `@background`: un
+`spawn(<bg>(...))` ubicado DENTRO de un módulo importado (no en el main)
+ahora emite el path persistente en `fitz build`, con paridad bit-a-bit
+ante `fitz run`. Sin sintaxis nueva; solo codegen. Aditivo — los
+programas sin `@background(store=db)` compilan byte-idéntico.
+
+### Fixed
+
+- **`spawn(...)` persistente desde un módulo caía al path fire-and-forget
+  en el binario.** El intérprete (`fitz run`) persiste un spawn desde
+  cualquier lado (registry global), pero `fitz build` solo lo persistía
+  cuando el `spawn(...)` vivía en el main: el ctx de codegen de cada
+  módulo emitía su `.rs` con `bg_persistent_fns` vacío, así que
+  `gen_spawn_call` no reconocía el target como persistente y descartaba
+  la persistencia en silencio. Fix: (a) nuevo pre-scan
+  `pre_scan_imported_background_persist_for_loader` que recolecta la
+  config completa (`BgPersistInfo`: store_var/retry/catch_up) de los
+  `@background(store=db)` alcanzables — corre ANTES de `collect_imports`,
+  mismo patrón que `main_imported_background_fns` (B10); (b) se puebla
+  `ctx.bg_persistent_fns` de CADA módulo en
+  `generate_module_rs_with_bindings` (imports + defs locales, los locales
+  ganan en colisión); (c) la arm persistente de `gen_spawn_call` califica
+  con `crate::` los 5 símbolos crate-root (`__fitz_run_persisted_spawn`,
+  `__FITZ_BG_STORE_<VAR>`, `__FitzRetryConfig`/`__FitzBackoffKind`,
+  `__ToFitzJson`) cuando emite desde un módulo (en el main
+  `mod_path_prefix()` → `""`, main.rs sin cambios). Cubre spawn+def
+  co-localizados en un módulo y spawn-en-A/def-en-B.
+
+### Tests
+
+- `background_persistent_spawn_in_module_compiles_to_binary_v0_37_9`
+  (spawn dentro del módulo, inspecciona `worker.rs`: path persistente +
+  símbolos `crate::`-calificados) +
+  `background_persistent_spawn_cross_module_def_v0_37_9` (spawn en A, def
+  en B). Los 2 de v0.37.7/8 verdes sin regresión.
+
+### Notas
+
+- La persistencia de `@background` (v0.37.7 + cross-module v0.37.8 +
+  spawn-desde-módulo v0.37.9) queda completa: paridad bit-a-bit
+  `fitz run` ↔ `fitz build` desde cualquier layout de módulos. Restante
+  (sin cambio): el valor de retorno de un spawn persistido se descarta
+  (fire-and-forget), y el fn debe retornar `Null`/`Result<Null>`.
+
 ## [v0.37.8] — 2026-08-10 — `@background(store=db)` cross-module en `fitz build` (port de B20)
 
 Cierra la deuda residual de v0.37.7: un `@background(store=db)` fn + su
