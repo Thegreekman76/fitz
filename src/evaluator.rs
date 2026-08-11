@@ -5394,13 +5394,14 @@ fn dispatch_builtin_kwargs(
             let max_conns_opt = max_conns;
             let fut: crate::value::FitzFuture = Box::pin(async move {
                 if let Some(n) = max_conns_opt {
-                    // SAFETY: this set_var runs before any connect
-                    // (since connect_url reads the env var via
-                    // LazyLock on first use). If the user calls
-                    // db.connect(..., max_conns=20) AFTER a prior
-                    // db.connect(url) that already cached the default
-                    // max_conns, the override does NOT apply (minor
-                    // debt — documented in docs/db-orm.md).
+                    // SAFETY: this set_var runs right before the
+                    // connect. Since v0.37.12 `effective_max_conns()`
+                    // reads `FITZ_DB_MAX_CONNS` fresh on each pool
+                    // creation (no longer `LazyLock`), so a
+                    // `db.connect(url2, max_conns=20)` issued AFTER a
+                    // prior `db.connect(url1)` DOES apply the override
+                    // to the new pool (the old "does not apply after a
+                    // prior connect" caveat is closed).
                     unsafe {
                         std::env::set_var("FITZ_DB_MAX_CONNS", n.to_string());
                     }

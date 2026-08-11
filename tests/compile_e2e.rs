@@ -12934,6 +12934,35 @@ fn cross_module_orm_preload_nullable_fk_b15() {
 }
 
 #[test]
+fn orm_preload_has_one_compiles_to_binary_v0_37_12() {
+    // #5 (v0.37.12) — HasOne `.preload("profile")` compiles to a
+    // native binary. Loading mirrors HasMany (WHERE child.fk IN
+    // parent.pks), but the parent's virtual field `profile: Profile?`
+    // gets an `Option<Profile>` (first match). Nullable child FK
+    // (`user_id: Int? = null`) exercised too. Build-only (running
+    // needs a real DB), which still validates the emitted Rust
+    // actually rustc-compiles.
+    let src = "@table(\"users\") type User {\n  \
+                   @primary id: Int = 0\n  \
+                   name: Str = \"\"\n  \
+                   @has_one(\"Profile\", via=\"user_id\") profile: Profile?\n\
+               }\n\
+               @table(\"profiles\") type Profile {\n  \
+                   @primary id: Int = 0\n  \
+                   user_id: Int? = null\n  \
+                   bio: Str = \"\"\n\
+               }\n\
+               @get(\"/users-with-profile\")\n\
+               async fn users_with_profile() -> Result<List<User>> {\n  \
+                   let conn = db.connect(\"postgres://x@h/d\").await?\n  \
+                   return User.where(fn(u) => u.id > 0).preload(\"profile\").all(conn).await\n\
+               }\n\
+               @server(43921)\n\
+               fn main() => 0\n";
+    build_expect_ok("orm_preload_has_one_compiles_to_binary_v0_37_12", src);
+}
+
+#[test]
 fn for_over_list_with_await_in_body_does_not_break_send_b17() {
     // B17 (post-fitzwatch cosecha) — `for x in <List<T>>` con `.await`
     // adentro del body en un handler `async` rompía Send porque el

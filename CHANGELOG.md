@@ -9,6 +9,48 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.12] — 2026-08-11 — `FITZ_DB_*` mid-run reload + ORM `.preload()` HasOne
+
+Dos deudas residuales chicas del inventario. Sin sintaxis nueva. #6 (CLI
+`@arg`/`@flag`) se difirió tras mapearla con un Explore: Fase 13 ya la cerró
+como deuda menor, `@flag` colisiona con el decorator de feature flags
+(Fase 12.8), y los params no soportan decorators hoy (habría que tocar
+AST + parser) — es una mini-feature con forks de diseño, no un commit chico.
+
+### Fixed
+
+- **`FITZ_DB_MAX_CONNS` / `FITZ_DB_LOG` reflejan cambios mid-run.** Ambos se
+  leían con `LazyLock` (fijados al primer acceso, cambios posteriores
+  ignorados). Ahora `effective_max_conns()` relee `FITZ_DB_MAX_CONNS` fresco
+  en cada creación de pool (path frío) y `current_db_log_mode()` relee
+  `FITZ_DB_LOG` fresco en cada query (network-bound, costo despreciable).
+  Cierra el caveat documentado: un `db.connect(url2, max_conns=20)` emitido
+  DESPUÉS de un `db.connect(url1)` previo ahora SÍ aplica el override al pool
+  nuevo (el connect previo ya no fija el valor); y `FITZ_DB_LOG=verbose` vía
+  `load_env` toma efecto en la siguiente query sin reiniciar. `HTTP_LOG_MODE`
+  (`FITZ_HTTP_LOG`) sigue `LazyLock` (fuera de scope de #4).
+
+### Added
+
+- **`.preload("relation")` sobre `@has_one`.** Antes solo `@has_many` y
+  BelongsToCompanion; HasOne se rechazaba citando "deuda futura". Ahora
+  `User.preload("profile").all(db)` con `@has_one("Profile", via="user_id")
+  profile: Profile?` carga eager en la misma dirección que HasMany (el FK vive
+  en el child: `WHERE profiles.user_id IN (user_ids)`, reusa el manejo de FK
+  nullable de B15) pero, por cardinalidad 1:1, asigna `Option<Profile>` (el
+  primer match) en vez de una lista. Codegen-only, en paridad con HasMany/
+  companion (el intérprete no soporta `.preload()` de ningún kind — feature
+  build-only). **BelongsTo eager ya estaba cerrado** vía companion (v0.10.5);
+  `.preload()` sobre el FK directo sigue rechazado a propósito (el companion
+  es la forma correcta).
+
+### Tests
+
+- `db::tests::{effective_max_conns,current_db_log_mode}_reflects_midrun_env_change_v0_37_12`
+  (2) + `codegen::tests::codegen_orm_preload_has_one_{emits_option_assignment,with_nullable_child_fk_emits_some_pid}_v0_37_12`
+  (2) + `compile_e2e::orm_preload_has_one_compiles_to_binary_v0_37_12`
+  (1 E2E build a binario nativo).
+
 ## [v0.37.11] — 2026-08-11 — `bytes_from_b64`/`bytes_from_hex` + spans de `Stmt` en interpolación
 
 Dos deudas chicas del inventario. Sin sintaxis nueva del lenguaje más allá

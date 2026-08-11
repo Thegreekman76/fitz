@@ -2174,8 +2174,10 @@ pub enum HttpLogMode {
 }
 
 /// Reads `FITZ_HTTP_LOG` once per process. The mode is locked at
-/// first access (lazy). Pattern parallel to the driver's
-/// `DB_LOG_MODE` (sub-step 3).
+/// first access (lazy). Sibling of the driver's query logging,
+/// which since v0.37.12 re-reads its env var fresh each query
+/// (`db::current_db_log_mode`); this HTTP toggle stays `LazyLock`
+/// for now.
 pub static HTTP_LOG_MODE: std::sync::LazyLock<HttpLogMode> =
     std::sync::LazyLock::new(|| match std::env::var("FITZ_HTTP_LOG").as_deref() {
         Ok("verbose") => HttpLogMode::Verbose,

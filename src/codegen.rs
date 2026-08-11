@@ -23192,20 +23192,21 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 ),
             )
         })?;
-        // Debt #2 (v0.10.5) — accept HasMany AND BelongsToCompanion.
-        // Other kinds (BelongsTo FK direct, HasOne) remain as future
-        // debt. BelongsTo "direct" (e.g. `.preload("user_id")` with
-        // the FK name) makes no sense because deserialization
-        // would populate the Int field, not a target — the virtual companion
-        // is the correct form.
+        // Debt #2 (v0.10.5) + #5 (v0.37.12) — accept HasMany,
+        // BelongsToCompanion AND HasOne. BelongsTo "direct" (e.g.
+        // `.preload("user_id")` with the FK name) remains rejected on
+        // purpose: deserialization would populate the Int field, not a
+        // target — the virtual companion is the correct form.
         if !matches!(
             rel.kind,
-            crate::types::RelationKind::HasMany | crate::types::RelationKind::BelongsToCompanion
+            crate::types::RelationKind::HasMany
+                | crate::types::RelationKind::BelongsToCompanion
+                | crate::types::RelationKind::HasOne
         ) {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.preload(\"{}\")` MVP: only @has_many or BelongsToCompanion (received: {:?}). For eager BelongsTo, declare a sibling `field: Target?` adjacent to the FK (e.g. `user: User?` next to `@belongs_to(\"User\") user_id: Int`).",
+                    "`{}.preload(\"{}\")` MVP: only @has_many, @has_one or BelongsToCompanion (received: {:?}). For eager BelongsTo, declare a sibling `field: Target?` adjacent to the FK (e.g. `user: User?` next to `@belongs_to(\"User\") user_id: Int`).",
                     type_name, name, rel.kind
                 ),
             ));
@@ -23361,16 +23362,18 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                         ),
                     )
                 })?;
-                // Debt #2 (v0.10.5) — accept HasMany AND BelongsToCompanion.
+                // Debt #2 (v0.10.5) + #5 (v0.37.12) — accept HasMany,
+                // BelongsToCompanion AND HasOne.
                 if !matches!(
                     rel.kind,
                     crate::types::RelationKind::HasMany
                         | crate::types::RelationKind::BelongsToCompanion
+                        | crate::types::RelationKind::HasOne
                 ) {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.preload(\"{}\")` MVP: solo @has_many o BelongsToCompanion (recibido: {:?})",
+                            "`.preload(\"{}\")` MVP: solo @has_many, @has_one o BelongsToCompanion (recibido: {:?})",
                             name, rel.kind
                         ),
                     ));
@@ -24300,6 +24303,15 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 arms.push_str(&arm);
                 continue;
             }
+            // #5 (v0.37.12) — HasOne. Loading is identical to HasMany
+            // (`WHERE child.<fk> IN (parent.<pk>...)`), but cardinality
+            // 1: assign an `Option<target>` (the first match) instead
+            // of a `Vec`.
+            if matches!(rel.kind, crate::types::RelationKind::HasOne) {
+                let arm = self.emit_has_one_preload_arm(rel_name, rel, &parent_pk)?;
+                arms.push_str(&arm);
+                continue;
+            }
             if !matches!(rel.kind, crate::types::RelationKind::HasMany) {
                 continue;
             }
@@ -24381,11 +24393,12 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 parent_field = parent_field,
             ));
         }
-        // If there are no HasMany relations in the parent, the for loop
-        // has no useful branches. We return an empty block to
-        // simplify — `.preload()` in gen_orm_qb_method already rejects
-        // names without HasMany in the row, so we don't arrive here with
-        // preloads waiting to be processed.
+        // If there are no preloadable relations (HasMany / HasOne /
+        // BelongsToCompanion) in the parent, the for loop has no useful
+        // branches. We return an empty block to simplify — `.preload()`
+        // in gen_orm_qb_method already rejects unsupported relation
+        // kinds, so we don't arrive here with preloads waiting to be
+        // processed.
         if arms.is_empty() {
             return Ok(String::new());
         }
@@ -24523,6 +24536,94 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             ids_collection = ids_collection,
             matched_lookup = matched_lookup,
             companion_field = companion_field,
+        ))
+    }
+
+    /// #5 (v0.37.12) — `.preload(name)` dispatch branch for `HasOne`.
+    /// Loading is IDENTICAL to the HasMany path (`WHERE
+    /// child.<fk_field> IN (parent.<pk>...)`, so the FK lives on the
+    /// target/child). The only difference is cardinality: HasOne is
+    /// 1:1, so instead of grouping the matches into a `Vec` we `find`
+    /// the FIRST child whose FK matches the parent PK and assign an
+    /// `Option<target>` to the parent's virtual field (`profile:
+    /// Profile?`). If the SQL happens to return more than one row for
+    /// a parent (the 1:1 contract is not enforced at the DB level) the
+    /// first one wins, consistent with `.first()` navigation.
+    fn emit_has_one_preload_arm(
+        &mut self,
+        parent_field: &str,
+        rel: &crate::types::RelationMetadata,
+        parent_pk: &str,
+    ) -> Result<String, FitzError> {
+        let target_name = &rel.target_type;
+        let (target_meta, target_fields) =
+            self.orm_lookup_meta_and_fields(target_name, crate::ast::Span::ZERO)?;
+        let target_data = format!("{}Data", target_name);
+        // v0.10.21 — qualified already-quoted.
+        let target_table = target_meta.qualified_sql_name();
+        let cols = Self::orm_build_qb_cols(&target_meta, &target_fields);
+        let fk_sql = target_meta
+            .columns
+            .get(&rel.fk_field)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(rel.fk_field.as_str())
+            .to_string();
+        let fk_fitz = &rel.fk_field;
+        // Same nullable-child-FK handling as the HasMany arm (B15):
+        // if the child's FK is `Int?`, `__cg2.<fk>` is `Option<i64>`,
+        // so the equality needs `Some(__pid)`.
+        let child_fk_is_nullable = target_fields
+            .iter()
+            .find(|f| f.name == *fk_fitz)
+            .map(|f| matches!(f.type_, Type::Nullable(_)))
+            .unwrap_or(false);
+        let child_fk_eq = if child_fk_is_nullable {
+            format!("__cg2.{fk_fitz} == Some(__pid)")
+        } else {
+            format!("__cg2.{fk_fitz} == __pid")
+        };
+        Ok(format!(
+            "{name_lit} => {{ \
+                let __ids: Vec<__FitzPgValue> = {{ \
+                    let __guard = __rows.lock().unwrap(); \
+                    __guard.iter().map(|__p| {{ let __g = __p.lock().unwrap(); __FitzPgValue::Int(__g.{parent_pk}) }}).collect() \
+                }}; \
+                if !__ids.is_empty() {{ \
+                    let __placeholders = (1..=__ids.len()).map(|__i| format!(\"${{}}\", __i)).collect::<Vec<_>>().join(\", \"); \
+                    let __sql = format!(\"SELECT {cols_lit} FROM {table_lit} WHERE \\\"{fk_lit}\\\" IN ({{}})\", __placeholders); \
+                    match __fitz_db_query(&__conn_pl, __sql, __ids).await {{ \
+                        Ok(__child_rows) => {{ \
+                            let __cg = __child_rows.lock().unwrap(); \
+                            let mut __children: Vec<std::sync::Arc<std::sync::Mutex<{target_data}>>> = Vec::with_capacity(__cg.len()); \
+                            for __r in __cg.iter() {{ \
+                                match <{target_data} as __FromFitzDbRow>::from_fitz_db_row(__r) {{ \
+                                    Ok(__d) => __children.push(std::sync::Arc::new(std::sync::Mutex::new(__d))), \
+                                    Err(__e) => return Err(__e), \
+                                }} \
+                            }} \
+                            drop(__cg); \
+                            let __pg = __rows.lock().unwrap(); \
+                            for __p in __pg.iter() {{ \
+                                let __pid = {{ let __g = __p.lock().unwrap(); __g.{parent_pk} }}; \
+                                let __matched: Option<std::sync::Arc<std::sync::Mutex<{target_data}>>> = __children.iter().find(|__c| {{ \
+                                    let __cg2 = __c.lock().unwrap(); {child_fk_eq} \
+                                }}).cloned(); \
+                                let mut __pg2 = __p.lock().unwrap(); \
+                                __pg2.{parent_field} = __matched; \
+                            }} \
+                        }} \
+                        Err(__e) => return Err(__e), \
+                    }} \
+                }} \
+            }}, ",
+            name_lit = rust_str_literal(parent_field),
+            parent_pk = parent_pk,
+            cols_lit = cols.replace('"', "\\\""),
+            table_lit = target_table.replace('"', "\\\""),
+            fk_lit = fk_sql,
+            target_data = target_data,
+            child_fk_eq = child_fk_eq,
+            parent_field = parent_field,
         ))
     }
 
@@ -49950,6 +50051,84 @@ async fn get_u(id: Int) -> Result<U> {
         assert!(
             !rust.contains("__cg2.author_id == __pid"),
             "did NOT expect legacy `__cg2.author_id == __pid` for nullable child FK, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_preload_has_one_emits_option_assignment_v0_37_12() {
+        // #5 (v0.37.12) — HasOne preload. Loading is like HasMany
+        // (WHERE child.<fk> IN parent.<pk>...), but cardinality 1:
+        // assign `Option<target>` (first `.find`) instead of a `Vec`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str = \"\"\n  \
+                       @has_one(\"Profile\", via=\"user_id\") profile: Profile?\n\
+                   }\n\
+                   @table(\"profiles\") type Profile {\n  \
+                       @primary id: Int = 0\n  \
+                       user_id: Int = 0\n  \
+                       bio: Str = \"\"\n\
+                   }\n\
+                   async fn boot() -> Result<List<User>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return User.preload(\"profile\").all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_preload(\"profile\")"),
+            "expected .with_preload(\"profile\") in the chain, was: {rust}",
+        );
+        assert!(
+            rust.contains("\"profile\" =>") && rust.contains("__preloads.iter()"),
+            "expected static dispatch with branch for `profile`, was: {rust}",
+        );
+        // Same loading direction as HasMany: WHERE child.user_id IN (...).
+        assert!(
+            rust.contains("FROM \\\"profiles\\\"") && rust.contains("\\\"user_id\\\" IN"),
+            "expected batch query FROM profiles + WHERE user_id IN, was: {rust}",
+        );
+        // Cardinality 1: Option assignment via `.find(...).cloned()`.
+        assert!(
+            rust.contains("__pg2.profile = __matched;"),
+            "expected Option assignment `__pg2.profile = __matched;`, was: {rust}",
+        );
+        assert!(
+            rust.contains("__children.iter().find(|__c|"),
+            "expected `.find` (first match, Option) for HasOne, was: {rust}",
+        );
+        // Non-nullable child FK → bare `== __pid`.
+        assert!(
+            rust.contains("__cg2.user_id == __pid"),
+            "expected `__cg2.user_id == __pid` for non-nullable child FK, was: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_preload_has_one_with_nullable_child_fk_emits_some_pid_v0_37_12() {
+        // #5 sibling — HasOne with a nullable child FK (`user_id:
+        // Int?`) compares `__cg2.user_id == Some(__pid)` (B15-style),
+        // same rule as the HasMany arm.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_one(\"Profile\", via=\"user_id\") profile: Profile?\n\
+                   }\n\
+                   @table(\"profiles\") type Profile {\n  \
+                       @primary id: Int = 0\n  \
+                       user_id: Int? = null\n  \
+                       bio: Str = \"\"\n\
+                   }\n\
+                   async fn boot() -> Result<List<User>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return User.preload(\"profile\").all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__cg2.user_id == Some(__pid)"),
+            "expected `__cg2.user_id == Some(__pid)` for nullable child FK, was: {rust}",
+        );
+        assert!(
+            !rust.contains("__cg2.user_id == __pid"),
+            "did NOT expect legacy `__cg2.user_id == __pid` for nullable child FK, was: {rust}",
         );
     }
 

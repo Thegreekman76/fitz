@@ -6540,10 +6540,25 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   directo + `User.where(...).preload(...)` chain ambos soportados.
   Test paridad real: `orm_preload_has_many_paridad_codegen_e2e`
   valida bit-a-bit `u0=ada:3 u1=alan:1 u2=grace:0` con 1 query
-  para users + 1 batch para posts (en vez de N+1). MVP solo
-  HasMany — BelongsTo y HasOne quedan como deuda menor abierta
-  para v0.11 si entra demanda (sus casos típicos los cubren
-  navigation methods directos sin riesgo de N+1).
+  para users + 1 batch para posts (en vez de N+1). MVP inicial
+  solo HasMany. **BelongsTo eager CERRADO 2026-05-26 (deuda #2,
+  v0.10.5)** vía `BelongsToCompanion` (`.preload("user")` sobre el
+  sibling `user: User?` con SQL invertido `WHERE target.pk IN
+  (parent.fks)`). **HasOne eager CERRADO 2026-08-11 (deuda #5,
+  v0.37.12)**: `.preload("profile")` sobre `@has_one("Profile",
+  via="user_id") profile: Profile?` carga en la MISMA dirección que
+  HasMany (`WHERE child.fk IN (parent.pks)`, reusa el `child_fk_eq`
+  nullable de B15) pero, por cardinalidad 1, hace `.find(...)` del
+  primer match y asigna `Option<target>` en vez de `Vec`. Nuevo
+  helper `emit_has_one_preload_arm` en `src/codegen.rs` + `HasOne`
+  agregado a los dos gates (`gen_orm_type_preload` + QB `.preload`).
+  Codegen-only (paridad con HasMany/companion — el intérprete no
+  soporta `.preload()` de ningún kind, feature build-only). Tests:
+  2 unit `codegen_orm_preload_has_one_*_v0_37_12` (Option assignment
+  + nullable child FK) + 1 E2E build
+  `orm_preload_has_one_compiles_to_binary_v0_37_12`. `.preload()`
+  sobre el FK BelongsTo directo sigue rechazado a propósito (el
+  companion es la forma correcta).
 - ✅ **Cross-type navigation con `@column(name=...)` en el FK source
   field** — CERRADO 2026-05-26 (10.b.10.2). Test paridad real
   `orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e`

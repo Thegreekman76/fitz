@@ -2824,17 +2824,17 @@ const HEALTH_CHECK_INTERVAL_SECS: u64 = 30;
 /// concurrent load (> 10 simultaneous requests hitting the DB) or
 /// for apps with very little load where 10 conns is overkill.
 ///
-/// Parsed once per process (`LazyLock`) — mid-run changes are NOT
-/// reflected (same model as `FITZ_DB_LOG`). Invalid or empty
-/// values → fallback to `DEFAULT_MAX_CONNS`. Clamp: min 1, max
-/// 200 (beyond that is probably a typo and saturates Postgres'
+/// v0.37.12 — Read fresh on each pool creation (was a `LazyLock`
+/// parsed once). Mid-run changes ARE now reflected: a
+/// `db.connect(url2, max_conns=20)` issued AFTER a prior
+/// `db.connect(url1)` applies the override to the new pool (the
+/// earlier connect no longer locks the value). Pool creation is a
+/// cold path (once per URL, cached in `POOL_CACHE`), so the
+/// per-call env read is effectively free. Invalid or empty values
+/// → fallback to `DEFAULT_MAX_CONNS`. Clamp: min 1, max 200
+/// (beyond that is probably a typo and saturates Postgres'
 /// `max_connections`).
-pub static FITZ_DB_MAX_CONNS: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| match std::env::var("FITZ_DB_MAX_CONNS") {
-        Ok(s) => parse_max_conns_value(&s),
-        Err(_) => DEFAULT_MAX_CONNS,
-    });
-
+///
 /// v0.10.29 — Pure testable parser. Trim + parse + clamp [1, 200].
 /// Unparseable or out-of-range values → DEFAULT_MAX_CONNS.
 pub(crate) fn parse_max_conns_value(s: &str) -> usize {
@@ -2845,8 +2845,14 @@ pub(crate) fn parse_max_conns_value(s: &str) -> usize {
 }
 
 /// Resolves the effective max_conns of the pool: env var > default.
+/// Reads `FITZ_DB_MAX_CONNS` fresh each call so a mid-run override
+/// (e.g. `db.connect(url, max_conns=N)`) is honored by pools created
+/// afterwards.
 pub(crate) fn effective_max_conns() -> usize {
-    *FITZ_DB_MAX_CONNS
+    match std::env::var("FITZ_DB_MAX_CONNS") {
+        Ok(s) => parse_max_conns_value(&s),
+        Err(_) => DEFAULT_MAX_CONNS,
+    }
 }
 
 /// Internal pool of the `DbConnHandle`. NOT exposed directly to
@@ -3012,18 +3018,20 @@ pub enum DbLogMode {
     Verbose,
 }
 
-/// Reads `FITZ_DB_LOG` once per process. Mid-run changes to the
-/// env var are NOT reflected — the mode is locked at first
-/// access (lazy). Compatible with `fitz run`, `fitz build` (the
-/// produced binary reuses the same `db.rs` via `pub use`), and
-/// tests (each test process re-reads the env var in its
-/// LazyLock).
-pub static DB_LOG_MODE: std::sync::LazyLock<DbLogMode> =
-    std::sync::LazyLock::new(|| match std::env::var("FITZ_DB_LOG").as_deref() {
+/// Reads `FITZ_DB_LOG` fresh on each query (v0.37.12 — was a
+/// `LazyLock` locked at first access). Mid-run changes ARE now
+/// reflected: flipping `FITZ_DB_LOG=verbose` (e.g. via `load_env`)
+/// takes effect on the next query without restarting the process.
+/// Queries are network-bound, so the per-query env read is
+/// negligible. Compatible with `fitz run` and `fitz build` (the
+/// produced binary reuses the same `db.rs` via `include_str!`).
+pub fn current_db_log_mode() -> DbLogMode {
+    match std::env::var("FITZ_DB_LOG").as_deref() {
         Ok("verbose") => DbLogMode::Verbose,
         Ok("1" | "true") => DbLogMode::Simple,
         _ => DbLogMode::Off,
-    });
+    }
+}
 
 /// Truncates a string to `max` chars (chars, not bytes — UTF-8
 /// safe). If the original was longer, suffixes with `…` to mark
@@ -3220,7 +3228,7 @@ pub(crate) fn should_redact_param(sql_lower: &str, position: usize) -> bool {
 /// Emits the log line to stderr if the mode is active. Cheap
 /// when `DbLogMode::Off` — a single load + match, no allocations.
 fn log_db_query(elapsed: std::time::Duration, sql: &str, args: &[PgValue]) {
-    let mode = *DB_LOG_MODE;
+    let mode = current_db_log_mode();
     if matches!(mode, DbLogMode::Off) {
         return;
     }
@@ -4847,6 +4855,46 @@ mod tests {
         assert_eq!(parse_max_conns_value("201"), DEFAULT_MAX_CONNS);
         assert_eq!(parse_max_conns_value("foo"), DEFAULT_MAX_CONNS);
         assert_eq!(parse_max_conns_value("-5"), DEFAULT_MAX_CONNS);
+    }
+
+    // v0.37.12 — FITZ_DB_* mid-run reload. `effective_max_conns()`
+    // and `current_db_log_mode()` read their env vars fresh on each
+    // access (no longer `LazyLock`), so a mid-run change is honored.
+    // The two tests touch disjoint env vars, but serialize on a
+    // shared lock to be safe against poisoning between them.
+    static ENV_MIDRUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn effective_max_conns_reflects_midrun_env_change_v0_37_12() {
+        let _g = ENV_MIDRUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: this test serializes on ENV_MIDRUN_LOCK and no
+        // other test reads FITZ_DB_MAX_CONNS.
+        unsafe { std::env::set_var("FITZ_DB_MAX_CONNS", "15") };
+        assert_eq!(effective_max_conns(), 15);
+        // Mid-run change is reflected without re-locking anything.
+        unsafe { std::env::set_var("FITZ_DB_MAX_CONNS", "42") };
+        assert_eq!(effective_max_conns(), 42);
+        // Invalid value falls back to default, still fresh.
+        unsafe { std::env::set_var("FITZ_DB_MAX_CONNS", "nope") };
+        assert_eq!(effective_max_conns(), DEFAULT_MAX_CONNS);
+        unsafe { std::env::remove_var("FITZ_DB_MAX_CONNS") };
+        assert_eq!(effective_max_conns(), DEFAULT_MAX_CONNS);
+    }
+
+    #[test]
+    fn current_db_log_mode_reflects_midrun_env_change_v0_37_12() {
+        let _g = ENV_MIDRUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized on ENV_MIDRUN_LOCK; no other test reads
+        // FITZ_DB_LOG.
+        unsafe { std::env::set_var("FITZ_DB_LOG", "1") };
+        assert_eq!(current_db_log_mode(), DbLogMode::Simple);
+        unsafe { std::env::set_var("FITZ_DB_LOG", "verbose") };
+        assert_eq!(current_db_log_mode(), DbLogMode::Verbose);
+        // Flip back off mid-run.
+        unsafe { std::env::set_var("FITZ_DB_LOG", "0") };
+        assert_eq!(current_db_log_mode(), DbLogMode::Off);
+        unsafe { std::env::remove_var("FITZ_DB_LOG") };
+        assert_eq!(current_db_log_mode(), DbLogMode::Off);
     }
 
     #[test]

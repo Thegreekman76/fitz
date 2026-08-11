@@ -1684,6 +1684,16 @@ let r2 = User.preload("posts").where(fn(u) => u.active).all(db).await?
   let user_ids = posts.map(fn(p) => p.user_id)
   let authors = User.where(fn(u) => u.id.is_in(user_ids)).all(db).await?
   ```
+- **HasOne eager** (deuda #5 cerrada v0.37.12):
+  `User.preload("profile").all(db)` ahora funciona cuando el type
+  declara `@has_one("Profile", via="user_id") profile: Profile?`.
+  Carga en la misma dirección que HasMany (el FK vive en el child:
+  `WHERE profiles.user_id IN (user_ids)`) pero, por cardinalidad
+  1:1, puebla el field con el primer match (`Option<Profile>`) en
+  vez de una lista. Si la query devuelve más de un row para un
+  parent (el contrato 1:1 no se enforza a nivel DB), gana el
+  primero. El field `profile` se inicializa `null` por default y
+  queda poblado post-preload.
 - **Single-level**. `.preload("posts").preload("posts.comments")` no
   soportado (cargar posts + comments de cada post en 3 queries).
   Workaround: `.preload("posts")` + N+1 manual sobre `u.posts`.
