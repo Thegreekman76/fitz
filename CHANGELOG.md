@@ -9,6 +9,54 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.11] — 2026-08-11 — `bytes_from_b64`/`bytes_from_hex` + spans de `Stmt` en interpolación
+
+Dos deudas chicas del inventario. Sin sintaxis nueva del lenguaje más allá
+de los dos builtins.
+
+### Added
+
+- **`bytes_from_b64(s: Str) -> Result<Bytes>` y `bytes_from_hex(s: Str) ->
+  Result<Bytes>`** — decodifican un string base64/hex a `Bytes`, cerrando el
+  gap de `Response { body_bytes }` (respuestas HTTP binarias: imágenes,
+  PDFs). Antes solo se podían construir bytes con `bytes(s)` (copia UTF-8
+  cruda). Builtins globales con paridad bit-a-bit `fitz run` ↔ `fitz build`:
+  los decoders son inline idénticos en el evaluator y en el codegen (mismo
+  algoritmo → mismo Ok/Err para cualquier input, mismos mensajes de error).
+  Un input inválido es `Result::Err(Str)`. **Cero dep nueva** al Cargo.toml
+  generado (los decoders son self-contained, no arrastran el crate
+  `base64`). LSP completions + grammar TextMate actualizados.
+
+### Fixed
+
+- **Cuelgue del LSP al abrir un `.fitz` fuera de un proyecto (hotfix de
+  v0.37.10).** El pre-scan de `@middleware` cross-module (v0.37.10) hacía,
+  cuando no encontraba un `fitz.toml` ancestro, un fallback que caminaba
+  `base_dir` — y para un documento suelto (URI `file:///x.fitz`, cuyo
+  `base_dir` es `/` o `/tmp`) eso escaneaba **el disco entero**, colgando el
+  job LSP del CI 1h+ y el LSP de cualquier usuario que abriera un `.fitz`
+  suelto. Fix: sin `fitz.toml` ancestro → **no se camina nada** (el patrón
+  cross-module de `@middleware` solo existe en proyectos multi-módulo, que
+  siempre tienen manifest). Además el walker ya no sigue symlinks (evita
+  ciclos) y corta en 2000 archivos. Tests
+  `lsp::tests::v0_37_11_project_scan_{without,with}_manifest_*`.
+- **Spans de `Stmt` dentro de una interpolación de string.** El walker de
+  spans del parser (que corrige los spans de sub-expresiones parseadas en un
+  `{...}`) no recursaba en el `Vec<Stmt>` de `FnExpr.body`/`Loop`/`If`/`Match`
+  (residual de V1). Un `"r: {xs.map(fn(x) => x * 2)}"` dejaba el `x * 2` con
+  spans corridos → hover/go-to-def/diagnósticos mal ubicados. Fix: nuevo
+  `parser::shift_stmt_spans` + `Stmt::span_mut()` (ast.rs) + relleno de los 5
+  brazos con deuda en `shift_expr_spans`. El caso real alcanzable vía
+  interpolación es el arrow `fn(x) => expr` (el lexer de interpolación no
+  balancea llaves anidadas, así que los brazos block-form quedan defensivos).
+
+### Tests
+
+- `evaluator::tests::bytes_from_*` (6: Ok/Err b64/hex, empty, odd-length) +
+  `codegen::tests::codegen_bytes_*` (3: call + prelude + Cargo.toml sin
+  base64) + `parser::tests::v0_37_11_*` (2: FnExpr body con columnas exactas
+  + shift_stmt_spans directo sobre un If).
+
 ## [v0.37.10] — 2026-08-11 — LSP: falso positivo cross-module de `@middleware` cerrado
 
 El LSP ya no marca un falso positivo de "return con status fuera de

@@ -1118,31 +1118,55 @@ fn resolve_import_file_path_lsp(
     crate::view::resolve_module_file_candidates(&dir, last)
 }
 
+/// Defensive cap on how many `.fitz`/`.fitzv` files the project walk
+/// collects. A real Fitz project has far fewer; the cap only bounds a
+/// pathological tree (or a manifest rooted very high) so the LSP never
+/// walks unboundedly.
+const MAX_PROJECT_FITZ_FILES: usize = 2000;
+
 /// v0.37.10 — LSP-only recursive walker of the project's `.fitz` /
 /// `.fitzv` files. Parallel to `main.rs::collect_fitz_recursive` but
 /// lives in the lib (the bin's copy isn't reachable), also picks up
 /// `.fitzv`, and never exits on unreadable dirs. Skips hidden dirs
-/// (`.git`, `.fitz`) and `target/`. Read errors are silently ignored
-/// (best-effort — the "unreadable file" diagnostic is the loader's job).
+/// (`.git`, `.fitz`), `target/`, and `node_modules/`. Read errors are
+/// silently ignored (best-effort — the "unreadable file" diagnostic is
+/// the loader's job).
+///
+/// v0.37.11 — does NOT follow symlinks (uses `symlink_metadata`, so a
+/// symlinked dir is treated as a non-dir and skipped), preventing cycles
+/// that would hang the walk; and stops at `MAX_PROJECT_FITZ_FILES`.
 fn collect_project_fitz_files_lsp(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    if out.len() >= MAX_PROJECT_FITZ_FILES {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        if out.len() >= MAX_PROJECT_FITZ_FILES {
+            return;
+        }
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // Skip hidden dirs (`.git`, `.fitz`) and `target/`.
-        if name.starts_with('.') || name == "target" {
+        // Skip hidden dirs (`.git`, `.fitz`), `target/`, `node_modules/`.
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
             continue;
         }
-        if path.is_dir() {
+        // `symlink_metadata` does NOT follow symlinks: a symlinked dir is
+        // seen as a symlink (not a dir) → skipped → no cycle.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
             collect_project_fitz_files_lsp(&path, out);
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("fitz") | Some("fitzv")
-        ) {
+        } else if meta.is_file()
+            && matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("fitz") | Some("fitzv")
+            )
+        {
             out.push(path);
         }
     }
@@ -1160,10 +1184,18 @@ fn collect_project_fitz_files_lsp(dir: &std::path::Path, out: &mut Vec<std::path
 /// (`pre_scan_imported_middleware_fns_for_loader`); the LSP has no
 /// `main`, so it walks the project tree instead.
 ///
-/// Root = directory of the ancestor `fitz.toml` (Cargo-style walk-up
-/// via `manifest::find_manifest`); a loose document without a manifest
-/// falls back to `base_dir`. Silent fallback on read/parse errors (same
+/// Root = directory of the ancestor `fitz.toml` (Cargo-style walk-up via
+/// `manifest::find_manifest`). Silent fallback on read/parse errors (same
 /// policy as `pre_scan_imported_background_fns_lsp`).
+///
+/// v0.37.11 — a document WITHOUT an ancestor `fitz.toml` returns empty
+/// and does NOT walk. Critical: a loose document (URI like
+/// `file:///x.fitz`, whose `base_dir` is `/` or `/tmp`) must never
+/// trigger a filesystem walk — that would scan the whole disk and hang
+/// (it hung the CI LSP job on v0.37.10, and would scan a user's entire
+/// disk when they open a stray `.fitz`). The cross-module `@middleware`
+/// false positive only arises in multi-module projects, which always
+/// have a manifest, so gating on `find_manifest` loses no real coverage.
 ///
 /// TODO(perf): cache by (root_dir + modtimes) if the walk becomes hot.
 /// Today it re-walks + reparses on each keystroke, which is cheap for
@@ -1171,10 +1203,12 @@ fn collect_project_fitz_files_lsp(dir: &std::path::Path, out: &mut Vec<std::path
 /// type-check — parallel to the existing sibling pre-scans).
 fn pre_scan_project_middleware_fns_lsp(base_dir: &std::path::Path) -> Vec<String> {
     // `find_manifest` returns the manifest FILE path; its parent is the
-    // project root. No manifest → loose document → scan `base_dir`.
-    let root = crate::manifest::find_manifest(base_dir)
+    // project root. No manifest → not a Fitz project → no walk.
+    let Some(root) = crate::manifest::find_manifest(base_dir)
         .and_then(|m| m.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| base_dir.to_path_buf());
+    else {
+        return Vec::new();
+    };
 
     let mut files = Vec::new();
     collect_project_fitz_files_lsp(&root, &mut files);
@@ -4039,6 +4073,14 @@ fn scope_level_completions(
         ("spawn", "fn(fn_call) -> Future<T>  // requires @background"),
         ("cors", "fn(config: Map?) -> CorsConfig"),
         ("bytes", "fn(s: Str) -> Bytes"),
+        (
+            "bytes_from_b64",
+            "fn(s: Str) -> Result<Bytes>  // decode base64",
+        ),
+        (
+            "bytes_from_hex",
+            "fn(s: Str) -> Result<Bytes>  // decode hex",
+        ),
         ("assert", "fn(cond: Bool, msg: Str?) -> Null"),
         ("assert_eq", "fn(a, b) -> Null"),
         ("assert_ne", "fn(a, b) -> Null"),
@@ -7486,6 +7528,51 @@ fn make_resp() -> Response {
                 .iter()
                 .map(|e| &e.message)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn v0_37_11_project_scan_without_manifest_returns_empty_no_walk() {
+        // Critical regression guard: a directory WITHOUT an ancestor
+        // `fitz.toml` must NOT trigger a project walk. Before the gate, a
+        // loose document (base_dir `/` from a `file:///x.fitz` URI) walked
+        // the whole filesystem and hung the CI LSP job for 1h+. The scan
+        // returns empty (and instantly) when there is no manifest.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("a.fitz"),
+            "@middleware(mw_strict)\n@post(\"/x\")\nasync fn x() -> Result<Str> { return Ok(\"ok\") }\n",
+        )
+        .unwrap();
+        // No `fitz.toml` → not a Fitz project → skip the walk.
+        let names = pre_scan_project_middleware_fns_lsp(tmp.path());
+        assert!(
+            names.is_empty(),
+            "without a manifest the walk must be skipped, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn v0_37_11_project_scan_with_manifest_finds_middleware_refs() {
+        // With an ancestor `fitz.toml`, the walk runs and collects the
+        // `@middleware(name)` refs across the project tree.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("fitz.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("a.fitz"),
+            "@middleware(mw_strict)\n@post(\"/x\")\nasync fn x() -> Result<Str> { return Ok(\"ok\") }\n",
+        )
+        .unwrap();
+        let names = pre_scan_project_middleware_fns_lsp(tmp.path());
+        assert!(
+            names.contains(&"mw_strict".to_string()),
+            "with a manifest the scan must find middleware refs, got: {:?}",
+            names
         );
     }
 

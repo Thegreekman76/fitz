@@ -1985,19 +1985,28 @@ Tres fixes adicionales colaterales:
    de imports (`pre_scan_imported_middleware_fns_for_loader`); el LSP no
    tiene `main`. **Fix**: `pre_scan_project_middleware_fns_lsp(base_dir)`
    camina el ÁRBOL del proyecto acotado por el `fitz.toml` ancestro
-   (`manifest::find_manifest` walk-up; fallback a `base_dir` para docs
-   sueltos), parsea cada `.fitz`/`.fitzv` con `parse_strict`, extrae
-   `extract_middleware_fn_names` y alimenta el set al checker vía
-   `add_imported_middleware_fns` en `check_source_with_types_and_base_dir`
-   (después del bloque `@background`). Walker recursivo nuevo
-   `collect_project_fitz_files_lsp` (saltea `.`/`target`, incluye
-   `.fitzv`; el `collect_fitz_recursive` del bin no es reusable — vive
-   en `main.rs`, hace `process::exit`, y filtra solo `.fitz`). Silent
-   fallback en read/parse (política de los hermanos). Sin cache en el MVP
-   (walk + parse por keystroke, barato para proyectos típicos; `TODO(perf)`
-   dejado por si se vuelve caliente). Cero riesgo runtime — solo
-   diagnostics del LSP. Test `lsp::tests::cross_module_middleware_declared_
-   fn_no_false_positive`.
+   (`manifest::find_manifest` walk-up), parsea cada `.fitz`/`.fitzv` con
+   `parse_strict`, extrae `extract_middleware_fn_names` y alimenta el set
+   al checker vía `add_imported_middleware_fns` en
+   `check_source_with_types_and_base_dir` (después del bloque
+   `@background`). Walker recursivo nuevo `collect_project_fitz_files_lsp`
+   (saltea `.`/`target`/`node_modules`, incluye `.fitzv`; el
+   `collect_fitz_recursive` del bin no es reusable — vive en `main.rs`,
+   hace `process::exit`, y filtra solo `.fitz`). Silent fallback en
+   read/parse (política de los hermanos). Sin cache en el MVP (walk +
+   parse por keystroke, barato para proyectos típicos; `TODO(perf)`
+   dejado). Cero riesgo runtime — solo diagnostics del LSP. Tests
+   `lsp::tests::cross_module_middleware_declared_fn_no_false_positive` +
+   `v0_37_11_project_scan_{without,with}_manifest_*`.
+   **⚠ HOTFIX v0.37.11**: la versión inicial (v0.37.10) tenía un fallback
+   `unwrap_or_else(|| base_dir.to_path_buf())` cuando NO había `fitz.toml`
+   ancestro — para un documento suelto (URI `file:///x.fitz`, `base_dir`
+   = `/`) eso caminaba el disco entero y **colgó el job LSP del CI 1h+**
+   (los E2E abren URIs sueltos). v0.37.11: sin `fitz.toml` ancestro → NO
+   se camina nada (el patrón cross-module solo existe en proyectos con
+   manifest); el walker además no sigue symlinks (corta ciclos) y corta
+   en 2000 archivos. Lección: el fix v0.37.10 mergeó sin correr los E2E
+   del LSP `--features lsp` localmente.
 
 3. **Wrap-style middleware (`Fn() -> Response` second param)** —
    sigue siendo deuda pre-existente; rechazada en codegen con
@@ -3074,8 +3083,13 @@ canónicos.
   no soportado — el post-mw recibe `__FitzResponse` JSON-wrapped que
   pierde content_type / body_bytes. Workaround documentado: usar
   `return <status> { ... }` o remover el post-mw.
-- Helpers Bytes adicionales si aparece demanda real:
-  `bytes_from_b64`, `bytes_from_hex`, etc.
+- Helpers Bytes adicionales — 🟢 **CERRADO v0.37.11**: `bytes_from_b64(s:
+  Str) -> Result<Bytes>` y `bytes_from_hex(s: Str) -> Result<Bytes>`
+  decodifican base64/hex a `Bytes` (para `Response { body_bytes }`).
+  Builtins globales con paridad bit-a-bit `run`↔`build` (decoders inline
+  idénticos en evaluator + codegen, mismos mensajes de error; cero dep
+  nueva al Cargo.toml generado). Un input inválido es `Result::Err(Str)`.
+  Tests `evaluator::tests::bytes_from_*` + `codegen::tests::codegen_bytes_*`.
 
 **Workarounds actuales (todos malos)**:
 - Devolver el XML como `Value::Str` → axum lo serializa JSON-quoted: `"<rss>..."` (no parseable como RSS).
@@ -8342,11 +8356,18 @@ Validación end-to-end con el bug reportado por el alumno:
 `{altitud_m + altitud_a}` con `Int + Str` ahora reporta error en
 "línea 5:31" (donde está el `+`) en vez de "línea 1:1".
 
-**Deuda residual menor** (NO bloquea uso real): el walker NO recursa
-en `Stmt` adentro de `FnExpr.body`/`Loop.body`/`If.then`/etc. ni en
-`Pattern`/`TypeExpr`. En la práctica, FnExpr inline adentro de un
-StrInterp es extremadamente raro. Si entra demanda, sumamos walker
-para Stmt en otro sub-paso.
+**Deuda residual menor** — la parte `Stmt` 🟢 **CERRADA v0.37.11**: el
+walker ahora recursa en `Stmt` adentro de `FnExpr.body`/`Loop.body`/
+`If.then`+`else_`/`Match` arms (guard + body), vía el nuevo
+`parser::shift_stmt_spans` + `Stmt::span_mut()` (ast.rs) + relleno de
+los 5 brazos con deuda en `shift_expr_spans` (incl. `ListComp`/`MapComp`).
+El caso REAL alcanzable vía interpolación es el arrow FnExpr
+`{ f(fn(x) => x * 2) }` (sin `{}`) — el lexer de interpolación NO
+balancea llaves anidadas, así que los brazos block-form (`if`/`loop`/
+`match` con `{}`) nunca llegan al parser desde un StrInterp y quedan como
+código defensivo (testeado directo sobre un AST hand-built). Tests
+`parser::tests::v0_37_11_*`. Sigue como residual menor (muy raro): spans
+en `Pattern`/`TypeExpr` + defaults de `TypeDef` dentro de un StrInterp.
 
 ---
 

@@ -262,6 +262,9 @@ pub fn builtin_names() -> &'static [&'static str] {
         "trailing_zeros",
         "rotate_left",
         "rotate_right",
+        // v0.37.11 — base64/hex → Bytes decoders (for Response body_bytes).
+        "bytes_from_b64",
+        "bytes_from_hex",
         // Mini-batch Math — math builtins.
         "abs",
         "min",
@@ -11733,6 +11736,23 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_bytes,
         },
     );
+    // v0.37.11 — decode a base64/hex string to `Bytes` (for
+    // `Response { body_bytes }` binary responses). Both return
+    // `Result<Bytes>`; a bad input is `Result::Err(Str)`.
+    env.lock().define(
+        "bytes_from_b64",
+        Value::Builtin {
+            name: "bytes_from_b64",
+            func: builtin_bytes_from_b64,
+        },
+    );
+    env.lock().define(
+        "bytes_from_hex",
+        Value::Builtin {
+            name: "bytes_from_hex",
+            func: builtin_bytes_from_hex,
+        },
+    );
     // `cors(config: Map?)` — built-in MW.2. Builds a
     // `Value::CorsConfig` with the effective kwargs. The config is a
     // `Map<Str, ...>` (no runtime kwargs — the call parser does not
@@ -18164,6 +18184,169 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
             0,
             format!("`bytes(s)` expects Str, received `{}`", other.type_name()),
         )),
+    }
+}
+
+/// v0.37.11 — Standard base64 decoder (with `=` padding). Ported
+/// verbatim from `codegen::b64_decode_for_file` so `bytes_from_b64` is
+/// bit-for-bit identical between `fitz run` (this) and `fitz build`
+/// (the emitted `__fitz_bytes_from_b64`). SAME algorithm → SAME Ok/Err
+/// for any input, and SAME error message. Tolerates missing padding
+/// like the emitted helper (a trailing lone char yields no extra byte).
+fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
+    fn dec_char(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let s = s.trim_end_matches('=');
+    let mut out = Vec::with_capacity((s.len() * 3) / 4);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let a = dec_char(bytes[i])
+            .ok_or_else(|| format!("bytes_from_b64: invalid base64 char '{}'", bytes[i] as char))?;
+        let b = dec_char(bytes[i + 1]).ok_or_else(|| {
+            format!(
+                "bytes_from_b64: invalid base64 char '{}'",
+                bytes[i + 1] as char
+            )
+        })?;
+        out.push((a << 2) | (b >> 4));
+        if i + 2 < bytes.len() {
+            let c = dec_char(bytes[i + 2]).ok_or_else(|| {
+                format!(
+                    "bytes_from_b64: invalid base64 char '{}'",
+                    bytes[i + 2] as char
+                )
+            })?;
+            out.push((b << 4) | (c >> 2));
+            if i + 3 < bytes.len() {
+                let d = dec_char(bytes[i + 3]).ok_or_else(|| {
+                    format!(
+                        "bytes_from_b64: invalid base64 char '{}'",
+                        bytes[i + 3] as char
+                    )
+                })?;
+                out.push((c << 6) | d);
+            }
+        }
+        i += 4;
+    }
+    Ok(out)
+}
+
+/// v0.37.11 — Hex decoder (two nibbles per byte). Ported verbatim to the
+/// codegen's emitted `__fitz_bytes_from_hex` for bit-for-bit parity.
+/// SAME algorithm + SAME error strings between run and build.
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    fn nibble(b: u8) -> Result<u8, String> {
+        match b {
+            b'0'..=b'9' => Ok(b - b'0'),
+            b'a'..=b'f' => Ok(b - b'a' + 10),
+            b'A'..=b'F' => Ok(b - b'A' + 10),
+            _ => Err(format!("bytes_from_hex: invalid hex char '{}'", b as char)),
+        }
+    }
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return Err("bytes_from_hex: odd-length hex string".to_string());
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = nibble(bytes[i])?;
+        let lo = nibble(bytes[i + 1])?;
+        out.push(hi * 16 + lo);
+        i += 2;
+    }
+    Ok(out)
+}
+
+/// v0.37.11 — `bytes_from_b64(s: Str) -> Result<Bytes>`. Decodes a
+/// base64 string to `Bytes` (for `Response { body_bytes }` etc.).
+/// Arity/type errors abort (FitzError); a decode failure is a
+/// recoverable `Result::Err(Str)` (parallel to `env`/`Bytes.to_str`).
+fn builtin_bytes_from_b64(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`bytes_from_b64(s)` expects 1 argument, received {}",
+                args.len()
+            ),
+        ));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s,
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`bytes_from_b64(s)` expects Str, received `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    match decode_base64(s) {
+        Ok(bs) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bytes(bs))))),
+        Err(msg) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(msg))))),
+    }
+}
+
+/// v0.37.11 — `bytes_from_hex(s: Str) -> Result<Bytes>`. Decodes a hex
+/// string to `Bytes`. Same error model as `bytes_from_b64`.
+fn builtin_bytes_from_hex(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`bytes_from_hex(s)` expects 1 argument, received {}",
+                args.len()
+            ),
+        ));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s,
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`bytes_from_hex(s)` expects Str, received `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    match decode_hex(s) {
+        Ok(bs) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bytes(bs))))),
+        Err(msg) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(msg))))),
     }
 }
 
@@ -27298,6 +27481,107 @@ f = to_json(true)
         }
         unsafe {
             std::env::remove_var("FITZ_TEST_ENV_EMPTY");
+        }
+    }
+
+    // v0.37.11 — bytes_from_b64 / bytes_from_hex builtins.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_from_b64_decodes_to_ok_bytes() {
+        let src = "let r = bytes_from_b64(\"Zm9v\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Bytes(b"foo".to_vec()));
+            }
+            other => panic!("expected Ok(Bytes), was {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_from_b64_empty_is_ok_empty() {
+        let src = "let r = bytes_from_b64(\"\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Bytes(vec![]));
+            }
+            other => panic!("expected Ok(empty Bytes), was {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_from_b64_invalid_char_returns_err() {
+        let src = "let r = bytes_from_b64(\"!!!!\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Err(msg)) => match *msg {
+                Value::Str(s) => assert!(
+                    s.contains("bytes_from_b64: invalid base64 char"),
+                    "msg: {}",
+                    s
+                ),
+                other => panic!("expected Err(Str), was Err({:?})", other),
+            },
+            other => panic!("expected Err, was {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_from_hex_decodes_to_ok_bytes() {
+        let src = "let r = bytes_from_hex(\"666f6f\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Bytes(b"foo".to_vec()));
+            }
+            other => panic!("expected Ok(Bytes), was {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_from_hex_odd_length_returns_err() {
+        let src = "let r = bytes_from_hex(\"abc\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Err(msg)) => match *msg {
+                Value::Str(s) => assert!(
+                    s.contains("bytes_from_hex: odd-length hex string"),
+                    "msg: {}",
+                    s
+                ),
+                other => panic!("expected Err(Str), was Err({:?})", other),
+            },
+            other => panic!("expected Err, was {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_from_hex_invalid_char_returns_err() {
+        let src = "let r = bytes_from_hex(\"zz\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Err(msg)) => match *msg {
+                Value::Str(s) => assert!(
+                    s.contains("bytes_from_hex: invalid hex char 'z'"),
+                    "msg: {}",
+                    s
+                ),
+                other => panic!("expected Err(Str), was Err({:?})", other),
+            },
+            other => panic!("expected Err, was {:?}", other),
         }
     }
 

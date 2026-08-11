@@ -192,7 +192,7 @@
     },
     "builtins": {
       "name": "support.function.builtin.fitz",
-      "match": "\\b(print|len|sleep|cors|bytes|spawn|assert|assert_eq|assert_ne|assert_throws|popcount|leading_zeros|trailing_zeros|rotate_left|rotate_right|abs|min|max|pow|sqrt|ceil|floor|round|clamp|env|env_or|load_env|config|secret|flag|ws_broadcast)\\b(?=\\s*\\()"
+      "match": "\\b(print|len|sleep|cors|bytes|bytes_from_b64|bytes_from_hex|spawn|assert|assert_eq|assert_ne|assert_throws|popcount|leading_zeros|trailing_zeros|rotate_left|rotate_right|abs|min|max|pow|sqrt|ceil|floor|round|clamp|env|env_or|load_env|config|secret|flag|ws_broadcast)\\b(?=\\s*\\()"
     },
     "labels": {
       "comment": "Loop labels (mini-phase L): `'outer:` at declaration site and `'outer` at break/continue. The trailing `:` is optional and NOT consumed here — the rest of the parser picks it up.",

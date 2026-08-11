@@ -792,6 +792,30 @@ impl Stmt {
             Stmt::Error(span) => *span,
         }
     }
+
+    /// v0.37.11 — mutable access to the span of any variant. Parallel
+    /// to `span()`. Used by `parser::shift_stmt_spans` to rewrite the
+    /// spans of statements parsed inside a string interpolation (e.g.
+    /// the `Vec<Stmt>` body of a `FnExpr`/`If`/`Loop` inside `{...}`).
+    pub fn span_mut(&mut self) -> &mut Span {
+        match self {
+            Stmt::Assign { span, .. } => span,
+            Stmt::Destructure { span, .. } => span,
+            Stmt::Return(_, span) => span,
+            Stmt::ReturnStatus { span, .. } => span,
+            Stmt::Expr(_, span) => span,
+            Stmt::FnDef { span, .. } => span,
+            Stmt::TypeDef { span, .. } => span,
+            Stmt::Break(_, _, span) => span,
+            Stmt::Continue(_, span) => span,
+            Stmt::While { span, .. } => span,
+            Stmt::Loop { span, .. } => span,
+            Stmt::For { span, .. } => span,
+            Stmt::Import { span, .. } => span,
+            Stmt::FromImport { span, .. } => span,
+            Stmt::Error(span) => span,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

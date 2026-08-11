@@ -13018,6 +13018,74 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              Ok(())\n\
              }\n\n",
         );
+        // v0.37.11 — inline base64/hex decoders for `bytes_from_b64` /
+        // `bytes_from_hex`. Byte-for-byte parallel to the interpreter's
+        // `decode_base64`/`decode_hex` (evaluator.rs): SAME algorithm +
+        // SAME error strings → run<->build parity. Always emitted (small;
+        // dead_code_elim removes them if unused). No Cargo.toml dep — the
+        // decoders are self-contained (they do NOT pull the `base64` crate
+        // into the generated binary).
+        self.emit(
+            r#"#[allow(dead_code)]
+fn __fitz_bytes_from_b64(s: &str) -> Result<Vec<u8>, String> {
+    fn dec_char(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let s = s.trim_end_matches('=');
+    let mut out = Vec::with_capacity((s.len() * 3) / 4);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let a = dec_char(bytes[i]).ok_or_else(|| format!("bytes_from_b64: invalid base64 char '{}'", bytes[i] as char))?;
+        let b = dec_char(bytes[i + 1]).ok_or_else(|| format!("bytes_from_b64: invalid base64 char '{}'", bytes[i + 1] as char))?;
+        out.push((a << 2) | (b >> 4));
+        if i + 2 < bytes.len() {
+            let c = dec_char(bytes[i + 2]).ok_or_else(|| format!("bytes_from_b64: invalid base64 char '{}'", bytes[i + 2] as char))?;
+            out.push((b << 4) | (c >> 2));
+            if i + 3 < bytes.len() {
+                let d = dec_char(bytes[i + 3]).ok_or_else(|| format!("bytes_from_b64: invalid base64 char '{}'", bytes[i + 3] as char))?;
+                out.push((c << 6) | d);
+            }
+        }
+        i += 4;
+    }
+    Ok(out)
+}
+
+#[allow(dead_code)]
+fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
+    fn nibble(b: u8) -> Result<u8, String> {
+        match b {
+            b'0'..=b'9' => Ok(b - b'0'),
+            b'a'..=b'f' => Ok(b - b'a' + 10),
+            b'A'..=b'F' => Ok(b - b'A' + 10),
+            _ => Err(format!("bytes_from_hex: invalid hex char '{}'", b as char)),
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return Err("bytes_from_hex: odd-length hex string".to_string());
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = nibble(bytes[i])?;
+        let lo = nibble(bytes[i + 1])?;
+        out.push(hi * 16 + lo);
+        i += 2;
+    }
+    Ok(out)
+}
+
+"#,
+        );
         // Phase 12.2.b — opaque type `__FitzSecret<T>` bit-for-bit
         // parallel to the interpreter's `Value::Secret(SecretInner)`.
         // Display/Debug redact; .expose() returns the inner T by
@@ -18534,6 +18602,33 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 format!("__fitz_env(&{})", k_coerced),
                 Type::Result {
                     ok: Box::new(Type::Str),
+                    err: Box::new(Type::Str),
+                },
+            ));
+        }
+        // v0.37.11 — `bytes_from_b64(s)` / `bytes_from_hex(s)` -> Result<Bytes>.
+        // Emits a call to the pure inline helper `__fitz_bytes_from_{b64,hex}`
+        // (in the __fitz_env prelude) — bit-for-bit parity with the
+        // interpreter's `decode_base64`/`decode_hex` (same algorithm + error
+        // strings). No Cargo.toml dep (the helpers are self-contained).
+        if (name == "bytes_from_b64" || name == "bytes_from_hex") && !self.is_user_callable(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(
+                    call_span,
+                    format!("`{}(s)` expects 1 argument, got {}", name, args.len()),
+                ));
+            }
+            let (s_code, s_ty) = self.gen_expr(&args[0])?;
+            let s_coerced = coerce(&s_code, &s_ty, &Type::Str, self.env);
+            let helper = if name == "bytes_from_b64" {
+                "__fitz_bytes_from_b64"
+            } else {
+                "__fitz_bytes_from_hex"
+            };
+            return Ok((
+                format!("{}(&{})", helper, s_coerced),
+                Type::Result {
+                    ok: Box::new(Type::Bytes),
                     err: Box::new(Type::Str),
                 },
             ));
@@ -45157,6 +45252,73 @@ async fn get_u(id: Int) -> Result<U> {
         assert!(
             code.contains("fn __fitz_secret(key: &str)"),
             "expected helper __fitz_secret in prelude"
+        );
+    }
+
+    #[test]
+    fn codegen_bytes_from_b64_emits_helper_call_and_prelude() {
+        let code = gen("let r = bytes_from_b64(\"Zm9v\")")
+            .unwrap_or_else(|e| panic!("codegen failed: {}", e));
+        assert!(
+            code.contains("__fitz_bytes_from_b64(&"),
+            "expected call to __fitz_bytes_from_b64(&...)"
+        );
+        assert!(
+            code.contains("fn __fitz_bytes_from_b64(s: &str) -> Result<Vec<u8>, String>"),
+            "expected the __fitz_bytes_from_b64 helper in the prelude"
+        );
+        // Same error string as the interpreter's `decode_base64` (parity).
+        assert!(
+            code.contains("bytes_from_b64: invalid base64 char"),
+            "expected the parity error string in the emitted helper"
+        );
+    }
+
+    #[test]
+    fn codegen_bytes_from_hex_emits_helper_call_and_prelude() {
+        let code = gen("let r = bytes_from_hex(\"666f6f\")")
+            .unwrap_or_else(|e| panic!("codegen failed: {}", e));
+        assert!(
+            code.contains("__fitz_bytes_from_hex(&"),
+            "expected call to __fitz_bytes_from_hex(&...)"
+        );
+        assert!(
+            code.contains("fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String>"),
+            "expected the __fitz_bytes_from_hex helper in the prelude"
+        );
+        assert!(
+            code.contains("bytes_from_hex: odd-length hex string")
+                && code.contains("bytes_from_hex: invalid hex char"),
+            "expected the parity error strings in the emitted helper"
+        );
+    }
+
+    #[test]
+    fn codegen_bytes_decode_does_not_pull_base64_crate() {
+        // The decoders are self-contained inline helpers (no `uses_bytes_*`
+        // flag was added) — a CLI program using them must NOT add the
+        // `base64` crate to the generated Cargo.toml (contrast: DB pulls it).
+        let toml = cargo_toml_for(
+            "demo", false, // has_http
+            false, // uses_async
+            false, // uses_python
+            false, // uses_auth
+            false, // uses_ws
+            false, // uses_jobs
+            false, // uses_logging
+            false, // uses_trace_metric
+            false, // uses_db
+            false, // uses_fitz_value
+            false, // uses_date_or_uuid
+            false, // uses_prometheus_export
+            false, // uses_http_client
+            false, // uses_smtp
+            false, // uses_to_json
+        );
+        assert!(
+            !toml.contains("base64"),
+            "bytes_from_b64/hex are inline; Cargo.toml must not pull base64:\n{}",
+            toml
         );
     }
 

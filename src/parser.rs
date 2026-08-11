@@ -3441,11 +3441,11 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
             shift_expr_spans(value, line, sub_col_base);
         }
         Expr::FnExpr { body, .. } => {
-            // body: Vec<Stmt> — residual debt (we don't walk Stmts).
-            // In practice, an inline FnExpr inside a StrInterp is
-            // extremely rare. If demand appears, we'll add a Stmt
-            // walker in another sub-step.
-            let _ = body;
+            // v0.37.11 — walk the Vec<Stmt> body (was residual debt).
+            // Covers `{ f(fn(x) => x * 2) }` inside an interpolation.
+            for st in body {
+                shift_stmt_spans(st, line, sub_col_base);
+            }
         }
         Expr::Field { object, .. } => {
             shift_expr_spans(object, line, sub_col_base);
@@ -3473,16 +3473,49 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
         Expr::TupleField { tuple, .. } => {
             shift_expr_spans(tuple, line, sub_col_base);
         }
-        Expr::Loop { .. } => {
-            // body: Vec<Stmt> — same residual debt as FnExpr.
+        Expr::Loop { body, .. } => {
+            for st in body {
+                shift_stmt_spans(st, line, sub_col_base);
+            }
         }
         Expr::List(items, _) => {
             for it in items {
                 shift_expr_spans(it, line, sub_col_base);
             }
         }
-        Expr::ListComp { .. } | Expr::MapComp { .. } => {
-            // Composite — minor residual debt (very rare in interp).
+        Expr::ListComp {
+            expr: e,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
+            shift_expr_spans(e, line, sub_col_base);
+            shift_expr_spans(iter, line, sub_col_base);
+            for (_, it) in extra_clauses {
+                shift_expr_spans(it, line, sub_col_base);
+            }
+            if let Some(f) = filter.as_mut() {
+                shift_expr_spans(f, line, sub_col_base);
+            }
+        }
+        Expr::MapComp {
+            key,
+            value,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
+            shift_expr_spans(key, line, sub_col_base);
+            shift_expr_spans(value, line, sub_col_base);
+            shift_expr_spans(iter, line, sub_col_base);
+            for (_, it) in extra_clauses {
+                shift_expr_spans(it, line, sub_col_base);
+            }
+            if let Some(f) = filter.as_mut() {
+                shift_expr_spans(f, line, sub_col_base);
+            }
         }
         Expr::Map(pairs, _) => {
             for (k, v) in pairs {
@@ -3501,13 +3534,25 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
             ..
         } => {
             shift_expr_spans(condition, line, sub_col_base);
-            // then/else are Vec<Stmt> — residual debt.
-            let _ = then;
-            let _ = else_;
+            for st in then {
+                shift_stmt_spans(st, line, sub_col_base);
+            }
+            if let Some(else_body) = else_.as_mut() {
+                for st in else_body {
+                    shift_stmt_spans(st, line, sub_col_base);
+                }
+            }
         }
-        Expr::Match { value, .. } => {
+        Expr::Match { value, arms, .. } => {
             shift_expr_spans(value, line, sub_col_base);
-            // arms are Vec<MatchArm> with Pattern + body — residual debt.
+            for arm in arms {
+                if let Some(guard) = arm.guard.as_mut() {
+                    shift_expr_spans(guard, line, sub_col_base);
+                }
+                for st in &mut arm.body {
+                    shift_stmt_spans(st, line, sub_col_base);
+                }
+            }
         }
         Expr::StructLit { fields, .. } => {
             for (_, value) in fields {
@@ -3517,6 +3562,83 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             shift_expr_spans(inner, line, sub_col_base);
         }
+    }
+}
+
+/// v0.37.11 — Shifts the spans of a `Stmt` parsed inside a string
+/// interpolation. Sibling of `shift_expr_spans` for the `Vec<Stmt>`
+/// bodies that used to be residual debt (`FnExpr`/`Loop`/`If`/`Match`
+/// arms). Rewrites the stmt's own span (same `column > 0` rule that
+/// preserves `Span::ZERO`) and recurses into sub-Exprs (via
+/// `shift_expr_spans`) and sub-Stmts. Closes the V1 residual debt so
+/// hover/go-to-def/diagnostics work over nodes inside an inline
+/// `fn(x) => ...` / `if`/`loop` within `{...}`.
+fn shift_stmt_spans(stmt: &mut Stmt, line: usize, sub_col_base: usize) {
+    {
+        let s = stmt.span_mut();
+        if s.column > 0 {
+            s.line = line;
+            s.column = sub_col_base + s.column.saturating_sub(1);
+        }
+    }
+    match stmt {
+        Stmt::Assign { target, value, .. } => {
+            match target {
+                AssignTarget::Field { object, .. } => shift_expr_spans(object, line, sub_col_base),
+                AssignTarget::Index { object, index } => {
+                    shift_expr_spans(object, line, sub_col_base);
+                    shift_expr_spans(index, line, sub_col_base);
+                }
+                AssignTarget::Ident(_, _) => {}
+            }
+            shift_expr_spans(value, line, sub_col_base);
+        }
+        Stmt::Destructure { value, .. } => shift_expr_spans(value, line, sub_col_base),
+        Stmt::Return(e, _) => shift_expr_spans(e, line, sub_col_base),
+        Stmt::ReturnStatus { status, body, .. } => {
+            shift_expr_spans(status, line, sub_col_base);
+            if let Some(b) = body.as_mut() {
+                shift_expr_spans(b, line, sub_col_base);
+            }
+        }
+        Stmt::Expr(e, _) => shift_expr_spans(e, line, sub_col_base),
+        Stmt::FnDef { body, .. } => {
+            for st in body {
+                shift_stmt_spans(st, line, sub_col_base);
+            }
+        }
+        Stmt::Break(opt, _, _) => {
+            if let Some(e) = opt.as_mut() {
+                shift_expr_spans(e, line, sub_col_base);
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        } => {
+            shift_expr_spans(condition, line, sub_col_base);
+            for st in body {
+                shift_stmt_spans(st, line, sub_col_base);
+            }
+        }
+        Stmt::Loop { body, .. } => {
+            for st in body {
+                shift_stmt_spans(st, line, sub_col_base);
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            shift_expr_spans(iter, line, sub_col_base);
+            for st in body {
+                shift_stmt_spans(st, line, sub_col_base);
+            }
+        }
+        // No sub-Exprs/Stmts relevant to the interpolation shift.
+        // `TypeDef` field defaults are minor residual debt (a `type`
+        // inside a `{...}` interpolation is not a real scenario).
+        Stmt::Continue(_, _)
+        | Stmt::Import { .. }
+        | Stmt::FromImport { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Error(_) => {}
     }
 }
 
@@ -9398,6 +9520,100 @@ mod tests {
                 assert_eq!(right.span().column, 16, "col de `b`");
             }
             other => panic!("expected BinOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn v0_37_11_fnexpr_body_inside_strinterp_shifts_stmt_spans() {
+        // `print("r: {f(fn(x) => x * 2)}")` — the BinOp `x * 2` lives in
+        // the arrow FnExpr body (a `Vec<Stmt>` Return). Before the
+        // `shift_stmt_spans` walker its operands stayed at col 1
+        // (residual V1 debt). Now they point at the real source columns.
+        let parts = first_strinterp_parts("print(\"r: {f(fn(x) => x * 2)}\")\n");
+        let expr = parts
+            .iter()
+            .find_map(|p| match p {
+                StrPart::Expr(e, _) => Some(e),
+                _ => None,
+            })
+            .expect("must have a StrPart::Expr");
+        // Call(f) -> args[0] = FnExpr -> body[0] = Return(BinOp).
+        let fn_expr = match expr {
+            Expr::Call { args, .. } => &args[0],
+            other => panic!("expected Call, got {:?}", other),
+        };
+        let body = match fn_expr {
+            Expr::FnExpr { body, .. } => body,
+            other => panic!("expected FnExpr, got {:?}", other),
+        };
+        let binop = match &body[0] {
+            Stmt::Return(e, _) => e,
+            other => panic!("expected Return, got {:?}", other),
+        };
+        match binop {
+            Expr::BinOp { left, right, .. } => {
+                // `x` at col 23, `2` at col 27 in the full source.
+                assert_eq!(left.span().line, 1);
+                assert_eq!(left.span().column, 23, "col of `x`");
+                assert_eq!(right.span().line, 1);
+                assert_eq!(right.span().column, 27, "col of `2`");
+            }
+            other => panic!("expected BinOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn v0_37_11_shift_stmt_spans_walks_if_then_else_directly() {
+        // The interpolation lexer does NOT balance nested `{}` blocks, so
+        // an `if (c) { a } else { b }` inside `{...}` never reaches the
+        // parser (the block-form arms of shift_stmt_spans are defensive).
+        // We exercise the If arm directly on a hand-built AST: a Return
+        // wrapping an If whose then/else idents start at col 1 must be
+        // shifted to the real base.
+        let mut stmt = Stmt::Return(
+            Expr::If {
+                condition: Box::new(Expr::Ident("c".into(), Span { line: 1, column: 4 })),
+                then: vec![Stmt::Expr(
+                    Expr::Ident("a".into(), Span { line: 1, column: 8 }),
+                    Span::ZERO,
+                )],
+                else_: Some(vec![Stmt::Expr(
+                    Expr::Ident(
+                        "b".into(),
+                        Span {
+                            line: 1,
+                            column: 12,
+                        },
+                    ),
+                    Span::ZERO,
+                )]),
+                span: Span { line: 1, column: 1 },
+            },
+            Span::ZERO,
+        );
+        // Shift with base column 20 (as if the interpolation started there).
+        shift_stmt_spans(&mut stmt, 5, 20);
+        let if_expr = match &stmt {
+            Stmt::Return(e, _) => e,
+            other => panic!("expected Return, got {:?}", other),
+        };
+        let (then, else_) = match if_expr {
+            Expr::If { then, else_, .. } => (then, else_.as_ref().expect("else present")),
+            other => panic!("expected If, got {:?}", other),
+        };
+        for (label, block, orig_col) in [("then", then, 8usize), ("else", else_, 12usize)] {
+            let ident = match &block[0] {
+                Stmt::Expr(e, _) => e,
+                other => panic!("{} body[0] not Expr: {:?}", label, other),
+            };
+            assert_eq!(ident.span().line, 5, "{} ident line", label);
+            // 20 + orig_col - 1.
+            assert_eq!(
+                ident.span().column,
+                20 + orig_col - 1,
+                "{} ident column",
+                label
+            );
         }
     }
 

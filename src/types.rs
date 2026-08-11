@@ -4212,6 +4212,28 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // v0.37.11 — `bytes_from_b64(s: Str) -> Result<Bytes>` and
+        // `bytes_from_hex(s: Str) -> Result<Bytes>` — decode a base64/hex
+        // string to Bytes (for `Response { body_bytes }`). Result because
+        // the input may be invalid.
+        for name in ["bytes_from_b64", "bytes_from_hex"] {
+            self.scopes[0].insert(
+                name.into(),
+                VarBinding {
+                    ty: Type::Function {
+                        params: vec![Type::Str],
+                        ret: Box::new(Type::Result {
+                            ok: Box::new(Type::Bytes),
+                            err: Box::new(Type::Str),
+                        }),
+                    },
+                    annotated: false,
+                    def_span: Span::ZERO,
+                    defaults_count: 0,
+                    has_varargs: false,
+                },
+            );
+        }
         // `to_json(x) -> Str` — serialize any Fitz value to a JSON string.
         self.scopes[0].insert(
             "to_json".into(),
