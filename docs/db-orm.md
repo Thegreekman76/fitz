@@ -3591,16 +3591,16 @@ Hay un benchmark publicable contra SQLAlchemy en
 3 endpoints idénticos (`GET /users`, `GET /users/{id}`, `POST /users`)
 sobre dos boilerplates equivalentes (`api-postgres-fitz` con ORM
 nativo vs `api-postgres-python` con SQLAlchemy interop). Headline
-(corrida v0.37.8, mediana de 3, hardware Intel Core Ultra 7 + 64GB + Docker WSL2):
+(corrida v0.37.12, mediana de 3, hardware Intel Core Ultra 7 + 64GB + Docker WSL2):
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
 |---|---:|---:|---:|
-| Memory peak | **9.0 MB** | 53.4 MB | **5.9x más eficiente** |
-| `GET /users` p50 | **4.94 ms** | 39.89 ms | **8.07x** |
-| `GET /users/{id}` p50 | **3.76 ms** | 32.02 ms | **8.52x** |
-| `GET /users/{id}` RPS | **2244** | 282 | **7.96x** |
+| Memory peak | **9.2 MB** | 52.4 MB | **5.7x más eficiente** |
+| `GET /users` p50 | **3.57 ms** | 31.24 ms | **8.75x** |
+| `GET /users/{id}` p50 | **2.74 ms** | 21.52 ms | **7.85x** |
+| `GET /users/{id}` RPS | **3377** | 411 | **8.22x** |
 
-Cold start 0.29s vs 0.24s (Python arranca a la par desde que Fitz
+Cold start 0.34s vs 0.31s (Python arranca a la par desde que Fitz
 linkea observability). Image 134MB vs 272MB. POST sequential queda
 en empate (~174ms p50 ambos) — bottleneck del bench mismo (curl loop
 con subshell overhead), no del server.
@@ -3683,9 +3683,9 @@ magnitud típicamente.
 - **B-1 (v0.10.13)** — Driver Postgres `Extended Query Protocol`
   batchea los 5 mensajes (Parse/Bind/Describe/Execute/Sync) en un
   único `write_all_bytes(...)` + `TCP_NODELAY` activo. `GET
-  /users/{id}` pasó de **43.70ms p50 → 3.60ms p50** (12x más
+  /users/{id}` pasó de **43.70ms p50 → ~2.7ms p50** (16x más
   rápido, de "30% más lento que Python" a "~8x más rápido" —
-  estable en v0.37.8 con 3.76ms p50 mediana).
+  estable en v0.37.12 con 2.74ms p50 mediana).
 - **Pool singleton per URL (v0.10.9)** — `db.connect(url)` cachea
   el `Arc<DbConnHandle>` global; calls subsiguientes a la misma
   URL devuelven `Arc::clone()` en vez de crear pool nuevo (fix
@@ -4346,6 +4346,11 @@ deuda residual derivada.
 - Cuando aparezcan benchmarks reales del boilerplate 7, la
   sección 27 (Performance) deja el placeholder y suma números
   concretos vs SQLAlchemy.
+- **2026-08-11 (v0.37.12)** — re-corrida del bench (mediana de 3)
+  para revalidar contra el driver/ORM actual. **Sin regresión**:
+  reads **~8x más rápido** y **5.7x más eficiente en memoria** que
+  SQLAlchemy. El fix de `FITZ_DB_*` mid-run reload (env read por
+  query en `log_db_query`) es despreciable en workload network-bound.
 - **2026-08-10 (v0.37.8)** — refresh contra v0.37.8 (mediana de 3
   corridas). Fitz ORM mantiene el liderazgo: **7-8x más rápido** y
   **5.9x más eficiente en memoria** que SQLAlchemy en reads

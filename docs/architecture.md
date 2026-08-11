@@ -31,10 +31,10 @@ flowchart TD
 
     Fork -->|fitz check| OK["✓ no type errors"]
 
-    Fork -->|fitz run<br/>fitz test<br/>fitz repl<br/>fitz dev| Eval["<b>evaluator.rs</b><br/>execute AST<br/>(env.rs + value.rs<br/>+ cron_jobs.rs)"]
+    Fork -->|"fitz run<br/>fitz test<br/>fitz repl<br/>fitz dev"| Eval["<b>evaluator.rs</b><br/>execute AST<br/>(env.rs + value.rs<br/>+ cron_jobs.rs)"]
     Eval -->|registered HTTP routes| Http["<b>http.rs</b><br/>axum + tokio<br/>multi-thread"]
-    Eval -->|WS routes (@ws)| Ws["<b>http.rs + asyncapi.rs</b><br/>WsConn&lt;T&gt; + AsyncAPI 3.0"]
-    Eval -->|@cron jobs| Cron["<b>cron_jobs.rs</b><br/>tokio::spawn scheduler<br/>+ opt-in DB persistence"]
+    Eval -->|"WS routes (@ws)"| Ws["<b>http.rs + asyncapi.rs</b><br/>WsConn&lt;T&gt; + AsyncAPI 3.0"]
+    Eval -->|"@cron jobs"| Cron["<b>cron_jobs.rs</b><br/>tokio::spawn scheduler<br/>+ opt-in DB persistence"]
     Eval -->|no routes| StdOut["stdout / output / test report"]
     Http -->|/openapi.json + /docs| Openapi["<b>openapi.rs</b><br/>OpenAPI 3.1 schema"]
     Http -->|/healthz + /readyz + /metrics| HealthMetrics["healthz/readyz<br/>+ Prometheus"]
@@ -45,20 +45,20 @@ flowchart TD
     Codegen --> Project["Cargo project at<br/>target/fitz-build/&lt;stem&gt;/"]
     Project --> Cargo["cargo build --release"]
     Cargo --> Bin["native binary<br/>(next to the .fitz<br/>or in target/release/)"]
-    Cargo -->|--bundle-python/--bundle-pip| Launcher["<b>launcher_template.rs<br/>+ pbs.rs</b><br/>embedded CPython + pip"]
+    Cargo -->|"--bundle-python/--bundle-pip"| Launcher["<b>launcher_template.rs<br/>+ pbs.rs</b><br/>embedded CPython + pip"]
 
     Fork -->|fitz openapi| OpenApiCmd["<b>openapi.rs</b><br/>standalone schema"]
     Fork -->|fitz fmt| Fmt["<b>fmt.rs</b><br/>pretty-printer"]
     Fork -->|fitz lint| Lint["<b>lint.rs</b><br/>pattern linter"]
     Fork -->|fitz test| Test["<b>testing.rs</b><br/>@test fn registry"]
-    Fork -->|fitz db &lt;sub&gt;| Db["<b>migrations.rs</b><br/>schema diff + introspect"]
+    Fork -->|"fitz db &lt;sub&gt;"| Db["<b>migrations.rs</b><br/>schema diff + introspect"]
     Db -->|diff/migrate/inspect| Driver["<b>db.rs</b><br/>pure Postgres driver<br/>(wire v3.0 + TLS + pool)"]
     Driver --> Postgres[("real Postgres")]
     Db -->|new/squash/stamp| FileSystem[".sql/.fitz files<br/>in migrations/"]
     Fork -->|fitz docker init/build| Docker["<b>docker.rs</b><br/>auto-generated Dockerfile<br/>+ compose"]
     Fork -->|fitz deploy| Deploy["<b>deploy.rs</b><br/>thin wrapper over<br/>docker/compose"]
-    Fork -->|fitz py-types<br/>fitz py-stubs| PyTools["<b>py_types.rs<br/>+ pyi_stub.rs</b><br/>SQLAlchemy → Fitz<br/>+ .pyi stubs"]
-    Fork -->|fitz new<br/>fitz init<br/>fitz add/remove/update| Pm["<b>manifest.rs<br/>+ lockfile.rs<br/>+ git_dep.rs</b><br/>package manager"]
+    Fork -->|"fitz py-types<br/>fitz py-stubs"| PyTools["<b>py_types.rs<br/>+ pyi_stub.rs</b><br/>SQLAlchemy → Fitz<br/>+ .pyi stubs"]
+    Fork -->|"fitz new<br/>fitz init<br/>fitz add/remove/update"| Pm["<b>manifest.rs<br/>+ lockfile.rs<br/>+ git_dep.rs</b><br/>package manager"]
     Pm --> Toml["fitz.toml + fitz.lock"]
 
     classDef good fill:#dff5dd,stroke:#3a8a3a

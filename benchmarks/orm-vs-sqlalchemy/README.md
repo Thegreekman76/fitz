@@ -169,7 +169,7 @@ hardware anotado a mano:
 
 ---
 
-## Última corrida publicable (2026-08-10) — v0.37.8 (mediana de 3 corridas)
+## Última corrida publicable (2026-08-11) — v0.37.12 (mediana de 3 corridas)
 
 **Hardware**:
 - CPU: Intel Core Ultra 7 155H (Meteor Lake, 16 cores)
@@ -177,14 +177,17 @@ hardware anotado a mano:
 - OS: Windows 11 Pro
 - Docker: 29.2.1 (Desktop con WSL2 backend)
 
-**Versión Fitz**: `ghcr.io/thegreekman76/fitz:v0.37.8` — mediana de
-3 corridas (el driver Postgres incluye el **B-1 fix** desde v0.10.13:
-TCP_NODELAY + batch de los 5 mensajes del Extended Query Protocol,
-ver `docs/deudas-post-5b.md` → B-1).
+**Versión Fitz**: `ghcr.io/thegreekman76/fitz:v0.37.12` — mediana de
+3 corridas. El driver Postgres es byte-idéntico al de v0.37.8 en el
+hot path (incluye el **B-1 fix** desde v0.10.13: TCP_NODELAY + batch de
+los 5 mensajes del Extended Query Protocol, ver `docs/deudas-post-5b.md`
+→ B-1). v0.37.12 revalidó los números **sin regresión**: el fix de
+`FITZ_DB_*` mid-run reload agrega una lectura de env var por query en
+`log_db_query`, despreciable en workload network-bound.
 
 ### Headline
 
-> **Fitz ORM es 7-8x más rápido y 5.9x más eficiente en memoria que
+> **Fitz ORM es ~8x más rápido y 5.7x más eficiente en memoria que
 > Python+SQLAlchemy** en read workloads (sustained 30s, c=10).
 > Empate técnico en write workload (POST es bottleneck del bench
 > mismo, no del server).
@@ -193,9 +196,9 @@ ver `docs/deudas-post-5b.md` → B-1).
 
 | Métrica | Fitz ORM | Python (SQLAlchemy) | Ratio |
 |---|---:|---:|---:|
-| Cold start (s) | 0.29 | **0.24** | 0.83x (~empate) |
+| Cold start (s) | 0.34 | **0.31** | 0.91x (~empate) |
 | Image size | **134 MB** | 272 MB | **2x más liviano** |
-| Memory peak (MB) | **9.0** | 53.4 | **5.9x más eficiente** |
+| Memory peak (MB) | **9.2** | 52.4 | **5.7x más eficiente** |
 
 ### Latencia + throughput por endpoint
 
@@ -203,37 +206,37 @@ ver `docs/deudas-post-5b.md` → B-1).
 
 | Métrica | Fitz ORM | Python (SQLAlchemy) | Speedup |
 |---|---:|---:|---:|
-| p50 latency (ms) | **4.94** | 39.89 | **8.07x** |
-| p95 latency (ms) | **12.19** | 74.30 | **6.10x** |
-| p99 latency (ms) | **19.75** | 93.03 | **4.71x** |
-| Throughput (RPS) | **1693** | 232 | **7.30x** |
-| Total requests | 50,793 | 6,972 | — |
+| p50 latency (ms) | **3.57** | 31.24 | **8.75x** |
+| p95 latency (ms) | **5.76** | 56.75 | **9.85x** |
+| p99 latency (ms) | **8.22** | 72.39 | **8.81x** |
+| Throughput (RPS) | **2618** | 297 | **8.81x** |
+| Total requests | 78,580 | 8,915 | — |
 | Success rate | 100% | 100% | — |
 
 #### `GET /users/{id}` (single read por PK, 30s sustained, c=10) ⭐
 
 | Métrica | Fitz ORM | Python (SQLAlchemy) | Speedup |
 |---|---:|---:|---:|
-| p50 latency (ms) | **3.76** | 32.02 | **8.52x** |
-| p95 latency (ms) | **8.27** | 63.37 | **7.66x** |
-| p99 latency (ms) | **15.26** | 84.70 | **5.55x** |
-| Throughput (RPS) | **2244** | 282 | **7.96x** |
-| Total requests | 67,340 | 8,451 | — |
+| p50 latency (ms) | **2.74** | 21.52 | **7.85x** |
+| p95 latency (ms) | **4.51** | 44.07 | **9.77x** |
+| p99 latency (ms) | **6.44** | 61.50 | **9.55x** |
+| Throughput (RPS) | **3377** | 411 | **8.22x** |
+| Total requests | 101,341 | 12,334 | — |
 | Success rate | 100% | 100% | — |
 
-> **Antes del B-1 fix** (v0.10.12): Fitz tenía p50=43.70ms aquí —
-> ~30% MÁS LENTO que Python. El batching de Extended Query + Nagle
-> off lo bajó a **~3.7ms, 12x más rápido que antes** y ~8x más
-> rápido que Python (estable en v0.37.8).
+> **El B-1 fix** (v0.10.13): batching del Extended Query Protocol +
+> Nagle off bajó este single-read por PK de p50=43.70ms (v0.10.12,
+> ~30% MÁS LENTO que Python) a ~2.7ms — ~8x más rápido que Python,
+> estable desde entonces (v0.37.12: p50 2.74ms mediana).
 
-#### `POST /users` (500 sequential, body único por request)
+#### `POST /users` (100 sequential, body único por request)
 
 | Métrica | Fitz ORM | Python (SQLAlchemy) | Speedup |
 |---|---:|---:|---:|
-| p50 latency (ms) | 173.84 | 175.56 | ~empate |
-| p95 latency (ms) | 293.64 | 265.06 | 0.90x |
-| p99 latency (ms) | 439.93 | 301.52 | 0.68x (Python wins) |
-| Throughput (RPS) | 3.08 | 3.31 | 0.95x |
+| p50 latency (ms) | 174.69 | 190.23 | 1.09x |
+| p95 latency (ms) | 243.97 | 271.75 | 1.11x |
+| p99 latency (ms) | 304.35 | 372.30 | 1.22x |
+| Throughput (RPS) | 3.28 | 2.98 | 1.10x |
 
 > **POST es bottleneck del cliente**, no del server. El script de
 > bench hace `curl` sequential con email único por request — en
@@ -264,5 +267,5 @@ Tiempo total run: ~5-8 min (con imágenes ya cacheadas).
 ### Variabilidad esperada
 
 ±10% entre corridas. Para resultados más estables correr 3 veces y
-reportar mediana. Los **headline numbers** (5.9x memory, 7-8x reads)
+reportar mediana. Los **headline numbers** (5.7x memory, ~8x reads)
 son consistentes entre corridas; solo cambian decimales.

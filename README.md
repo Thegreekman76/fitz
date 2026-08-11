@@ -97,17 +97,17 @@ mantenemos un **bench reproducible cabeza-a-cabeza** entre los dos
 boilerplates equivalentes
 ([`api-postgres-fitz`](boilerplates/api-postgres-fitz/) vs
 [`api-postgres-python`](boilerplates/api-postgres-python/)) — mismo
-Postgres, mismos endpoints, misma firma. **Headline numbers en v0.37.8**
+Postgres, mismos endpoints, misma firma. **Headline numbers en v0.37.12**
 (Intel Core Ultra 7 155H, Docker 29.2.1, sustained 30s c=10, mediana de 3 corridas):
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
 |---|---:|---:|---:|
-| Memory peak | **9.0 MB** | 53.4 MB | **5.9x más eficiente** |
-| GET /users p50 | **4.94 ms** | 39.89 ms | **8.07x** |
-| GET /users RPS | **1693** | 232 | **7.30x** |
-| GET /users/{id} p50 | **3.76 ms** | 32.02 ms | **8.52x** |
-| GET /users/{id} RPS | **2244** | 282 | **7.96x** |
-| Cold start | 0.29 s | **0.24 s** | 0.83x (~empate) |
+| Memory peak | **9.2 MB** | 52.4 MB | **5.7x más eficiente** |
+| GET /users p50 | **3.57 ms** | 31.24 ms | **8.75x** |
+| GET /users RPS | **2618** | 297 | **8.81x** |
+| GET /users/{id} p50 | **2.74 ms** | 21.52 ms | **7.85x** |
+| GET /users/{id} RPS | **3377** | 411 | **8.22x** |
+| Cold start | 0.34 s | **0.31 s** | 0.91x (~empate) |
 | Image size | 134 MB | 272 MB | 2x más liviano |
 
 **Reproducí los números** con [`bash benchmarks/orm-vs-sqlalchemy/run.sh`](benchmarks/orm-vs-sqlalchemy/)

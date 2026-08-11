@@ -12857,8 +12857,8 @@ benchmarks reproducibles en el repo:
 
 - [**`benchmarks/orm-vs-sqlalchemy/`**](https://github.com/Thegreekman76/fitz/tree/main/benchmarks/orm-vs-sqlalchemy)
   — Fitz vs Python+SQLAlchemy en endpoints aislados con `oha`
-  sustained c=10. **Fitz 7-8x más rápido en reads**, **5.9x más
-  eficiente en memoria** (v0.37.8, mediana de 3 corridas).
+  sustained c=10. **Fitz ~8x más rápido en reads**, **5.7x más
+  eficiente en memoria** (v0.37.12, mediana de 3 corridas).
 - [**`benchmarks/mixed-workload/`**](https://github.com/Thegreekman76/fitz/tree/main/benchmarks/mixed-workload)
   — Fitz vs Python+SQLAlchemy **vs Node+Prisma** bajo mixed
   workload (60/40 reads/writes, 100 VUs peak ramping) sobre un

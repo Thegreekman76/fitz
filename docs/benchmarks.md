@@ -29,27 +29,29 @@ Ambos exponen los mismos 3 endpoints (`GET /users`, `GET /users/{id}`,
 `POST /users`) con misma firma de body. Misma DB Postgres 16-alpine,
 misma red Docker, mismo host.
 
-### Headline numbers (v0.37.8, 2026-08-10 — mediana de 3 corridas)
+### Headline numbers (v0.37.12, 2026-08-11 — mediana de 3 corridas)
 
-!!! success "Fitz ORM: 5.9x menos memoria, 7-8x más throughput y ~8x menor latencia en reads"
+!!! success "Fitz ORM: 5.7x menos memoria, ~8x más throughput y ~8x menor latencia en reads"
     Read workloads sustained (30s, c=10) — el caso típico de un
     servicio HTTP que sirve API REST. Fitz ORM sostiene ~8x el
-    throughput de SQLAlchemy con ~8x menor latencia y usa **5.9x menos
-    memoria** (9.0 MB vs 53.4 MB). Empate técnico en write (POST es
+    throughput de SQLAlchemy con ~8x menor latencia y usa **5.7x menos
+    memoria** (9.2 MB vs 52.4 MB). Empate técnico en write (POST es
     bottleneck del bench mismo, no del server).
 
 **Hardware del run**: Intel Core Ultra 7 155H (Meteor Lake, 16 cores),
 64 GB RAM, Windows 11 Pro, Docker 29.2.1 (Desktop con WSL2 backend).
-**Versión**: `ghcr.io/thegreekman76/fitz:v0.37.8` — mediana de 3
-corridas (±10% de variabilidad por corrida).
+**Versión**: `ghcr.io/thegreekman76/fitz:v0.37.12` — mediana de 3
+corridas (±10% de variabilidad por corrida). El driver Postgres es
+byte-idéntico al de v0.37.8 en el hot path; v0.37.12 revalidó los
+números sin regresión.
 
 #### Cold start, image, memory
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Ratio |
 |---|---:|---:|---:|
-| Cold start (s) | 0.29 | **0.24** | 0.83x (~empate) |
+| Cold start (s) | 0.34 | **0.31** | 0.91x (~empate) |
 | Image size | **134 MB** | 272 MB | **2.0x más liviano** |
-| Memory peak (MB) | **9.0** | 53.4 | **5.9x más eficiente** |
+| Memory peak (MB) | **9.2** | 52.4 | **5.7x más eficiente** |
 
 !!! note "El cold start ya no es ventaja de Fitz vs Python"
     En v0.10.13 Fitz arrancaba en 0.14s (vs 0.22s de Python). Desde
@@ -63,22 +65,22 @@ corridas (±10% de variabilidad por corrida).
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
 |---|---:|---:|---:|
-| p50 latency (ms) | **4.94** | 39.89 | **8.07x** |
-| p95 latency (ms) | **12.19** | 74.30 | **6.10x** |
-| p99 latency (ms) | **19.75** | 93.03 | **4.71x** |
-| Throughput (RPS) | **1693** | 232 | **7.30x** |
-| Total requests | 50,793 | 6,972 | — |
+| p50 latency (ms) | **3.57** | 31.24 | **8.75x** |
+| p95 latency (ms) | **5.76** | 56.75 | **9.85x** |
+| p99 latency (ms) | **8.22** | 72.39 | **8.81x** |
+| Throughput (RPS) | **2618** | 297 | **8.81x** |
+| Total requests | 78,580 | 8,915 | — |
 | Success rate | 100% | 100% | — |
 
 #### `GET /users/{id}` — single read por PK, sustained 30s c=10 ⭐
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
 |---|---:|---:|---:|
-| p50 latency (ms) | **3.76** | 32.02 | **8.52x** |
-| p95 latency (ms) | **8.27** | 63.37 | **7.66x** |
-| p99 latency (ms) | **15.26** | 84.70 | **5.55x** |
-| Throughput (RPS) | **2244** | 282 | **7.96x** |
-| Total requests | 67,340 | 8,451 | — |
+| p50 latency (ms) | **2.74** | 21.52 | **7.85x** |
+| p95 latency (ms) | **4.51** | 44.07 | **9.77x** |
+| p99 latency (ms) | **6.44** | 61.50 | **9.55x** |
+| Throughput (RPS) | **3377** | 411 | **8.22x** |
+| Total requests | 101,341 | 12,334 | — |
 | Success rate | 100% | 100% | — |
 
 !!! note "Historia del fix B-1 (v0.10.13)"
@@ -96,18 +98,18 @@ corridas (±10% de variabilidad por corrida).
        Nagle entre el cliente y el server).
     2. Batch los 5 mensajes en un solo `write_all_bytes(...)`.
 
-    Resultado: GET /users/{id} pasó de **43.70ms → ~3.7ms p50**
-    (~12x más rápido), de "Fitz pierde" a "Fitz gana ~8x" — se
-    mantiene estable en v0.37.8 (mediana 3.76ms p50).
+    Resultado: GET /users/{id} pasó de **43.70ms → ~2.7ms p50**
+    (~16x más rápido), de "Fitz pierde" a "Fitz gana ~8x" — se
+    mantiene estable en v0.37.12 (mediana 2.74ms p50).
 
-#### `POST /users` — 500 sequential con email único por request
+#### `POST /users` — 100 sequential con email único por request
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
 |---|---:|---:|---:|
-| p50 latency (ms) | 173.84 | 175.56 | ~empate |
-| p95 latency (ms) | 293.64 | 265.06 | 0.90x |
-| p99 latency (ms) | 439.93 | 301.52 | 0.68x (Python wins) |
-| Throughput (RPS) | 3.08 | 3.31 | 0.95x |
+| p50 latency (ms) | 174.69 | 190.23 | 1.09x |
+| p95 latency (ms) | 243.97 | 271.75 | 1.11x |
+| p99 latency (ms) | 304.35 | 372.30 | 1.22x |
+| Throughput (RPS) | 3.28 | 2.98 | 1.10x |
 
 !!! warning "POST mide el cliente, no el server"
     El script de bench hace `curl` sequential con email único por
@@ -386,6 +388,13 @@ Express + Prisma es razonable en performance, pero:
 
 ## Histórico
 
+- **v0.37.12 (2026-08-11)** — re-corrida del bench ORM vs SQLAlchemy
+  (mediana de 3) para revalidar contra el driver/ORM actual. **Sin
+  regresión**: reads ~8x más rápido, memoria 5.7x — el fix de
+  `FITZ_DB_*` mid-run reload (env read por query en `log_db_query`) es
+  despreciable en workload network-bound. El mixed-workload no se
+  re-corrió (driver byte-idéntico en el hot path; sus números v0.37.8
+  siguen válidos).
 - **v0.37.8 (2026-08-10)** — refresh de ambos benchmarks (mediana de
   3 corridas). Fitz mantiene su liderazgo casi idéntico a v0.10.13:
   reads 7-8x más rápido que SQLAlchemy, memoria 5.9x (orm) / 4-11x
