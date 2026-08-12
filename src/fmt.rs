@@ -765,11 +765,49 @@ fn fmt_fndef(
     fmt_block(ctx, body);
 }
 
-fn fmt_param_to_string(p: &Param) -> String {
-    match &p.type_ {
-        Some(t) => format!("{}: {}", p.name, t.display_name()),
-        None => p.name.clone(),
+/// #6 (v0.37.13) — inline (String-returning) variant of `fmt_decorator`,
+/// used for per-parameter `@arg`/`@flag` decorators (which live inside a
+/// param, not on their own line).
+fn decorator_to_inline_string(deco: &Decorator) -> String {
+    let mut s = format!("@{}", deco.name);
+    if deco.args.is_empty() && deco.kwargs.is_empty() {
+        return s;
     }
+    let mut parts: Vec<String> = deco.args.iter().map(expr_to_inline_string).collect();
+    for (k, v) in &deco.kwargs {
+        parts.push(format!("{}={}", k, expr_to_inline_string(v)));
+    }
+    s.push('(');
+    s.push_str(&parts.join(", "));
+    s.push(')');
+    s
+}
+
+fn fmt_param_to_string(p: &Param) -> String {
+    let mut s = String::new();
+    // #6 (v0.37.13) — per-parameter decorators (`@arg`/`@flag`),
+    // space-separated before the param name.
+    for d in &p.decorators {
+        s.push_str(&decorator_to_inline_string(d));
+        s.push(' ');
+    }
+    // Fp.2 — variadic prefix (`...name`). Was dropped before.
+    if p.varargs {
+        s.push_str("...");
+    }
+    s.push_str(&p.name);
+    if let Some(t) = &p.type_ {
+        s.push_str(": ");
+        s.push_str(&t.display_name());
+    }
+    // Pre-existing bug fix (surfaced by #6): the param default was
+    // dropped, so `fitz fmt` turned flags (params-with-default) into
+    // positionals. Emit `= <default>`.
+    if let Some(default) = &p.default {
+        s.push_str(" = ");
+        s.push_str(&expr_to_inline_string(default));
+    }
+    s
 }
 
 fn fmt_typedef(

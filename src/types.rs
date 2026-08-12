@@ -10063,6 +10063,11 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // CLI-marshallable (Str/Int/Float/Bool/Str?), and that the return
             // is Int (exit code).
             check_command_decorator(ctx, fn_name, params, &ret, decorators, *fn_span);
+            // #6 (v0.37.13) — validate per-parameter `@arg`/`@flag`
+            // decorators (CLI builder). Only valid on params of a
+            // `@command` fn; enforces arg-vs-flag placement, kwarg
+            // shapes, and short-flag collisions.
+            check_cli_param_decorators(ctx, fn_name, params, decorators, *fn_span);
             // Phase 12.7 — `@trace(name="X")` and `@metric(name="X")`
             // on user fns (business logic). Rejects stacking
             // on HTTP handlers (12.3 auto-instrumentation covers them).
@@ -12906,6 +12911,170 @@ fn is_valid_health_return(ret: &Type) -> bool {
 /// (Python). Reduces verbosity vs requiring `@arg`/`@flag` on each
 /// param. Trade-off: CANNOT have positional optional args
 /// (the ones with default are flags).
+/// #6 (v0.37.13) — validates per-parameter `@arg` / `@flag` decorators
+/// on a CLI command's params. Rules:
+///   1. only on params of a `@command` fn;
+///   2. only `@arg` / `@flag` decorator names;
+///   3. `@arg` only on positional params (no default);
+///   4. `@flag` only on flag params (with default);
+///   5. `@arg` kwargs: only `help` (Str literal), no positional args;
+///   6. `@flag` kwargs: only `short` / `help` (Str literals), no positional;
+///   7. `short=` is exactly one ASCII-alphanumeric char;
+///   8. at most one decorator per param;
+///   9. not on the variadic `List<...>` param;
+///   10. short-flag collisions (explicit + auto) surface via
+///       `compute_short_flags` at `fitz check` time (parity with codegen).
+fn check_cli_param_decorators(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let mk = |msg: String| FitzError::new(ErrorKind::TypeError, fn_span.line, fn_span.column, msg);
+    let has_command = decorators.iter().any(|d| d.name == "command");
+    // Variadic param = last param typed `List<...>` (mirrors the runtime
+    // `compute_short_flags` check). It must not carry `@arg`/`@flag`.
+    let variadic_idx = params
+        .last()
+        .filter(|p| {
+            matches!(
+                p.type_.as_ref().map(|t| t.display_name()),
+                Some(n) if n.starts_with("List<")
+            )
+        })
+        .map(|_| params.len() - 1);
+    let mut any_cli_deco = false;
+    for (i, p) in params.iter().enumerate() {
+        // Rule 8 — at most one decorator per param.
+        if p.decorators.len() > 1 {
+            ctx.errors.push(mk(format!(
+                "param `{}` of `@command` fn '{}': at most one `@arg`/`@flag` decorator per parameter.",
+                p.name, fn_name
+            )));
+            continue;
+        }
+        let d = match p.decorators.first() {
+            Some(d) => d,
+            None => continue,
+        };
+        // Rule 2 — only `@arg` / `@flag`.
+        if d.name != "arg" && d.name != "flag" {
+            ctx.errors.push(mk(format!(
+                "param `{}`: unsupported decorator `@{}`. Parameters only accept `@arg` / `@flag` (CLI builder).",
+                p.name, d.name
+            )));
+            continue;
+        }
+        // Rule 1 — only inside a `@command` fn.
+        if !has_command {
+            ctx.errors.push(mk(format!(
+                "param `{}`: `@{}` is only valid on a parameter of a `@command` fn. Add `@command(\"...\")` on `{}`.",
+                p.name, d.name, fn_name
+            )));
+            continue;
+        }
+        any_cli_deco = true;
+        // Rule 9 — not the variadic param.
+        if Some(i) == variadic_idx {
+            ctx.errors.push(mk(format!(
+                "param `{}`: `@{}` is not allowed on the variadic `List<...>` parameter.",
+                p.name, d.name
+            )));
+            continue;
+        }
+        // Rules 5/6 — no positional args on `@arg`/`@flag`.
+        if !d.args.is_empty() {
+            ctx.errors.push(mk(format!(
+                "`@{}` on param `{}`: no positional args — use kwargs (`help=`{}).",
+                d.name,
+                p.name,
+                if d.name == "flag" { ", `short=`" } else { "" }
+            )));
+            continue;
+        }
+        let is_flag_param = p.default.is_some();
+        match d.name.as_str() {
+            "arg" => {
+                // Rule 3 — `@arg` on a flag param.
+                if is_flag_param {
+                    ctx.errors.push(mk(format!(
+                        "`@arg` on param `{}`: that param has a default, so it's a flag — use `@flag`.",
+                        p.name
+                    )));
+                    continue;
+                }
+                // Rule 5 — only `help` kwarg (Str literal).
+                for (k, v) in &d.kwargs {
+                    if k != "help" {
+                        ctx.errors.push(mk(format!(
+                            "`@arg` on param `{}`: unknown kwarg `{}`. Supported: `help=\"...\"`.",
+                            p.name, k
+                        )));
+                    } else if !matches!(v, Expr::Str(_, _)) {
+                        ctx.errors.push(mk(format!(
+                            "`@arg(help=...)` on param `{}`: expects a Str literal.",
+                            p.name
+                        )));
+                    }
+                }
+            }
+            "flag" => {
+                // Rule 4 — `@flag` on a positional param.
+                if !is_flag_param {
+                    ctx.errors.push(mk(format!(
+                        "`@flag` on param `{}`: that param has no default, so it's a positional arg — add a default or use `@arg`.",
+                        p.name
+                    )));
+                    continue;
+                }
+                // Rules 6/7 — `short` / `help` kwargs.
+                for (k, v) in &d.kwargs {
+                    match k.as_str() {
+                        "help" => {
+                            if !matches!(v, Expr::Str(_, _)) {
+                                ctx.errors.push(mk(format!(
+                                    "`@flag(help=...)` on param `{}`: expects a Str literal.",
+                                    p.name
+                                )));
+                            }
+                        }
+                        "short" => match v {
+                            Expr::Str(s, _) => {
+                                let mut chars = s.chars();
+                                match (chars.next(), chars.next()) {
+                                    (Some(c), None) if c.is_ascii_alphanumeric() => {}
+                                    _ => ctx.errors.push(mk(format!(
+                                        "`@flag(short=...)` on param `{}`: expects a single ASCII alphanumeric char (e.g. `short=\"l\"`).",
+                                        p.name
+                                    ))),
+                                }
+                            }
+                            _ => ctx.errors.push(mk(format!(
+                                "`@flag(short=...)` on param `{}`: expects a Str literal.",
+                                p.name
+                            ))),
+                        },
+                        other => ctx.errors.push(mk(format!(
+                            "`@flag` on param `{}`: unknown kwarg `{}`. Supported: `short=\"x\"`, `help=\"...\"`.",
+                            p.name, other
+                        ))),
+                    }
+                }
+            }
+            _ => unreachable!("param decorator name validated to arg/flag above"),
+        }
+    }
+    // Rule 10 — short-flag collisions. Run whenever the fn is a
+    // `@command` with at least one CLI decorator, so explicit + auto
+    // collisions surface at `fitz check` time (parity with codegen).
+    if has_command && any_cli_deco {
+        if let Err(msg) = crate::cli::compute_short_flags(params) {
+            ctx.errors.push(mk(msg));
+        }
+    }
+}
+
 fn check_command_decorator(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -13124,6 +13293,113 @@ mod tests {
         let program = parse(tokens).expect("parse OK");
         let (_env, _types, _defs, errors) = check_program(&program);
         errors
+    }
+
+    // #6 (v0.37.13) — CLI `@arg`/`@flag` param decorators.
+
+    #[test]
+    fn cli_param_decorators_valid_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@arg(help=\"who\") name: Str, @flag(short=\"l\", help=\"shout\") loud: Bool = false) -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.is_empty(),
+            "valid @arg/@flag should be clean, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_param_decorators_only_on_command_fn_v0_37_13() {
+        let errors = errors_of("fn greet(@arg(help=\"who\") name: Str) -> Int {\n  return 0\n}\n");
+        assert!(
+            errors.iter().any(|e| e.message.contains("@command")),
+            "@arg outside @command should error, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_arg_on_flag_param_is_error_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@arg(help=\"x\") name: Str = \"y\") -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("use `@flag`")),
+            "@arg on a param-with-default should error, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_flag_on_positional_param_is_error_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@flag(short=\"n\") name: Str) -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("use `@arg`")),
+            "@flag on a positional param should error, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_unknown_param_decorator_is_error_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@bogus name: Str) -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("@bogus")),
+            "unknown param decorator should error, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_flag_short_must_be_one_char_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@flag(short=\"lo\") loud: Bool = false) -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("single ASCII")),
+            "multi-char short should error, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_flag_unknown_kwarg_is_error_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@flag(colour=\"red\") loud: Bool = false) -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("unknown kwarg")),
+            "unknown kwarg should error, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_two_param_decorators_is_error_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@arg(help=\"a\") @flag(short=\"n\") name: Str = \"x\") -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("at most one")),
+            "stacking @arg @flag should error, was {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cli_explicit_short_collision_is_error_v0_37_13() {
+        let errors = errors_of(
+            "@command(\"greet\")\n\
+             fn greet(@flag(short=\"x\") count: Int = 1, @flag(short=\"x\") color: Str = \"r\") -> Int {\n  return 0\n}\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("-x")),
+            "explicit short collision should error, was {errors:?}"
+        );
     }
 
     #[test]
@@ -14301,6 +14577,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 return_type: None,
                 body: vec![],

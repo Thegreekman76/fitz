@@ -11440,13 +11440,16 @@ Sin imports — `clap`/`typer`/`click` no son necesarios.
 escriben scripts en Python/Bash" — un mercado más amplio que
 solo web.
 
-**Decisión de diseño**: la sintaxis ORIGINAL del roadmap mencionaba
-`@arg("name", help="...")` y `@flag("loud", short="l")` como
-decorators separados. Al implementar, decidimos que la **convención
-del default cubre el 90% del caso** sin verbosidad extra (vs Click
-que exige `@click.argument`/`@click.option` por cada param). Short
-flags se auto-derivan (`--loud` → `-l`) con detección de conflictos.
-`@arg`/`@flag` separados quedan como deuda menor si aparece presión.
+**Decisión de diseño**: la convención del default (param sin default =
+positional, con default = flag; short flags auto-derivados `--loud` →
+`-l`) cubre el 90% del caso sin verbosidad. Los decorators separados
+`@arg`/`@flag` sobre parámetros quedaron primero como deuda menor y se
+**CERRARON en v0.37.13** (ítem #6 del inventario de deudas residuales
+chicas): `@arg(help="...")` sobre un positional y `@flag(short="x",
+help="...")` sobre un flag son overrides opt-in estilo Click/typer.
+Short explícito case-sensitive (`-V`≠`-v`); `@flag` position-aware (no
+colisiona con el `@flag` de feature flags de 12.8); paridad bit-a-bit
+`fitz run` ↔ `fitz build`. Ver cap 34 del guide.
 
 **Inspiración**: typer (Python), clap (Rust), cobra (Go).
 

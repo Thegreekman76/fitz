@@ -388,13 +388,16 @@ Express + Prisma es razonable en performance, pero:
 
 ## Histórico
 
-- **v0.37.12 (2026-08-11)** — re-corrida del bench ORM vs SQLAlchemy
-  (mediana de 3) para revalidar contra el driver/ORM actual. **Sin
-  regresión**: reads ~8x más rápido, memoria 5.7x — el fix de
-  `FITZ_DB_*` mid-run reload (env read por query en `log_db_query`) es
-  despreciable en workload network-bound. El mixed-workload no se
-  re-corrió (driver byte-idéntico en el hot path; sus números v0.37.8
-  siguen válidos).
+- **v0.37.12 (2026-08-11/12)** — re-corrida de **ambos** benchmarks
+  para revalidar contra el driver/ORM actual. **Sin regresión**: el fix
+  de `FITZ_DB_*` mid-run reload (env read por query en `log_db_query`)
+  es despreciable en workload network-bound. ORM vs SQLAlchemy
+  republicado con **mediana de 3** (reads ~8x más rápido, memoria 5.7x).
+  El mixed-workload (Fitz/Python/Node) se **revalidó con 1 corrida**
+  (sin bitrot; Fitz mantiene el liderazgo: memoria 14 MB vs 62 vs 176,
+  reads 865 vs 361 vs 429 RPS, p99 mixed 25 vs 542 vs 191 ms) — sus
+  números publicados (mediana de 3, v0.37.8) se mantienen como baseline
+  riguroso.
 - **v0.37.8 (2026-08-10)** — refresh de ambos benchmarks (mediana de
   3 corridas). Fitz mantiene su liderazgo casi idéntico a v0.10.13:
   reads 7-8x más rápido que SQLAlchemy, memoria 5.9x (orm) / 4-11x

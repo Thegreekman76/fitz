@@ -2465,6 +2465,13 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "@command(name, desc=) — declares fn as a CLI command",
             "The binary produced by `fitz build` parses argv and dispatches. Return type must be Int (exit code). Params without default = positional args; with default = flags. Bool with default false → bool flag.",
         ),
+        // #6 (v0.37.13) — CLI per-parameter decorators.
+        (
+            "arg",
+            "arg(help=\"${1:description}\")",
+            "@arg(help=) — CLI positional-arg help text",
+            "On a parameter of a `@command` fn (positional — i.e. no default). Adds help text shown in `--help`. Only the `help` kwarg.",
+        ),
         // Phase 12.7 — observability decorators over user fns.
         (
             "trace",
@@ -2482,8 +2489,8 @@ fn decorator_completions() -> Vec<CompletionItem> {
         (
             "flag",
             "flag(\"${1:flag-name}\")",
-            "@flag(\"name\") — gates the fn by feature flag",
-            "On HTTP/WS handlers or regular fns. If the flag is off (default), HTTP/WS return 404. Defaults in `fitz.toml [flags]`; runtime override via env var `FITZ_FLAG_<UPPERCASE>`. Combinable with auth + RBAC.",
+            "@flag — feature-flag gate (on a fn) OR CLI flag options (on a param)",
+            "Position-aware: on a fn, `@flag(\"name\")` gates by feature flag (off → HTTP/WS return 404; defaults in `fitz.toml [flags]`, env override `FITZ_FLAG_<UPPERCASE>`; combinable with auth + RBAC). On a `@command` fn parameter with a default, `@flag(short=\"x\", help=\"...\")` overrides the CLI flag's short letter and help text.",
         ),
         // ORM
         (

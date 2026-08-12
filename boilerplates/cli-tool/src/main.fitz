@@ -10,6 +10,8 @@
 //   - `@command("name", desc="...")` para declarar comandos.
 //   - Multi-comando con dispatch automático (3 commands).
 //   - Positional args (params sin default) + flags (params con default).
+//   - Overrides `@arg`/`@flag` (v0.37.13): help por param + short
+//     flag elegido a mano (ej: `count` usa `-r` para `--region`).
 //   - Help autogenerado: `cli-tool --help`, `cli-tool report --help`.
 //   - Exit codes tipados (`Int` return).
 //   - State compartido entre handlers (`let SALES` top-level).
@@ -66,7 +68,7 @@ fn pick_top(acc: Sale, s: Sale) -> Sale {
 /// Imprime el report completo (totales + by-region + top venta).
 /// Opcional: filtra ventas con monto mínimo.
 @command("report", desc="Show full sales report (summary + per-region + top)")
-fn report(min: Float = 0.0) -> Int {
+fn report(@flag(help="minimum amount to include") min: Float = 0.0) -> Int {
     let sales = all_sales()
     let filtered = sales.filter(fn(s: Sale) => s.amount >= min)
     print("📊 Sales Report")
@@ -94,7 +96,7 @@ fn report(min: Float = 0.0) -> Int {
 /// `cli-tool count [--region <STR>]`
 /// Cuenta cuántas ventas hay, opcionalmente filtrando por región.
 @command("count", desc="Quick count of sales (with optional region filter)")
-fn count(region: Str = "all") -> Int {
+fn count(@flag(short="r", help="filter by this region") region: Str = "all") -> Int {
     let sales = all_sales()
     if region == "all" {
         print("{sales.len()}")

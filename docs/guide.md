@@ -14127,9 +14127,75 @@ Reglas:
 - Params **sin default** → positional args, en orden de declaración.
 - Params **con default** → flags opcionales.
 - `Bool = false` → flag boolean; presencia = `true`.
-- `Bool = true` queda como deuda menor (requiere convención
-  `--no-flag` para negar). Por ahora invertí la lógica.
+- `Bool = true` se niega con `--no-<name>` (v0.11.1, paralelo a
+  Cargo `--no-default-features`).
 - El return type debe ser `Int` — es el exit code.
+
+### Ayuda y short flags explícitos: `@arg` / `@flag` (v0.37.13)
+
+La convención de arriba cubre el 90% de los casos. Cuando querés
+**texto de ayuda** por parámetro o **elegir la letra del short flag**
+(en vez de la primera letra auto), anotá el parámetro con `@arg` (para
+positional args) o `@flag` (para flags). Son decoradores **sobre el
+parámetro** — la única posición donde Fitz acepta decoradores de
+parámetro — estilo Click/typer:
+
+```fitz
+@command("greet", desc="Greet a person")
+fn greet(
+    @arg(help="who to greet") name: Str,
+    @flag(short="L", help="shout it") loud: Bool = false,
+    @flag(help="how many times") count: Int = 1,
+) -> Int {
+    let n = count
+    while n > 0 {
+        if loud { print("HEY {name}!") } else { print("hi {name}") }
+        n = n - 1
+    }
+    return 0
+}
+```
+
+```bash
+$ ./greeter --help
+USAGE:
+    greeter <name> [OPTIONS]
+
+ARGS:
+    <name>  (Str)  who to greet
+
+OPTIONS:
+    -L, --loud  shout it
+    -c, --count <INT>  how many times
+    -h, --help
+
+$ ./greeter World -L --count 2
+HEY World!
+HEY World!
+```
+
+Reglas:
+
+- `@arg(help="...")` va sobre un **positional** (param sin default);
+  `@flag(short="x", help="...")` va sobre un **flag** (param con
+  default). Ponerlos al revés es error de compilación con mensaje
+  claro.
+- `@arg` acepta solo `help=`; `@flag` acepta `short=` (una letra) y
+  `help=`. Los valores son literales `Str`.
+- El `short=` es **case-sensitive** (`short="V"` → `-V`, distinto de
+  un auto `-v`), así que podés tener `-v`/`-V` como en Click.
+- Un `short=` explícito **gana** sobre la primera-letra auto; una
+  colisión (dos `short=` iguales, o un explícito vs el auto de otro
+  flag) es error de compilación — renombrá o poné otro `short=`.
+- Solo un `@arg`/`@flag` por parámetro; no van sobre el `List<...>`
+  variadic ni sobre params de una fn sin `@command`.
+- **Nota**: `@flag` es *position-aware*. Sobre una fn es el gate de
+  feature flags (§33.11); sobre un parámetro de `@command` es este
+  override de CLI. No colisionan (posiciones distintas).
+
+Todo con **paridad bit-a-bit** `fitz run` ↔ `fitz build`: el help y el
+parseo del short explícito son idénticos en el intérprete y en el
+binario nativo.
 
 ### Subcomandos (multi-command)
 

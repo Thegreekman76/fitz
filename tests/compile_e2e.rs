@@ -12110,6 +12110,105 @@ fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
     assert_eq!(interp_exit, 0);
 }
 
+#[test]
+fn fase_13_cli_arg_flag_decorators_parity_v0_37_13() {
+    // #6 (v0.37.13) — per-param `@arg(help=)` / `@flag(short=, help=)`
+    // decorators: help text + explicit (case-preserved) short flag, with
+    // bit-for-bit parity between `fitz run` and the compiled binary.
+    let stem = "fase13_argflag_v0_37_13";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src = "\
+@command(\"greet\", desc=\"Greet a person\")
+fn greet(@arg(help=\"who to greet\") name: Str, @flag(short=\"L\", help=\"shout it\") loud: Bool = false, @flag(help=\"how many\") count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud {
+            print(\"HEY {name}!\")
+        } else {
+            print(\"hi {name}\")
+        }
+        n = n - 1
+    }
+    return 0
+}
+";
+    let src_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&src_path, src).expect("write");
+
+    let bout = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        bout.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&bout.stderr)
+    );
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
+
+    // --- Help parity: arg help + explicit short + flag help ---
+    let run_help = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .arg("--")
+        .arg("--help")
+        .output()
+        .expect("run --help");
+    let build_help = Command::new(&bin)
+        .arg("--help")
+        .output()
+        .expect("bin --help");
+    let rh = String::from_utf8_lossy(&run_help.stdout).replace("\r\n", "\n");
+    let bh = String::from_utf8_lossy(&build_help.stdout).replace("\r\n", "\n");
+    // The USAGE line differs by bin name (interpreter is `fitz`, the
+    // binary is its own stem) — by design. Compare the ARGS + OPTIONS
+    // body (the parts `@arg`/`@flag` affect), which must be bit-identical.
+    let run_body = rh.split("ARGS:").nth(1).unwrap_or("");
+    let build_body = bh.split("ARGS:").nth(1).unwrap_or("");
+    assert_eq!(
+        run_body, build_body,
+        "ARGS/OPTIONS help parity run↔build expected"
+    );
+    assert!(
+        rh.contains("<name>  (Str)  who to greet"),
+        "arg help missing: {rh}"
+    );
+    assert!(
+        rh.contains("-L, --loud  shout it"),
+        "explicit short + flag help missing: {rh}"
+    );
+    assert!(
+        rh.contains("--count <INT>  how many"),
+        "count help missing: {rh}"
+    );
+
+    // --- Functional parity: explicit `-L` parses in both paths ---
+    let args = ["World", "-L", "--count", "2"];
+    let run_out = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .arg("--")
+        .args(args)
+        .output()
+        .expect("run");
+    let build_out = Command::new(&bin).args(args).output().expect("bin");
+    let ro = String::from_utf8_lossy(&run_out.stdout).replace("\r\n", "\n");
+    let bo = String::from_utf8_lossy(&build_out.stdout).replace("\r\n", "\n");
+    assert_eq!(ro, bo, "output parity run↔build with -L");
+    assert!(
+        ro.contains("HEY World!"),
+        "expected shout (explicit -L), was: {ro}"
+    );
+    assert_eq!(ro.lines().count(), 2, "count=2 → two lines, was: {ro}");
+}
+
 // ---------------------------------------------------------------------------
 // Fase 12.3.a.3 — codegen paridad bit-a-bit del módulo `log`.
 //

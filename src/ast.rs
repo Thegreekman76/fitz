@@ -889,6 +889,14 @@ pub struct Param {
     /// `Span::PartialEq` is always-true, so this does not affect
     /// the AST structural tests that compare `Param`s.
     pub name_span: Span,
+    /// #6 (v0.37.13) — per-parameter decorators. Empty except for CLI
+    /// builder params annotated with `@arg(help=...)` / `@flag(short=,
+    /// help=)` inside a `@command` fn. Parsed by `parse_params`; the
+    /// only decorator vector that lives on a `Param` (fn/type/field
+    /// decorators live on their own statements). The feature-flag
+    /// `@flag("name")` decorator lives on FUNCTIONS, physically disjoint
+    /// from this vector, so param-level `@flag` does not collide.
+    pub decorators: Vec<Decorator>,
 }
 
 /// Field of a `type`. The type is mandatory inside a struct.
@@ -1216,6 +1224,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 return_type: None,
                 body: vec![Stmt::Return(
@@ -1545,6 +1554,7 @@ mod tests {
                 default: None,
                 varargs: false,
                 name_span: Span::default(),
+                decorators: vec![],
             }],
             body: vec![Stmt::Return(
                 Expr::BinOp {

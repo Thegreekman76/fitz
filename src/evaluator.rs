@@ -20900,6 +20900,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 })
                 .collect(),
             return_type: None,
@@ -24238,6 +24239,7 @@ f = to_json(true)
                 default: None,
                 varargs: false,
                 name_span: Span::default(),
+                decorators: vec![],
             }],
             body: vec![Stmt::Return(
                 Expr::BinOp {

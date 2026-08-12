@@ -7874,6 +7874,7 @@ mod tests {
                 default: None,
                 varargs: false,
                 name_span: Span::default(),
+                decorators: vec![],
             }],
             body: vec![crate::ast::Stmt::Return(
                 crate::ast::Expr::Ident("body".into(), crate::ast::Span::ZERO),
@@ -8017,6 +8018,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 },
                 crate::ast::Param {
                     name: "res".into(),
@@ -8024,6 +8026,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 },
             ],
             body: vec![crate::ast::Stmt::ReturnStatus {
@@ -8435,6 +8438,7 @@ mod tests {
             default: None,
             varargs: false,
             name_span: Span::default(),
+            decorators: vec![],
         };
         assert_eq!(
             crate::evaluator::classify_2_arg_middleware(&p),
@@ -8452,6 +8456,7 @@ mod tests {
             default: None,
             varargs: false,
             name_span: Span::default(),
+            decorators: vec![],
         };
         assert_eq!(
             crate::evaluator::classify_2_arg_middleware(&p),
@@ -8470,6 +8475,7 @@ mod tests {
             default: None,
             varargs: false,
             name_span: Span::default(),
+            decorators: vec![],
         };
         assert_eq!(
             crate::evaluator::classify_2_arg_middleware(&p),
@@ -8490,6 +8496,7 @@ mod tests {
             default: None,
             varargs: false,
             name_span: Span::default(),
+            decorators: vec![],
         };
         assert_eq!(
             crate::evaluator::classify_2_arg_middleware(&p),

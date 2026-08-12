@@ -1787,6 +1787,15 @@ impl Parser {
         }
         loop {
             self.skip_newlines();
+            // #6 (v0.37.13) — per-parameter decorators (`@arg(...)` /
+            // `@flag(...)` for the CLI builder). Mirrors the field
+            // decorator path. The checker validates that these only
+            // appear on params of a `@command` fn.
+            let mut param_decorators = Vec::new();
+            while matches!(self.peek(), Token::At) {
+                param_decorators.push(self.parse_one_decorator()?);
+                self.skip_newlines();
+            }
             // Fp.2 — `...name` signals varargs. Detected as `..` + `.`
             // (Token::DotDot followed by Token::Dot). Fitz has `..`
             // for Range and `..=` for inclusive Range; three
@@ -1862,6 +1871,7 @@ impl Parser {
                 default,
                 varargs,
                 name_span,
+                decorators: param_decorators,
             });
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
@@ -3807,6 +3817,34 @@ mod tests {
     }
 
     #[test]
+    fn param_decorators_parse_into_param_v0_37_13() {
+        // #6 — `@arg(...)` / `@flag(...)` before a param parse into
+        // `Param.decorators`; a plain param keeps an empty vector.
+        let program = parse_ok(
+            "@command(\"greet\")\n\
+             fn greet(@arg(help=\"who\") name: Str, @flag(short=\"l\") loud: Bool = false, plain: Int = 0) -> Int { return 0 }\n",
+        );
+        let params = program
+            .iter()
+            .find_map(|s| match s {
+                Stmt::FnDef { name, params, .. } if name == "greet" => Some(params),
+                _ => None,
+            })
+            .expect("fn greet");
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0].name, "name");
+        assert_eq!(params[0].decorators.len(), 1);
+        assert_eq!(params[0].decorators[0].name, "arg");
+        assert_eq!(params[1].name, "loud");
+        assert_eq!(params[1].decorators.len(), 1);
+        assert_eq!(params[1].decorators[0].name, "flag");
+        assert!(
+            params[2].decorators.is_empty(),
+            "a plain param has no decorators"
+        );
+    }
+
+    #[test]
     fn peek_returns_current_token_without_advancing() {
         let p = parser("42 + 1");
         assert_eq!(*p.peek(), Token::Int(42));
@@ -5551,6 +5589,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 return_type: None,
                 body: vec![Stmt::Return(
@@ -5582,6 +5621,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 return_type: Some(TypeExpr::named("Int")),
                 body: vec![Stmt::Return(
@@ -5613,6 +5653,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 return_type: None,
                 body: vec![Stmt::Expr(
@@ -5643,6 +5684,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 return_type: None,
                 body: vec![
@@ -6596,6 +6638,7 @@ mod tests {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 return_type: None,
                 body: vec![Stmt::Return(

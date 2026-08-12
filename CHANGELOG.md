@@ -9,6 +9,58 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.13] — 2026-08-12 — CLI `@arg` / `@flag` (decoradores de parámetro, estilo Click)
+
+Cierra el ítem #6 (el último) del inventario de "deudas residuales
+chicas". Los parámetros de un `@command` aceptan decoradores explícitos
+para texto de ayuda + short flags elegidos a mano. Fase 13 (CLI builder)
+tenía esto diferido como "deuda menor si aparece presión". Sin sintaxis
+nueva del lexer; `Param` gana un vector de decoradores.
+
+### Added
+
+- **`@arg(help="...")` y `@flag(short="x", help="...")` sobre parámetros
+  de un `@command`.** Overrides opt-in de la convención auto (param sin
+  default = positional, con default = flag): `@arg` da texto de ayuda a
+  un positional; `@flag` elige la letra del short flag + texto de ayuda.
+  Los short flags explícitos son **case-sensitive** (`-V` distinto de un
+  auto `-v`, estilo Click) y ganan sobre la primera-letra auto; una
+  colisión (dos explícitos, o explícito vs auto) es error de
+  compilación. `@flag` es **position-aware**: sobre una fn es el gate de
+  feature flags (12.8), sobre un parámetro es el override CLI —
+  posiciones disjuntas, no colisionan. Paridad bit-a-bit `fitz run` ↔
+  `fitz build` (help + parseo del short). Toca 7 capas:
+  `Param.decorators` (AST), `parse_params`, el checker
+  (`check_cli_param_decorators`, 10 reglas de validación), `cli.rs`
+  (render de help/short + `parse_argv` case-sensitive), el codegen
+  (mirror bit-a-bit de los string-templates), `fmt` y el LSP.
+
+### Fixed
+
+- **`fitz fmt` dropeaba el valor por default (y el `...` de varargs) de
+  un parámetro** — bug pre-existente que #6 sacó a la luz (los flags CLI
+  SON params con default): `fn f(x: Int = 5)` se formateaba como
+  `fn f(x: Int)`, convirtiendo un flag en positional. `fmt_param_to_string`
+  ahora emite el `= <default>`, el prefijo `...` variadic y los
+  decoradores de parámetro.
+
+### Tests
+
+- 7 unit `cli::tests::*_v0_37_13` (help/short accessors + render +
+  3 colisiones) + 9 unit `types::tests::cli_*_v0_37_13` (las 10 reglas)
+  + 1 parser `param_decorators_parse_into_param_v0_37_13` + 1 E2E
+  `compile_e2e::fase_13_cli_arg_flag_decorators_parity_v0_37_13` (help
+  ARGS/OPTIONS + short `-L` con paridad run↔build).
+
+### Docs / benchmarks
+
+- Cap 34 del guide (CLI builder) suma la sub-sección `@arg`/`@flag`;
+  `examples/guide/33-cli.fitz` suma el comando `deploy` y el boilerplate
+  `cli-tool` usa `@flag(help=)` de showcase.
+- Benchmarks revalidados contra v0.37.12: mixed-workload (Fitz/Python/
+  Node) re-corrido (1 corrida, sin bitrot, Fitz mantiene el liderazgo);
+  ORM ya republicado con mediana de 3 en v0.37.12.
+
 ## [v0.37.12] — 2026-08-11 — `FITZ_DB_*` mid-run reload + ORM `.preload()` HasOne
 
 Dos deudas residuales chicas del inventario. Sin sintaxis nueva. #6 (CLI

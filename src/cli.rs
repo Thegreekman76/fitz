@@ -5,12 +5,16 @@
 //! dispatcha al comando matcheante. El intérprete `fitz run` también
 //! puede correr CLI programs — útil para development.
 //!
-//! Convención de params (sin decorators en `Param` — decisión MVP):
+//! Convención de params (los decorators son opcionales):
 //! - Param **sin default** → positional arg requerido (`mybin <name>`).
 //! - Param **con default** → flag opcional (`--name <value>` o `--name`
 //!   si es Bool sin valor).
 //! - Bool con default `false` → flag bool (`--loud`).
 //! - Otros tipos con default → flag value (`--count 5`).
+//!
+//! #6 (v0.37.13) — overrides explícitos opt-in con decorators de
+//! parámetro: `@arg(help="...")` (positional) y `@flag(short="x",
+//! help="...")` (flag). Ver `param_help` / `param_short_override`.
 //!
 //! Help autogenerado: `mybin --help` lista comandos, `mybin <cmd> --help`
 //! muestra usage del comando con args + flags + descs.
@@ -105,6 +109,44 @@ pub fn param_is_flag(p: &Param) -> bool {
     p.default.is_some()
 }
 
+/// #6 (v0.37.13) — explicit help text for a param, from `@arg(help=...)`
+/// or `@flag(help=...)`. `None` if the param has no such decorator or no
+/// `help` kwarg. Used by `render_args_section` / `render_options_section`
+/// and mirrored bit-for-bit by the codegen (`fitz build`).
+pub fn param_help(p: &Param) -> Option<String> {
+    for d in &p.decorators {
+        if d.name == "arg" || d.name == "flag" {
+            for (k, v) in &d.kwargs {
+                if k == "help" {
+                    if let crate::ast::Expr::Str(s, _) = v {
+                        return Some(s.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// #6 (v0.37.13) — explicit short-flag override for a param, from
+/// `@flag(short="x")`. `None` if absent. A `Some(c)` reserves `-c` for
+/// this flag in `compute_short_flags` (taking precedence over the
+/// auto-inferred first letter).
+pub fn param_short_override(p: &Param) -> Option<char> {
+    for d in &p.decorators {
+        if d.name == "flag" {
+            for (k, v) in &d.kwargs {
+                if k == "short" {
+                    if let crate::ast::Expr::Str(s, _) = v {
+                        return s.chars().next();
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// v0.11.1 (Fase 13 polish) — auto-infiere short flags por primera
 /// letra del nombre del param. Devuelve `HashMap<char, String>` que
 /// mapea `'l' → "loud"`, `'c' → "count"`, etc. Si dos flags empiezan
@@ -112,11 +154,10 @@ pub fn param_is_flag(p: &Param) -> bool {
 /// la `@command` debe renombrar uno o aceptar que solo el primero
 /// reciba short flag.
 ///
-/// Decisión de diseño: short flags **auto** en vez de `@flag(short="l")`
-/// kwargs. Razón: la mayoría de las CLI standards (POSIX, GNU)
-/// usan primera letra; el override manual queda como deuda futura
-/// (kwargs en @flag requeriría AST change en Param). Si una colisión
-/// aparece, el user renombra o desactiva via kwarg futuro.
+/// Short flags **auto** por primera letra (POSIX/GNU standard). Desde
+/// #6 (v0.37.13) el override manual `@flag(short="x")` reserva una letra
+/// explícita (case-sensitive, gana sobre el auto); ver el primer pass
+/// abajo. Una colisión (dos explícitos, o explícito vs auto) → error.
 pub fn compute_short_flags(
     params: &[Param],
 ) -> Result<std::collections::HashMap<char, String>, String> {
@@ -131,12 +172,33 @@ pub fn compute_short_flags(
         })
         .map(|_| params.len() - 1);
     let mut out: std::collections::HashMap<char, String> = std::collections::HashMap::new();
+    // #6 (v0.37.13) — first pass: explicit `@flag(short="x")` overrides
+    // reserve their char (case-preserving, so `-v`/`-V` can coexist).
+    // Two explicit shorts colliding → error.
     for (i, p) in params.iter().enumerate() {
-        if Some(i) == variadic_idx {
+        if Some(i) == variadic_idx || !param_is_flag(p) {
             continue;
         }
-        if !param_is_flag(p) {
+        if let Some(c) = param_short_override(p) {
+            if let Some(existing) = out.get(&c) {
+                return Err(format!(
+                    "@command short flag conflict: `-{}` requested by `--{}` is already used by `--{}`.",
+                    c, p.name, existing
+                ));
+            }
+            out.insert(c, p.name.clone());
+        }
+    }
+    // Second pass: auto-infer the first letter for flags WITHOUT an
+    // explicit `short=`. A collision (with an explicit reservation or
+    // another auto) → error; the user must rename or set an explicit
+    // `@flag(short="x")` on one of them.
+    for (i, p) in params.iter().enumerate() {
+        if Some(i) == variadic_idx || !param_is_flag(p) {
             continue;
+        }
+        if param_short_override(p).is_some() {
+            continue; // already reserved in the first pass
         }
         let first = match p.name.chars().next() {
             Some(c) => c.to_ascii_lowercase(),
@@ -150,8 +212,7 @@ pub fn compute_short_flags(
         if let Some(existing) = out.get(&first) {
             return Err(format!(
                 "@command short flag conflict: `--{}` and `--{}` share first letter `-{}`. \
-                 Rename one of them or disable short flags for one (future debt: kwarg \
-                 `@flag(short=null)`).",
+                 Rename one of them, or set an explicit `@flag(short=\"x\")` on one.",
                 existing, p.name, first
             ));
         }
@@ -197,7 +258,11 @@ pub fn render_args_section(cmd: &CliCommand) -> String {
             .as_ref()
             .map(|t| t.display_name())
             .unwrap_or_else(|| "Any".into());
-        s.push_str(&format!("    <{}>  ({})\n", p.name, ty));
+        // #6 (v0.37.13) — `@arg(help="...")` text, appended after the type.
+        let help = param_help(p)
+            .map(|h| format!("  {}", h))
+            .unwrap_or_default();
+        s.push_str(&format!("    <{}>  ({}){}\n", p.name, ty, help));
     }
     s.trim_end().to_string()
 }
@@ -241,7 +306,11 @@ pub fn render_options_section(cmd: &CliCommand) -> String {
         } else {
             format!("{}--{} <{}>", short_prefix, p.name, ty.to_uppercase())
         };
-        s.push_str(&format!("    {}\n", flag_form));
+        // #6 (v0.37.13) — `@flag(help="...")` text, appended after the flag form.
+        let help = param_help(p)
+            .map(|h| format!("  {}", h))
+            .unwrap_or_default();
+        s.push_str(&format!("    {}{}\n", flag_form, help));
     }
     s.push_str("    -h, --help");
     s
@@ -467,7 +536,11 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
                     2,
                 );
             }
-            let long_name = match short_map.get(&first.to_ascii_lowercase()) {
+            // #6 (v0.37.13) — case-sensitive short lookup so an explicit
+            // `@flag(short="L")` (`-L`) is distinct from an auto/lowercase
+            // `-l` (Click-style). Auto shorts are lowercased at map-build
+            // time, so lowercase input still resolves them.
+            let long_name = match short_map.get(&first) {
                 Some(n) => n.clone(),
                 None => {
                     return ParseResult::Error(
@@ -659,6 +732,7 @@ mod tests {
             },
             varargs: false,
             name_span: Span::default(),
+            decorators: vec![],
         }
     }
 
@@ -670,6 +744,120 @@ mod tests {
             params,
             handler: Value::Null,
         }
+    }
+
+    // #6 (v0.37.13) — helpers for `@arg`/`@flag` param decorators.
+    fn deco(name: &str, kwargs: &[(&str, &str)]) -> crate::ast::Decorator {
+        crate::ast::Decorator {
+            name: name.into(),
+            args: vec![],
+            kwargs: kwargs
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        crate::ast::Expr::Str(v.to_string(), Span::default()),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn param_deco(name: &str, ty: &str, has_default: bool, d: crate::ast::Decorator) -> Param {
+        let mut p = param(name, ty, has_default);
+        p.decorators = vec![d];
+        p
+    }
+
+    #[test]
+    fn param_help_from_arg_and_flag_v0_37_13() {
+        let a = param_deco("name", "Str", false, deco("arg", &[("help", "who")]));
+        assert_eq!(param_help(&a).as_deref(), Some("who"));
+        let f = param_deco("loud", "Bool", true, deco("flag", &[("help", "shout it")]));
+        assert_eq!(param_help(&f).as_deref(), Some("shout it"));
+        assert_eq!(param_help(&param("x", "Int", false)), None);
+    }
+
+    #[test]
+    fn param_short_override_from_flag_v0_37_13() {
+        let f = param_deco("loud", "Bool", true, deco("flag", &[("short", "L")]));
+        assert_eq!(param_short_override(&f), Some('L'));
+        assert_eq!(param_short_override(&param("loud", "Bool", true)), None);
+    }
+
+    #[test]
+    fn render_args_section_includes_arg_help_v0_37_13() {
+        let cmd = mkcmd(
+            "greet",
+            vec![param_deco(
+                "name",
+                "Str",
+                false,
+                deco("arg", &[("help", "who to greet")]),
+            )],
+        );
+        let s = render_args_section(&cmd);
+        assert!(
+            s.contains("<name>  (Str)  who to greet"),
+            "expected arg help in ARGS, was: {s}"
+        );
+    }
+
+    #[test]
+    fn render_options_includes_flag_help_and_explicit_short_v0_37_13() {
+        let cmd = mkcmd(
+            "greet",
+            vec![param_deco(
+                "loud",
+                "Bool",
+                true,
+                deco("flag", &[("short", "L"), ("help", "shout it")]),
+            )],
+        );
+        let s = render_options_section(&cmd);
+        // Explicit short `-L` (case-preserved) + help text.
+        assert!(
+            s.contains("-L, --loud  shout it"),
+            "expected explicit short + help, was: {s}"
+        );
+    }
+
+    #[test]
+    fn compute_short_flags_explicit_override_wins_v0_37_13() {
+        // `count` would auto-infer `-c`, but an explicit `short="k"` moves it.
+        let params = vec![param_deco(
+            "count",
+            "Int",
+            true,
+            deco("flag", &[("short", "k")]),
+        )];
+        let map = compute_short_flags(&params).unwrap();
+        assert_eq!(map.get(&'k').map(|s| s.as_str()), Some("count"));
+        assert!(!map.contains_key(&'c'), "auto -c should be superseded");
+    }
+
+    #[test]
+    fn compute_short_flags_explicit_collision_is_error_v0_37_13() {
+        let params = vec![
+            param_deco("count", "Int", true, deco("flag", &[("short", "x")])),
+            param_deco("color", "Str", true, deco("flag", &[("short", "x")])),
+        ];
+        let err = compute_short_flags(&params).unwrap_err();
+        assert!(err.contains("-x"), "expected collision on -x, was: {err}");
+    }
+
+    #[test]
+    fn compute_short_flags_explicit_vs_auto_collision_is_error_v0_37_13() {
+        // `color` auto-infers `-c`; explicit `short="c"` on `count` collides.
+        let params = vec![
+            param_deco("count", "Int", true, deco("flag", &[("short", "c")])),
+            param("color", "Str", true),
+        ];
+        let err = compute_short_flags(&params).unwrap_err();
+        assert!(
+            err.contains("-c") || err.contains("share first letter"),
+            "expected -c collision, was: {err}"
+        );
     }
 
     #[test]

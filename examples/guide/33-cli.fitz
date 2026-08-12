@@ -6,7 +6,7 @@
 // intérprete `fitz run` también soporta el dispatch (con `--` para
 // separar args de fitz de los del programa).
 //
-// Convención de params (sin decorators en `Param`):
+// Convención de params (los decorators son opcionales):
 // - Param **sin default** → positional arg requerido.
 // - Param **con default** → flag opcional (`--name <value>` o
 //   `--name` si es Bool sin valor).
@@ -19,6 +19,11 @@
 //   misma inicial) → error en compile-time.
 // - **`List<Str>` variadic** (v0.11.1): último positional, absorbe
 //   N tokens restantes.
+//
+// Overrides explícitos (v0.37.13, opt-in, estilo Click/typer):
+// - `@arg(help="...")` sobre un positional → texto de ayuda.
+// - `@flag(short="x", help="...")` sobre un flag → letra del short
+//   (case-sensitive) + texto de ayuda. Ver el comando `deploy` abajo.
 //
 // El return type debe ser `Int` (exit code; `0` éxito).
 
@@ -48,5 +53,22 @@ fn add(a: Int, b: Int) -> Int {
 @command("status", desc="Show status")
 fn status() -> Int {
     print("status: OK")
+    return 0
+}
+
+/// `mybin deploy <target> [-V] [--replicas <N>]` — muestra los
+/// overrides explícitos: help por param + short flag elegido a mano.
+/// `-V` (verbose) es case-sensitive: distinto de un auto `-v`.
+@command("deploy", desc="Deploy to a target")
+fn deploy(
+    @arg(help="target environment") target: Str,
+    @flag(short="V", help="verbose output") verbose: Bool = false,
+    @flag(help="replica count") replicas: Int = 1,
+) -> Int {
+    if verbose {
+        print("deploying to {target} with {replicas} replica(s)...")
+    } else {
+        print("deploy {target}")
+    }
     return 0
 }

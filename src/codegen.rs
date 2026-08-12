@@ -13481,10 +13481,16 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     .as_ref()
                     .map(|t| t.display_name())
                     .unwrap_or_else(|| "Any".into());
+                // #6 (v0.37.13) — `@arg(help="...")` text, mirrors
+                // `cli::render_args_section` bit-for-bit.
+                let help = crate::cli::param_help(p)
+                    .map(|h| format!("  {}", h))
+                    .unwrap_or_default();
                 self.emit(&format!(
-                    "    s.push_str(\"    <{}>  ({})\\n\");\n",
+                    "    s.push_str(\"    <{}>  ({}){}\\n\");\n",
                     p.name.replace('"', "\\\""),
-                    ty.replace('"', "\\\"")
+                    ty.replace('"', "\\\""),
+                    help.replace('"', "\\\"")
                 ));
             }
         }
@@ -13517,6 +13523,11 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 Some(c) => format!("-{}, ", c),
                 None => String::new(),
             };
+            // #6 (v0.37.13) — `@flag(help="...")` text, mirrors
+            // `cli::render_options_section` bit-for-bit.
+            let help = crate::cli::param_help(p)
+                .map(|h| format!("  {}", h))
+                .unwrap_or_default();
             if ty == "Bool" {
                 // v0.11.1 — Bool with default true shows `--no-<name>`.
                 let default_true = matches!(&p.default, Some(Expr::Bool(true, _)));
@@ -13526,15 +13537,17 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     format!("{}--{}", short_prefix, p.name)
                 };
                 self.emit(&format!(
-                    "    s.push_str(\"    {}\\n\");\n",
-                    form.replace('"', "\\\"")
+                    "    s.push_str(\"    {}{}\\n\");\n",
+                    form.replace('"', "\\\""),
+                    help.replace('"', "\\\"")
                 ));
             } else {
                 self.emit(&format!(
-                    "    s.push_str(\"    {}--{} <{}>\\n\");\n",
+                    "    s.push_str(\"    {}--{} <{}>{}\\n\");\n",
                     short_prefix.replace('"', "\\\""),
                     p.name.replace('"', "\\\""),
-                    ty.to_uppercase().replace('"', "\\\"")
+                    ty.to_uppercase().replace('"', "\\\""),
+                    help.replace('"', "\\\"")
                 ));
             }
         }
@@ -13641,7 +13654,11 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         self.emit("                if ci.next().is_none() {\n");
         // If there is a known short flag, map it. Emit the match.
         if !short_map.is_empty() {
-            self.emit("                    let mapped: Option<&'static str> = match first.to_ascii_lowercase() {\n");
+            // #6 (v0.37.13) — case-sensitive short lookup (parity with
+            // `cli::parse_argv`): explicit `@flag(short="L")` → `-L`
+            // distinct from auto lowercase `-l`. Map keys already carry
+            // the correct case (auto lowercased, explicit preserved).
+            self.emit("                    let mapped: Option<&'static str> = match first {\n");
             // Deterministic order (alphabetical by char) for reproducible output.
             let mut entries: Vec<(char, &str)> =
                 short_map.iter().map(|(c, n)| (*c, n.as_str())).collect();

@@ -9532,6 +9532,7 @@ component Card {
                     default: None,
                     varargs: false,
                     name_span: Span::default(),
+                    decorators: vec![],
                 }],
                 body: vec![],
                 loc: Loc { line: 1, column: 1 },
