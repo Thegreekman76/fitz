@@ -17330,10 +17330,49 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                         self.emit("}\n");
                         self.indent -= 1;
                     }
-                    _ => {
-                        return Err(self.err_at(iter.span(),
-                            "`for ... in m` sobre Map en `fitz build` exige un tuple pattern de 2 elementos: `for (k, v) in m { ... }`. `for kv in m` queda como deuda residual del codegen.",
-                        ));
+                    Pattern::Ident(name, _) => {
+                        // `for kv in m` — the single Ident binds the WHOLE
+                        // pair as a `(K, V)` Rust tuple, matching the
+                        // interpreter (which binds `kv` to a `Value::Tuple`)
+                        // and the checker (which types `kv` as
+                        // `Type::Tuple([K, V])`, accessed via `kv.0`/`kv.1`).
+                        // Iterating the Map's internal `Vec<(K, V)>` yields
+                        // the tuple directly, so no destructuring is needed.
+                        let tuple_ty = Type::Tuple(vec![(**k_ty).clone(), (**v_ty).clone()]);
+                        // B17 fix: block + snapshot to drop the MutexGuard
+                        // before the body runs (Send across `.await`).
+                        self.emit_indent();
+                        self.emit("{\n");
+                        self.indent += 1;
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "let __for_snap = ({iter_code}).lock().unwrap().clone();"
+                        )
+                        .unwrap();
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "{label_prefix}for mut {name} in __for_snap.into_iter() {{"
+                        )
+                        .unwrap();
+                        self.indent += 1;
+                        self.push_scope();
+                        self.declare_var(name.clone(), tuple_ty);
+                        for s in body {
+                            self.gen_stmt_in_fn(s, ret_expected)?;
+                        }
+                        self.pop_scope();
+                        self.indent -= 1;
+                        self.emit_indent();
+                        self.emit("}\n");
+                        self.indent -= 1;
+                    }
+                    other => {
+                        return Err(self.err_at(iter.span(), format!(
+                            "`for <pat> in m` sobre Map en `fitz build`: patrón `{:?}` no soportado. Usá `for (k, v) in m` (destructuring), `for kv in m` (par completo) o `for _ in m`.",
+                            other
+                        )));
                     }
                 }
             }
@@ -42437,6 +42476,32 @@ async fn get_u(id: Int) -> Result<U> {
         assert!(
             code.contains("__FitzHttpRequestOpts {"),
             "expected struct literal __FitzHttpRequestOpts in the callsite"
+        );
+    }
+
+    #[test]
+    fn v0_37_15_for_kv_in_map_binds_whole_pair_tuple() {
+        // v0.37.15 — `for kv in m` (single Ident) sobre un Map compila en
+        // `fitz build`, con `kv` bindeado al par completo `(K, V)` como
+        // tuple Rust (paridad con el intérprete que bindea `Value::Tuple` y
+        // el checker que tipa `Type::Tuple([K, V])`, accedido `kv.0`/`kv.1`).
+        // Antes: error de codegen "exige un tuple pattern de 2 elementos".
+        let src = "fn dump(m: Map<Str, Int>) {\n\
+                       for kv in m {\n\
+                           print(\"{kv.0}={kv.1}\")\n\
+                       }\n\
+                   }\n";
+        let code = gen(src).expect("codegen ok para `for kv in m`");
+        assert!(
+            code.contains("for mut kv in __for_snap.into_iter()"),
+            "esperaba `for mut kv in __for_snap.into_iter()` (el Ident bindea el par entero); \
+             el codegen no lo emitió.\nGenerado:\n{code}"
+        );
+        // `kv.0` / `kv.1` bajan a `.0` / `.1` sobre el tuple Rust (TupleField);
+        // el path de interpolación clona el receptor → `(kv.clone()).N`.
+        assert!(
+            code.contains("(kv.clone()).0") && code.contains("(kv.clone()).1"),
+            "esperaba acceso a los campos del tuple `(kv.clone()).0` / `.1`; generado:\n{code}"
         );
     }
 

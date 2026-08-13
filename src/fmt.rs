@@ -1,41 +1,31 @@
-//! Fitz formatter (`fitz fmt`) — Phase 9.z.1.a.
+//! Fitz formatter (`fitz fmt`) — Phase 9.z.1.
 //!
 //! Hand-written pretty-printer over the AST. Zero config —
 //! fixed conventions (4-space indent, double quotes, trailing
 //! comma only multi-line, max 100 chars soft).
 //!
-//! Flow: `format_source(src)` → tokenize → parse → walk the AST →
-//! string. The caller decides what to do with the string (write or compare).
+//! Flow: `format_source(src)` → `tokenize_with_trivia` → parse → walk
+//! the AST (threading the trivia back) → string. The caller decides what
+//! to do with the string (write or compare).
 //!
-//! ## ⚠ CRITICAL LIMITATION OF 9.z.1.a — comments + blank lines get erased
+//! ## Comments + blank lines are preserved (9.z.1.b landed)
 //!
-//! The lexer strips comments before reaching the AST, and the
-//! formatter does not preserve user blank lines. Therefore, when
-//! rewriting a file, **comments (`//`) and all of the author's
-//! intentional blank lines get lost**.
+//! The lexer captures comments (`//`) and the author's intentional blank
+//! lines as a `Trivia` side-stream (`tokenize_with_trivia`). `FmtCtx`
+//! holds the `Trivia` + a `comment_cursor`, and the AST walk re-emits
+//! them at their original position, so a rewrite preserves them. Write
+//! mode is production-grade — no loud "you lose your comments" warning
+//! (that was the 9.z.1.a limitation, closed in 9.z.1.b).
 //!
-//! This is **missing table-stakes** for a production-grade
-//! formatter (gofmt, prettier, black all preserve). It closes
-//! in **9.z.1.b**:
+//! ## Remaining debts (do not block the MVP)
 //!
-//! - lexer emits comments as tokens (side stream)
-//! - parser builds a side-table `Vec<(SpanKey, Comment)>` adjacent
-//!   to the AST
-//! - formatter threads the comments back into the output according
-//!   to original position
-//!
-//! While 9.z.1.b is not landed, `fitz fmt` (write mode) emits a
-//! loud warning to the user about the loss. The `--check`
-//! (read-only) mode does not need a warning — it does not break anything.
-//!
-//! ## Other debts (do not block the MVP)
-//!
-//! - **`is_let` lost in the AST**: the parser produces the same
-//!   `Stmt::Assign` for `let x = 1` and `x = 1` (reassignment). The
-//!   formatter inspects the source line via `Span` to detect
-//!   `let` and preserve it. Refactoring the AST (adding
-//!   `is_let: bool`) is minor debt; the current hack is isolated
-//!   in `stmt_has_let_keyword`.
+//! - **`is_let` still read via the Span hack**: the AST now carries
+//!   `Stmt::Assign.is_let: bool` (added v0.28.0), but the formatter still
+//!   detects the `let` keyword by inspecting the source line via `Span`
+//!   (`stmt_has_let_keyword`). Migrating the call site (`fmt.rs`, the
+//!   `AssignTarget::Ident` arm) to read the `is_let` field is a minor,
+//!   isolated refactor — the field destructure is already there
+//!   (`is_let: _`).
 //! - **Unhandled nodes** fall back to `// <invalid>`. In the
 //!   MVP we cover the AST nodes that appear in >90% of guide
 //!   code; rare ones get completed iteratively.

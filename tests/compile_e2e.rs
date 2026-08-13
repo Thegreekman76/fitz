@@ -14321,6 +14321,45 @@ fn main() => 0\n\
 }
 
 #[test]
+fn for_kv_in_map_parity_run_build_v0_37_15() {
+    // v0.37.15 — `for kv in m` (single Ident sobre un Map) compila en
+    // `fitz build` con paridad bit-a-bit ante `fitz run`. `kv` es el par
+    // completo `(K, V)` (Tuple), accedido `kv.0`/`kv.1`. Antes: `fitz build`
+    // abortaba con "exige un tuple pattern de 2 elementos" mientras `fitz run`
+    // lo aceptaba (gap de paridad).
+    let src = "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+               for kv in m {\n\
+                   print(\"{kv.0}={kv.1}\")\n\
+               }\n";
+    let stem = "for_kv_in_map_v0_37_15";
+
+    // Binario nativo.
+    let (bin_out, code) = build_and_run(stem, src);
+    assert_eq!(code, 0, "el binario debe salir 0");
+    assert_eq!(
+        bin_out, "a=1\nb=2\nc=3\n",
+        "salida del binario incorrecta (orden de inserción preservado)"
+    );
+
+    // Paridad: `fitz run` sobre la misma fuente produce lo mismo.
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}-run", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir run");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+    let run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz run");
+    let run_out = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(
+        run_out, bin_out,
+        "paridad rota: `fitz run` != binario\nrun: {run_out:?}\nbin: {bin_out:?}"
+    );
+}
+
+#[test]
 fn module_shared_state_primitive_const_compiles_v0_37_14() {
     // v0.37.14 — un `let X: Int = N` (o Str/Float/Bool) top-level de un
     // MÓDULO importado, referenciado por handlers HTTP/WS de ese módulo, es

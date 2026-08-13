@@ -7283,9 +7283,13 @@ features grandes que expanden el lenguaje (mini-fases dedicadas).
 ### Tier A — Cierre MVP fuerte del ORM — **9/10 CERRADO 2026-06-01 (v0.10.31)**
 
 **9 ítems cerrados en bloque** (~12h reales vs ~30-40h estimadas).
-Detalle por sub-paso en `CHANGELOG.md` v0.10.31. Solo A.10 queda
-pendiente (FITZ_DB_* mid-run reload — refinable cuando aparezca
-presión, hoy `LazyLock` cubre 99% del caso real).
+Detalle por sub-paso en `CHANGELOG.md` v0.10.31. A.10
+(`FITZ_DB_MAX_CONNS`/`FITZ_DB_LOG` mid-run reload) **CERRADO en
+v0.37.12** (`effective_max_conns()` + `current_db_log_mode()` releen
+las env vars fresh en cada uso, en vez del `LazyLock` que las fijaba al
+primer acceso). Residual menor: `HTTP_LOG_MODE`/`FITZ_HTTP_LOG` en
+`http.rs` sigue `LazyLock` (fuera del scope de A.10; refinable con el
+mismo patrón si aparece demanda).
 
 | ID | Item | Estado |
 |----|------|------:|

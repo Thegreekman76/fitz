@@ -9,6 +9,39 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.15] — 2026-08-13 — Codegen: `for kv in m` sobre Map en `fitz build`
+
+Cierra un gap de **paridad `fitz run` ↔ `fitz build`** encontrado en la
+auditoría de deuda: iterar un Map con un solo Ident (`for kv in m`) corría
+en el intérprete y pasaba `fitz check`, pero `fitz build` lo rechazaba.
+Sin sintaxis nueva; sin impacto en LSP/grammar.
+
+### Fixed
+
+- **`for kv in m` (single Ident sobre un `Map<K, V>`) compila en
+  `fitz build`.** Antes el codegen del `for` solo aceptaba el tuple pattern
+  `for (k, v) in m` o `for _ in m`, y abortaba con "exige un tuple pattern
+  de 2 elementos" ante `for kv in m` — mientras el intérprete lo aceptaba
+  (bindeando `kv` a un `Value::Tuple`) y el checker lo tipaba
+  (`Type::Tuple([K, V])`, accedido `kv.0`/`kv.1`). Ahora el codegen emite
+  `for mut kv in __for_snap.into_iter()` bindeando el par completo como un
+  tuple Rust `(K, V)` (iterar el `Vec<(K, V)>` interno del Map lo da
+  directo), y `kv.0`/`kv.1` bajan al `TupleField` Rust. Paridad bit-a-bit
+  validada (`fitz run` ↔ binario producen el mismo output, orden de
+  inserción preservado). Tests `codegen::tests::
+  v0_37_15_for_kv_in_map_binds_whole_pair_tuple` +
+  `compile_e2e::for_kv_in_map_parity_run_build_v0_37_15`.
+
+### Docs
+
+- `fmt.rs` — doc-header stale corregido (la "CRITICAL LIMITATION de
+  9.z.1.a: comments+blank lines se borran" ya no aplica; 9.z.1.b los
+  preserva vía `Trivia`). Nota del `is_let` actualizada (el AST ya tiene el
+  campo desde v0.28.0; el fmt aún lo lee por el hack de `Span`).
+- `deudas-post-5b.md` — nota A.10 (`FITZ_DB_*` mid-run reload) marcada
+  CERRADA en v0.37.12 (era "pendiente"); residual menor `HTTP_LOG_MODE`
+  anotado.
+
 ## [v0.37.14] — 2026-08-13 — Codegen: state compartido de módulo con primitivo `let X` en handlers
 
 Cierra un bug de **paridad `fitz run` ↔ `fitz build`** del codegen de
