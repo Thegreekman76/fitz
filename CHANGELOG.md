@@ -9,6 +9,40 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.14] — 2026-08-13 — Codegen: state compartido de módulo con primitivo `let X` en handlers
+
+Cierra un bug de **paridad `fitz run` ↔ `fitz build`** del codegen de
+módulos, descubierto al hacer `fitz build` del showcase Admin ABM de
+fitz-liveviews (un `let PAGE_SIZE: Int = 8` de módulo usado por handlers
+`@ws`). Sin sintaxis nueva; sin impacto en LSP/grammar; extensión VSCode
+sin cambios (bug interno del codegen).
+
+### Fixed
+
+- **Un `let X` de un MÓDULO importado, referenciado por handlers HTTP/WS
+  de ese módulo, con RHS primitivo (`Int`/`Float`/`Bool`/`Str`), rompía
+  `fitz build`.** El caso es *shared state*: el handler materializa
+  `let X = (*__FITZ_STATE_X).clone()` al inicio de su cuerpo, pero
+  `gen_module_top_let` emitía el binding como un bare `pub const X`
+  (Paths 1a/1b) y retornaba temprano — nunca emitía el static
+  `__FITZ_STATE_X` → `E0425 cannot find value __FITZ_STATE_X` +
+  `E0530 let bindings cannot shadow constants`. El caso MAIN ya
+  funcionaba (`gen_http_main` emite el `LazyLock` para **todo** state
+  var, primitivos incluidos); solo el ctx de MÓDULO no corría esa
+  maquinaria para primitivos (los contenedores `List`/`Map`/`Nominal` y
+  los async `db.connect(...).await` sí desde v0.28.3 / v0.37.6). El
+  intérprete (`fitz run`) nunca lo sufrió (captura el env del módulo).
+  **Fix** (~50 LoC netas, solo `src/codegen.rs`): `gen_module_top_let`
+  computa `is_shared_state` al tope y gatea Paths 1a (Str) y 1b (const
+  primitivo) en `!is_shared_state`, así un primitivo shared-state cae a
+  una rama nueva que emite `static __FITZ_STATE_X: LazyLock<T>` +
+  accessor `pub fn X()` (mirror del main). Los primitivos shared-state se
+  registran en `accessor_consts` tras `resolve_state_var_types` para que
+  una fn NO-handler del módulo que los referencie bare emita `X()` (las
+  fns handler siguen shadoweando con el local materializado). Paridad
+  bit-a-bit validada con curl. Test E2E
+  `module_shared_state_primitive_const_compiles_v0_37_14`.
+
 ## [v0.37.13] — 2026-08-12 — CLI `@arg` / `@flag` (decoradores de parámetro, estilo Click)
 
 Cierra el ítem #6 (el último) del inventario de "deudas residuales

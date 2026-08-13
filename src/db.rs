@@ -4572,7 +4572,14 @@ mod tests {
     async fn db_pool_max_conns_default() {
         // The default pool exposes DEFAULT_MAX_CONNS concurrent
         // conns. The handle's public API exposes it via
-        // `max_conns()`.
+        // `max_conns()`. v0.37.14: serialize on ENV_MIDRUN_LOCK
+        // and clear FITZ_DB_MAX_CONNS — `effective_max_conns()`
+        // (v0.37.12) reads it fresh, so the mid-run env test
+        // could otherwise race this one and flip the default.
+        let _g = ENV_MIDRUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized on ENV_MIDRUN_LOCK; the only other
+        // readers/writers of FITZ_DB_MAX_CONNS take the same lock.
+        unsafe { std::env::remove_var("FITZ_DB_MAX_CONNS") };
         let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
         assert_eq!(handle.max_conns(), DEFAULT_MAX_CONNS);
     }
@@ -4867,8 +4874,9 @@ mod tests {
     #[test]
     fn effective_max_conns_reflects_midrun_env_change_v0_37_12() {
         let _g = ENV_MIDRUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: this test serializes on ENV_MIDRUN_LOCK and no
-        // other test reads FITZ_DB_MAX_CONNS.
+        // SAFETY: this test serializes on ENV_MIDRUN_LOCK — every
+        // reader/writer of FITZ_DB_MAX_CONNS (including
+        // `db_pool_max_conns_default`) takes the same lock.
         unsafe { std::env::set_var("FITZ_DB_MAX_CONNS", "15") };
         assert_eq!(effective_max_conns(), 15);
         // Mid-run change is reflected without re-locking anything.

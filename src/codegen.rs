@@ -6478,6 +6478,28 @@ fn generate_module_rs_with_bindings(
     // `resolve_state_var_types`. `top_lets` are the module's top-level
     // `Stmt::Assign`s (the "main_stmts" equivalent for this pass).
     resolve_state_var_types(&mut ctx, program, &top_lets, env, module_has_http)?;
+    // v0.37.14 — a module-level `let X` that is SHARED STATE (referenced by
+    // a handler of this module) is emitted as `__FITZ_STATE_X: LazyLock<T>`
+    // + a `pub fn X()` accessor by `gen_module_top_let` (below), even when
+    // its RHS is a const-eval primitive (Str/Int/Float/Bool) that would
+    // otherwise be a bare `const`. Register it in `accessor_consts` so a
+    // NON-handler module fn that references `X` bare emits `X()` — handler
+    // fns still shadow it with the materialized local. Only sync shared
+    // state reaches the accessor path; async-init state (`.await`) has no
+    // sync accessor and is always used through the materialized local.
+    for stmt in &top_lets {
+        if let Stmt::Assign {
+            target: AssignTarget::Ident(name, _),
+            ..
+        } = stmt
+        {
+            if ctx.state_var_types.contains_key(name)
+                && !ctx.state_var_async.get(name).copied().unwrap_or(false)
+            {
+                ctx.accessor_consts.insert(name.clone());
+            }
+        }
+    }
     for stmt in top_fns {
         ctx.gen_top_fn(stmt)?;
     }
@@ -16363,11 +16385,26 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             None => rhs_ty.clone(),
         };
 
+        // v0.37.14 — a module-level `let X` that is SHARED STATE
+        // (referenced by an HTTP/WS handler of THIS module, per
+        // `detect_shared_state`) must be emitted as `static
+        // __FITZ_STATE_X: LazyLock<T>` (Path 3 below) so `gen_top_fn`'s
+        // materialization (`let X = (*__FITZ_STATE_X).clone()`) resolves
+        // — same contract as the main case (`gen_http_main`, which emits
+        // the LazyLock for EVERY state var, primitives included). Without
+        // this gate, a primitive `let PAGE_SIZE = 8` used in a handler
+        // short-circuits to a bare `pub const PAGE_SIZE` (Paths 1a/1b) and
+        // returns early, while the handler still references the
+        // never-emitted `__FITZ_STATE_PAGE_SIZE` → E0425 + E0530 (the
+        // `let` shadowing the `const`). Falling shared-state primitives
+        // through to Path 3 fixes both.
+        let is_shared_state = self.state_var_types.contains_key(name);
+
         // Path 1a: direct Str literal → `pub static X: &str =
         // "...";`. (Rust does not accept `String` in const,
         // but does accept `&'static str`. The call site takes
         // care of `String::from(X)` when needed.)
-        if matches!(&declared_ty, Type::Str) {
+        if !is_shared_state && matches!(&declared_ty, Type::Str) {
             if let Expr::Str(s, _) = value {
                 writeln!(
                     &mut self.output,
@@ -16382,8 +16419,9 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
 
         // Path 1b+2: const-eval-able (Int/Float/Bool with
         // arithmetic/logical/bit recursive BinOp/UnaryOp) →
-        // emit as `pub const`.
-        if is_const_eval_expr(value) {
+        // emit as `pub const`. Skipped for shared state (see above) —
+        // those fall to Path 3's `__FITZ_STATE_X: LazyLock<T>` backing.
+        if !is_shared_state && is_const_eval_expr(value) {
             match &declared_ty {
                 Type::Int => {
                     let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int, self.env);
@@ -16446,7 +16484,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // (same names via `state_var_static_name`). `gen_http_main` /
         // `emit_cron_job_spawns` drive the init before serving/spawning; the
         // handlers materialize the local via `gen_top_fn` (fn_state_deps).
-        let is_shared_state = self.state_var_types.contains_key(name);
+        // `is_shared_state` computed once at the top of this fn (v0.37.14).
         if expr_contains_await(value)
             && (self.module_cron_store_vars.contains(name)
                 || self.module_background_store_vars.contains(name)
@@ -16507,6 +16545,31 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 name = name,
                 ret = ret_rs,
                 rhs = final_rhs
+            )
+            .unwrap();
+            return Ok(());
+        }
+
+        // v0.37.14 — a shared-state PRIMITIVE (Int/Float/Bool/Str) reaches
+        // here after the const/static short-circuits (Paths 1a/1b) were
+        // skipped by the `!is_shared_state` gate at the top. Emit the
+        // `__FITZ_STATE_X: LazyLock<T>` backing so `gen_top_fn`'s
+        // materialization (`let X = (*__FITZ_STATE_X).clone()`) resolves —
+        // mirror of `gen_http_main` for the main case. The `pub fn X()`
+        // accessor covers non-handler module fns (registered in
+        // `accessor_consts` right after `resolve_state_var_types`); handler
+        // refs shadow it with the materialized local.
+        if is_shared_state {
+            let static_name = state_var_static_name(name);
+            writeln!(
+                &mut self.output,
+                "static {static_name}: std::sync::LazyLock<{ret}> = \
+                 std::sync::LazyLock::new(|| {{ {rhs} }});\n\
+                 pub fn {name}() -> {ret} {{ (*{static_name}).clone() }}\n",
+                static_name = static_name,
+                name = name,
+                ret = ret_rs,
+                rhs = final_rhs,
             )
             .unwrap();
             return Ok(());

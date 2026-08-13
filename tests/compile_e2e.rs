@@ -14321,6 +14321,52 @@ fn main() => 0\n\
 }
 
 #[test]
+fn module_shared_state_primitive_const_compiles_v0_37_14() {
+    // v0.37.14 — un `let X: Int = N` (o Str/Float/Bool) top-level de un
+    // MÓDULO importado, referenciado por handlers HTTP/WS de ese módulo, es
+    // shared state y debe emitirse como `__FITZ_STATE_X: LazyLock<T>` +
+    // accessor `pub fn X()`, NO como bare `pub const X` (Paths 1a/1b). Antes:
+    // el const short-circuiteaba y retornaba, pero `gen_top_fn` materializaba
+    // `let X = (*__FITZ_STATE_X).clone()` → E0425 (`__FITZ_STATE_X` faltante) +
+    // E0530 (`let` shadowing `const`). El caso MAIN ya funcionaba (gen_http_main
+    // emite el LazyLock para todo state var, primitivos incluidos); solo el ctx
+    // de MÓDULO no corría esa maquinaria para primitivos.
+    let mod_src = "\
+let PAGE_SIZE: Int = 8\n\
+\n\
+fn double_page() -> Int {\n    \
+    return PAGE_SIZE * 2\n\
+}\n\
+\n\
+@get(\"/page/{n}\")\n\
+fn page(n: Int) -> Int {\n    \
+    return n * PAGE_SIZE + double_page()\n\
+}\n\
+";
+    let main_src = "\
+from pagemod import page\n\
+\n\
+@server(43978)\n\
+fn main() => 0\n\
+";
+    let stem = "module_shared_primitive_v0_37_14";
+    build_expect_ok_multi(stem, main_src, &[("pagemod.fitz", mod_src)]);
+    // El módulo debe emitir el static backing + accessor, NO un `pub const`.
+    let mod_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/pagemod.rs", stem));
+    if mod_rs.exists() {
+        let content = std::fs::read_to_string(&mod_rs).expect("leer pagemod.rs generado");
+        assert!(
+            content.contains("static __FITZ_STATE_PAGE_SIZE: std::sync::LazyLock<i64>"),
+            "esperaba el LazyLock backing `__FITZ_STATE_PAGE_SIZE` en pagemod.rs"
+        );
+        assert!(
+            !content.contains("pub const PAGE_SIZE"),
+            "no esperaba un bare `pub const PAGE_SIZE` (shared state → LazyLock)"
+        );
+    }
+}
+
+#[test]
 fn admin_cross_module_role_field_via_provider_module_imports_v0_37_3() {
     // v0.37.3 — `@admin`/`@requires` require the `@auth_provider`'s User
     // type to have a `role: Str` field. Before this fix, the cross-module
