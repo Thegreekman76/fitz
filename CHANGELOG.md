@@ -9,6 +9,36 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.38.0] — 2026-08-13 — `.fitzv`: atributos booleanos condicionales (`checked={expr}`, gotcha #6)
+
+Cierra el gotcha #6 del DSL `.fitzv` (Form B). Un atributo booleano condicional
+—`checked={expr}` / `disabled={expr}` con llave SIN comillas— está presente en
+el DOM **sii `expr` es truthy** (el modelo de boolean-attribute de HTML).
+Distinto del `checked="{expr}"` CON comillas (siempre presente, valor
+stringificado). Antes el único camino era emitir las dos variantes con
+`{#if checked}<input checked/>{#else}<input/>{/if}`. Sin impacto en el codegen
+`.fitz` clásico ni en el LSP; el grammar del `.fitzv` vive en la extensión de
+fitz-liveviews.
+
+### Added
+
+- **`attr={boolExpr}` — atributo booleano condicional en `.fitzv`.** Llave sin
+  comillas tras `=` → presente-sii-truthy. Cubre `checked`/`disabled`/
+  `selected`/`readonly`/`required`/… sin whitelist: la sintaxis + el requisito
+  `Bool` en el checker son el gate. Los eventos (`@click=…`) siguen exigiendo
+  comillas. Full-stack: **parser** (`Attr::BoolInterpolation`, brace-balanced),
+  **expand** (`ExpandedAttr::BoolInterpolation`), **checker** (el expr debe ser
+  `Bool`, misma regla que un `{#if}`; ve el scope de un `{#for}` envolvente),
+  **SSR** (baja a una if-expresión Fitz `if (cond) { "checked" } else { "" }`),
+  **WASM** (build con `set_attribute`, y en un componente keep-node el patch
+  reactivo togglea `set_attribute` / `remove_attribute` in-place — único
+  primitivo web-sys nuevo). Rechaza el bool attr sobre un `<Child />` (prop
+  dinámico, zona de reactividad sin terminar) y sobre un `<slot>` con mensajes
+  claros. Byte-compat: los `.fitzv` sin bool attrs emiten idéntico (los ~24
+  `examples/view/` regeneran byte-a-byte). Ejemplo nuevo `examples/view/
+  bool-attr/` (keep-node, compila a WASM real) + smoke. 15 tests nuevos
+  (parser/expand/check/SSR/WASM). Bump 0.37.17 → 0.38.0.
+
 ## [v0.37.17] — 2026-08-13 — `.fitzv`: comillas dobles anidadas en valores de atributo
 
 Cierra el gotcha #1 del DSL `.fitzv` (item P4 de la auditoría, máximo DX de

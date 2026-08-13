@@ -1504,6 +1504,53 @@ impl<'a> HtmlParser<'a> {
         }
         self.advance(); // `=`
         self.skip_ws_inside_tag();
+        // Form B (gotcha #6) — an UNQUOTED brace after `=` binds a
+        // conditional boolean attribute: `checked={expr}`. The attribute
+        // is present in the DOM iff `expr` is truthy (the HTML
+        // boolean-attribute model). Distinct from the QUOTED
+        // `checked="{expr}"`, which is always-present with a stringified
+        // value. Events (`@click=…`) must stay quoted, so exclude `@`.
+        if self.peek() == Some('{') && !name.starts_with('@') {
+            self.advance(); // `{`
+            let mut expr = String::new();
+            let mut depth = 1_usize;
+            loop {
+                match self.peek() {
+                    None => {
+                        return Err(ViewParseError {
+                            message: format!(
+                                "unmatched `{{` in boolean attribute `{name}` — expected `}}`"
+                            ),
+                            line: start_line,
+                            column: start_col,
+                        });
+                    }
+                    Some('{') => {
+                        depth += 1;
+                        expr.push('{');
+                        self.advance();
+                    }
+                    Some('}') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            self.advance();
+                            break;
+                        }
+                        expr.push('}');
+                        self.advance();
+                    }
+                    Some(c) => {
+                        expr.push(c);
+                        self.advance();
+                    }
+                }
+            }
+            return Ok(Attr::BoolInterpolation {
+                name,
+                expr_raw: expr.trim().to_string(),
+                loc: Loc::new(start_line, start_col),
+            });
+        }
         if self.peek() != Some('"') {
             return Err(ViewParseError {
                 message: format!("attribute `{name}` value must be double-quoted in the POC"),
@@ -1729,6 +1776,17 @@ fn build_slot(
                 return Err(ViewParseError {
                     message: format!(
                         "`<slot>` does not accept event bindings; `@{event_name}` is not allowed"
+                    ),
+                    line,
+                    column,
+                });
+            }
+            Attr::BoolInterpolation {
+                name: attr_name, ..
+            } => {
+                return Err(ViewParseError {
+                    message: format!(
+                        "`<slot>` does not accept conditional boolean attributes — `{attr_name}={{…}}` is not allowed"
                     ),
                     line,
                     column,
@@ -3163,6 +3221,102 @@ mod tests {
             bare_count, 3,
             "expected 3 bare boolean attrs; got {:?}",
             input
+        );
+    }
+
+    // Form B (gotcha #6, v0.38.0) — conditional boolean attribute
+    // `checked={expr}` (unquoted brace) parses as Attr::BoolInterpolation.
+
+    fn first_input_attrs(src: &str) -> Vec<Attr> {
+        let file = parse(src).expect("parse ok");
+        let tmpl = file.components[0]
+            .template
+            .as_ref()
+            .expect("template present");
+        fn find(nodes: &[TemplateNode]) -> Option<&Vec<Attr>> {
+            for n in nodes {
+                if let TemplateNode::Element {
+                    tag,
+                    attrs,
+                    children,
+                    ..
+                } = n
+                {
+                    if tag == "input" {
+                        return Some(attrs);
+                    }
+                    if let Some(a) = find(children) {
+                        return Some(a);
+                    }
+                }
+            }
+            None
+        }
+        find(&tmpl.roots).expect("input element present").clone()
+    }
+
+    #[test]
+    fn bool_attr_parses_as_bool_interpolation_v0_38_0() {
+        let attrs = first_input_attrs(
+            "component X { state { done: Bool = false }\n  <template><input checked={done} /></template> }",
+        );
+        assert!(
+            attrs.iter().any(
+                |a| matches!(a, Attr::BoolInterpolation { name, expr_raw, .. }
+                if name == "checked" && expr_raw == "done")
+            ),
+            "esperaba BoolInterpolation checked=done, got: {attrs:?}"
+        );
+    }
+
+    #[test]
+    fn bool_attr_with_complex_expr_v0_38_0() {
+        let attrs = first_input_attrs(
+            "component X { state { n: Int = 0 }\n  <template><input disabled={n > 0} /></template> }",
+        );
+        assert!(
+            attrs.iter().any(
+                |a| matches!(a, Attr::BoolInterpolation { name, expr_raw, .. }
+                if name == "disabled" && expr_raw == "n > 0")
+            ),
+            "esperaba BoolInterpolation disabled con expr `n > 0`, got: {attrs:?}"
+        );
+    }
+
+    #[test]
+    fn bool_attr_mixed_with_static_and_quoted_v0_38_0() {
+        // A bool attr sitting between a static and a quoted-interp attr
+        // parses cleanly, and the quoted `checked="{x}"` stays a normal
+        // (always-present, stringified) Interpolation — disjoint syntax.
+        let attrs = first_input_attrs(
+            "component X { state { done: Bool = false, cls: Str = \"\" }\n  <template><input type=\"checkbox\" checked={done} class=\"{cls}\" /></template> }",
+        );
+        assert!(
+            attrs.iter().any(|a| matches!(a, Attr::Static { name, value, .. } if name == "type" && value == "checkbox")),
+            "esperaba type static, got: {attrs:?}"
+        );
+        assert!(
+            attrs
+                .iter()
+                .any(|a| matches!(a, Attr::BoolInterpolation { name, .. } if name == "checked")),
+            "esperaba checked BoolInterpolation, got: {attrs:?}"
+        );
+        assert!(
+            attrs
+                .iter()
+                .any(|a| matches!(a, Attr::Interpolation { name, .. } if name == "class")),
+            "esperaba class Interpolation (quoted queda stringify), got: {attrs:?}"
+        );
+    }
+
+    #[test]
+    fn bool_attr_unmatched_brace_is_error_v0_38_0() {
+        let src = "component X { state { done: Bool = false }\n  <template><input checked={done /></template> }";
+        let err = parse(src).expect_err("unmatched brace en bool attr debe fallar");
+        assert!(
+            err.message.contains("unmatched `{`") && err.message.contains("checked"),
+            "esperaba error de unmatched brace nombrando checked, got: {}",
+            err.message
         );
     }
 

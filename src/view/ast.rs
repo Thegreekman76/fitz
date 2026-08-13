@@ -242,6 +242,16 @@ pub enum Attr {
         expr_raw: String,
         loc: Loc,
     },
+    /// A conditional boolean attribute: `checked={expr}` (unquoted
+    /// brace). The attribute is present in the DOM iff `expr` is truthy
+    /// (the HTML boolean-attribute model — `checked` / `disabled` /
+    /// `selected` / …). Distinct from the QUOTED `checked="{expr}"`,
+    /// which is always-present with a stringified value.
+    BoolInterpolation {
+        name: String,
+        expr_raw: String,
+        loc: Loc,
+    },
     Event {
         event_name: String,
         handler_raw: String,

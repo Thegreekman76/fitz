@@ -4066,6 +4066,52 @@ fn emit_element(
                     ));
                 }
             }
+            // Form B (gotcha #6) — conditional boolean attribute
+            // `checked={expr}`: present in the DOM iff `expr` is truthy.
+            // Build: `set_attribute(name, "")` when the cond holds, else
+            // leave it off. Keep-node: stash the element and, on a later
+            // state change, toggle presence in place with
+            // `set_attribute` / `remove_attribute` (the only new web-sys
+            // primitive this feature needs).
+            ExpandedAttr::BoolInterpolation { name, expr, .. } => {
+                let cond =
+                    lower_cond_expr(expr, ctx.state_names, &ctx.locals).map_err(|mut e| {
+                        e.context = format!(
+                            "conditional boolean attribute `{}` of element `<{}>` in component `{}`",
+                            name, tag, ctx.component_name
+                        );
+                        e
+                    })?;
+                writeln!(
+                    out,
+                    "        if {} {{ {}.set_attribute({}, \"\").unwrap(); }}",
+                    cond,
+                    var,
+                    rust_string_literal(name)
+                )
+                .unwrap();
+                if ctx.keep.is_some() {
+                    let k = ctx.keep_index();
+                    let field = format!("__kattr_{}", k);
+                    writeln!(
+                        out,
+                        "        *self.{}.borrow_mut() = Some({}.clone());",
+                        field, var
+                    )
+                    .unwrap();
+                    let accum = ctx.keep.as_mut().unwrap();
+                    accum
+                        .fields
+                        .push((field.clone(), "web_sys::Element".to_string()));
+                    accum.patch.push(format!(
+                        "        if let Some(__el) = self.{}.borrow().as_ref() {{ if {} {{ let _ = __el.set_attribute({}, \"\"); }} else {{ let _ = __el.remove_attribute({}); }} }}",
+                        field,
+                        cond,
+                        rust_string_literal(name),
+                        rust_string_literal(name)
+                    ));
+                }
+            }
         }
     }
 
@@ -4213,6 +4259,21 @@ fn emit_element_adopt(
                 if let Some(key) = name.strip_prefix("data-flv-value-") {
                     value_keys.push(key.to_string());
                 }
+                if ctx.keep.is_some() {
+                    let k = ctx.keep_index();
+                    writeln!(
+                        out,
+                        "        *self.__kattr_{}.borrow_mut() = Some({}.clone());",
+                        k, el
+                    )
+                    .unwrap();
+                }
+            }
+            // Form B (gotcha #6) — conditional boolean attribute. The
+            // server painted the attribute (or not) already; adopt just
+            // stashes the keep-node handle so a later state change can
+            // toggle it in place. Index stays aligned with the build walk.
+            ExpandedAttr::BoolInterpolation { .. } => {
                 if ctx.keep.is_some() {
                     let k = ctx.keep_index();
                     writeln!(
@@ -11102,6 +11163,41 @@ component Card {
                 r#".set_attribute("style", &format!("width: {}%", (*self.pct.borrow()))).unwrap();"#
             ),
             "mixed attr interp must lower to a format! set_attribute:\n{out}"
+        );
+    }
+
+    // ---- Form B (gotcha #6, v0.38.0): conditional boolean attribute ----
+
+    #[test]
+    fn bool_attr_wasm_build_sets_attribute_when_truthy_v0_38_0() {
+        // Naive component: build emits `if <cond> { el.set_attribute(name,"") }`.
+        let src = r#"component App {
+  state { done: Bool = false }
+  <template><input type="checkbox" checked={done} /></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(r#"if (*self.done.borrow()) {"#)
+                && out.contains(r#".set_attribute("checked", "").unwrap();"#),
+            "bool attr must build-set the attribute only when truthy:\n{out}"
+        );
+    }
+
+    #[test]
+    fn bool_attr_wasm_keep_node_toggles_set_remove_v0_38_0() {
+        // A value-input component uses keep-node reconciliation, so the bool
+        // attr stashes a `__kattr` handle and the patch toggles presence in
+        // place via set_attribute / remove_attribute.
+        let src = r#"component App {
+  state { done: Bool = false, txt: Str = "" }
+  event edit() { txt = payload["value"] }
+  <template><input value="{txt}" checked={done} @change="edit" /></template>
+}"#;
+        let out = emit_component(&parse_expand(src).components[0]).unwrap();
+        assert!(
+            out.contains(r#"let _ = __el.set_attribute("checked", "");"#)
+                && out.contains(r#"let _ = __el.remove_attribute("checked");"#),
+            "keep-node patch must toggle set/remove for the bool attr:\n{out}"
         );
     }
 

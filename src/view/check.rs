@@ -172,6 +172,7 @@ pub fn check_with_imported_components(
                     check_template_for_iters(component, template, &import_stmts, &mut errors);
                     check_template_interpolations(component, template, &import_stmts, &mut errors);
                     check_template_if_conds(component, template, &import_stmts, &mut errors);
+                    check_template_bool_attrs(component, template, &import_stmts, &mut errors);
                 }
             }
         }
@@ -437,6 +438,116 @@ fn check_template_if_conds(
     }
 }
 
+/// Collect every conditional boolean attribute (`checked={expr}`,
+/// Form B / gotcha #6) with its enclosing `{#for}` scope. Mirrors
+/// `collect_if_conds` but scans element attrs for `BoolInterpolation`.
+fn collect_bool_attrs<'a>(
+    nodes: &'a [ExpandedTemplateNode],
+    out: &mut Vec<BoolAttrRef<'a>>,
+    for_scope: &mut Vec<ForBinding<'a>>,
+) {
+    for node in nodes {
+        match node {
+            ExpandedTemplateNode::Text(_)
+            | ExpandedTemplateNode::Interpolation { .. }
+            | ExpandedTemplateNode::Slot { .. }
+            | ExpandedTemplateNode::ChildComponent { .. } => {}
+            ExpandedTemplateNode::Element {
+                attrs, children, ..
+            } => {
+                for attr in attrs {
+                    if let ExpandedAttr::BoolInterpolation { name, expr, loc } = attr {
+                        out.push(BoolAttrRef {
+                            name,
+                            expr,
+                            loc: *loc,
+                            for_scope: for_scope.clone(),
+                        });
+                    }
+                }
+                collect_bool_attrs(children, out, for_scope);
+            }
+            ExpandedTemplateNode::If {
+                children,
+                else_children,
+                ..
+            } => {
+                collect_bool_attrs(children, out, for_scope);
+                if let Some(else_kids) = else_children {
+                    collect_bool_attrs(else_kids, out, for_scope);
+                }
+            }
+            ExpandedTemplateNode::For {
+                var,
+                iter,
+                children,
+                ..
+            } => {
+                for_scope.push(ForBinding {
+                    var: var.as_str(),
+                    iter,
+                });
+                collect_bool_attrs(children, out, for_scope);
+                for_scope.pop();
+            }
+        }
+    }
+}
+
+/// Check every conditional boolean attribute (`checked={expr}`): its
+/// expression must be `Bool` (or a gradual/`Bool?` compatible type),
+/// same rule as a `{#if}` condition — the attribute is present iff the
+/// expression is truthy. Parallel to `check_template_if_conds`.
+fn check_template_bool_attrs(
+    component: &ExpandedComponent,
+    template: &ExpandedTemplate,
+    imports: &[Stmt],
+    errors: &mut Vec<CheckError>,
+) {
+    let mut attrs: Vec<BoolAttrRef<'_>> = Vec::new();
+    let mut for_scope: Vec<ForBinding<'_>> = Vec::new();
+    collect_bool_attrs(&template.roots, &mut attrs, &mut for_scope);
+
+    for (idx, attr_ref) in attrs.iter().enumerate() {
+        let check_var = format!("__view_bool_attr_check_{}", idx);
+        let expr_span = attr_ref.expr.span();
+        let program = build_env_program(
+            component,
+            imports,
+            None,
+            Some(Stmt::Assign {
+                target: AssignTarget::Ident(check_var, Span::ZERO),
+                type_: None,
+                value: attr_ref.expr.clone(),
+                is_let: true,
+                span: Span::ZERO,
+            }),
+            &attr_ref.for_scope,
+        );
+        let (env, type_info, _defs, classic_errors) = check_program(&program);
+        for e in classic_errors {
+            errors.push(CheckError {
+                message: e.message,
+                loc: attr_ref.loc,
+                context: attr_ref.context(component),
+            });
+        }
+        if let Some(ty) = type_info.type_at(expr_span) {
+            if !is_bool_compatible(ty) {
+                errors.push(CheckError {
+                    message: format!(
+                        "conditional boolean attribute `{}={{…}}` must evaluate to Bool; type `{}` is not compatible (the attribute is present iff the expression is truthy)",
+                        attr_ref.name,
+                        ty.display(&env),
+                    ),
+                    loc: attr_ref.loc,
+                    context: attr_ref.context(component),
+                });
+            }
+        }
+    }
+}
+
 /// Check every `{#for x in iter}` iter expression. Each iter must
 /// type-check in the (state + outer-for-scope)-seeded env; the
 /// classic `Stmt::For` checker will additionally reject non-iterable
@@ -507,6 +618,25 @@ impl IfCondRef<'_> {
         format!(
             "component '{}': template `{{#if}}` condition",
             component.name
+        )
+    }
+}
+
+/// Reference to a conditional boolean attribute (`checked={expr}`),
+/// carrying the enclosing `{#for}` scope so the Bool check sees the
+/// loop bindings (a bool attr can sit on an element inside a `{#for}`).
+struct BoolAttrRef<'a> {
+    name: &'a str,
+    expr: &'a Expr,
+    loc: Loc,
+    for_scope: Vec<ForBinding<'a>>,
+}
+
+impl BoolAttrRef<'_> {
+    fn context(&self, component: &ExpandedComponent) -> String {
+        format!(
+            "component '{}': conditional boolean attribute `{}={{…}}`",
+            component.name, self.name,
         )
     }
 }
@@ -2896,6 +3026,67 @@ component B {
             e.message.contains("must evaluate to Bool") && e.message.contains("Str"),
             "message = {:?}",
             e.message
+        );
+    }
+
+    // Form B (gotcha #6, v0.38.0) — conditional boolean attribute
+    // `checked={expr}`: the expr must be Bool, same rule as a `{#if}` cond.
+
+    #[test]
+    fn bool_attr_bool_state_field_ok_v0_38_0() {
+        let src = r#"component X {
+  state { done: Bool = false }
+  <template><input checked={done} /></template>
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "Bool bool-attr must pass silently"
+        );
+    }
+
+    #[test]
+    fn bool_attr_binop_is_bool_ok_v0_38_0() {
+        let src = r#"component X {
+  state { n: Int = 0 }
+  <template><input disabled={n > 0} /></template>
+}"#;
+        assert!(check_str(src).is_empty(), "n > 0 is Bool");
+    }
+
+    #[test]
+    fn bool_attr_non_bool_type_reports_error_v0_38_0() {
+        let src = r#"component X {
+  state { title: Str = "" }
+  <template><input checked={title} /></template>
+}"#;
+        let errs = check_str(src);
+        assert_eq!(errs.len(), 1, "one bool-attr type error expected: {errs:?}");
+        let e = &errs[0];
+        assert!(
+            e.context.contains("conditional boolean attribute `checked"),
+            "context = {:?}",
+            e.context
+        );
+        assert!(
+            e.message.contains("must evaluate to Bool") && e.message.contains("Str"),
+            "message = {:?}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn bool_attr_inside_for_sees_loop_var_v0_38_0() {
+        // A bool attr on an element inside `{#for b in flags}` sees the
+        // loop var — `b` (a `List<Bool>` element) is Bool, so it's valid.
+        // Exercises the `for_scope` path of the bool-attr check.
+        let src = r#"component X {
+  state { flags: List<Bool> = [] }
+  <template>{#for b in flags}<input checked={b} />{/for}</template>
+}"#;
+        assert!(
+            check_str(src).is_empty(),
+            "bool attr with Bool loop var must pass: {:?}",
+            check_str(src)
         );
     }
 

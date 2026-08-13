@@ -1856,6 +1856,27 @@ fn emit_attr_to_pieces(
             push_text(pieces, &format!("{name}=\"{value}\""));
             Ok(())
         }
+        // Form B (gotcha #6) — conditional boolean attribute
+        // `checked={expr}`: present in the DOM iff `expr` is truthy.
+        // Emit a Fitz if-as-expression that yields the bare attribute
+        // name (present) or "" (absent). A bare boolean attribute is
+        // valid HTML5 and matches the `{#if}checked{/if}` workaround's
+        // output. The unconditional leading space the element loop
+        // pushes before each attr is harmless when the attr is absent.
+        ExpandedAttr::BoolInterpolation { name, expr, .. } => {
+            let cond = format_fitz_expr_scoped(
+                expr,
+                state_field_names,
+                local_scope,
+                imported_names,
+                &component.name,
+                "conditional boolean attribute",
+            )?;
+            pieces.push(TemplatePiece::Expr(format!(
+                "if ({cond}) {{ \"{name}\" }} else {{ \"\" }}"
+            )));
+            Ok(())
+        }
         ExpandedAttr::Event {
             event_name,
             handler_name,
@@ -5506,6 +5527,50 @@ component X { state { n: Int = 0 } <template><div class="row {cls(n)}">x</div></
         assert!(
             out.contains("value=\"{state.q}\""),
             "full interpolation must still rewrite to state.q:\n{out}"
+        );
+    }
+
+    // ---- Form B (gotcha #6, v0.38.0): conditional boolean attribute ----
+    // `checked={expr}` lowers to a Fitz if-as-expression yielding the bare
+    // attribute name (present) or "" (absent) — present-iff-truthy.
+
+    #[test]
+    fn bool_attr_ssr_emits_conditional_present_v0_38_0() {
+        let file = parse_expand(
+            r#"component X { state { done: Bool = false } <template><input checked={done} /></template> }"#,
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("if (state.done) { \"checked\" } else { \"\" }"),
+            "bool attr must lower to a present-iff-truthy if-expr:\n{out}"
+        );
+    }
+
+    #[test]
+    fn bool_attr_ssr_binop_cond_v0_38_0() {
+        let file = parse_expand(
+            r#"component X { state { n: Int = 0 } <template><input disabled={n > 0} /></template> }"#,
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        // `format_fitz_expr_scoped` parenthesises a BinOp, so the cond
+        // arrives as `(state.n > 0)` inside the emitter's own `if (...)`.
+        assert!(
+            out.contains("(state.n > 0)) { \"disabled\" } else { \"\" }"),
+            "binop cond must rewrite the state field and yield `disabled`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn bool_attr_ssr_inside_for_uses_loop_var_v0_38_0() {
+        // Inside `{#for b in flags}` the loop var `b` is NOT rewritten to
+        // `state.b` (it shadows state), so the cond stays `b`.
+        let file = parse_expand(
+            r#"component X { state { flags: List<Bool> = [] } <template>{#for b in flags}<input checked={b} />{/for}</template> }"#,
+        );
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("if (b) { \"checked\" } else { \"\" }"),
+            "loop var must stay bare (not state.b):\n{out}"
         );
     }
 

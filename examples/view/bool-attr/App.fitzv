@@ -1,0 +1,44 @@
+// Form B (gotcha #6) — conditional boolean attributes on the client-WASM
+// target. `checked={expr}` / `disabled={expr}` (unquoted brace) make the
+// attribute present in the DOM iff `expr` is truthy — the HTML
+// boolean-attribute model. Distinct from the QUOTED `checked="{expr}"`, which
+// is always present with a stringified value.
+//
+// This is a keep-node component (it has a live `@input` form control over a
+// static template), so a state change PATCHES in place: the emitter stashes
+// each bool-attr element and, on re-render, toggles presence with
+// `set_attribute` / `remove_attribute` instead of rebuilding the subtree.
+//
+//   - `disabled={name == ""}` on the Submit button — disabled until you type.
+//   - `checked={name == ""}` on the checkbox — ticked only while empty.
+//
+// Type into the input and both attributes toggle reactively; clear it and
+// they come back. No `{#if}` two-variant workaround needed.
+
+component ToggleForm {
+  state {
+    name: Str = ""
+  }
+
+  event on_name() { name = payload["value"] }
+
+  <template>
+    <div class="form">
+      <h1>Conditional boolean attributes</h1>
+
+      <label class="row">
+        <span>Your name</span>
+        <input @input="on_name" value="{name}" placeholder="Type here" autocomplete="off" />
+      </label>
+
+      <button disabled={name == ""}>Submit</button>
+
+      <label class="row">
+        <input type="checkbox" checked={name == ""} readonly />
+        <span>empty (auto-checked while the field is blank)</span>
+      </label>
+
+      <p class="echo">Hello, {name}!</p>
+    </div>
+  </template>
+}

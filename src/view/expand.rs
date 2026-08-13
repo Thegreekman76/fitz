@@ -335,6 +335,15 @@ pub enum ExpandedAttr {
         segments: Vec<AttrValueSegment>,
         loc: Loc,
     },
+    /// Conditional boolean attribute: `checked={expr}` (unquoted
+    /// brace). Present in the DOM iff `expr` is truthy — the checker
+    /// requires `expr` to be `Bool`. SSR emits the attribute name
+    /// conditionally; WASM `set_attribute`/`remove_attribute` reactively.
+    BoolInterpolation {
+        name: String,
+        expr: fast::Expr,
+        loc: Loc,
+    },
     /// `@click="handler"` — the value must be a bare identifier that
     /// names one of the enclosing component's `event ...` handlers.
     /// Cross-checking that identity happens in Phase 11.2.b (checker).
@@ -1080,6 +1089,23 @@ fn expand_child_component(
                     loc: *aloc,
                 });
             }
+            // A conditional boolean attribute (`checked={expr}`) is a plain
+            // HTML boolean-attribute feature, not a child-component prop.
+            // Passing one to a `<Child />` would be a dynamic prop, which is
+            // the unfinished reactivity zone — reject with a clear pointer.
+            RawAttr::BoolInterpolation {
+                name, loc: aloc, ..
+            } => {
+                return Err(ExpandError {
+                    message: format!(
+                        "conditional boolean attribute `{name}={{…}}` is only for plain HTML \
+                         elements, not a `<{tag} />` prop. Pass a Bool prop with \
+                         `{name}=\"{{expr}}\"` (quoted) instead."
+                    ),
+                    loc: *aloc,
+                    context: "template (child component composition)".to_string(),
+                });
+            }
         }
     }
 
@@ -1218,6 +1244,19 @@ fn expand_attr(attr: &RawAttr, component_name: &str, tag: &str) -> ExpandResult<
             let ctx = format!("component '{component_name}': <{tag}> attr '{name}' interpolation");
             let expr = parse_expr_at(expr_raw, *loc, ctx)?;
             Ok(ExpandedAttr::Interpolation {
+                name: name.clone(),
+                expr,
+                loc: *loc,
+            })
+        }
+        RawAttr::BoolInterpolation {
+            name,
+            expr_raw,
+            loc,
+        } => {
+            let ctx = format!("component '{component_name}': <{tag}> boolean attr '{name}={{…}}'");
+            let expr = parse_expr_at(expr_raw, *loc, ctx)?;
+            Ok(ExpandedAttr::BoolInterpolation {
                 name: name.clone(),
                 expr,
                 loc: *loc,
@@ -1658,6 +1697,44 @@ mod tests {
             }
             other => panic!("expected Interpolation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bool_attr_expands_to_bool_interpolation_v0_38_0() {
+        // Form B (gotcha #6): `checked={done}` → ExpandedAttr::BoolInterpolation
+        // whose expr is the parsed Fitz expression.
+        let src = r#"component X {
+  state { done: Bool = false }
+  <template><input checked={done} /></template>
+}"#;
+        let file = expand_str(src).expect("expand ok con bool attr");
+        let node = &file.components[0].template.as_ref().unwrap().roots[0];
+        let ExpandedTemplateNode::Element { attrs, .. } = node else {
+            panic!("expected <input>");
+        };
+        assert!(
+            matches!(&attrs[0], ExpandedAttr::BoolInterpolation { name, expr, .. }
+                if name == "checked" && matches!(expr, fast::Expr::Ident(n, _) if n == "done")),
+            "esperaba BoolInterpolation checked=done, got: {:?}",
+            attrs[0]
+        );
+    }
+
+    #[test]
+    fn bool_attr_on_child_component_rejects_v0_38_0() {
+        // A conditional boolean attribute is a plain-HTML feature; passing it
+        // to a `<Child />` is a dynamic prop (the unfinished reactivity zone),
+        // so expand rejects with a clear pointer to the quoted-prop workaround.
+        let src = r#"component X {
+  state { done: Bool = false }
+  <template><Card checked={done} /></template>
+}"#;
+        let err = expand_str(src).expect_err("bool attr sobre child debe rechazar");
+        assert!(
+            err.message.contains("plain HTML") && err.message.contains("checked"),
+            "esperaba error citando plain HTML + checked, got: {}",
+            err.message
+        );
     }
 
     #[test]
