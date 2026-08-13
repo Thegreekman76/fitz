@@ -2970,6 +2970,26 @@ mod tests {
         );
     }
 
+    // ---- gotcha #1: nested quotes in an attribute interp --------
+
+    #[test]
+    fn ssr_emits_attr_interp_with_nested_quotes_v0_37_17() {
+        // An attribute interpolation whose expr carries a string
+        // literal (i18n in an attribute, `placeholder="{t(locale,
+        // "ph.key")}"`) emits the call verbatim in the SSR render fn —
+        // no `ph_*` helper needed. `locale` is scoped to `state.locale`
+        // and the string literal survives the attribute-value capture.
+        let file = parse_expand(
+            r#"from i18n import t
+component X { state { locale: Str = "es" } <template><input placeholder="{t(locale, "ph.key")}" /></template> }"#,
+        );
+        let out = emit_module_ssr(&file).unwrap();
+        assert!(
+            out.contains("state.locale") && out.contains("\"ph.key\""),
+            "esperaba `state.locale` + el string `\"ph.key\"` en el emit SSR:\n{out}"
+        );
+    }
+
     // ---- SSR-1: hydration state script -----------------------
 
     #[test]

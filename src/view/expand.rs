@@ -1635,12 +1635,42 @@ mod tests {
     }
 
     #[test]
+    fn nested_quotes_full_interp_expands_to_parsed_call_v0_37_17() {
+        // gotcha #1 end-to-end through expand: `placeholder="{t(l, "x")}"`
+        // → ExpandedAttr::Interpolation whose expr is the parsed Fitz call
+        // (the nested `"` survived the attribute-value capture).
+        let src = r#"component X {
+  state { l: Str = "es" }
+  <template><input placeholder="{t(l, "dep.ph")}" /></template>
+}"#;
+        let file = expand_str(src).expect("expand ok con comillas anidadas");
+        let node = &file.components[0].template.as_ref().unwrap().roots[0];
+        let ExpandedTemplateNode::Element { attrs, .. } = node else {
+            panic!("expected <input>");
+        };
+        match &attrs[0] {
+            ExpandedAttr::Interpolation { name, expr, .. } => {
+                assert_eq!(name, "placeholder");
+                assert!(
+                    matches!(expr, fast::Expr::Call { .. }),
+                    "esperaba un Call parseado `t(l, \"dep.ph\")`, got: {expr:?}"
+                );
+            }
+            other => panic!("expected Interpolation, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mixed_attribute_unmatched_brace_is_an_error() {
         let src = r#"component X {
   state { kind: Str = "ok" }
   <template><span class="badge-{kind">x</span></template>
 }"#;
-        let err = expand_str(src).expect_err("unmatched brace must error");
+        // v0.37.17 — con el state machine de `read_attr_value`, un `{`
+        // sin cerrar en el valor de un atributo se rechaza en PARSE
+        // (antes pasaba el parse como Static y el error salía en expand).
+        // Sigue siendo un error claro que menciona la llave sin cerrar.
+        let err = view_parse(src).expect_err("unmatched brace must error");
         assert!(
             err.message.contains("unmatched"),
             "error should mention the unmatched brace: {}",

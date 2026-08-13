@@ -1538,12 +1538,58 @@ impl<'a> HtmlParser<'a> {
     }
 
     fn read_attr_value(&mut self) -> ViewParseResult<String> {
+        // v0.37.17 — gotcha #1: an attribute value may contain a Fitz
+        // interpolation `{expr}` whose expression has string literals
+        // with double quotes (`placeholder="{t(locale, "dep.ph")}"`).
+        // A naive "close on the first `\"`" terminated the value early
+        // and produced "expected attribute name". We track `{...}`
+        // brace depth and a nested-string flag: only a `"` at brace
+        // depth 0 (outside any interpolation) closes the attribute; a
+        // `"` inside a `{...}` toggles the nested-string state and is
+        // kept verbatim (so the `{`/`}` inside that string are literal
+        // and the downstream classic Fitz parser re-lexes it). Values
+        // without a nested `"` behave identically to before
+        // (byte-compatible: `brace_depth` only matters once a nested
+        // quote appears).
         let mut s = String::new();
+        let mut brace_depth: i32 = 0;
+        let mut in_expr_str = false;
         loop {
             match self.peek() {
-                Some('"') => {
+                // Top-level `"` closes the attribute value.
+                Some('"') if brace_depth == 0 => {
                     self.advance();
                     return Ok(s);
+                }
+                // A `"` inside an interpolation opens/closes a nested
+                // string literal; keep it and do NOT terminate.
+                Some('"') => {
+                    in_expr_str = !in_expr_str;
+                    s.push('"');
+                    self.advance();
+                }
+                // Inside an interpolation, preserve a Fitz escape (`\"`,
+                // `\\`, ...) verbatim so `parse_expr_at` re-lexes it.
+                // Only active within braces to stay byte-compatible with
+                // static HTML values (where `\` is a literal char).
+                Some('\\') if brace_depth > 0 => {
+                    s.push('\\');
+                    self.advance();
+                    if let Some(n) = self.advance() {
+                        s.push(n);
+                    }
+                }
+                // `{`/`}` change interpolation depth, but not inside a
+                // nested string (there they are literal).
+                Some('{') if !in_expr_str => {
+                    brace_depth += 1;
+                    s.push('{');
+                    self.advance();
+                }
+                Some('}') if !in_expr_str && brace_depth > 0 => {
+                    brace_depth -= 1;
+                    s.push('}');
+                    self.advance();
                 }
                 Some('\n') => {
                     return Err(ViewParseError {
@@ -1559,8 +1605,19 @@ impl<'a> HtmlParser<'a> {
                     self.advance();
                 }
                 None => {
+                    // A run-away brace depth at EOF means the interpolation
+                    // `{...}` in the value was never closed (e.g.
+                    // `class="badge-{kind"` — the `"` looked like a nested
+                    // string quote because it sat inside the open `{`).
+                    // Report it as an unmatched brace (clearer, and keeps
+                    // the pre-v0.37.17 error contract for that input).
+                    let message = if brace_depth > 0 {
+                        "unmatched `{` in attribute value — the interpolation was not closed with `}`"
+                    } else {
+                        "unterminated attribute value — expected closing `\"`"
+                    };
                     return Err(ViewParseError {
-                        message: "unterminated attribute value — expected closing `\"`".into(),
+                        message: message.into(),
                         line: self.line,
                         column: self.column,
                     });
@@ -2021,6 +2078,68 @@ mod tests {
                 );
             }
             _ => panic!("expected <input/> element"),
+        }
+    }
+
+    #[test]
+    fn attr_value_nested_double_quotes_full_interp_v0_37_17() {
+        // gotcha #1 — a `"` inside the `{...}` interpolation of an
+        // attribute value must NOT terminate the value early.
+        let src = r#"component X {
+  <template><input placeholder="{t(locale, "dep.ph")}" /></template>
+}"#;
+        let file = parse(src).expect("parse ok con comillas anidadas en atributo");
+        let input = &file.components[0].template.as_ref().unwrap().roots[0];
+        match input {
+            TemplateNode::Element { attrs, .. } => {
+                assert!(
+                    matches!(&attrs[0], Attr::Interpolation { name, expr_raw, .. }
+                    if name == "placeholder" && expr_raw == "t(locale, \"dep.ph\")"),
+                    "esperaba Interpolation con expr_raw completo, got: {:?}",
+                    attrs[0]
+                );
+            }
+            _ => panic!("expected <input/> element"),
+        }
+    }
+
+    #[test]
+    fn attr_value_nested_quotes_mixed_preserves_full_value_v0_37_17() {
+        // Mixed literal + interpolation with nested quotes → Static
+        // whose value survives whole (expand turns it into
+        // MixedInterpolation later).
+        let src = r#"component X {
+  <template><span title="Hi {t(l, "x")}">y</span></template>
+}"#;
+        let file = parse(src).expect("parse ok mixed con comillas");
+        let span = &file.components[0].template.as_ref().unwrap().roots[0];
+        match span {
+            TemplateNode::Element { attrs, .. } => {
+                assert!(
+                    matches!(&attrs[0], Attr::Static { name, value, .. }
+                    if name == "title" && value == "Hi {t(l, \"x\")}"),
+                    "esperaba Static con el valor completo, got: {:?}",
+                    attrs[0]
+                );
+            }
+            _ => panic!("expected <span> element"),
+        }
+    }
+
+    #[test]
+    fn attr_value_plain_static_unchanged_v0_37_17() {
+        // Byte-compat: un valor sin comillas anidadas parsea idéntico.
+        let src = r#"component X {
+  <template><div class="card"></div></template>
+}"#;
+        let file = parse(src).unwrap();
+        let div = &file.components[0].template.as_ref().unwrap().roots[0];
+        match div {
+            TemplateNode::Element { attrs, .. } => {
+                assert!(matches!(&attrs[0], Attr::Static { name, value, .. }
+                    if name == "class" && value == "card"));
+            }
+            _ => panic!("expected <div> element"),
         }
     }
 

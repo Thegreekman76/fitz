@@ -9,6 +9,44 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.17] — 2026-08-13 — `.fitzv`: comillas dobles anidadas en valores de atributo
+
+Cierra el gotcha #1 del DSL `.fitzv` (item P4 de la auditoría, máximo DX de
+autoría). Sin sintaxis nueva; sin impacto en LSP/grammar (el template es
+opaco al lexer de `.fitzv`).
+
+### Fixed
+
+- **`placeholder="{t(locale, "dep.ph")}"` — comillas dobles anidadas en el
+  VALOR de un atributo — ahora parsea.** El `"` interno (parte de un string
+  literal Fitz dentro de la interpolación `{...}`) se interpretaba como el
+  `"` de cierre del atributo → "expected attribute name". El view parser
+  (`read_attr_value`) ahora trackea la profundidad de `{...}` + un flag de
+  string anidado: solo un `"` a brace-depth 0 cierra el atributo; un `"`
+  dentro de una interpolación abre/cierra un string anidado y se preserva
+  verbatim (el parser clásico de Fitz lo re-lexea downstream vía
+  `parse_expr_at`). **Borra la categoría de helpers `ph_*`/`tip_*`** que
+  fitz-liveviews necesitaba para meter i18n (`t(locale, "key")`) en atributos
+  — ahora se escribe inline. Byte-compatible: un valor sin `"` anidado parsea
+  idéntico (el brace-depth solo importa cuando aparece un `"` anidado). Un `{`
+  sin cerrar en un valor ahora se rechaza en PARSE (antes en expand) con
+  "unmatched `{`" — más temprano y con mensaje claro. Fix contenido en una
+  sola fn (`src/view/parser.rs`), sin tocar el emisor SSR/WASM (consumen
+  `ExpandedAttr::Interpolation`/`MixedInterpolation` sin cambios). Tests:
+  parser (nested full-interp / mixed / static byte-compat / unmatched),
+  expand (→ `Expr::Call` parseado), SSR emit (i18n en atributo emite la
+  llamada verbatim).
+
+### Diferido
+
+- **Gotcha #6** (`{expr}` bare en posición de atributo / atributos booleanos
+  condicionales `checked`/`disabled`) — requiere una variante de atributo
+  nueva + reactividad WASM (`setAttribute`/`removeAttribute` en el patch); el
+  workaround `{#if checked}<input checked/>{#else}<input/>{/if}` es barato y
+  no genera sprawl de helpers. Y el edge `}` literal dentro de un string en
+  la interpolación (`{f("}")}`) sigue mal-contado por `split_mixed_attr_value`
+  / `extract_full_interp` (niche, sin uso real).
+
 ## [v0.37.16] — 2026-08-13 — Migraciones: red de seguridad para renames de columna sin anotar
 
 Cierra el ítem P1 de la auditoría (seguridad de datos). El path seguro
