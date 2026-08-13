@@ -1345,6 +1345,103 @@ pub fn count_by_severity(changes: &[Change]) -> (usize, usize, usize) {
     (safe, risky, destructive)
 }
 
+/// v0.37.16 — a probable column rename the user forgot to annotate.
+/// A name-based diff cannot distinguish a rename from a genuine
+/// drop-then-add, so a rename WITHOUT `@renamed_from` is emitted as
+/// `DROP COLUMN old` + `ADD COLUMN new` — which LOSES the column's
+/// data silently. We surface the suspicion (never auto-rename: a
+/// legit drop+add of the same type would be misclassified) so the
+/// user can add `@renamed_from("old")` and get a safe
+/// `ALTER TABLE ... RENAME COLUMN` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbableRename {
+    /// Quoted, schema-qualified table name for display
+    /// (`"users"` or `"analytics"."events"`).
+    pub table_display: String,
+    pub old_column: String,
+    pub new_column: String,
+    /// The SQL type shared by the dropped and added column (the
+    /// signal that makes this look like a rename).
+    pub sql_type: String,
+}
+
+/// v0.37.16 — heuristic detection of probable column renames in a
+/// diff. For each table, a dropped column is paired with an added
+/// column when they share the same canonical `sql_type` (looking up
+/// the dropped column's type in `current`, since `Change::DropColumn`
+/// only carries the name). Each dropped/added column is used in at
+/// most one pair. When `@renamed_from` IS present the diff emits a
+/// `RenameColumn` (no drop+add), so this returns nothing — no false
+/// warning for already-annotated renames.
+pub fn detect_probable_renames(changes: &[Change], current: &Schema) -> Vec<ProbableRename> {
+    use std::collections::HashMap;
+    type Key = (String, String); // (schema, table)
+    let key_of = |tr: &TableRef| -> Key {
+        (
+            tr.schema.as_deref().unwrap_or("public").to_string(),
+            tr.name.clone(),
+        )
+    };
+
+    let mut drops: HashMap<Key, Vec<String>> = HashMap::new();
+    let mut adds: HashMap<Key, Vec<&Column>> = HashMap::new();
+    for c in changes {
+        match c {
+            Change::DropColumn { table, column } => {
+                drops.entry(key_of(table)).or_default().push(column.clone());
+            }
+            Change::AddColumn { table, column } => {
+                adds.entry(key_of(table)).or_default().push(column);
+            }
+            _ => {}
+        }
+    }
+
+    let mut hints: Vec<ProbableRename> = Vec::new();
+    for (key, dropped) in &drops {
+        let Some(added) = adds.get(key) else { continue };
+        // Look up the current table to type the dropped columns.
+        let Some(cur_table) = current.tables.iter().find(|t| {
+            (t.schema.as_deref().unwrap_or("public"), t.name.as_str())
+                == (key.0.as_str(), key.1.as_str())
+        }) else {
+            continue;
+        };
+        let mut used_add = vec![false; added.len()];
+        // Deterministic pairing: sort dropped names.
+        let mut dropped_sorted: Vec<&String> = dropped.iter().collect();
+        dropped_sorted.sort();
+        for old_name in dropped_sorted {
+            let Some(old_col) = cur_table.columns.iter().find(|c| &c.name == old_name) else {
+                continue;
+            };
+            if let Some((i, add_col)) = added
+                .iter()
+                .enumerate()
+                .find(|(i, ac)| !used_add[*i] && ac.sql_type == old_col.sql_type)
+            {
+                used_add[i] = true;
+                let table_display = if key.0 == "public" {
+                    format!("\"{}\"", key.1)
+                } else {
+                    format!("\"{}\".\"{}\"", key.0, key.1)
+                };
+                hints.push(ProbableRename {
+                    table_display,
+                    old_column: old_name.clone(),
+                    new_column: add_col.name.clone(),
+                    sql_type: old_col.sql_type.clone(),
+                });
+            }
+        }
+    }
+    hints.sort_by(|a, b| {
+        (a.table_display.as_str(), a.old_column.as_str())
+            .cmp(&(b.table_display.as_str(), b.old_column.as_str()))
+    });
+    hints
+}
+
 /// Compares `current` (snapshot via [`introspect_schema`]) with
 /// `target` (snapshot via [`schema_from_program`]) and emits the
 /// ordered list of [`Change`] needed to synchronize.
@@ -1364,7 +1461,10 @@ pub fn count_by_severity(changes: &[Change]) -> (usize, usize, usize) {
 ///   seen as `DROP COLUMN name` + `ADD COLUMN full_name`, losing
 ///   the data. The user explicitly marks the rename with
 ///   `@renamed_from("old")` on the field/type so that the diff
-///   emits `RENAME COLUMN`/`RENAME TABLE` preserving data.
+///   emits `RENAME COLUMN`/`RENAME TABLE` preserving data. As a
+///   safety net (v0.37.16), [`detect_probable_renames`] flags a
+///   `DROP + ADD` of the same type as a likely un-annotated rename
+///   so `fitz db diff` can warn before the data is lost.
 /// - **Direct `AlterColumnType` without USING** — if the data
 ///   does NOT convert to the new type, Postgres fails. The user
 ///   must edit the migration to add `USING (col::new_type)` or a
@@ -4633,6 +4733,129 @@ type Plain {
                 "rename should not emit ADD/DROP COLUMN; got: {c:?}"
             );
         }
+    }
+
+    // v0.37.16 — probable-rename safety net.
+    #[test]
+    fn detect_probable_rename_same_type_pairs_drop_and_add() {
+        // current: users(id, old_email text); target: users(id, email text)
+        // WITHOUT `@renamed_from` → the diff is a DROP + ADD (data loss).
+        let mut current_users = table_users();
+        current_users.columns = vec![
+            col("id", "bigint", false, true),
+            col("old_email", "text", false, false),
+        ];
+        let mut target_users = table_users();
+        target_users.columns = vec![
+            col("id", "bigint", false, true),
+            col("email", "text", false, false),
+        ];
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        // Sanity: sin anotación es drop+add (el footgun que detectamos).
+        assert!(changes
+            .iter()
+            .any(|c| matches!(c, Change::DropColumn { .. })));
+        assert!(changes
+            .iter()
+            .any(|c| matches!(c, Change::AddColumn { .. })));
+        let hints = detect_probable_renames(&changes, &current);
+        assert_eq!(hints.len(), 1, "esperaba 1 probable rename, got: {hints:?}");
+        assert_eq!(hints[0].old_column, "old_email");
+        assert_eq!(hints[0].new_column, "email");
+        assert_eq!(hints[0].sql_type, "text");
+        assert_eq!(hints[0].table_display, "\"users\"");
+    }
+
+    #[test]
+    fn detect_probable_rename_different_type_no_hint() {
+        // Distinto tipo → drop+add genuino, no un rename.
+        let mut current_users = table_users();
+        current_users.columns = vec![
+            col("id", "bigint", false, true),
+            col("active", "boolean", false, false),
+        ];
+        let mut target_users = table_users();
+        target_users.columns = vec![
+            col("id", "bigint", false, true),
+            col("visits", "bigint", false, false),
+        ];
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        let hints = detect_probable_renames(&changes, &current);
+        assert!(
+            hints.is_empty(),
+            "distinto tipo no debe sugerir rename, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn detect_probable_rename_annotated_emits_no_hint() {
+        // Con `@renamed_from` el diff emite RenameColumn (no drop+add),
+        // así que no hay par que detectar → cero falsos positivos.
+        let mut current_users = table_users();
+        current_users.columns = vec![
+            col("id", "bigint", false, true),
+            col("old_email", "text", false, false),
+        ];
+        let mut target_users = table_users();
+        target_users.columns = vec![
+            col("id", "bigint", false, true),
+            Column {
+                name: "email".to_string(),
+                sql_type: "text".to_string(),
+                nullable: false,
+                default: None,
+                is_primary: false,
+                renamed_from: Some("old_email".to_string()),
+            },
+        ];
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        let hints = detect_probable_renames(&changes, &current);
+        assert!(
+            hints.is_empty(),
+            "un rename anotado no debe generar hint, got: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn detect_probable_rename_drop_only_no_hint() {
+        // Drop sin ningún add en la tabla → no es rename.
+        let mut current_users = table_users();
+        current_users.columns = vec![
+            col("id", "bigint", false, true),
+            col("legacy", "text", false, false),
+        ];
+        let mut target_users = table_users();
+        target_users.columns = vec![col("id", "bigint", false, true)];
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        let hints = detect_probable_renames(&changes, &current);
+        assert!(
+            hints.is_empty(),
+            "drop sin add no es rename, got: {hints:?}"
+        );
     }
 
     #[test]

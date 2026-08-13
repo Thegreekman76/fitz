@@ -9,6 +9,35 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.37.16] — 2026-08-13 — Migraciones: red de seguridad para renames de columna sin anotar
+
+Cierra el ítem P1 de la auditoría (seguridad de datos). El path seguro
+para renombrar columnas ya existía (`@renamed_from("old")` → `ALTER TABLE
+... RENAME COLUMN`, v0.10.17), pero un rename **sin** la anotación se
+emite como `DROP COLUMN old` + `ADD COLUMN new`, que pierde los datos de
+la columna en silencio. Ahora `fitz db diff` lo detecta y avisa
+específicamente. Sin cambios de lenguaje; sin impacto en LSP/grammar.
+
+### Added
+
+- **`fitz db diff` avisa de renames de columna probables.** Cuando el diff
+  contiene un `DROP COLUMN` + un `ADD COLUMN` del **mismo tipo SQL** en la
+  misma tabla, emite (en TODOS los paths, no solo `--check-destructive`) un
+  `⚠ possible column rename(s)` que nombra el par exacto (`old` → `new`,
+  tipo) y apunta a `@renamed_from("old")` para un `ALTER TABLE ... RENAME
+  COLUMN` que preserva los datos. Es un warning **no bloqueante** (un
+  drop+add genuino del mismo tipo es un falso positivo aceptable — el aviso
+  se puede ignorar). Nunca auto-renombra: un name-based diff no puede
+  distinguir un rename de un drop+add legítimo, así que la señal se
+  superficializa para que el usuario decida. Nueva fn pública
+  `migrations::detect_probable_renames(changes, current) -> Vec<ProbableRename>`
+  (empareja cada columna dropeada con una agregada del mismo `sql_type`,
+  cada una en a lo sumo un par); wired en `db_diff_cmd`. Con `@renamed_from`
+  presente el diff emite `RenameColumn` (no drop+add) → cero falsos
+  positivos. Validado end-to-end contra Postgres real (rename sin anotar →
+  ⚠ + DROP/ADD; con `@renamed_from` → RENAME COLUMN sin warning). 4 unit
+  tests `migrations::tests::detect_probable_rename_*`.
+
 ## [v0.37.15] — 2026-08-13 — Codegen: `for kv in m` sobre Map en `fitz build`
 
 Cierra un gap de **paridad `fitz run` ↔ `fitz build`** encontrado en la

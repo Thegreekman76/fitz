@@ -6216,6 +6216,26 @@ fn db_diff_cmd(
         eprintln!("✓ schema in sync — no pending changes");
         return;
     }
+    // v0.37.16 — probable-rename safety net. A rename WITHOUT
+    // `@renamed_from` is emitted as DROP + ADD of the same type,
+    // which loses the column's data silently. Surface it on EVERY
+    // path (not just `--check-destructive`) so the user can annotate
+    // before applying the SQL. Non-blocking (a genuine drop+add of
+    // the same type is a legit — if noisy — false positive).
+    let rename_hints = migrations::detect_probable_renames(&changes, &current);
+    if !rename_hints.is_empty() {
+        eprintln!(
+            "⚠ possible column rename(s) — a DROP + ADD of the same type LOSES the column's data:"
+        );
+        for h in &rename_hints {
+            eprintln!(
+                "    • {}: `{}` dropped, `{}` added (both {}). If this is a rename, add \
+                 `@renamed_from(\"{}\")` to the `{}` field for a safe \
+                 `ALTER TABLE ... RENAME COLUMN` (preserves data).",
+                h.table_display, h.old_column, h.new_column, h.sql_type, h.old_column, h.new_column
+            );
+        }
+    }
     // v0.10.31 (Tier A.1) — classification + guard. Aborts if
     // there are destructive changes and `--allow-destructive`
     // was not passed.
