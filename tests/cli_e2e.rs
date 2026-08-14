@@ -3003,6 +3003,108 @@ fn phase_11_6_d_broken_fitzv_import_surfaces_view_pipeline_error_with_path() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Phase 11 (gotcha #7) — `fitz check` view-parses `.fitzv` entries
+// ---------------------------------------------------------------------------
+//
+// Before this, `fitz check` always ran the classic lexer, so a `.fitzv`
+// entry exploded with a classic-lexer error and view type/parse errors
+// only surfaced in `run`/`build`. Now a `.fitzv` entry routes through the
+// view pipeline (parse → expand → type-check) with the same exit-code
+// contract as the classic path.
+
+#[test]
+fn gotcha7_check_valid_fitzv_entry_is_clean() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "Counter.fitzv",
+        "component Counter {\n  state { count: Int = 0 }\n  event bump() { count = count + 1 }\n  <template><div><span>{count}</span><button @click=\"bump\">+</button></div></template>\n}\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["check", "Counter.fitzv"], root);
+    assert_eq!(code, 0, "valid .fitzv must check clean: stderr = {stderr}");
+    assert!(
+        stdout.contains("no type errors"),
+        "stdout = {stdout} / stderr = {stderr}"
+    );
+}
+
+#[test]
+fn gotcha7_check_fitzv_with_type_error_exits_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // State field default `Str` assigned to an `Int` field.
+    write_file(
+        root,
+        "Bad.fitzv",
+        "component Bad {\n  state { count: Int = \"not an int\" }\n  <template><span>{count}</span></template>\n}\n",
+    );
+    let (_stdout, stderr, code) = run_fitz(&["check", "Bad.fitzv"], root);
+    assert_ne!(code, 0, "a view type error must exit non-zero");
+    assert!(
+        stderr.contains("view error(s)"),
+        "stderr must report view errors: {stderr}"
+    );
+    assert!(
+        stderr.contains("count") && stderr.contains("Int"),
+        "the view checker's message must surface: {stderr}"
+    );
+}
+
+#[test]
+fn gotcha7_check_fitzv_with_parse_error_names_the_view_stage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // Unterminated interpolation in the template. The classic lexer
+    // would reject the `component`/`<template>` shape with a generic
+    // error; the view path reports it as a *view parse* error — the
+    // exact gap gotcha #7 names.
+    write_file(
+        root,
+        "Broken.fitzv",
+        "component Broken {\n  state { x: Int = 0 }\n  <template><div>{x</template>\n}\n",
+    );
+    let (_stdout, stderr, code) = run_fitz(&["check", "Broken.fitzv"], root);
+    assert_ne!(code, 0, "a view parse error must exit non-zero");
+    assert!(
+        stderr.contains("view parse"),
+        "error must be attributed to the view parse stage, not the classic \
+         lexer: {stderr}"
+    );
+}
+
+#[test]
+fn gotcha7_check_cross_file_child_composition_resolves_under_check() {
+    // App.fitzv composes a `<Card />` that lives in a SEPARATE sibling
+    // `.fitzv`, imported with `from Card import Card`. The check must
+    // resolve the imported component surface (dep-aware, same loaders as
+    // `fitz build --target wasm-client`) and validate the composition —
+    // exit 0 proves cross-file resolution runs under `check`, not just
+    // under `build`.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "Card.fitzv",
+        "component Card {\n  state { title: Str = \"\" }\n  <template><section class=\"card\"><h2>{title}</h2></section></template>\n}\n",
+    );
+    write_file(
+        root,
+        "App.fitzv",
+        "from Card import Card\n\ncomponent App {\n  state { heading: Str = \"cards\" }\n  <template><main><h1>{heading}</h1><Card title=\"Patagonia\" /><Card title=\"El Chalten\" /></main></template>\n}\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["check", "App.fitzv"], root);
+    assert_eq!(
+        code, 0,
+        "cross-file composition must check clean: stderr = {stderr}"
+    );
+    assert!(
+        stdout.contains("no type errors"),
+        "stdout = {stdout} / stderr = {stderr}"
+    );
+}
+
 // ===================================================================
 // Phase 11.6.e continuation (§9.bb, 2026-07-16) — cross-module
 // `@live_component` auto-inject.

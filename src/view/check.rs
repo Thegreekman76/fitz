@@ -71,6 +71,27 @@ pub struct CheckError {
     pub context: String,
 }
 
+impl CheckError {
+    /// Build a `CheckError` from an upstream *syntax* failure (view
+    /// parse or expand). `fitz check` folds parse + expand +
+    /// type-check into a single uniform `Vec<CheckError>` so the CLI
+    /// reports them the same way; `context` names the stage that
+    /// rejected (`"view parse"` / `"view expand"`) so the user knows
+    /// which one to look at.
+    pub fn syntax(
+        message: impl Into<String>,
+        line: usize,
+        column: usize,
+        context: impl Into<String>,
+    ) -> Self {
+        CheckError {
+            message: message.into(),
+            loc: Loc { line, column },
+            context: context.into(),
+        }
+    }
+}
+
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

@@ -9,6 +9,33 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.39.0] — 2026-08-14 — `fitz check` view-parsea `.fitzv` (gotcha #7)
+
+Cierra el gotcha #7 —el último ítem del catálogo del DSL `.fitzv`. Cuando el
+entry (el `[bin].main` del manifest, o `fitz check App.fitzv` explícito) es un
+`.fitzv`, `fitz check` corre el pipeline de view (parse → expand → type-check)
+en vez del lexer clásico. Antes un `.fitzv` explotaba con un error de lexer
+clásico y los errores de view (parse + tipos) solo aparecían en `run`/`build`.
+
+La composición cross-file `<Child />` se resuelve **dep-aware** (mismos loaders
+transitivos + `DepRegistry` que `fitz build --target wasm-client`), así que un
+resultado de `check` predice el de `build` (`from fitz_liveviews.ui.Badge import
+Badge` resuelve por la dependencia, no solo por sibling). Contrato de exit code
+idéntico al clásico: `✓ … — no type errors` (exit 0) / `✗ … — N view error(s):`
+(exit 1). Alcance MVP: solo el entry (los imports transitivos SÍ se validan);
+descubrir TODO `.fitzv` bajo `src/` queda como fast-follow.
+
+Interno: helper NO-gateado `view::check_view_source(source, base_dir,
+dep_registry) -> Vec<CheckError>` + constructor `CheckError::syntax(...)` que
+pliega parse/expand en el mismo `Vec`; dispatch por extensión en el arm `Check`
+de `src/main.rs` (`check_view_file` sibling de `check_file`). Sin cambios al
+path clásico `.fitz` ni a los emitters de view (byte-compat: los ~25 ejemplos
+`examples/view/` regeneran idénticos). **Cierra el catálogo de gotchas del
+`.fitzv` entero** (#1 v0.37.17, #6 v0.38.0, #7 v0.39.0). Verificación: lib 4097
+(default, +3) / 4261 (lsp); cli_e2e 127 (+4 `gotcha7_*`); fmt + clippy
+`-D warnings` default+lsp limpios; view smoke 25/25 + byte-compat. Bump
+`Cargo.toml` + `editors/vscode/package.json` 0.38.0 → 0.39.0.
+
 ## [v0.38.0] — 2026-08-13 — `.fitzv`: atributos booleanos condicionales (`checked={expr}`, gotcha #6)
 
 Cierra el gotcha #6 del DSL `.fitzv` (Form B). Un atributo booleano condicional

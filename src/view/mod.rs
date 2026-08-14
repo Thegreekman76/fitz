@@ -160,6 +160,77 @@ pub fn transform_fitzv_source(
     })
 }
 
+/// Phase 11 (gotcha #7) — type-check a `.fitzv` source and return
+/// every view error found, WITHOUT lowering to classic Fitz or
+/// emitting code. This is what `fitz check` runs when the entry is a
+/// `.fitzv`, so a view type error surfaces at `check` time instead of
+/// only in `run`/`build`.
+///
+/// Pipeline: `view::parse` → `view::expand` →
+/// `view::check_with_imported_components`. Parse and expand each
+/// short-circuit into a single `CheckError` (you can't type-check
+/// what you can't parse); the type-check pass accumulates every
+/// error. All three stages fold into one uniform `Vec<CheckError>`
+/// (via [`CheckError::syntax`] for the two syntax stages) so the
+/// caller reports them the same way.
+///
+/// Cross-file `<Child />` composition is resolved *dep-aware* — the
+/// same transitive + `DepRegistry` loaders the `fitz build
+/// --target wasm-client` path uses ([`build_wasm_client`] in
+/// `src/main.rs`) — so a `check` result matches what a build would
+/// see (`from fitz_liveviews.ui.Badge import Badge` resolves through
+/// the dependency, not just a flat sibling). Component loading is
+/// best-effort: a broken import degrades to an empty registry (the
+/// unknown-component error then surfaces from the checker itself)
+/// rather than aborting the whole check.
+///
+/// `base_dir` anchors sibling / dep resolution (the entry `.fitzv`'s
+/// directory); `dep_registry` maps `dep-name → lib_entry` from the
+/// manifest (empty in single-file mode → sibling-only resolution).
+///
+/// This does NOT load imported nominals or helper `fn`s — those are
+/// needed only by the WASM emitter, not by the checker.
+pub fn check_view_source(
+    source: &str,
+    base_dir: &std::path::Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> Vec<CheckError> {
+    let raw = match parse(source) {
+        Ok(r) => r,
+        Err(e) => {
+            return vec![CheckError::syntax(
+                format!("view parse error: {}", e.message),
+                e.line,
+                e.column,
+                "view parse",
+            )];
+        }
+    };
+
+    let expanded = match expand(&raw) {
+        Ok(x) => x,
+        Err(e) => {
+            return vec![CheckError::syntax(
+                format!("view expand error: {} ({})", e.message, e.context),
+                e.loc.line,
+                e.loc.column,
+                "view expand",
+            )];
+        }
+    };
+
+    // Cross-file `<Child />` — mirror the build path: walk the `.fitzv`
+    // import graph (dep-aware) and load every reachable imported
+    // component surface so composition validates against the real
+    // shape. Best-effort: a load failure degrades to an empty registry.
+    let all_imports =
+        collect_transitive_view_imports_with_deps(&expanded.imports, base_dir, dep_registry);
+    let imported = load_imported_components_with_deps(&all_imports, base_dir, dep_registry)
+        .unwrap_or_default();
+
+    check_with_imported_components(&expanded, imported.components())
+}
+
 /// True when `path` ends in a case-insensitive `.fitzv`
 /// extension. Used by the loader entry points to decide whether
 /// to route the source through [`transform_fitzv_source`] before
@@ -368,6 +439,60 @@ mod loader_bridge_tests {
                 || err.message.contains("view emit_ssr error"),
             "error must name at least one of the four stages:\n{}",
             err.message
+        );
+    }
+
+    #[test]
+    fn check_view_source_clean_component_returns_no_errors() {
+        // gotcha #7 — a well-formed `.fitzv` produces zero view
+        // errors (what `fitz check` reports as "no type errors").
+        let src = r#"component Counter {
+  state { count: Int = 0 }
+  event bump() { count = count + 1 }
+  <template><div><span>{count}</span><button @click="bump">+</button></div></template>
+}"#;
+        let deps = crate::manifest::DepRegistry::new();
+        let errs = check_view_source(src, std::path::Path::new("."), &deps);
+        assert!(errs.is_empty(), "expected clean check, got: {errs:?}");
+    }
+
+    #[test]
+    fn check_view_source_parse_error_is_a_single_view_parse_check_error() {
+        // An unterminated interpolation short-circuits into ONE
+        // CheckError attributed to the "view parse" stage — proving
+        // `fitz check` reports it as a view error, not a classic
+        // lexer explosion.
+        let src = "component Broken {\n  state { x: Int = 0 }\n  <template><div>{x</template>\n}\n";
+        let deps = crate::manifest::DepRegistry::new();
+        let errs = check_view_source(src, std::path::Path::new("."), &deps);
+        assert_eq!(errs.len(), 1, "parse error should be a single error");
+        assert_eq!(errs[0].context, "view parse");
+        assert!(
+            errs[0].message.contains("view parse error"),
+            "message: {}",
+            errs[0].message
+        );
+    }
+
+    #[test]
+    fn check_view_source_type_error_surfaces_the_checker_message() {
+        // A state field default of the wrong type flows through the
+        // checker (not the syntax short-circuit), so `context` names
+        // the component/field, not a syntax stage.
+        let src =
+            "component Bad {\n  state { count: Int = \"nope\" }\n  <template><span>{count}</span></template>\n}\n";
+        let deps = crate::manifest::DepRegistry::new();
+        let errs = check_view_source(src, std::path::Path::new("."), &deps);
+        assert!(!errs.is_empty(), "type error must surface");
+        assert!(
+            errs[0].context.contains("component 'Bad'"),
+            "context should name the component/field: {}",
+            errs[0].context
+        );
+        assert!(
+            errs[0].message.contains("Int"),
+            "message should mention the declared type: {}",
+            errs[0].message
         );
     }
 

@@ -16,7 +16,7 @@ use fitz::py_types;
 
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Phase 11.13 — bin-local dev server for `fitz dev`'s wasm-client
 // mode (static serving + live-reload WebSocket). Not part of the
@@ -752,14 +752,26 @@ fn main() {
         Commands::Check { file } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
-            // `fitz check` doesn't use the loader (the checker does
-            // not recurse into imported modules — the importer's
-            // names get typed as Any/nominal placeholders and real
-            // validation happens in `fitz run`/`build`). That's why
-            // `check_file` does not receive the dep_registry. If the
-            // checker ever wants to consume types from the imported
-            // module, wire it up here.
-            check_file(&resolved.entry);
+            if view::is_fitzv_extension(&resolved.entry) {
+                // Phase 11 (gotcha #7) — the entry is a `.fitzv`
+                // single-file component. Run the view pipeline (parse →
+                // expand → type-check) instead of the classic lexer,
+                // resolving cross-file `<Child />` imports dep-aware
+                // exactly as `fitz build --target wasm-client` does, so a
+                // `check` result predicts a build result. Imports
+                // transitively reachable from the entry ARE validated;
+                // discovering every non-entry `.fitzv` under `src/` is a
+                // fast-follow (a2).
+                let dep_registry = dep_registry_from(&resolved);
+                check_view_file(&resolved.entry, &dep_registry);
+            } else {
+                // Classic `.fitz`. The checker does not recurse into
+                // imported modules — the importer's names get typed as
+                // Any/nominal placeholders and real validation happens
+                // in `fitz run`/`build`. That's why `check_file` does
+                // not receive the dep_registry.
+                check_file(&resolved.entry);
+            }
         }
         Commands::Openapi { file } => {
             openapi_file(&file);
@@ -2181,6 +2193,35 @@ fn check_file(path: &PathBuf) {
         println!("✓ {} — no type errors", path.display());
     } else {
         eprintln!("✗ {} — {} type error(s):", path.display(), errors.len());
+        for e in &errors {
+            eprintln!("  {}", e);
+        }
+        std::process::exit(1);
+    }
+}
+
+/// `fitz check <file.fitzv>` — Phase 11 (gotcha #7). Runs the view
+/// pipeline (parse → expand → type-check) over a single-file
+/// component and reports view errors with the SAME exit-code contract
+/// as [`check_file`] (0 = clean, 1 = errors) so CI greps and existing
+/// checks keep working. Cross-file `<Child />` imports resolve
+/// dep-aware (via `dep_registry`), matching the
+/// `fitz build --target wasm-client` path so a `check` failure
+/// predicts a build failure.
+fn check_view_file(path: &Path, dep_registry: &manifest::DepRegistry) {
+    let source = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error leyendo {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+    let base_dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let errors = view::check_view_source(&source, &base_dir, dep_registry);
+    if errors.is_empty() {
+        println!("✓ {} — no type errors", path.display());
+    } else {
+        eprintln!("✗ {} — {} view error(s):", path.display(), errors.len());
         for e in &errors {
             eprintln!("  {}", e);
         }
