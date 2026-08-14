@@ -37546,7 +37546,13 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
     match (a, b) {
         (Type::Int, Type::Float) | (Type::Float, Type::Int) => Ok(Type::Float),
         (Type::Null, other) | (other, Type::Null) if !matches!(other, Type::Null) => {
-            Ok(Type::Nullable(Box::new(other.clone())))
+            // If `other` is already Nullable, stay Nullable (Null is
+            // subsumed by `T?` — avoids a spurious `T??`).
+            if matches!(other, Type::Nullable(_)) {
+                Ok(other.clone())
+            } else {
+                Ok(Type::Nullable(Box::new(other.clone())))
+            }
         }
         (Type::Nullable(inner), other) | (other, Type::Nullable(inner)) if **inner == *other => {
             Ok(Type::Nullable(inner.clone()))

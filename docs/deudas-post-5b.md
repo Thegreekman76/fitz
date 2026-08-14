@@ -3881,9 +3881,44 @@ unificada `Value`).
 
 ~115 LoC totales en `src/codegen.rs` (delta + tests inline).
 
-### B16 — match arms con tipos incompatibles (`i64` vs `()`) en posición no-Nullable
+### B16 — match arms con tipos incompatibles (`i64` vs `()`) en posición no-Nullable — **CERRADO v0.39.0**
 
-**Descubierto** durante el sub-paso 2 de la cosecha al reproducir fitzwatch. **NO se cierra en el sub-paso 5** — el fix correcto vive en el checker (no es mecánico como B1/B9 etc.) y requiere discusión de UX (error proactivo del checker vs trade-off de over-trigger).
+> **Cierre (v0.39.0)**: la causa raíz real era una **inconsistencia
+> checker↔codegen** en el tipo de un `match`. El **checker tipaba el
+> match como el tipo del PRIMER arm** (`first`), mientras el **codegen
+> computa el LUB de los arms**. Con B7 (sub-paso 3) el codegen ya
+> envolvía en `Option` cuando algún arm es `Null`, así que el síntoma
+> original (`i64` vs `()`) desapareció, pero mutó a un nuevo mismatch:
+> `match r { Ok(v) => v, Err(e) => log.error(...) }` en una fn `-> Int`
+> pasaba `fitz check` (checker: match = `Int`, primer arm) pero rompía
+> `fitz build` con `E0308: expected i64, found Option<i64>` (codegen:
+> match = `Int?`). **Tres cambios coordinados**: (1) el checker
+> (`src/types.rs`, `Expr::Match`) tipa el match como el **LUB de todos
+> los arms** en vez del primero — los arms divergentes (`return`/`break`/
+> `continue`) se tipan `Any`, que `lub` cede al concreto, así el patrón
+> canónico `Ok(r) => r, Err(_) => return null` sigue tipando como `r`
+> (sin regresión); (2) `log.info/warn/error/debug(...)` se tipa `Null`
+> en el checker (antes `Any` vía el módulo `log: Any`), así el arm
+> contribuye `Null` al LUB y el match promueve a `T?` — nadie usa el
+> retorno de `log.X` (grep vacío en examples/tests/boilerplates); (3)
+> fix de un bug pre-existente del `lub` (checker Y codegen): `lub(T?,
+> Null)` devolvía `T??` en vez de `T?` (idempotencia — `Null` está
+> subsumido por `T?`), latente hasta que el match empezó a LUBear. Ahora
+> el mismatch sale en `fitz check` con mensaje claro (`` `return`
+> returns `Int?` but the function declares `Int` ``); el usuario lo
+> arregla con un sentinel (`{ log.error(...); 0 }`) o anotando `-> Int?`.
+> **Bug hermano cerrado en el mismo release**: el checker tipaba
+> `Stmt::ReturnStatus` (`return <status> { ... }`, el short-circuit HTTP)
+> como `Null` en vez de divergente — inconsistente con el codegen, que
+> ya lo trata como `!`. Latente hasta que el match empezó a LUBear; sin
+> el fix, `let user: User = match ... { Ok(u) => u, Err(_) => return 401
+> {...} }` (patrón canónico de auth/ws/cron) ensanchaba a `User?` y
+> rompía. Ahora los cuatro divergentes (Return/Break/Continue/
+> ReturnStatus) se tipan `Any` en el arm, igual que el codegen. 6 unit
+> tests `types::tests::b16_*` + verificación full (lib 4103 / lsp 4267,
+> smoke ~290 ejemplos verde, 10 boilerplates check, cli_e2e 127, fmt +
+> clippy default+lsp limpios). El texto de abajo queda como registro del
+> síntoma original.
 
 **Síntoma** (cargo build):
 ```
@@ -3932,7 +3967,7 @@ let n = match result {
 | **B13** | **`log.X` kwargs heterogéneos** | ~~Medium~~ | (n/a) | ✅ **NO REPRO en v0.17.0** (W18 lo cerró) | n/a |
 | **B14** | **(meta) match refine** | — | (helpers Result) | ✅ **CERRADO 2026-06-19** ~80 LoC + 4 unit tests | unit (cubre B4/B5/B6 + all-divergent) |
 | **B15** | **`.preload()` + FK Nullable** | 🔴 **Critical** | ❌ sin workaround | ✅ **CERRADO 2026-06-19** ~115 LoC + 3 unit + 1 E2E | sí |
-| **B16** | **match arms `i64` vs `()` E0308** | Low | ✅ `; <sentinel>` | abierta (sub-paso 7+) | sí |
+| **B16** | **match arms `i64` vs `()` E0308** | Low | ✅ `; <sentinel>` | ✅ **CERRADO v0.39.0** — checker tipa match como LUB de arms + `log.X` → `Null` + `lub(T?,Null)` idempotente; 5 unit tests | sí |
 
 **Plan de ataque sugerido** (orden por dependencias + impacto):
 

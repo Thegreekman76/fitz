@@ -9,6 +9,35 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.39.1] — 2026-08-14 — Bugfix B16: consistencia checker↔codegen en el tipo de un `match`
+
+Cierra la deuda **B16**. La causa raíz era una inconsistencia: el **checker
+tipaba un `match` como el tipo del PRIMER arm**, mientras el **codegen computa
+el LUB de los arms**. Con B7 (que ya envuelve en `Option` los arms `Null`) el
+síntoma original (`i64` vs `()`) mutó a un nuevo mismatch — `match r { Ok(v) =>
+v, Err(e) => log.error(...) }` en una fn `-> Int` pasaba `fitz check` (match =
+`Int`) pero rompía `fitz build` con un `E0308` opaco de rustc (`expected i64,
+found Option<i64>`, match = `Int?`).
+
+**Tres cambios coordinados en el checker (`src/types.rs`)**: (1) un `match`
+tipa como el **LUB de todos sus arms**, no el primero — los arms divergentes
+(`return`/`break`/`continue`/`return <status> {...}`) se tipan `Any`, que el
+LUB cede al concreto, así el patrón canónico `Ok(r) => r, Err(_) => return`
+sigue tipando como `r` (sin regresión); (2) `log.info/warn/error/debug(...)` se
+tipa `Null` (su retorno real) en vez de `Any`; (3) `return <status> { ... }` (el
+short-circuit HTTP, `Stmt::ReturnStatus`) se trata como divergente, igual que el
+codegen — antes era `Null`, latente hasta que el match empezó a LUBear. Más un
+fix del `lub` (checker + codegen): `lub(T?, Null)` devolvía `T??` en vez de `T?`
+(idempotencia — `Null` está subsumido por `T?`).
+
+Ahora el mismatch sale en **`fitz check` con mensaje claro** (`` `return`
+returns `Int?` but the function declares `Int` ``) en vez del `E0308` de rustc
+al buildear; el usuario lo arregla con un sentinel (`{ log.error(...); 0 }`) o
+anotando `-> Int?`. 6 unit tests `types::tests::b16_*`. Verificación full: lib
+4103 (default) / 4267 (lsp), smoke ~290 ejemplos verde, 10 boilerplates check,
+cli_e2e 127, fmt + clippy default+lsp limpios. Bump `Cargo.toml` +
+`editors/vscode/package.json` 0.39.0 → 0.39.1.
+
 ## [v0.39.0] — 2026-08-14 — `fitz check` view-parsea `.fitzv` (gotcha #7)
 
 Cierra el gotcha #7 —el último ítem del catálogo del DSL `.fitzv`. Cuando el

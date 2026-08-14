@@ -5460,6 +5460,37 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         }
                     }
                 }
+                // B16 (v0.39.0) — `log.info/warn/error/debug(...)` return
+                // `Null`. The `log` module is typed `Any` (refinable
+                // post-MVP), so without this the call would infer `Any`,
+                // and a match arm like `Err(e) => log.error(...)` LUBs with
+                // the other arm's `T` as `T` in the checker (Any yields to
+                // the concrete) but as `T?` in codegen (which types
+                // `log.X` as `Null`). That silent checker/codegen split
+                // only surfaced as an opaque rustc `E0308` at `fitz build`.
+                // Typing it as `Null` here makes the checker agree with
+                // codegen: the match promotes to `T?`, and the real
+                // mismatch (e.g. returning `T?` from a fn `-> T`) surfaces
+                // at `fitz check` with a clear message. Shadowing: only
+                // applies while `log` still resolves to the `Any` builtin
+                // (mirrors the `spawn` dispatch below).
+                if let Expr::Ident(obj_name, _) = object.as_ref() {
+                    if obj_name == "log"
+                        && matches!(field.as_str(), "info" | "warn" | "error" | "debug")
+                        && matches!(ctx.lookup_binding("log").map(|b| &b.ty), Some(Type::Any))
+                    {
+                        // Still infer each arg so errors inside them
+                        // (e.g. an undefined var in a kwarg) surface.
+                        for a in args {
+                            let inner = match a {
+                                Expr::NamedArg { value, .. } => value.as_ref(),
+                                other => other,
+                            };
+                            infer_expr(ctx, inner);
+                        }
+                        return Type::Null;
+                    }
+                }
                 // Fp.3 — for method calls with named args, exact
                 // checking requires knowing the method's param names
                 // (R.3 custom methods). For built-ins we don't support
@@ -5925,7 +5956,20 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // scrutinee `Result<T>`, x is T. For `Err(e)` the error
             // is fixed at Str. For Ident it's the whole scrutinee.
             // For literals/wildcard/range there is no bind.
-            let mut first: Option<Type> = None;
+            //
+            // B16 (v0.39.0) — the match types as the LUB of ALL its arms,
+            // not just the first one. Previously the checker returned the
+            // first arm's type, which diverged from the codegen (which
+            // already computes the LUB): e.g. `match r { Ok(v) => v,
+            // Err(e) => log.error(...) }` typed as `Int` in the checker
+            // but `Int?` in codegen (the `log.X(...)` arm is `Null`), so a
+            // real mismatch (returning `Int?` from a fn `-> Int`) only
+            // surfaced as an opaque rustc `E0308` at `fitz build`. Divergent
+            // arms (`return`/`break`/`continue`) type as `Any` here, and
+            // `lub` yields `Any` to the concrete, so the canonical
+            // `Ok(r) => r, Err(_) => return null` pattern still types as
+            // `r`'s type — no regression.
+            let mut arm_types: Vec<Type> = Vec::new();
             for arm in arms {
                 ctx.push_scope();
                 // Without own span on `MatchArm`/`Pattern` (S1 debt),
@@ -5988,7 +6032,17 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                                 t = Type::Any;
                             }
                         }
-                        Stmt::Break(..) | Stmt::Continue(..) => {
+                        Stmt::Break(..) | Stmt::Continue(..) | Stmt::ReturnStatus { .. } => {
+                            // B16 (v0.39.0) — `return <status> { ... }` (the
+                            // HTTP short-circuit) diverges just like
+                            // `return`/`break`/`continue`: it exits the
+                            // handler. Typing it `Any` keeps it out of the
+                            // arm LUB, so `let user: User = match ... {
+                            // Ok(u) => u, Err(_) => return 401 {...} }` still
+                            // types the match as `User` (not `User?`). The
+                            // codegen already treats `ReturnStatus` as
+                            // divergent; without this the checker disagreed
+                            // once the match started LUB-ing its arms.
                             check_stmt(ctx, stmt);
                             if is_last {
                                 t = Type::Any;
@@ -6003,9 +6057,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     }
                 }
                 ctx.pop_scope();
-                if first.is_none() {
-                    first = Some(t);
-                }
+                arm_types.push(t);
                 // W2 — update the flag AFTER processing the arm:
                 // the next arm can benefit from the refinement if
                 // THIS arm matched null.
@@ -6019,7 +6071,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if matches!(scrutinee, Type::Result { .. }) {
                 check_result_match_exhaustiveness(ctx, arms, *span);
             }
-            first.unwrap_or(Type::Any)
+            arm_types
+                .into_iter()
+                .reduce(|acc, t| lub(&acc, &t))
+                .unwrap_or(Type::Any)
         }
         Expr::Ok(inner, _) => {
             // Mini-batch Re+ — without context, E stays `Any` (the
@@ -6204,12 +6259,21 @@ fn lub(a: &Type, b: &Type) -> Type {
     {
         return Type::Float;
     }
-    // Null + T → T? (and symmetric).
+    // Null + T → T? (and symmetric). If T is already Nullable, stay
+    // Nullable (Null is subsumed by `T?` — avoids a spurious `T??`).
     if matches!(a, Type::Null) {
-        return Type::Nullable(Box::new(b.clone()));
+        return if matches!(b, Type::Nullable(_)) {
+            b.clone()
+        } else {
+            Type::Nullable(Box::new(b.clone()))
+        };
     }
     if matches!(b, Type::Null) {
-        return Type::Nullable(Box::new(a.clone()));
+        return if matches!(a, Type::Nullable(_)) {
+            a.clone()
+        } else {
+            Type::Nullable(Box::new(a.clone()))
+        };
     }
     // T + T? → T? (and symmetric): if the nullable's inner is equal
     // to the other, that's already the best we have.
@@ -16744,6 +16808,108 @@ mod tests {
             err: Box::new(Type::Str),
         };
         assert_eq!(lub(&a, &b), a);
+    }
+
+    // B16 (v0.39.0) — match types as the LUB of its arms; `lub` is
+    // idempotent for `Nullable(T) + Null`.
+
+    #[test]
+    fn b16_lub_nullable_plus_null_is_idempotent() {
+        // `Str? + Null` must stay `Str?`, NOT `Str??` (Null is subsumed).
+        let str_opt = Type::Nullable(Box::new(Type::Str));
+        assert_eq!(lub(&str_opt, &Type::Null), str_opt);
+        assert_eq!(lub(&Type::Null, &str_opt), str_opt);
+        // A bare T still promotes.
+        assert_eq!(
+            lub(&Type::Int, &Type::Null),
+            Type::Nullable(Box::new(Type::Int))
+        );
+    }
+
+    #[test]
+    fn b16_match_types_as_lub_of_arms_not_first() {
+        // `Ok(v) => v` (Int) + `Err(_) => null` (Null) → the match is
+        // `Int?`, not `Int` (the first arm). Previously the checker
+        // returned the first arm's type, diverging from codegen.
+        let ty = type_of_last_let(
+            "let r: Result<Int> = Ok(3)\n\
+             let n = match r { Ok(v) => v, Err(_) => null }\n",
+        );
+        assert_eq!(ty, Some(Type::Nullable(Box::new(Type::Int))));
+    }
+
+    #[test]
+    fn b16_canonical_divergent_arm_still_types_as_concrete() {
+        // The canonical `Ok(r) => r, Err(_) => return ...` pattern must
+        // still type as `r`'s concrete type — a divergent arm is `Any`,
+        // which `lub` yields to the concrete (no spurious widening).
+        let errs = errors_of(
+            "fn head(xs: List<Int>) -> Int {\n\
+             \x20 let r: Result<Int> = Ok(xs[0])\n\
+             \x20 let n = match r { Ok(v) => v, Err(_) => return 0 }\n\
+             \x20 return n + 1\n\
+             }\n",
+        );
+        assert!(
+            errs.is_empty(),
+            "canonical divergent match must not widen to Int?: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn b16_log_error_arm_in_non_nullable_return_is_a_clear_check_error() {
+        // `log.error(...)` returns Null, so a match with it as an arm is
+        // `Int?`; returning that from a fn `-> Int` must error at CHECK
+        // time (not as an opaque rustc E0308 at `fitz build`).
+        let errs = errors_of(
+            "fn classify(x: Int) -> Int {\n\
+             \x20 let r: Result<Int> = Ok(x)\n\
+             \x20 let n = match r { Ok(v) => v, Err(e) => log.error(\"boom\", err: e) }\n\
+             \x20 return n\n\
+             }\n",
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("Int?") && e.message.contains("Int")),
+            "expected a clear return-type mismatch citing Int? vs Int: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn b16_log_error_arm_with_nullable_return_is_accepted() {
+        // The same match in a fn `-> Int?` type-checks cleanly.
+        let errs = errors_of(
+            "fn classify(x: Int) -> Int? {\n\
+             \x20 let r: Result<Int> = Ok(x)\n\
+             \x20 let n = match r { Ok(v) => v, Err(e) => log.error(\"boom\", err: e) }\n\
+             \x20 return n\n\
+             }\n",
+        );
+        assert!(errs.is_empty(), "fn -> Int? must accept it: {errs:?}");
+    }
+
+    #[test]
+    fn b16_returnstatus_arm_is_divergent_not_null() {
+        // `return <status> { ... }` (the HTTP short-circuit) must be
+        // divergent in the arm LUB, so `let row: Row = match r {
+        // Ok(v) => v, Err(_) => return 404 {...} }` types the match as
+        // `Row` (not `Row?`). Regression guard: the checker previously
+        // typed `ReturnStatus` as `Null`, which — once the match started
+        // LUB-ing its arms — widened it to `Row?` and broke the auth /
+        // ws / cron guide examples.
+        let errs = errors_of(
+            "type Row { id: Int = 0 }\n\
+             @get(\"/row/{id}\")\n\
+             fn get_row(id: Int) -> Row {\n\
+             \x20 let r: Result<Row> = Ok(Row { id: id })\n\
+             \x20 let row: Row = match r { Ok(v) => v, Err(_) => return 404 { \"error\": \"nope\" } }\n\
+             \x20 return row\n\
+             }\n",
+        );
+        assert!(
+            errs.is_empty(),
+            "a ReturnStatus arm must not widen the match to Row?: {errs:?}"
+        );
     }
 
     #[test]
