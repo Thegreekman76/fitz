@@ -88,61 +88,51 @@ pub fn check_view_source_with_base_dir(
     source: &str,
     base_dir: Option<&std::path::Path>,
 ) -> Vec<FitzError> {
-    use crate::error::ErrorKind;
-    // Layer 1 — view lexer + parser.
-    let raw = match crate::view::parse(source) {
-        Ok(f) => f,
-        Err(e) => {
-            return vec![FitzError {
-                kind: ErrorKind::InvalidSyntax,
-                line: e.line,
-                column: e.column,
-                message: e.message,
-                hint: None,
-            }];
-        }
-    };
-    // Layer 2 — expand.
-    let expanded = match crate::view::expand::expand(&raw) {
-        Ok(f) => f,
-        Err(e) => {
-            return vec![FitzError {
-                kind: ErrorKind::InvalidSyntax,
-                line: e.loc.line,
-                column: e.loc.column,
-                message: format!("{} ({})", e.message, e.context),
-                hint: None,
-            }];
-        }
-    };
-    // Layer 3 — type-check. Returns Vec<CheckError> — accumulates,
-    // doesn't short-circuit. Cross-file when a base_dir is known.
+    // v0.41.0 — delegate the whole parse → expand → check pipeline to
+    // the view module (single source of truth, shared with `fitz
+    // check` via `view::check_view_source`). With a `base_dir` the
+    // cross-file `<Child />` graph is walked (empty dep registry — the
+    // LSP has no cheap way to resolve `fitz.toml` deps per keystroke,
+    // dep resolution clones git deps + does I/O); a loose document uses
+    // the plain check. CheckError → FitzError below.
     let check_errors = match base_dir {
         Some(bd) => {
-            // Walk the `.fitzv` import graph (transitive) and load the
-            // imported sibling components. Best-effort: a load failure
-            // yields an empty registry, so composition falls back to the
-            // single-file behaviour rather than crashing the request.
-            let all_imports = crate::view::collect_transitive_view_imports(&expanded.imports, bd);
-            let imported =
-                crate::view::load_imported_components(&all_imports, bd).unwrap_or_default();
-            crate::view::check::check_with_imported_components(&expanded, imported.components())
+            crate::view::check_view_source(source, bd, &crate::manifest::DepRegistry::new())
         }
-        None => crate::view::check::check(&expanded),
+        None => crate::view::check_view_source_plain(source),
     };
     check_errors
         .into_iter()
-        .map(|e| FitzError {
-            kind: ErrorKind::TypeMismatch {
+        .map(view_check_error_to_fitz)
+        .collect()
+}
+
+/// Maps a view-pipeline `CheckError` to an LSP `FitzError`. Parse/expand
+/// short-circuits (context `"view parse"` / `"view expand"`) become
+/// `InvalidSyntax` with their message verbatim (it already reads "view
+/// parse error: …"); everything else is a type error, with the check
+/// context appended in parens (component name, state field, etc.).
+fn view_check_error_to_fitz(e: crate::view::check::CheckError) -> FitzError {
+    use crate::error::ErrorKind;
+    let is_syntax = e.context == "view parse" || e.context == "view expand";
+    FitzError {
+        kind: if is_syntax {
+            ErrorKind::InvalidSyntax
+        } else {
+            ErrorKind::TypeMismatch {
                 expected: String::new(),
                 found: String::new(),
-            },
-            line: e.loc.line,
-            column: e.loc.column,
-            message: format!("{} ({})", e.message, e.context),
-            hint: None,
-        })
-        .collect()
+            }
+        },
+        line: e.loc.line,
+        column: e.loc.column,
+        message: if is_syntax {
+            e.message
+        } else {
+            format!("{} ({})", e.message, e.context)
+        },
+        hint: None,
+    }
 }
 
 /// Session B — Phase 11.8.b (2026-07-18): completion inside a `.fitzv`
@@ -1197,11 +1187,23 @@ fn collect_project_fitz_files_lsp(dir: &std::path::Path, out: &mut Vec<std::path
 /// false positive only arises in multi-module projects, which always
 /// have a manifest, so gating on `find_manifest` loses no real coverage.
 ///
-/// TODO(perf): cache by (root_dir + modtimes) if the walk becomes hot.
-/// Today it re-walks + reparses on each keystroke, which is cheap for
-/// typical projects (a few dozen small `.fitz`, parse-only, no
-/// type-check — parallel to the existing sibling pre-scans).
+/// Perf (v0.41.0): a per-file cache keyed by modtime skips the read +
+/// tokenize + parse of unchanged files across keystrokes. The project
+/// walk (readdir) still runs each check — cheap — but the parse cost is
+/// paid only for files that actually changed.
 fn pre_scan_project_middleware_fns_lsp(base_dir: &std::path::Path) -> Vec<String> {
+    // v0.41.0 — per-file cache keyed by modtime, persisted across
+    // keystrokes. The project walk still runs each check (a cheap
+    // readdir), but the expensive read + tokenize + parse is skipped
+    // for files whose modtime is unchanged. A write bumps the modtime
+    // → the entry re-parses. Stale entries for deleted files linger
+    // harmlessly (they are never re-listed by the walk).
+    type ProjectMwCache = std::sync::Mutex<
+        std::collections::HashMap<std::path::PathBuf, (std::time::SystemTime, Vec<String>)>,
+    >;
+    static PROJECT_MW_CACHE: std::sync::LazyLock<ProjectMwCache> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
     // `find_manifest` returns the manifest FILE path; its parent is the
     // project root. No manifest → not a Fitz project → no walk.
     let Some(root) = crate::manifest::find_manifest(base_dir)
@@ -1215,6 +1217,25 @@ fn pre_scan_project_middleware_fns_lsp(base_dir: &std::path::Path) -> Vec<String
 
     let mut out: Vec<String> = Vec::new();
     for file_path in files {
+        let modtime = std::fs::metadata(&file_path)
+            .and_then(|m| m.modified())
+            .ok();
+        // Cache hit: modtime unchanged → reuse the parsed names.
+        if let Some(mt) = modtime {
+            let cached = PROJECT_MW_CACHE.lock().ok().and_then(|c| {
+                c.get(&file_path).and_then(|(cmt, names)| {
+                    if *cmt == mt {
+                        Some(names.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
+            if let Some(names) = cached {
+                out.extend(names);
+                continue;
+            }
+        }
         let Ok(source_raw) = std::fs::read_to_string(&file_path) else {
             continue;
         };
@@ -1233,7 +1254,13 @@ fn pre_scan_project_middleware_fns_lsp(base_dir: &std::path::Path) -> Vec<String
         let Ok(module_program) = parse_strict(tokens) else {
             continue;
         };
-        out.extend(extract_middleware_fn_names(&module_program));
+        let names = extract_middleware_fn_names(&module_program);
+        if let Some(mt) = modtime {
+            if let Ok(mut c) = PROJECT_MW_CACHE.lock() {
+                c.insert(file_path.clone(), (mt, names.clone()));
+            }
+        }
+        out.extend(names);
     }
     out
 }
@@ -7581,6 +7608,33 @@ fn make_resp() -> Response {
             "with a manifest the scan must find middleware refs, got: {:?}",
             names
         );
+    }
+
+    #[test]
+    fn v0_41_0_project_scan_cache_returns_same_result_across_calls() {
+        // The per-file modtime cache must return the SAME result on the
+        // second call (cache hit) as on the first (cold parse). Each test
+        // uses a unique tempdir path, so the module-level cache never
+        // collides across tests.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("fitz.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("a.fitz"),
+            "@middleware(mw_cache)\n@post(\"/x\")\nasync fn x() -> Result<Str> { return Ok(\"ok\") }\n",
+        )
+        .unwrap();
+        let first = pre_scan_project_middleware_fns_lsp(tmp.path());
+        let second = pre_scan_project_middleware_fns_lsp(tmp.path());
+        assert!(
+            first.contains(&"mw_cache".to_string()),
+            "cold scan must find the ref, got: {:?}",
+            first
+        );
+        assert_eq!(first, second, "cache hit must match the cold result");
     }
 
     // -----------------------------------------------------------------------

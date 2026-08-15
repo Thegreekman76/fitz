@@ -9,6 +9,36 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.41.1] — 2026-08-15 — LSP: dedup del view-check + cache del project-scan
+
+Dos refinamientos internos del LSP (feature `lsp`) — los dos diferidos que
+quedaron de la tanda de v0.41.0. **Sin cambio user-facing del lenguaje ni de
+los diagnósticos de tipos.**
+
+- **Dedup del view-check** — `lsp.rs::check_view_source_with_base_dir`
+  duplicaba el pipeline parse → expand → check que el CLI
+  (`view::check_view_source`, de gotcha #7) ya tenía. Ahora delega: con
+  `base_dir` usa el pipeline dep-aware (registro vacío — el LSP no puede
+  resolver deps de `fitz.toml` por keystroke: clonaría git deps + haría I/O);
+  un documento suelto usa `check_view_source_plain` (nuevo, rama sin
+  composición cross-file). El parse/expand se comparte vía el helper
+  `parse_and_expand` en `view/mod.rs` (una sola fuente de verdad; `fitz check`
+  byte-idéntico). Los mensajes de parse/expand del LSP ganan el prefijo "view
+  parse error:" (consistente con el CLI).
+- **Cache del project-scan** — `pre_scan_project_middleware_fns_lsp` (que
+  camina el árbol del proyecto por keystroke, para el falso positivo
+  cross-module de `@middleware`) gana un cache por-archivo keyed por modtime,
+  persistido entre llamadas. El walk (readdir) sigue corriendo, pero el read +
+  tokenize + parse se saltea para archivos cuyo modtime no cambió. Un write
+  bumpea el modtime → re-parse. Documentos grandes dejan de re-parsear todo el
+  árbol en cada tecla.
+
+Tests: 13 lib lsp verdes (view + cross-module + `project_scan_cache_returns_
+same_result_across_calls` nuevo) + lsp_e2e. clippy `--features lsp` `-D
+warnings` limpio (type alias `ProjectMwCache` para el `type_complexity`).
+Benchmarks ORM vs SQLAlchemy (el 3er diferido) queda aparte — necesita Docker.
+Bump `Cargo.toml` + `editors/vscode/package.json` 0.41.0 → 0.41.1.
+
 ## [v0.41.0] — 2026-08-15 — `jwt.encode` heterogéneo + middleware `async` run↔build + docs anchors
 
 Tres cierres coordinados: un feature (payloads JWT heterogéneos en `fitz

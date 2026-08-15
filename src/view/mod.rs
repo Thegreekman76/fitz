@@ -195,28 +195,9 @@ pub fn check_view_source(
     base_dir: &std::path::Path,
     dep_registry: &crate::manifest::DepRegistry,
 ) -> Vec<CheckError> {
-    let raw = match parse(source) {
-        Ok(r) => r,
-        Err(e) => {
-            return vec![CheckError::syntax(
-                format!("view parse error: {}", e.message),
-                e.line,
-                e.column,
-                "view parse",
-            )];
-        }
-    };
-
-    let expanded = match expand(&raw) {
+    let expanded = match parse_and_expand(source) {
         Ok(x) => x,
-        Err(e) => {
-            return vec![CheckError::syntax(
-                format!("view expand error: {} ({})", e.message, e.context),
-                e.loc.line,
-                e.loc.column,
-                "view expand",
-            )];
-        }
+        Err(errs) => return errs,
     };
 
     // Cross-file `<Child />` — mirror the build path: walk the `.fitzv`
@@ -229,6 +210,42 @@ pub fn check_view_source(
         .unwrap_or_default();
 
     check_with_imported_components(&expanded, imported.components())
+}
+
+/// Shared parse → expand for the view-check entry points. On failure
+/// returns a single `CheckError` (short-circuit), so the CLI (`fitz
+/// check`) and the LSP diagnostics carry the same parse/expand wording.
+fn parse_and_expand(source: &str) -> Result<ExpandedViewFile, Vec<CheckError>> {
+    let raw = parse(source).map_err(|e| {
+        vec![CheckError::syntax(
+            format!("view parse error: {}", e.message),
+            e.line,
+            e.column,
+            "view parse",
+        )]
+    })?;
+    expand(&raw).map_err(|e| {
+        vec![CheckError::syntax(
+            format!("view expand error: {} ({})", e.message, e.context),
+            e.loc.line,
+            e.loc.column,
+            "view expand",
+        )]
+    })
+}
+
+/// LSP-only variant for a loose `.fitzv` document with no project
+/// context (no `base_dir`): no cross-file `<Child />` composition is
+/// possible, so a plain check. Parse/expand short-circuit is shared
+/// with [`check_view_source`] via [`parse_and_expand`]. This is the
+/// single source of truth the LSP delegates to (v0.41.0 — closes the
+/// duplicated pipeline that used to live in `lsp.rs`).
+pub fn check_view_source_plain(source: &str) -> Vec<CheckError> {
+    let expanded = match parse_and_expand(source) {
+        Ok(x) => x,
+        Err(errs) => return errs,
+    };
+    crate::view::check::check(&expanded)
 }
 
 /// True when `path` ends in a case-insensitive `.fitzv`
