@@ -24,8 +24,8 @@ copiás un binario al server (~150-300 MB), lo ejecutás, listo.
 **Ningún otro lenguaje moderno con interop Python ofrece esto activamente
 mantenido** (PyOxidizer está ralentizado desde 2023).
 
-**Cross-link**: [cap 21.11 — `fitz build --bundle-python`](../../guide.md#2111-fitz-build---bundle-python--binario-standalone)
-y [cap 21.12 — `fitz build --bundle-pip`](../../guide.md#2112-fitz-build---bundle-pip--empaquetar-paquetes-pip).
+**Cross-link**: [cap 21.11 — `fitz build --bundle-python`](../../guide.md#2111-fitz-build-bundle-python-binario-standalone)
+y [cap 21.12 — `fitz build --bundle-pip`](../../guide.md#2112-fitz-build-bundle-pip-empaquetar-paquetes-pip).
 
 ---
 

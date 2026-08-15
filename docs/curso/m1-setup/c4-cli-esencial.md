@@ -508,7 +508,7 @@ fitz lint
 | 1 | Findings que matchean algún `--deny`. |
 | 1 | Error de lectura/parseo de algún archivo. |
 
-📚 **Catálogo y filosofía del linter**: [cap 27 — `fitz lint`](../../guide.md#27---fitz-lint--linter-de-patrones)
+📚 **Catálogo y filosofía del linter**: [cap 27 — `fitz lint`](../../guide.md#27-fitz-lint-linter-de-patrones)
 de la guía.
 
 ---
@@ -541,7 +541,7 @@ un `.fitz`/`.fitzv` o el `fitz.toml` cambia. Análogo a `nodemon`,
 > toma en vivo, sin reiniciar. En un proyecto fullstack `server` +
 > `web`: `fitz run --bin server` en una terminal, `fitz dev --bin
 > web` en otra.
-> Detalle en [cap 25 de la guía](../../guide.md#25---fitz-dev--hot-reload).
+> Detalle en [cap 25 de la guía](../../guide.md#25-fitz-dev-hot-reload).
 
 ```bash
 fitz dev
@@ -602,7 +602,7 @@ proyecto.
 - Programs que necesitan retener state entre cambios (no hay
   hot-swap real).
 
-📚 **Detalle**: [cap 25 — `fitz dev`](../../guide.md#25---fitz-dev--hot-reload)
+📚 **Detalle**: [cap 25 — `fitz dev`](../../guide.md#25-fitz-dev-hot-reload)
 de la guía.
 
 ---

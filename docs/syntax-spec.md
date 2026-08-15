@@ -544,7 +544,7 @@ fn main() {
 
 Built-in test runner with the `@test` decorator. Closed in full
 on 2026-05-17. For usage detail see
-[chapter 24 of the guide](guide.md#24-fitz-test--testing-built-in).
+[chapter 24 of the guide](guide.md#24-fitz-test-testing-built-in).
 
 ```fitz
 @test fn sum_works() {

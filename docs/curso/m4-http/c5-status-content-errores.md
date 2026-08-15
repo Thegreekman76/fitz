@@ -413,7 +413,7 @@ status consistentes.
 > el caso entero — XML, RSS, plain text, HTML estático, CSV, SVG,
 > PDF binario y ZIP. Paridad bit-a-bit `fitz run` ↔ `fitz build` con
 > schema OpenAPI auto-documentado. Detalle exhaustivo en
-> [docs/guide.md cap 17 → "Respuestas con Content-Type custom"](../../guide.md#respuestas-con-content-type-custom-response--).
+> [docs/guide.md cap 17 → "Respuestas con Content-Type custom"](../../guide.md#respuestas-con-content-type-custom-response).
 
 El built-in:
 

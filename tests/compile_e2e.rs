@@ -7903,6 +7903,96 @@ print(\"verify-bad: {bad}\")\n\
     assert!(stdout.contains("verify-bad: false"), "stdout: {}", stdout);
 }
 
+/// Decodes a base64url segment (no padding) to a UTF-8 String. Small
+/// self-contained decoder so the test needs no external crate.
+fn decode_b64url_utf8(s: &str) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut lut = [255u8; 256];
+    for (i, &c) in ALPHA.iter().enumerate() {
+        lut[c as usize] = i as u8;
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in s.as_bytes() {
+        let v = lut[c as usize];
+        if v == 255 {
+            continue;
+        }
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[test]
+fn auth_codegen_jwt_encode_heterogeneous_payload_v0_41_0() {
+    // v0.41.0 — `jwt.encode` con payload HETEROGÉNEO (Str + Int + Bool +
+    // List) compila a binario nativo y serializa cada claim con su tipo
+    // JSON nativo (numérico/bool/array, NO stringificado). Paridad con el
+    // intérprete, que ya era heterogéneo vía `value_to_json`. Antes el
+    // codegen exigía `Map<Str, Str>` estricto.
+    let src = "\
+let secret = \"secret-32-bytes-long-test-aaaaaa\"\n\
+let payload = {\"sub\": \"ada\", \"exp\": 1699999999, \"admin\": true, \"roles\": [\"a\", \"b\"]}\n\
+let token = jwt.encode(payload, secret)\n\
+print(token)\n\
+";
+    let (stdout, exit) = build_and_run("jwt_encode_hetero_v0_41_0", src);
+    assert_eq!(exit, 0, "exit: {} stdout: {}", exit, stdout);
+    let token = stdout.trim();
+    let segs: Vec<&str> = token.split('.').collect();
+    assert_eq!(segs.len(), 3, "un JWT tiene 3 segmentos, got: {}", token);
+    // Decodifica el payload (segmento del medio) y verifica el tipo JSON
+    // nativo de cada claim — la prueba de que el marshaling heterogéneo
+    // funcionó (sin aplastar a Str).
+    let claims = decode_b64url_utf8(segs[1]);
+    assert!(
+        claims.contains("\"exp\":1699999999"),
+        "exp debe ser numérico (no \"1699999999\"): {}",
+        claims
+    );
+    assert!(
+        claims.contains("\"admin\":true"),
+        "admin debe ser bool: {}",
+        claims
+    );
+    assert!(
+        claims.contains("\"roles\":[\"a\",\"b\"]"),
+        "roles debe ser array: {}",
+        claims
+    );
+    assert!(
+        claims.contains("\"sub\":\"ada\""),
+        "sub debe ser string: {}",
+        claims
+    );
+}
+
+#[test]
+fn auth_codegen_jwt_encode_str_str_fast_path_still_compiles_v0_41_0() {
+    // Byte-compat: un payload `Map<Str, Str>` sigue el fast-path
+    // Str→Str (`__fitz_jwt_encode`) y produce un JWT válido de 3
+    // segmentos. Regresión del path preservado.
+    let src = "\
+let secret = \"secret-32-bytes-long-test-aaaaaa\"\n\
+let claims: Map<Str, Str> = {\"sub\": \"u42\", \"role\": \"admin\"}\n\
+let token = jwt.encode(claims, secret)\n\
+print(token)\n\
+";
+    let (stdout, exit) = build_and_run("jwt_encode_strstr_v0_41_0", src);
+    assert_eq!(exit, 0, "exit: {} stdout: {}", exit, stdout);
+    let segs: Vec<&str> = stdout.trim().split('.').collect();
+    assert_eq!(segs.len(), 3, "un JWT tiene 3 segmentos: {}", stdout);
+    let claims = decode_b64url_utf8(segs[1]);
+    assert!(claims.contains("\"sub\":\"u42\""), "claims: {}", claims);
+    assert!(claims.contains("\"role\":\"admin\""), "claims: {}", claims);
+}
+
 // ---------------------------------------------------------------------------
 // Fase 9.w.2.c — Tests E2E del codegen WebSocket.
 //

@@ -20,8 +20,8 @@ legítimos donde SQLAlchemy gana y casos donde el ORM nativo gana.
 Si elegís mal, el costo (rewrite, performance, deployment complexity)
 es alto. **Este cap te enseña a elegir bien**.
 
-**Cross-link**: [cap 21.8 de la guía — `fitz py-types`](../../guide.md#218-fitz-py-types--auto-mapeo-de-modelos-sqlalchemy)
-y [cap 21.9 — Async bridge](../../guide.md#219-async--await-sobre-corutinas-python).
+**Cross-link**: [cap 21.8 de la guía — `fitz py-types`](../../guide.md#218-fitz-py-types-auto-mapeo-de-modelos-sqlalchemy)
+y [cap 21.9 — Async bridge](../../guide.md#219-async-await-sobre-corutinas-python).
 
 ---
 

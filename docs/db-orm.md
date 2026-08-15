@@ -2,7 +2,7 @@
 
 Esta es la guía dedicada al stack DB nativo de Fitz: driver Postgres
 puro + ORM declarativo + paridad bit-a-bit `fitz run` ↔ `fitz build`.
-A diferencia del [cap 31 de la guía](guide.md#31-postgres--orm-nativo)
+A diferencia del [cap 31 de la guía](guide.md#31-postgres-orm-nativo)
 que sirve como resumen del lenguaje, este documento es la referencia
 completa que cubre cada pieza, cada operador, cada receta y cada
 limitación honesta.
@@ -21,29 +21,29 @@ cierran el bloque "stack web first-class del lado server".
 - [6. QueryBuilder reference: chain y terminales](#6-querybuilder-reference-chain-y-terminales)
 - [7. Operadores extendidos en `.where(...)`](#7-operadores-extendidos-en-where)
 - [8. Write methods: `.insert`, `.update`, `.delete`](#8-write-methods-insert-update-delete)
-- [9. Aggregates scalar + GROUP BY](#9-aggregates-scalar--group-by)
+- [9. Aggregates scalar + GROUP BY](#9-aggregates-scalar-group-by)
 - [10. Relations: `@belongs_to`, `@has_one`, `@has_many`](#10-relations-belongs_to-has_one-has_many)
-- [11. Navigation methods + chain](#11-navigation-methods--chain)
+- [11. Navigation methods + chain](#11-navigation-methods-chain)
 - [12. Eager loading con `.preload(...)`](#12-eager-loading-con-preload)
-- [13. JSONB: `Map<Str, Any>` ↔ `jsonb`](#13-jsonb-mapstr-any--jsonb)
-- [14. Arrays Postgres: `List<scalar>` ↔ `T[]`](#14-arrays-postgres-listscalar--t)
+- [13. JSONB: `Map<Str, Any>` ↔ `jsonb`](#13-jsonb-mapstr-any-jsonb)
+- [14. Arrays Postgres: `List<scalar>` ↔ `T[]`](#14-arrays-postgres-listscalar-t)
 - [15. NULL en arrays: `List<scalar?>`](#15-null-en-arrays-listscalar)
-- [16. `Map<Str, T>` concreto homogéneo](#16-mapstr-t-concreto-homog%C3%A9neo)
+- [16. `Map<Str, T>` concreto homogéneo](#16-mapstr-t-concreto-homogeneo)
 - [17. Array ops en `.where(...)`](#17-array-ops-en-where)
-- [18. Date / Time / Timestamp / UUID](#18-date--time--timestamp--uuid)
-- [19. Recetas — paginación](#19-recetas--paginaci%C3%B3n)
-- [20. Recetas — búsqueda](#20-recetas--b%C3%BAsqueda)
-- [21. Recetas — search filters combinatorios](#21-recetas--search-filters-combinatorios)
-- [22. Recetas — Auth + ORM (queries scoped al user autenticado)](#22-recetas--auth--orm-queries-scoped-al-user-autenticado)
-- [23. Recetas — HTTP CRUD completo](#23-recetas--http-crud-completo)
-- [24. Recetas — Cron job de limpieza](#24-recetas--cron-job-de-limpieza)
-- [25. Recetas — Bulk operations](#25-recetas--bulk-operations)
-- [26. Recetas — Schema idempotente al boot](#26-recetas--schema-idempotente-al-boot)
+- [18. Date / Time / Timestamp / UUID](#18-date-time-timestamp-uuid)
+- [19. Recetas — paginación](#19-recetas-paginacion)
+- [20. Recetas — búsqueda](#20-recetas-busqueda)
+- [21. Recetas — search filters combinatorios](#21-recetas-search-filters-combinatorios)
+- [22. Recetas — Auth + ORM (queries scoped al user autenticado)](#22-recetas-auth-orm-queries-scoped-al-user-autenticado)
+- [23. Recetas — HTTP CRUD completo](#23-recetas-http-crud-completo)
+- [24. Recetas — Cron job de limpieza](#24-recetas-cron-job-de-limpieza)
+- [25. Recetas — Bulk operations](#25-recetas-bulk-operations)
+- [26. Recetas — Schema idempotente al boot](#26-recetas-schema-idempotente-al-boot)
 - [26.b. Transactions (v0.10.14)](#26b-transactions-v01014)
-- [26.c. Migraciones automáticas (v0.10.16)](#26c-migraciones-autom%C3%A1ticas-v01016)
+- [26.c. Migraciones automáticas (v0.10.16)](#26c-migraciones-automaticas-v01016)
 - [27. Performance](#27-performance)
-- [28. Limitaciones honestas y deuda explícita](#28-limitaciones-honestas-y-deuda-expl%C3%ADcita)
-- [29. CLI con DB: cómo cada subcomando interactúa](#29-cli-con-db-c%C3%B3mo-cada-subcomando-interact%C3%BAa)
+- [28. Limitaciones honestas y deuda explícita](#28-limitaciones-honestas-y-deuda-explicita)
+- [29. CLI con DB: cómo cada subcomando interactúa](#29-cli-con-db-como-cada-subcomando-interactua)
 - [30. Ejemplos runnable y boilerplates](#30-ejemplos-runnable-y-boilerplates)
 
 ---
@@ -4366,4 +4366,4 @@ Para tirar dudas / proponer recetas nuevas / reportar gaps del
 ORM, abrir un issue en
 [GitHub](https://github.com/Thegreekman76/fitz/issues).
 
-— [Volver al inicio](#db-y-orm--gu%C3%ADa-exhaustiva)
+— [Volver al inicio](#db-y-orm-guia-exhaustiva)

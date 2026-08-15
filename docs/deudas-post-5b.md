@@ -5898,8 +5898,16 @@ discovery. Mini-fase separada del cap.
 > 2"): sessions cookie-based + RBAC multi-rol + token refresh/
 > revocación (requieren DB nativa, Fase 10); asimétricos JWT
 > (RS256/ES256 con PEM); provider request-aware más allá de
-> headers; heterogéneos en `jwt.encode/decode` (requiere
-> `__FitzValue` en codegen).
+> headers; ~~heterogéneos en `jwt.encode`~~ **CERRADO v0.41.0** — el
+> payload `Map<Str, Any>` se marshaliza vía `__FitzValue`
+> (`__fitz_jwt_encode_fv`), claims numéricos/bool/list con su tipo
+> JSON nativo, paridad bit-a-bit `fitz run` ↔ `fitz build`; el
+> Str→Str fast path queda byte-idéntico. `smtp.send` correctamente
+> fuera de alcance (schema fijo, campos inherentemente `Str`).
+> **Residual**: `jwt.decode` en `fitz build` todavía devuelve
+> `Result<Map<Str, Str>>` (stringifica claims no-Str). El intérprete
+> ya devuelve heterogéneo — cerrar la asimetría del codegen es el
+> follow-up.
 >
 > **Próximo norte**: resto de Fase 9.w — `@ws("/chat")`
 > (WebSockets tipados con `WsConn<T>`), `@cron` + `@background`

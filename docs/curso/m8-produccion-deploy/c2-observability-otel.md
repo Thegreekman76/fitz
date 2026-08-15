@@ -14,7 +14,7 @@ que muestran flujos cross-service, y métricas que un dashboard
 (Grafana, Datadog) gradúa. En la mayoría de los lenguajes esto es
 **6-12 paquetes externos** + setup manual. En Fitz es **built-in**.
 
-**Cross-link**: [cap 33 de la guía](../../guide.md#33-observability--logs-spans-métricas-otel)
+**Cross-link**: [cap 33 de la guía](../../guide.md#33-observability-logs-spans-metricas-otel)
 con detalle exhaustivo de cada feature.
 
 ---

@@ -30,7 +30,7 @@ optimizada. Y la **publica como producto independiente** para
 que alguien que no quiera hacer los 7 caps simplemente clone el
 boilerplate.
 
-**Cross-link**: [Cap 33 de la guía — Observability](../guide.md#33-observability)
+**Cross-link**: [Cap 33 de la guía — Observability](../guide.md#33-observability-logs-spans-metricas-otel)
 
 - [Cap 35 de la guía — Deployment ciudadano primera clase](../guide.md#35-deployment-ciudadano-primera-clase)
 - [Curso M8.C2-C5](../curso/m8-produccion-deploy/c1-distribucion-binarios.md).

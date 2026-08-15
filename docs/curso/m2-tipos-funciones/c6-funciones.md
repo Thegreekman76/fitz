@@ -468,7 +468,7 @@ test result: FAILED. 1 passed; 1 failed; finished in 0.00s
 
 Exit code: 1.
 
-📚 **Detalle exhaustivo**: [cap 24 — `fitz test`](../../guide.md#24---fitz-test--testing-built-in)
+📚 **Detalle exhaustivo**: [cap 24 — `fitz test`](../../guide.md#24-fitz-test-testing-built-in)
 de la guía.
 
 ---

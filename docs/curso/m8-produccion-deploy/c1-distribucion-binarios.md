@@ -17,8 +17,8 @@ en el binario emitido por `fitz build`.
 linkeada externa (salvo si usás interop Python), no hay `node_modules`
 ni `__pycache__`. Copiás el binario al server, lo corrés, listo.
 
-**Cross-link**: [cap 20 de la guía](../../guide.md#20-fitz-build--compilar-a-binario-nativo) y
-[cap 21.11 (`--bundle-python`)](../../guide.md#2111-fitz-build---bundle-python--binario-standalone).
+**Cross-link**: [cap 20 de la guía](../../guide.md#20-fitz-build-compilar-a-binario-nativo) y
+[cap 21.11 (`--bundle-python`)](../../guide.md#2111-fitz-build-bundle-python-binario-standalone).
 
 ---
 

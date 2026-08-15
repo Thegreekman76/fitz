@@ -9,6 +9,50 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.41.0] — 2026-08-15 — `jwt.encode` heterogéneo + middleware `async` run↔build + docs anchors
+
+Tres cierres coordinados: un feature (payloads JWT heterogéneos en `fitz
+build`), un bug de paridad `fitz run` ↔ `fitz build` (middleware `async`),
+y una barrida de doc-rot (cross-refs de anchor rotos).
+
+- **`jwt.encode` con payload heterogéneo (`Map<Str, Any>`)** — antes el
+  codegen exigía `Map<Str, Str>` estricto y aplastaba todo a strings. Ahora
+  un payload con valores no-`Str` (números, booleanos, listas) se serializa
+  con su **tipo JSON nativo** (`exp: 1699999999` queda numérico, `admin:
+  true` booleano, `roles: [...]` array), con **paridad bit-a-bit `fitz run`
+  ↔ `fitz build`** (el intérprete ya era heterogéneo vía `value_to_json`).
+  Un payload `Map<Str, Str>` mantiene el **fast-path Str→Str byte-idéntico**
+  (`__fitz_jwt_encode`); el hetero marshaliza vía `__FitzValue`
+  (`__fitz_jwt_encode_fv` + los conversores `__fitz_fv_to_json` emitidos en
+  el preludio para el caso sin-db). `smtp.send` queda **fuera de alcance**
+  (no es un payload libre: schema fijo con campos inherentemente `Str`).
+  **Residual**: `jwt.decode` en `fitz build` todavía devuelve `Map<Str,
+  Str>` (stringifica claims no-Str) — el intérprete ya lo devuelve
+  heterogéneo, cerrar la asimetría del codegen es el follow-up.
+- **Middleware `async fn` con paridad `fitz run` ↔ `fitz build`** — un
+  `@middleware(fn)` `async` devolvía **500** en el intérprete (el evaluator
+  no awaiteaba el `Value::Future` del middleware antes de inspeccionar el
+  resultado). Ahora el chain de middlewares (Pre/Post/Wrap) awaitea primero
+  y matchea `Null`/`HttpResponse`/short-circuit igual que un middleware sync,
+  igual que ya hacía `fitz build`. 2 tests nuevos (`handle_task_async_
+  middleware_returning_null_continues` + `_short_circuits`).
+- **Docs — 67 cross-refs de anchor rotos** en `docs/guide.md` (TOC + cross-
+  links), `docs/db-orm.md`, 11 caps del curso, `taskhub`, `index.md`,
+  `syntax-spec.md`. Venían de renumeraciones de capítulos + acentos/em-dash
+  en los slugs (mkdocs elimina acentos y colapsa el em-dash a un guión) +
+  anchors URL-encoded. `mkdocs build --strict` queda sin anchor-links
+  internos rotos (los ~92 warnings restantes son links `../` a archivos del
+  repo — CHANGELOG/examples/src — que funcionan en GitHub, no bloquean el CI
+  non-strict).
+
+Tests: 4 unit nuevos (2 codegen `jwt_encode_*_v0_41_0` + 2 http async-mw) +
+2 E2E (`compile_e2e::auth_codegen_jwt_encode_heterogeneous_payload_v0_41_0`
+decodifica el JWT y aserta el tipo nativo de cada claim; `_str_str_fast_path`
+byte-compat). Verificación: lib 4119 (default) / lsp, smoke ~290 ejemplos
+verde (cero regresión en 28-auth pese al detector nuevo que toca todo
+`jwt.encode`), cli_e2e, fmt + clippy default+lsp limpios. Bump `Cargo.toml`
++ `editors/vscode/package.json` 0.40.1 → 0.41.0.
+
 ## [v0.40.1] — 2026-08-15 — Cierre de la clase B16: `if` divergent-else + literales mixtos
 
 Cierra los **dos últimos residuales** de la clase de bugs checker↔codegen que

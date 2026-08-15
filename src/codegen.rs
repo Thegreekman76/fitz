@@ -2500,9 +2500,32 @@ fn program_uses_fitz_value(program: &Program) -> bool {
                 // __FitzValue. Without this flag, the db prelude
                 // helper is not emitted and codegen references
                 // nonexistent variants.
-                if let Expr::Field { field, .. } = callee.as_ref() {
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
                     if field == "group_by" {
                         return true;
+                    }
+                    // v0.41.0 — `jwt.encode` with a heterogeneous payload
+                    // marshals via __FitzValue. Fire the flag pre-codegen so
+                    // the enum + `__fitz_fv_to_json` converter are emitted
+                    // (the runtime flip in `gen_map_lit` is too late for the
+                    // prelude). A pure Str-literal payload keeps the
+                    // byte-identical Str→Str fast path (no __FitzValue).
+                    if field == "encode" {
+                        if let Expr::Ident(name, _) = object.as_ref() {
+                            if name == "jwt" {
+                                let needs = match args.first() {
+                                    Some(Expr::Map(pairs, _)) => {
+                                        pairs.iter().any(|(_, v)| item_class(v) != Some(2))
+                                    }
+                                    // Non-literal payload: can't prove Str→Str.
+                                    Some(_) => true,
+                                    None => false,
+                                };
+                                if needs {
+                                    return true;
+                                }
+                            }
+                        }
                     }
                 }
                 expr_uses_fv(callee) || args.iter().any(expr_uses_fv)
@@ -10698,14 +10721,21 @@ impl<'a> CodegenCtx<'a> {
     ///
     /// Policy of the helpers (parallel to `register_builtins` of the
     /// interpreter, 9.w.1.b):
-    /// - Encode: `Map<Str, Str>` payload strict for MVP (heterogeneous
-    ///   in codegen requires `__FitzValue` integration, post-MVP).
+    /// - Encode: `Map<Str, Str>` payload uses the byte-identical
+    ///   Str→Str fast path (`__fitz_jwt_encode`). A heterogeneous
+    ///   `Map<Str, Any>` payload (v0.41.0) marshals via `__FitzValue`
+    ///   (`__fitz_jwt_encode_fv`, gated `uses_fitz_value`), so numeric/
+    ///   bool/list claims keep their native JSON type — parity with the
+    ///   interpreter, which is already heterogeneous via `value_to_json`.
     ///   Secret/alg as Str. Default alg HS256, also HS384/HS512.
     ///   Encode panics on failure (build-time error, shouldn't
     ///   happen with valid args).
     /// - Decode: token+secret+alg Str. Returns `Result<Map<Str, Str>,
-    ///   String>` with claims serialized as Str. Any failure
-    ///   (malformed token, invalid signature, expired) → `Err(msg)`.
+    ///   String>` with claims serialized as Str (numbers/bools go
+    ///   through `to_string()`). Heterogeneous decode → `Map<Str, Any>`
+    ///   is residual debt (the interpreter already returns heterogeneous;
+    ///   `fitz build` decode still stringifies). Any failure (malformed
+    ///   token, invalid signature, expired) → `Err(msg)`.
     /// - hash.password/verify same as interpreter: Argon2id with
     ///   OWASP default params, PHC string output, verify returns
     ///   Bool (no Result — malformed hash → false for security).
@@ -10744,6 +10774,49 @@ impl<'a> CodegenCtx<'a> {
                      .unwrap_or_else(|e| panic!(\"`jwt.encode`: fallo al firmar: {}\", e))\n\
              }\n\n",
         );
+        // v0.41.0 — jwt.encode with a HETEROGENEOUS payload (`Map<Str,
+        // Any>`). Parallel to the interpreter, which is already
+        // heterogeneous via `value_to_json`. Only emitted when
+        // `uses_fitz_value` (else it references the undefined enum).
+        // Serializes each claim via `__fitz_fv_to_json` (emitted in
+        // `emit_prelude` for the no-db case, or the db prelude with db).
+        if self.uses_fitz_value {
+            self.emit(
+                "\
+/// v0.41.0 — `jwt.encode(payload, secret, alg)` with a heterogeneous
+/// `Map<Str, Any>` payload. Each claim serialized via `__fitz_fv_to_json`.
+pub(crate) fn __fitz_jwt_encode_fv(
+    payload: Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>,
+    secret: String,
+    alg: Option<String>,
+) -> String {
+    let mut claims = serde_json::Map::new();
+    {
+        let guard = payload.lock().unwrap();
+        for (k, v) in guard.iter() {
+            let key = match k {
+                __FitzValue::Str(s) => s.clone(),
+                other => format!(\"{}\", other),
+            };
+            claims.insert(key, __fitz_fv_to_json(v));
+        }
+    }
+    let alg_str = alg.as_deref().unwrap_or(\"HS256\");
+    let algorithm = match alg_str {
+        \"HS256\" => jsonwebtoken::Algorithm::HS256,
+        \"HS384\" => jsonwebtoken::Algorithm::HS384,
+        \"HS512\" => jsonwebtoken::Algorithm::HS512,
+        other => panic!(\"`jwt.encode`: alg `{}` no soportado en MVP. Soportados: HS256, HS384, HS512.\", other),
+    };
+    let header = jsonwebtoken::Header::new(algorithm);
+    let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());
+    jsonwebtoken::encode(&header, &serde_json::Value::Object(claims), &key)
+        .unwrap_or_else(|e| panic!(\"`jwt.encode`: fallo al firmar: {}\", e))
+}
+
+",
+            );
+        }
         // jwt.decode: verifies + decodes → `Result<Map<Str, Str>,
         // String>`. Claims are serialized to Str (numbers/bools go
         // through `to_string()`).
@@ -12808,6 +12881,67 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                  #[allow(dead_code)]\n\
                  fn __fv_to_bool(v: &__FitzValue) -> bool { match v { __FitzValue::Bool(b) => *b, _ => panic!(\"Any: expected Bool, got {}\", __fv_type_name(v)) } }\n\n",
             );
+            // v0.41.0 — jwt heterogeneous payloads. The
+            // `__fitz_fv_to_json` / `__fitz_json_to_fv` converters live in
+            // the db prelude (emit_db_prelude, JSONB path). A jwt program
+            // WITHOUT db still needs `__fitz_fv_to_json` for
+            // `__fitz_jwt_encode_fv`. Emit the pair here when auth is used
+            // but db is not (db programs get it from the db prelude, so
+            // `!uses_db` avoids a double definition). `uses_auth` guarantees
+            // `serde_json` is linked (parallel to the serde_json gating).
+            if self.uses_auth && !self.uses_db {
+                self.emit(
+                    "\
+fn __fitz_json_to_fv(v: &serde_json::Value) -> __FitzValue {
+    match v {
+        serde_json::Value::Null => __FitzValue::Null,
+        serde_json::Value::Bool(b) => __FitzValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() { __FitzValue::Int(i) }
+            else if let Some(f) = n.as_f64() { __FitzValue::Float(f) }
+            else { __FitzValue::Null }
+        }
+        serde_json::Value::String(s) => __FitzValue::Str(s.clone()),
+        serde_json::Value::Array(arr) => __FitzValue::List(arr.iter().map(__fitz_json_to_fv).collect()),
+        serde_json::Value::Object(obj) => __FitzValue::Map(
+            obj.iter().map(|(k, v)| (__FitzValue::Str(k.clone()), __fitz_json_to_fv(v))).collect()
+        ),
+    }
+}
+
+fn __fitz_fv_to_json(v: &__FitzValue) -> serde_json::Value {
+    match v {
+        __FitzValue::Null => serde_json::Value::Null,
+        __FitzValue::Bool(b) => serde_json::Value::Bool(*b),
+        __FitzValue::Int(n) => serde_json::Value::Number((*n).into()),
+        __FitzValue::Float(x) => serde_json::Number::from_f64(*x)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        __FitzValue::Str(s) => serde_json::Value::String(s.clone()),
+        __FitzValue::Bytes(_) => serde_json::Value::Null,
+        __FitzValue::Nominal(repr) => serde_json::Value::String(repr.clone()),
+        __FitzValue::List(items) => serde_json::Value::Array(
+            items.iter().map(__fitz_fv_to_json).collect()
+        ),
+        __FitzValue::Map(pairs) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in pairs.iter() {
+                let key_str = match k {
+                    __FitzValue::Str(s) => s.clone(),
+                    other => format!(\"{}\", other),
+                };
+                obj.insert(key_str, __fitz_fv_to_json(v));
+            }
+            serde_json::Value::Object(obj)
+        }
+        __FitzValue::Instance(_, _) => serde_json::Value::Null,
+        __FitzValue::Function(_) => serde_json::Value::Null,
+    }
+}
+
+",
+                );
+            }
             // F13.C — `__FromFitzJson` and `__ToFitzJson` for
             // `__FitzValue`. Only if HTTP is active (serde_json
             // and the traits require the HTTP prelude). Enables
@@ -19814,20 +19948,24 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             )));
         }
         let (payload_code, payload_ty) = self.gen_expr(&args[0])?;
-        let payload_ok = matches!(
-            &payload_ty,
-            Type::Map(k, v) if matches!(k.as_ref(), Type::Str) && matches!(v.as_ref(), Type::Str)
-        );
-        if !payload_ok {
-            return Err(self.err_at(
-                args[0].span(),
-                format!(
-                "`jwt.encode` in `fitz build` MVP: the payload must be `Map<Str, Str>` strict. \
-                 Heterogeneous (`Map<Str, Any>`) is post-MVP debt. Received `{}`.",
-                payload_ty.display(self.env)
-            ),
-            ));
-        }
+        // JWT claim objects have string keys. Accept `Str` or `Any`
+        // (gradual) keys; reject anything else (Int keys, etc.).
+        let (key_ty, val_ty) = match &payload_ty {
+            Type::Map(k, v) if matches!(k.as_ref(), Type::Str | Type::Any) => {
+                (k.as_ref().clone(), v.as_ref().clone())
+            }
+            _ => {
+                return Err(self.err_at(
+                    args[0].span(),
+                    format!(
+                        "`jwt.encode`: the payload must be a `Map` with `Str` keys \
+                         (`Map<Str, Str>` or heterogeneous `Map<Str, Any>`), got `{}`.",
+                        payload_ty.display(self.env)
+                    ),
+                ));
+            }
+        };
+        let _ = key_ty;
         let (secret_code, secret_ty) = self.gen_expr(&args[1])?;
         let secret_c = coerce(&secret_code, &secret_ty, &Type::Str, self.env);
         let alg_code = if args.len() == 3 {
@@ -19837,10 +19975,42 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         } else {
             "None".to_string()
         };
+        // v0.41.0 — heterogeneous payloads. `Map<Str, Str>` keeps the
+        // byte-identical Str→Str fast path (`__fitz_jwt_encode`). Any other
+        // value type marshals to `Map<Str, Any>` (`Vec<(__FitzValue,
+        // __FitzValue)>`) and serializes each claim via `__fitz_fv_to_json`
+        // (`__fitz_jwt_encode_fv`) — paridad con el intérprete, que ya es
+        // heterogéneo vía `value_to_json`.
+        if matches!(val_ty, Type::Str) {
+            return Ok((
+                format!(
+                    "__fitz_jwt_encode({}, {}, {})",
+                    payload_code, secret_c, alg_code
+                ),
+                Type::Str,
+            ));
+        }
+        self.uses_fitz_value = true;
+        // `Map<Str, Any>` (mixed literal) is already `Vec<(__FitzValue,
+        // __FitzValue)>`. A homogeneous non-Str map (`Map<Str, Int>`, etc.)
+        // is `Vec<(String, T)>` — re-wrap each pair to __FitzValue inline.
+        let payload_fv = if matches!(val_ty, Type::Any) {
+            payload_code
+        } else {
+            let vc = coerce("__v", &val_ty, &Type::Any, self.env);
+            format!(
+                "{{ let __src_m = {code}; let __g_m = __src_m.lock().unwrap(); \
+                 let __out_m: Vec<(__FitzValue, __FitzValue)> = __g_m.iter().map(|(__k0, __v0)| {{ \
+                 let __v = __v0.clone(); (__FitzValue::Str(__k0.clone()), {vc}) }}).collect(); \
+                 std::sync::Arc::new(std::sync::Mutex::new(__out_m)) }}",
+                code = payload_code,
+                vc = vc
+            )
+        };
         Ok((
             format!(
-                "__fitz_jwt_encode({}, {}, {})",
-                payload_code, secret_c, alg_code
+                "__fitz_jwt_encode_fv({}, {}, {})",
+                payload_fv, secret_c, alg_code
             ),
             Type::Str,
         ))
@@ -41360,6 +41530,51 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    #[test]
+    fn jwt_encode_str_str_literal_uses_fast_path_v0_41_0() {
+        // Byte-compat: a pure Str-literal payload keeps the Str→Str fast
+        // path (`__fitz_jwt_encode`) and does NOT pull `__FitzValue` nor
+        // the heterogeneous helper.
+        let rust = gen(
+            "let t = jwt.encode({\"sub\": \"u\", \"role\": \"admin\"}, \"secret-key\")\nprint(t)\n",
+        )
+        .expect("gen OK");
+        assert!(
+            rust.contains("__fitz_jwt_encode("),
+            "expected the Str→Str fast path helper call"
+        );
+        assert!(
+            !rust.contains("__fitz_jwt_encode_fv"),
+            "a Str-literal payload must not use the heterogeneous path"
+        );
+        assert!(
+            !rust.contains("pub(crate) enum __FitzValue"),
+            "a Str-literal payload must not pull __FitzValue"
+        );
+    }
+
+    #[test]
+    fn jwt_encode_heterogeneous_uses_fitz_value_path_v0_41_0() {
+        // A heterogeneous payload (Str + Int + Bool) marshals via
+        // `__FitzValue` (`__fitz_jwt_encode_fv`) with the enum + the
+        // `__fitz_fv_to_json` converter emitted (no db needed).
+        let rust =
+            gen("let t = jwt.encode({\"sub\": \"u\", \"exp\": 123, \"admin\": true}, \"secret-key\")\nprint(t)\n")
+                .expect("gen OK");
+        assert!(
+            rust.contains("__fitz_jwt_encode_fv("),
+            "expected the heterogeneous helper call"
+        );
+        assert!(
+            rust.contains("pub(crate) enum __FitzValue"),
+            "expected the __FitzValue enum"
+        );
+        assert!(
+            rust.contains("fn __fitz_fv_to_json"),
+            "expected the __fitz_fv_to_json converter in the prelude"
+        );
     }
 
     // ---------------------------------------------------------------

@@ -397,7 +397,7 @@ Las **fns anidadas / closures** capturan el env circundante.
 Sus locales NO escapan pero **pueden leer las del caller** (con
 algunos gotchas — lo cubrimos en C6).
 
-📚 **Detalle**: [cap 3 — Ámbito (scope)](../../guide.md#%C3%A1mbito-scope)
+📚 **Detalle**: [cap 3 — Ámbito (scope)](../../guide.md#ambito-scope)
 de la guía.
 
 ---

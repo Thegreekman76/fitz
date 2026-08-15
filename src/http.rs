@@ -3534,9 +3534,33 @@ async fn run_middleware_chain(
     for mw in middlewares.iter().filter(|m| m.kind == MiddlewareKind::Pre) {
         let args = vec![request.clone()];
         let label = format!("middleware {}", mw.name);
-        match call_handler(mw.handler.clone(), args, &label).await {
-            Ok(Value::Null) => continue,
-            Ok(Value::HttpResponse { status, body }) => {
+        let raw = match call_handler(mw.handler.clone(), args, &label).await {
+            Ok(v) => v,
+            Err(err) => {
+                return Some(HandlerOutcome::internal_error(format!(
+                    "middleware '{}' failed: {}",
+                    mw.name, err.message,
+                )));
+            }
+        };
+        // An `async fn` middleware returns a `Value::Future` — await it
+        // before inspecting the result (parallel to the HTTP handler + auth
+        // provider paths, which use the same helper). Without this an async
+        // middleware (e.g. a rate limit that hits the DB with `.await`)
+        // returned `Value::Future`, matched no arm below, and 500'd only in
+        // `fitz run` — a run↔build parity bug (`fitz build` awaited it).
+        let resolved = match await_if_future(raw).await {
+            Ok(r) => r,
+            Err(err) => {
+                return Some(HandlerOutcome::internal_error(format!(
+                    "middleware '{}' failed: {}",
+                    mw.name, err.message,
+                )));
+            }
+        };
+        match resolved {
+            Value::Null => continue,
+            Value::HttpResponse { status, body } => {
                 let payload_json = match body {
                     Some(b) => match value_to_json(b.as_ref()) {
                         Ok(j) => j,
@@ -3546,19 +3570,13 @@ async fn run_middleware_chain(
                 };
                 return Some(HandlerOutcome::json(status, payload_json));
             }
-            Ok(other) => {
+            other => {
                 return Some(HandlerOutcome::internal_error(format!(
                     "middleware '{}' returned an unexpected value ({}); \
                      it must return `null` to continue or `return <status> {{ ... }}` \
                      to short-circuit",
                     mw.name,
                     other.type_name(),
-                )));
-            }
-            Err(err) => {
-                return Some(HandlerOutcome::internal_error(format!(
-                    "middleware '{}' failed: {}",
-                    mw.name, err.message,
                 )));
             }
         }
@@ -3603,8 +3621,28 @@ async fn run_post_middlewares(
         };
         let args = vec![request.clone(), response_value];
         let label = format!("middleware post '{}'", mw.name);
-        match call_handler(mw.handler.clone(), args, &label).await {
-            Ok(Value::HttpResponse { status, body }) => {
+        let raw = match call_handler(mw.handler.clone(), args, &label).await {
+            Ok(v) => v,
+            Err(err) => {
+                return HandlerOutcome::internal_error(format!(
+                    "post middleware '{}' failed: {}",
+                    mw.name, err.message,
+                ));
+            }
+        };
+        // async fn post middleware → await the Future (run↔build parity,
+        // parallel to the Pre path above).
+        let resolved = match await_if_future(raw).await {
+            Ok(r) => r,
+            Err(err) => {
+                return HandlerOutcome::internal_error(format!(
+                    "post middleware '{}' failed: {}",
+                    mw.name, err.message,
+                ));
+            }
+        };
+        match resolved {
+            Value::HttpResponse { status, body } => {
                 let payload_json = match body {
                     Some(b) => match value_to_json(b.as_ref()) {
                         Ok(j) => j,
@@ -3622,18 +3660,12 @@ async fn run_post_middlewares(
                 outcome = HandlerOutcome::json(status, payload_json);
                 outcome.extra_headers = prev_extras;
             }
-            Ok(other) => {
+            other => {
                 return HandlerOutcome::internal_error(format!(
                     "post middleware '{}' returned an unexpected value ({}); \
                      it must return `Response` (a `return <status> {{ ... }}`)",
                     mw.name,
                     other.type_name(),
-                ));
-            }
-            Err(err) => {
-                return HandlerOutcome::internal_error(format!(
-                    "post middleware '{}' failed: {}",
-                    mw.name, err.message,
                 ));
             }
         }
@@ -3719,7 +3751,18 @@ fn run_wrap_chain(
         // Invoke the Wrap mw with (request, next).
         let args = vec![request.clone(), Value::NativeFn(next)];
         let label = format!("middleware wrap '{}'", current.name);
-        match call_handler(current.handler.clone(), args, &label).await {
+        let raw = match call_handler(current.handler.clone(), args, &label).await {
+            Ok(v) => v,
+            Err(err) => {
+                return HandlerOutcome::internal_error(format!(
+                    "wrap middleware '{}' failed: {}",
+                    current.name, err.message,
+                ));
+            }
+        };
+        // async fn wrap middleware → await the Future (run↔build parity,
+        // parallel to the Pre + Post paths).
+        match await_if_future(raw).await {
             Ok(Value::HttpResponse { status, body }) => {
                 let payload = match body {
                     Some(b) => match value_to_json(b.as_ref()) {
@@ -5728,6 +5771,59 @@ mod tests {
         .await;
         assert_eq!(outcome.status, 401);
         assert!(outcome.body.contains("unauthorized"));
+        assert!(!outcome.body.contains("SHOULD NOT APPEAR"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_async_middleware_returning_null_continues() {
+        // v0.41 — an `async fn` middleware returns a `Value::Future`; the
+        // chain must await it before inspecting the result. Without the
+        // await the Future matched no arm and 500'd only in `fitz run`
+        // (run↔build parity bug — `fitz build` awaited it).
+        let src = "\
+            async fn pass(req) {}\n\
+            @middleware(pass)\n\
+            @get(\"/\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, "\"ok\"");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_async_middleware_short_circuits() {
+        // An `async fn` middleware can still short-circuit with
+        // `return <status> { ... }` — the awaited value is the response.
+        let src = "\
+            async fn gate(req) {\n\
+                return 403 {\"error\": \"blocked\"}\n\
+            }\n\
+            @middleware(gate)\n\
+            @get(\"/\")\n\
+            fn h() => \"SHOULD NOT APPEAR\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 403);
+        assert!(outcome.body.contains("blocked"));
         assert!(!outcome.body.contains("SHOULD NOT APPEAR"));
     }
 

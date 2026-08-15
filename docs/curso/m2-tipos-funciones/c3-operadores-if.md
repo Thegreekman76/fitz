@@ -420,7 +420,7 @@ positivo
 - **`if cond statement`** sin bloque. Bloque obligatorio.
 - **Ternario `cond ? a : b`** explícito. Usá `if cond { a } else { b }` (Paso 8).
 
-📚 **Detalle**: [cap 7 — if / else](../../guide.md#7-if--else)
+📚 **Detalle**: [cap 7 — if / else](../../guide.md#7-if-else)
 de la guía.
 
 ---

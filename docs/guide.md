@@ -32,8 +32,8 @@ abrí un issue.
 5. [Strings](#5-strings)
 
 **Parte 3 — Control de flujo y colecciones**
-6. [Booleanos y lógica](#6-booleanos-y-lógica)
-7. [if / else](#7-if--else)
+6. [Booleanos y lógica](#6-booleanos-y-logica)
+7. [if / else](#7-if-else)
 8. [Loops](#8-loops)
 9. [Listas, mapas y rangos](#9-listas-mapas-y-rangos)
 10. [Match](#10-match)
@@ -41,50 +41,50 @@ abrí un issue.
 **Parte 4 — Abstracción**
 11. [Funciones](#11-funciones)
 12. [Tipos con `type`](#12-tipos-con-type)
-13. [Métodos y mutación](#13-métodos-y-mutación)
+13. [Métodos y mutación](#13-metodos-y-mutacion)
 
 **Parte 5 — Errores**
 14. [Result y manejo de errores](#14-result-y-manejo-de-errores)
 15. [Errores y mensajes](#15-errores-y-mensajes)
 
 **Parte 6 — Organización**
-16. [Módulos](#16-módulos)
+16. [Módulos](#16-modulos)
 16b. [Package manager](#16b-package-manager)
 
 **Parte 7 — HTTP nativo y concurrencia**
 17. [HTTP nativo](#17-http-nativo)
-18. [Docs automáticas](#18-docs-automáticas)
+18. [Docs automáticas](#18-docs-automaticas)
 19. [Async y concurrencia](#19-async-y-concurrencia)
 
 **Parte 8 — Compilar**
-20. [`fitz build` — compilar a binario nativo](#20-fitz-build--compilar-a-binario-nativo)
+20. [`fitz build` — compilar a binario nativo](#20-fitz-build-compilar-a-binario-nativo)
 
 **Parte 9 — Interop**
 21. [Interop Python](#21-interop-python)
 
 **Parte 10 — Tooling**
 22. [Soporte para editores](#22-soporte-para-editores)
-23. [`fitz fmt` — formateador automático](#23-fitz-fmt--formateador-automático)
-24. [`fitz test` — testing built-in](#24-fitz-test--testing-built-in)
-25. [`fitz dev` — hot reload](#25-fitz-dev--hot-reload)
-26. [`fitz repl` — REPL interactivo](#26-fitz-repl--repl-interactivo)
-27. [`fitz lint` — linter de patrones](#27-fitz-lint--linter-de-patrones)
+23. [`fitz fmt` — formateador automático](#23-fitz-fmt-formateador-automatico)
+24. [`fitz test` — testing built-in](#24-fitz-test-testing-built-in)
+25. [`fitz dev` — hot reload](#25-fitz-dev-hot-reload)
+26. [`fitz repl` — REPL interactivo](#26-fitz-repl-repl-interactivo)
+27. [`fitz lint` — linter de patrones](#27-fitz-lint-linter-de-patrones)
 
 **Parte 11 — Web first-class**
 28. [Auth nativa](#28-auth-nativa)
 29. [WebSockets tipados](#29-websockets-tipados)
 30. [Jobs sin Celery](#30-jobs-sin-celery)
-31. [Postgres + ORM nativo](#31-postgres--orm-nativo)
+31. [Postgres + ORM nativo](#31-postgres-orm-nativo)
 
 **Parte 12 — Operacional**
 32. [Variables de entorno](#32-variables-de-entorno)
-33. [Observability — logs, spans, métricas, OTel](#33-observability--logs-spans-métricas-otel)
+33. [Observability — logs, spans, métricas, OTel](#33-observability-logs-spans-metricas-otel)
 
 **Parte 13 — CLI y cerrando**
 34. [CLI builder nativo (`@command`)](#34-cli-builder-nativo-command)
 35. [Deployment ciudadano primera clase](#35-deployment-ciudadano-primera-clase)
-36. [Plantillas y boilerplates](#36-plantillas-y-boilerplates)
-37. [Qué sigue](#37-qué-sigue)
+36. [Plantillas y boilerplates](#37-plantillas-y-boilerplates)
+37. [Qué sigue](#38-que-sigue)
 
 ---
 
@@ -1284,7 +1284,7 @@ Ver [examples/guide/05b-format-specs.fitz](../examples/guide/05b-format-specs.fi
 > literales. Métodos `.split(sep)`, `.contains(s)`,
 > `.starts_with(s)`, `.ends_with(s)`, `.trim()`,
 > `.replace(old, new)`, `.repeat(n)` — vivos en `fitz run` y
-> `fitz build` (ver [cap 13](#13-métodos-y-mutación) + ejemplo
+> `fitz build` (ver [cap 13](#13-metodos-y-mutacion) + ejemplo
 > [13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)).
 > **Format specifiers** `{x:.2f}`, `{n:05d}`, etc. — ver
 > sub-sección "Format specifiers" arriba.
@@ -2456,7 +2456,7 @@ Ver [examples/guide/09b-indexing-slicing.fitz](../examples/guide/09b-indexing-sl
 
 - **Métodos sobre listas y mapas** — `xs.push(...)`, `xs.map(...)`,
   `m.get(...)`, etc. ya están vivos desde el paso 4 de Fase 3.
-  Los ves en el [capítulo 13](#13-métodos-y-mutación).
+  Los ves en el [capítulo 13](#13-metodos-y-mutacion).
 - **`for` sobre mapas**: necesita el tipo `Pair`/`entry`. Si lo
   intentás, el intérprete corta:
 
@@ -2897,7 +2897,7 @@ match find_user(1) {
 }
 ```
 
-Lo cubrimos en detalle en [el próximo capítulo](#13-result-y-manejo-de-errores).
+Lo cubrimos en detalle en [el próximo capítulo](#14-result-y-manejo-de-errores).
 
 ### Or-patterns `pat1 | pat2 | pat3`
 
@@ -3415,7 +3415,7 @@ para el ejemplo completo.
 
 > **Features completas de funciones**: **default params**,
 > **varargs**, **named args**, **métodos custom sobre `type`** —
-> ver [cap 13](#13-métodos-y-mutación).
+> ver [cap 13](#13-metodos-y-mutacion).
 
 ### Ejemplo completo
 
@@ -3769,7 +3769,7 @@ print("Hola, {u.name}!")    // Hola, Fitz!
   `type Shape { ... }` con un campo discriminador.
 
 > **Features completas de `type`**: **métodos custom sobre `type`**
-> — ver [cap 13](#13-métodos-y-mutación) con su propia sub-sección
+> — ver [cap 13](#13-metodos-y-mutacion) con su propia sub-sección
 > y ejemplos. Chequeo estático de anotaciones contra valores
 > (`let x: Int = "hola"` falla en `fitz check`), genéricos
 > compuestos en campos (`List<Str>`, `Map<Str, User>`, etc.,
@@ -7700,13 +7700,12 @@ Funciona en `fitz build` (binario nativo). Las fns middleware
 pueden ser `async` (caso típico: rate limit que consulta DB con
 `.await`) y reciben `Request` como primer parámetro normal.
 
-> Limitación conocida (deuda residual derivada de v0.19.5): en
-> `fitz run` (intérprete), las fns middleware **sync** funcionan
-> cross-module sin problema, pero las `async fn` middleware tienen
-> un bug pre-existente del evaluator y devuelven 500. Workaround:
-> durante desarrollo, validar el flujo middleware async con
-> `fitz build && ./binario`. Se cierra en una iteración futura
-> junto a otras mejoras de paridad runtime/codegen.
+> Middleware `async fn` funciona igual en `fitz run` y en `fitz build`
+> desde v0.41.0 — el intérprete awaitea el `Future` que devuelve una
+> middleware `async` (Pre, Post y Wrap). Antes de v0.41.0 tenían un bug
+> del evaluator que devolvía 500 solo en `fitz run` (el binario nativo
+> siempre las awaiteó); ya no hace falta el workaround de validar con
+> `fitz build`.
 
 ### HTTP client outbound
 
@@ -8896,7 +8895,7 @@ nativo standalone.
 > flag `fitz build --bundle-python` empaqueta CPython embebido
 > adentro del binario — el resultado corre standalone sin Python
 > en el destino. Tamaño +25-30 MB, pero el deploy se simplifica
-> dramáticamente. Detalle en [cap 21.11](#2111-fitz-build---bundle-python--binario-standalone).
+> dramáticamente. Detalle en [cap 21.11](#2111-fitz-build-bundle-python-binario-standalone).
 
 ### Cuándo usar `fitz run` y cuándo `fitz build`
 
@@ -11117,6 +11116,22 @@ HS256 default; opcional pasar `"HS384"`/`"HS512"` como tercer arg.
 devuelve `Result<Map<Str, Str>>` — token malformado, signature
 inválida, expirado son runtime events que el caller maneja con
 `match` o `?`.
+
+**Payloads heterogéneos (v0.41.0)** — `encode` acepta un payload
+`Map<Str, Any>` con valores que no son `Str`: números, booleanos y
+listas se serializan con su tipo JSON nativo (`exp: 1699999999` queda
+numérico, no `"1699999999"`; `admin: true` queda booleano), tanto en
+`fitz run` como en `fitz build` (paridad bit-a-bit). Un payload
+`Map<Str, Str>` mantiene el comportamiento previo byte-a-byte.
+
+```fitz
+let token = jwt.encode({"sub": "u42", "exp": 1699999999, "admin": true}, "mi-secret")
+```
+
+> Nota: `decode` todavía devuelve `Result<Map<Str, Str>>` en `fitz
+> build` — leer un claim numérico lo devuelve stringificado. El
+> intérprete (`fitz run`) ya lo devuelve heterogéneo; cerrar esa
+> asimetría en el binario es deuda residual.
 
 **`hash`** — módulo built-in. Argon2id (recomendación OWASP), salt
 aleatorio por hash, output en formato PHC string listo para
@@ -14522,7 +14537,7 @@ El `config("DB_HOST", default)` es seguro de loggear.
 
 ### 35.4. Observability con OTel (Fase 12.3)
 
-Detalle completo en [cap 33](#33-observability--logs-spans-métricas-otel).
+Detalle completo en [cap 33](#33-observability-logs-spans-metricas-otel).
 Resumen para deployment:
 
 - **Logs estructurados** → JSON a stderr por default; pretty en TTY o
@@ -14567,7 +14582,7 @@ $ fitz docker build --tag mi-api:v1.0
 ✓ build OK — `mi-api:v1.0`
 ```
 
-Detalle completo en [cap 33.10](#3310-deployment--fitz-docker-init--fitz-docker-build-fase-124).
+Detalle completo en [cap 33.10](#3310-deployment-fitz-docker-init-fitz-docker-build-fase-124).
 
 ### 35.6. Ejemplo runnable: API de producción end-to-end
 
@@ -15794,7 +15809,7 @@ escribir desde cero.
 > el correcto. Para programas Fitz que **solo usan Python stdlib**
 > (sin pip packages), `--bundle-python` hoy ya produce binarios
 > standalone listos para `FROM scratch` — ver
-> `examples/python-interop-8.b.fitz` y [cap 21.11](#2111-fitz-build---bundle-python--binario-standalone).
+> `examples/python-interop-8.b.fitz` y [cap 21.11](#2111-fitz-build-bundle-python-binario-standalone).
 
 ---
 
@@ -15862,33 +15877,33 @@ Con los capítulos 1 a 30 podés:
 - **Formato canónico** con `fitz fmt`: cero config, estilo gofmt,
   preserva comments y blank lines del usuario. Modo `--check` para
   CI / pre-commit hooks. Ver
-  [cap 23](#23-fitz-fmt--formateador-automático).
+  [cap 23](#23-fitz-fmt-formateador-automatico).
 - **Tests built-in** con `@test` + `fitz test`: decorator `@test`
   sobre fns sin args, 4 assertion builtins (`assert`, `assert_eq`,
   `assert_ne`, `assert_throws`), runner con output estilo cargo
   (ok/FAILED + summary + exit code), filtrado por substring, async
   tests, discovery automático en manifest mode (`tests/*.fitz` +
   `[lib]` integration). Cero librerías. Ver
-  [cap 24](#24-fitz-test--testing-built-in).
+  [cap 24](#24-fitz-test-testing-built-in).
 - **Hot reload** con `fitz dev`: file watcher sobre el proyecto +
   kill/respawn del child al detectar cambio en `.fitz` o
   `fitz.toml`. Debounce 100ms, exclusión de
   `target/`/`.git/`/`node_modules/`, banner ANSI entre runs,
   Ctrl+C atrapa sin dejar zombies. Ver
-  [cap 25](#25-fitz-dev--hot-reload).
+  [cap 25](#25-fitz-dev-hot-reload).
 - **REPL interactivo** con `fitz repl`: prompt `fitz> ` con env
   compartido entre líneas, multi-line automático (`... `),
   pretty-print Python-style del último valor, 5 comandos especiales
   (`:help`/`:env`/`:type`/`:reset`/`:load`/`:quit`), history
   persistente en `~/.fitz/history` con arrow up/down + Ctrl+R,
   async transparente (`sleep(100).await` funciona). Ver
-  [cap 26](#26-fitz-repl--repl-interactivo).
+  [cap 26](#26-fitz-repl-repl-interactivo).
 - **Linter** con `fitz lint`: 4 lints — `unused_variable`,
   `unused_import`, `useless_match`, `string_concat`. Default
   warning + exit 0; `--deny <lint>` promueve a error + exit 1
   para CI. Supresión con `// @allow(<lint>)` en la línea anterior.
   Output estilo cargo-clippy con colores ANSI auto. Ver
-  [cap 27](#27-fitz-lint--linter-de-patrones).
+  [cap 27](#27-fitz-lint-linter-de-patrones).
 - **Auth nativa**: tres decoradores — `@auth_provider` (singleton
   del programa que recibe headers y devuelve `Result<User>`),
   `@authenticated` (handler protegido por bearer JWT; 401

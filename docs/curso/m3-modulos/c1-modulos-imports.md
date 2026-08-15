@@ -58,7 +58,7 @@ print(u)
 print(doblar(21))
 ```
 
-📚 **Detalle exhaustivo**: [cap 16 — Módulos](../../guide.md#16-m%C3%B3dulos)
+📚 **Detalle exhaustivo**: [cap 16 — Módulos](../../guide.md#16-modulos)
 de la guía.
 
 ---

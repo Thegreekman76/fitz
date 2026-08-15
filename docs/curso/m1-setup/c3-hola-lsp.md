@@ -212,7 +212,7 @@ hover **no siempre refleja el refinement**. Es deuda residual
 del LSP — el chequeo estático sí lo hace, pero el display del
 hover puede mostrar el tipo declarado en vez del refinado.
 
-📚 **Detalle**: [cap 22.2 — Hover](../../guide.md#hover) de la
+📚 **Detalle**: [cap 22.2 — Hover](../../guide.md#22-soporte-para-editores) de la
 guía.
 
 ---
