@@ -9,6 +9,33 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.40.1] — 2026-08-15 — Cierre de la clase B16: `if` divergent-else + literales mixtos
+
+Cierra los **dos últimos residuales** de la clase de bugs checker↔codegen que
+abrió B16 ("pasa `fitz check`, rompe `fitz build` con un `E0308` opaco"). Con
+esto **no quedan ítems abiertos conocidos de la clase**.
+
+- **R-if-div — `if c { A } else { return B }` usado como valor**. El codegen
+  trataba el `if` con rama divergente como statement-mode (`Null`), aunque Rust
+  lo tipa como `A` (el `else` es `!`). Dos cambios coordinados: (1) `gen_if_expr`
+  gana una rama `asym_value` (+ helper `block_diverges`) que emite expression-mode
+  con el tipo de la rama-valor cuando la otra diverge (`return`/`break`); la rama
+  `want_value` simétrica queda byte-idéntica. (2) El checker `Expr::If` replica.
+  Ahora `let n: Int = if c { A } else { return B }` chequea + buildea + corre.
+- **R-list-mix — literales heterogéneos vs anotación**. `Expr::List`/`Expr::Map`
+  del checker computan el LUB de los elementos con un **sticky Any** (helper
+  `sticky_lub`), replicando `codegen::gen_list_lit`: `[1, 2.5]` → `List<Float>`
+  (antes `List<Any>`), `[1, "dos", 2]` → `List<Any>` sticky. Ahora `let xs:
+  List<Int> = [1, 2.5]` errora en `fitz check` con mensaje claro en vez del E0308
+  de rustc al buildear.
+
+Ambos son la misma clase que `match` (v0.39.1) e `if`-como-expresión (v0.39.3).
+5 unit tests (`list_literal_*`/`map_literal_*`/`ifexpr_divergent_else_*`) + 2 E2E
+(`compile_e2e::v040_1_*` — divergent-else builds+runs, `[1,2.5]` builds).
+Verificación: lib 4115 (default) / 4279 (lsp), smoke ~290 ejemplos verde, cli_e2e
+128, fmt + clippy default+lsp limpios. Bump `Cargo.toml` +
+`editors/vscode/package.json` 0.40.0 → 0.40.1.
+
 ## [v0.40.0] — 2026-08-15 — DX chico: `:load` en Windows (L3) + error de `'...'` string (L4) + `fitz check` barre todo `.fitzv` (a2)
 
 Tres cierres chicos del backlog (L3, L4 del curso + a2 fast-follow de gotcha #7).

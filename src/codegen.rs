@@ -30333,6 +30333,18 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
 
         let want_value = else_stmts_opt.is_some() && then_tail.is_some() && else_tail.is_some();
 
+        // (a) v0.40.1 — asymmetric value: exactly one branch has a value
+        // tail and the OTHER diverges (`return`/`break`). The divergent
+        // branch is `!` in Rust and coerces to the value branch's type, so
+        // `let n = if c { A } else { return B }` is a value of `A`'s type —
+        // NOT statement-mode `Null` (which broke `fitz build` with an
+        // opaque E0308 while `fitz check` passed). Handled in its own arm so
+        // the symmetric `want_value` emission stays byte-identical.
+        let then_diverges = block_diverges(then);
+        let else_diverges = else_.map(block_diverges).unwrap_or(false);
+        let asym_value = else_stmts_opt.is_some()
+            && ((then_tail.is_some() && else_diverges) || (then_diverges && else_tail.is_some()));
+
         if want_value {
             // Expression mode: we evaluate the tails and unify.
             let (then_block, then_tail_code, then_tail_ty) = {
@@ -30371,6 +30383,51 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 else_block,
                 self.indent_str(),
                 else_tail_coerced,
+                self.indent_str_outer(),
+            );
+            Ok((code, result_ty))
+        } else if asym_value {
+            // Exactly one branch is a value tail; the other diverges.
+            // Value branch → `<stmts> <tail>`; divergent branch → `<stmts>`
+            // (its last stmt is the `return`/`break`, making the block `!`).
+            // No cross-branch coercion: the result type is the value
+            // branch's own type (the divergent side is `!`).
+            let emit_branch = |ctx: &mut Self,
+                               stmts: &[&Stmt],
+                               tail: Option<&Expr>,
+                               narrow: &Option<(String, Type)>|
+             -> Result<(String, Option<Type>), FitzError> {
+                ctx.push_scope();
+                let mut full = String::new();
+                if let Some((name, inner_ty)) = narrow {
+                    ctx.declare_var(name.clone(), inner_ty.clone());
+                    full.push_str(&format!(
+                        "{}let {n} = {n}.unwrap();\n",
+                        ctx.indent_str(),
+                        n = name
+                    ));
+                }
+                full.push_str(&ctx.gen_block_to_string(stmts)?);
+                let ty = if let Some(e) = tail {
+                    let (c, t) = ctx.gen_expr(e)?;
+                    full.push_str(&format!("{}{}", ctx.indent_str(), c));
+                    Some(t)
+                } else {
+                    None
+                };
+                ctx.pop_scope();
+                Ok((full, ty))
+            };
+            let (then_block, then_ty) = emit_branch(self, &then_stmts, then_tail, &then_narrow)?;
+            let else_stmts = else_stmts_opt.clone().unwrap();
+            let (else_block, else_ty) = emit_branch(self, &else_stmts, else_tail, &else_narrow)?;
+            let result_ty = then_ty.or(else_ty).unwrap_or(Type::Null);
+            let code = format!(
+                "(if {} {{\n{}\n{}}} else {{\n{}\n{}}})",
+                cond_code,
+                then_block,
+                self.indent_str_outer(),
+                else_block,
                 self.indent_str_outer(),
             );
             Ok((code, result_ty))
@@ -36850,6 +36907,18 @@ fn split_tail_expr(body: &[Stmt]) -> (Vec<&Stmt>, Option<&Expr>) {
         }
     }
     (body.iter().collect(), None)
+}
+
+/// True when a block's last statement diverges (`return`/`break`/
+/// `continue`/`return <status>`). Such a block is `!` in Rust and
+/// coerces to any type — used by `gen_if_expr` to treat
+/// `if c { A } else { return B }` as an expression whose value is `A`
+/// (v0.40.1, B16-class consistency; the divergent `else` is `!`).
+fn block_diverges(body: &[Stmt]) -> bool {
+    matches!(
+        body.last(),
+        Some(Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..) | Stmt::ReturnStatus { .. })
+    )
 }
 
 fn is_print_call(e: &Expr) -> bool {

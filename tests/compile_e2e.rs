@@ -2976,6 +2976,35 @@ fn smoke_ejemplos_guia_compilables_compilan() {
     );
 }
 
+// B16-class consistency residuals (v0.40.1) — these patterns used to pass
+// `fitz check` but fail `fitz build` with an opaque rustc E0308.
+
+#[test]
+fn v040_1_divergent_else_if_builds_and_runs() {
+    // `if c { A } else { return B }` used as a value: the divergent `else`
+    // is `!` and coerces to `A`'s type.
+    let (out, code) = build_and_run(
+        "v040_1_divergent_else",
+        "fn unwrap_or(o: Int?) -> Int {\n\
+         \x20 let n = if (o != null) { o } else { return 0 }\n\
+         \x20 return n + 1\n\
+         }\n\
+         print(unwrap_or(41))\n\
+         print(unwrap_or(null))\n",
+    );
+    assert_eq!(code, 0, "divergent-else if must build + run: {out}");
+    assert!(out.contains("42") && out.contains('0'), "out: {out}");
+}
+
+#[test]
+fn v040_1_list_lub_float_builds_and_runs() {
+    // `[1, 2.5]` types as `List<Float>` (LUB of elements) in both the
+    // checker and the codegen — no annotation, builds clean.
+    let (out, code) = build_and_run("v040_1_list_lub", "let xs = [1, 2.5]\nprint(xs)\n");
+    assert_eq!(code, 0, "List<Float> literal must build + run: {out}");
+    assert!(out.contains("2.5"), "out: {out}");
+}
+
 // ---------------------------------------------------------------------------
 // F11 — state HTTP compartido (thread_local + tokio current_thread)
 // ---------------------------------------------------------------------------

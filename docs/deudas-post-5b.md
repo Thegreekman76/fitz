@@ -4003,50 +4003,53 @@ let n = match result {
 
 ---
 
-## 🟡 Consistencia checker↔codegen — clase B16 (parcialmente cerrada)
+## 🟢 Consistencia checker↔codegen — clase B16 (CERRADA v0.40.1)
 
 **Contexto.** B16 (v0.39.1/.2) destapó una **clase de bugs**: el checker y el
 codegen calculan tipos distintos para la misma construcción → un programa **pasa
 `fitz check` pero rompe `fitz build` con un `E0308` opaco de rustc**. Cerrados:
 `match` como LUB de arms (v0.39.1), `log.X`/`print`/`assert` → `Null`
 (v0.39.1/.2), `ReturnStatus` divergente (v0.39.1), `lub(T?,Null)` idempotente
-(v0.39.1), **`if`-como-expresión como LUB de ramas (v0.39.3)**.
+(v0.39.1), `if`-como-expresión como LUB de ramas (v0.39.3), y **los dos últimos
+residuales en v0.40.1** (R-if-div + R-list-mix, abajo). **No quedan ítems
+abiertos conocidos de esta clase.**
 
-**Residuales abiertos** (más raros; requieren cambio de codegen además del
-checker, por eso NO se cerraron en v0.39.3):
+**Residuales ~~abiertos~~ CERRADOS v0.40.1** (requerían cambio de codegen además
+del checker):
 
-### 🟡 R-if-div — `if c { A } else { return B }` usado como valor
+### 🟢 R-if-div — `if c { A } else { return B }` usado como valor — **CERRADO v0.40.1**
 
-**Síntoma**: `let n = if (o != null) { o } else { return 0 }` seguido de `n + 1`
-→ `fitz check` pasa (checker tipa el `if` como `Any`, gradual) pero `fitz build`
-falla con `operador + no aplicable a Null y Int en codegen`. El codegen
-(`gen_if_expr`) trata el `if` con rama divergente como **statement-mode** y
-devuelve `Type::Null`, aunque Rust tipa el `if` como `A` (la rama `else` es `!`).
+**Síntoma (histórico)**: `let n = if (o != null) { o } else { return 0 }` seguido
+de `n + 1` → `fitz check` pasaba (checker tipaba el `if` como `Any`) pero `fitz
+build` fallaba con `operador + no aplicable a Null y Int en codegen`. El codegen
+(`gen_if_expr`) trataba el `if` con rama divergente como statement-mode → `Null`,
+aunque Rust tipa el `if` como `A` (la rama `else` es `!`).
 
-**Por qué no se cerró en v0.39.3**: el checker mantiene `Any` para ese caso a
-propósito (devolver `Null` rechazaría spuriamente el programa). El fix correcto
-vive en el **codegen**: `gen_if_expr` debe tratar el divergent-else como
-expression-mode con el tipo de la rama no-divergente (paralelo a cómo el `match`
-maneja arms divergentes). ~40-60 LoC en `src/codegen.rs` + alinear el checker.
+**Cierre (v0.40.1)**: dos cambios coordinados. (1) Codegen `gen_if_expr` gana una
+rama `asym_value` (helper nuevo `block_diverges`): cuando una rama tiene value
+tail y la otra diverge (`return`/`break`), emite expression-mode con el tipo de la
+rama-valor (la divergente es `!` y coerce), en vez del statement-mode `Null`. La
+rama `want_value` simétrica queda byte-idéntica (arm separado). (2) Checker
+`Expr::If` replica: want_value → LUB; asimétrico (una rama Expr, otra diverge) →
+el tipo de la rama-valor; resto → `Any`. Ahora `let n: Int = if c { A } else {
+return B }` chequea + buildea + corre. Validado con E2E
+`compile_e2e::v040_1_divergent_else_if_builds_and_runs` (unwrap_or(41)=42,
+unwrap_or(null)=0) + 2 unit tests.
 
-**Workaround**: usar `match` (`match o { null => return 0, v => v }`) o el
-operador `?` — el idiom canónico para unwrap-or-return.
+### 🟢 R-list-mix — literales `[...]`/`{...}` heterogéneos vs anotación — **CERRADO v0.40.1**
 
-### 🟡 R-list-mix — literales `[...]`/`{...}` heterogéneos vs anotación
+**Síntoma (histórico)**: `let xs: List<Int> = [1, 2.5]` → `fitz check` pasaba (el
+checker tipaba `List<Any>` con "primer elemento o Any") pero `fitz build` fallaba
+con `E0308` (el codegen computa `lub(Int, Float) = Float` → `Vec<f64>`).
 
-**Síntoma**: `let xs: List<Int> = [1, 2.5]` → `fitz check` pasa (el checker tipa
-la lista como `List<Any>` cuando los elementos no son todos compatibles, y `Any`
-es compatible con `List<Int>`), pero `fitz build` falla con `E0308` (el codegen
-computa `lub(Int, Float) = Float` → `Vec<f64>` vs `Vec<i64>`).
-
-**Por qué no se cerró en v0.39.3**: `Expr::List`/`Expr::Map` en el checker usan
-"primer elemento o `Any`" en vez del LUB del codegen. Alinearlos (usar `lub`
-como en el match/if) haría que `[1, 2.5]` tipe `List<Float>` y el mismatch salga
-en `fitz check`. ~30-50 LoC en `src/types.rs`. Bajo riesgo (mismo patrón que el
-fix de if/match), pero cada cambio del checker exige el smoke de ~30 min.
-
-**Workaround**: no mezclar tipos incompatibles en un literal anotado (es un error
-del usuario que hoy sale tarde, en build, en vez de en check).
+**Cierre (v0.40.1)**: `Expr::List`/`Expr::Map` en el checker computan el LUB de los
+elementos con un **sticky Any** (helper nuevo `sticky_lub`), replicando bit-a-bit
+`codegen::gen_list_lit`: compatibles-pero-distintos → LUB (`[1, 2.5]` →
+`List<Float>`); genuinamente incompatibles → `List<Any>` sticky (`[1, "dos", 2]` →
+`List<Any>`, el codegen emite `Vec<__FitzValue>`, el intérprete lo permite). Ahora
+`let xs: List<Int> = [1, 2.5]` errora en `fitz check` con mensaje claro. 3 unit
+tests (`list_literal_*`, `map_literal_*`) + E2E
+`compile_e2e::v040_1_list_lub_float_builds_and_runs`.
 
 ---
 

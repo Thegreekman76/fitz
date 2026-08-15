@@ -5167,50 +5167,69 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     check_block_tail_type(ctx, else_body)
                 })
             });
-            // `want_value` mirror: else present AND both branches end in a
-            // `Stmt::Expr` (a divergent/other tail is NOT a value tail).
-            let then_tail_is_expr = matches!(then.last(), Some(Stmt::Expr(..)));
+            // Mirror `gen_if_expr` exactly (v0.40.1):
+            //   - want_value (else + both branches end in `Stmt::Expr`) →
+            //     LUB of the two tails.
+            //   - asymmetric (one branch is a value tail, the OTHER diverges
+            //     via `return`/`break`) → the value branch's type; the
+            //     divergent branch is `!` in Rust and coerces. This closes
+            //     `let n = if c { A } else { return B }` used as `A`.
+            //   - otherwise (no else, both diverge, or a branch ends in a
+            //     non-expression stmt) → `Any` (gradual, unchanged).
+            let stmt_diverges = |s: Option<&Stmt>| {
+                matches!(
+                    s,
+                    Some(
+                        Stmt::Return(..)
+                            | Stmt::Break(..)
+                            | Stmt::Continue(..)
+                            | Stmt::ReturnStatus { .. }
+                    )
+                )
+            };
+            let then_is_expr = matches!(then.last(), Some(Stmt::Expr(..)));
+            let then_div = stmt_diverges(then.last());
             match (else_.as_ref(), else_ty) {
-                (Some(else_body), Some(ety))
-                    if then_tail_is_expr && matches!(else_body.last(), Some(Stmt::Expr(..))) =>
-                {
-                    lub(&then_ty, &ety)
+                (Some(eb), Some(ety)) => {
+                    let else_is_expr = matches!(eb.last(), Some(Stmt::Expr(..)));
+                    let else_div = stmt_diverges(eb.last());
+                    if then_is_expr && else_is_expr {
+                        lub(&then_ty, &ety)
+                    } else if then_is_expr && else_div {
+                        then_ty
+                    } else if then_div && else_is_expr {
+                        ety
+                    } else {
+                        Type::Any
+                    }
                 }
-                // Non-value `if`: no else, or a branch that doesn't end in an
-                // expression. We keep `Type::Any` (gradual) rather than
-                // `Null`: the codegen tracks statement-mode `if` as `Null`,
-                // but for a divergent-else value pattern
-                // (`if c { A } else { return B }`) Rust actually types the
-                // `if` as `A` (the `else` is `!`) — returning `Null` here
-                // would spuriously reject `let x = if c { A } else { return }`
-                // used as `A`. Those cases keep their pre-existing gradual
-                // behaviour; only the common `want_value` shape (both
-                // branches are values) gets the precise LUB. Fully closing
-                // the no-else / divergent-else value cases needs a matching
-                // codegen change (residual).
                 _ => Type::Any,
             }
         }
 
         Expr::List(items, _) => {
-            // List<T> with T = type of the first element if the rest
-            // are compatible; if there's a mix, T = Any.
             if items.is_empty() {
                 return Type::List(Box::new(Type::Any));
             }
-            let first = infer_expr(ctx, &items[0]);
-            let mut all_same = true;
+            // B16-class consistency (v0.40.1) — the element type is the
+            // LUB of all items, with a *sticky* `Any` once two items are
+            // genuinely incompatible, mirroring the codegen's `gen_list_lit`
+            // (a heterogeneous list emits `Vec<__FitzValue>`). Previously
+            // the checker used "first item or Any", which diverged from the
+            // codegen for compatible-but-different items — e.g. `[1, 2.5]`
+            // typed `List<Any>` in the checker but `List<Float>` in codegen,
+            // so `let xs: List<Int> = [1, 2.5]` passed `fitz check` and broke
+            // `fitz build` with an opaque rustc E0308.
+            let mut elem = infer_expr(ctx, &items[0]);
+            let mut hetero = false;
             for it in &items[1..] {
-                let t = infer_expr(ctx, it);
-                if !is_compatible(&t, &first) {
-                    all_same = false;
+                let t = infer_expr(ctx, it); // always infer so item errors surface
+                if hetero {
+                    continue;
                 }
+                elem = sticky_lub(&elem, &t, &mut hetero);
             }
-            if all_same {
-                Type::List(Box::new(first))
-            } else {
-                Type::List(Box::new(Type::Any))
-            }
+            Type::List(Box::new(elem))
         }
 
         // Mini-batch C + Cmp+ — `[expr for var in iter ([for ...]*) [if cond]?]`.
@@ -5286,24 +5305,25 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if pairs.is_empty() {
                 return Type::Map(Box::new(Type::Any), Box::new(Type::Any));
             }
-            // We synthesize from the first pair. Mix of types falls to Any.
-            let (fk, fv) = (infer_expr(ctx, &pairs[0].0), infer_expr(ctx, &pairs[0].1));
-            let mut k_same = true;
-            let mut v_same = true;
+            // B16-class consistency (v0.40.1) — key/value types are the LUB
+            // of all pairs with the codegen's sticky-Any rule (mirrors
+            // `Expr::List` above). Previously "first pair or Any" diverged
+            // from the codegen for compatible-but-different values.
+            let mut kt = infer_expr(ctx, &pairs[0].0);
+            let mut vt = infer_expr(ctx, &pairs[0].1);
+            let mut k_hetero = false;
+            let mut v_hetero = false;
             for (k, v) in &pairs[1..] {
-                let kt = infer_expr(ctx, k);
-                let vt = infer_expr(ctx, v);
-                if !is_compatible(&kt, &fk) {
-                    k_same = false;
+                let kk = infer_expr(ctx, k); // always infer so pair errors surface
+                let vv = infer_expr(ctx, v);
+                if !k_hetero {
+                    kt = sticky_lub(&kt, &kk, &mut k_hetero);
                 }
-                if !is_compatible(&vt, &fv) {
-                    v_same = false;
+                if !v_hetero {
+                    vt = sticky_lub(&vt, &vv, &mut v_hetero);
                 }
             }
-            Type::Map(
-                Box::new(if k_same { fk } else { Type::Any }),
-                Box::new(if v_same { fv } else { Type::Any }),
-            )
+            Type::Map(Box::new(kt), Box::new(vt))
         }
 
         Expr::Range { start, end, .. } => {
@@ -6362,6 +6382,24 @@ fn lub(a: &Type, b: &Type) -> Type {
         (Type::Future(ai), Type::Future(bi)) => Type::Future(Box::new(lub(ai, bi))),
         (Type::Nullable(ai), Type::Nullable(bi)) => Type::Nullable(Box::new(lub(ai, bi))),
         _ => Type::Any,
+    }
+}
+
+/// LUB with the codegen's "sticky Any" rule for collection literals
+/// (v0.40.1). Once two elements are *genuinely* incompatible — both
+/// concrete, `lub` → `Any` — the accumulator locks to `Any` and `hetero`
+/// flips true, so the caller stops folding. This mirrors
+/// `codegen::gen_list_lit` (a heterogeneous list/map emits
+/// `Vec<__FitzValue>`) and, crucially, distinguishes a real
+/// incompatibility from a legitimate `Any` operand (`lub(Any, T) = T`,
+/// which must NOT stick).
+fn sticky_lub(acc: &Type, next: &Type, hetero: &mut bool) -> Type {
+    let joined = lub(acc, next);
+    if matches!(joined, Type::Any) && !matches!(acc, Type::Any) && !matches!(next, Type::Any) {
+        *hetero = true;
+        Type::Any
+    } else {
+        joined
     }
 }
 
@@ -17099,20 +17137,73 @@ mod tests {
     }
 
     #[test]
-    fn ifexpr_divergent_else_stays_gradual_no_regression() {
-        // `if c { A } else { return B }` is NOT `want_value` (the else tail
-        // is a `return`, not an expression), so it keeps its pre-existing
-        // gradual (`Any`) type — the checker must NOT add a spurious error
-        // (the `else`-diverges "unwrap-or-return" idiom).
+    fn ifexpr_divergent_else_types_as_value_branch() {
+        // (a) v0.40.1 — `if c { A } else { return B }` types as `A` (the
+        // value branch); the divergent `else` is `!` and coerces. The
+        // "unwrap-or-return" idiom `let n: Int = if (o != null) { o } else
+        // { return 0 }` now type-checks AND builds (was a `fitz check`-pass /
+        // `fitz build`-fail opaque E0308).
         let errs = errors_of(
             "fn unwrap_or(o: Int?) -> Int {\n\
              \x20 let n = if (o != null) { o } else { return 0 }\n\
-             \x20 return n\n\
+             \x20 return n + 1\n\
              }\n",
         );
         assert!(
             errs.is_empty(),
-            "divergent-else if must stay gradual (no spurious check error): {errs:?}"
+            "divergent-else if must type as the value branch (Int): {errs:?}"
+        );
+        // The symmetric case (then diverges, else is a value) too.
+        let errs2 = errors_of(
+            "fn unwrap_or(o: Int?) -> Int {\n\
+             \x20 let n = if (o == null) { return 0 } else { o }\n\
+             \x20 return n + 1\n\
+             }\n",
+        );
+        assert!(
+            errs2.is_empty(),
+            "divergent-then if must type as the else value branch: {errs2:?}"
+        );
+    }
+
+    // B16-class consistency (v0.40.1) — collection literals type as the LUB
+    // of their elements (sticky Any), matching the codegen's `gen_list_lit`.
+
+    #[test]
+    fn list_literal_types_as_lub_of_elements() {
+        // `[1, 2.5]` → `List<Float>` (was `List<Any>` under "first or Any").
+        let ty = type_of_last_let("let xs = [1, 2.5]\n");
+        assert_eq!(ty, Some(Type::List(Box::new(Type::Float))));
+        // Homogeneous stays precise.
+        let ty2 = type_of_last_let("let xs = [1, 2, 3]\n");
+        assert_eq!(ty2, Some(Type::List(Box::new(Type::Int))));
+        // Genuinely incompatible → sticky `List<Any>` (heterogeneous, the
+        // codegen emits `Vec<__FitzValue>` — the interpreter allows it).
+        let ty3 = type_of_last_let("let xs = [1, \"dos\"]\n");
+        assert_eq!(ty3, Some(Type::List(Box::new(Type::Any))));
+        // Sticky: a middle incompatible element must NOT un-stick to Int.
+        let ty4 = type_of_last_let("let xs = [1, \"dos\", 2]\n");
+        assert_eq!(ty4, Some(Type::List(Box::new(Type::Any))));
+    }
+
+    #[test]
+    fn list_literal_wrong_annotation_now_errors_at_check() {
+        // `let xs: List<Int> = [1, 2.5]` must error at CHECK time, not as an
+        // opaque rustc E0308 at `fitz build`.
+        let errs = errors_of("fn f() {\n  let xs: List<Int> = [1, 2.5]\n}\n");
+        assert!(
+            errs.iter().any(|e| e.message.contains("List")),
+            "expected a List<Float> vs List<Int> mismatch: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn map_literal_values_type_as_lub() {
+        // Values LUB: `{"a": 1, "b": 2.5}` → `Map<Str, Float>`.
+        let ty = type_of_last_let("let m = {\"a\": 1, \"b\": 2.5}\n");
+        assert_eq!(
+            ty,
+            Some(Type::Map(Box::new(Type::Str), Box::new(Type::Float)))
         );
     }
 
