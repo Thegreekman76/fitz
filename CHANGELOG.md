@@ -9,6 +9,39 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.41.2] — 2026-08-15 — `jwt.decode` heterogéneo en `fitz build` (cierra la paridad JWT)
+
+Cierra la deuda residual de v0.41.0: `jwt.decode` en `fitz build` devolvía
+`Result<Map<Str, Str>>` (stringificaba los claims) mientras el intérprete ya
+devolvía heterogéneo. Ahora el binario también devuelve `Result<Map<Str, Any>>`
+— los claims vuelven con su tipo JSON nativo (`exp`/`level` → Int, `admin` →
+Bool, `roles` → List), **paridad bit-a-bit `fitz run` ↔ `fitz build`** y
+round-trip correcto con el `jwt.encode` heterogéneo de v0.41.0.
+
+- **Codegen**: nuevo helper `__fitz_jwt_decode_fv` (gated `uses_fitz_value`)
+  que marshaliza cada claim vía `__fitz_json_to_fv` (el mismo conversor que ya
+  usaba encode). `gen_auth_jwt_decode` tipa el retorno como
+  `Result<Map<Str, Any>>` y dispara el flag `uses_fitz_value`. El detector
+  `program_uses_fitz_value` gana una rama `jwt.decode` (cualquier decode
+  emite el enum `__FitzValue` + los conversores). El helper viejo Str→Str
+  `__fitz_jwt_decode` se elimina — quedaba 100% muerto.
+- **Cross-module**: un módulo que extrae claims (`claims["email"]` sobre el
+  `Map<Str, Any>`) referencia los extractores `__fv_to_*` + el helper
+  `__fitz_jwt_decode_fv`, que viven solo en el preludio del crate root. Se
+  extendió el auto-inject por contenido (el mismo que ya inyecta
+  `use crate::__FitzValue`) para importarlos. `examples/guide/multi-module-auth`
+  compila con los claims extraídos dentro del módulo.
+- **Sin cambio del intérprete ni del checker** — el módulo `jwt` ya era
+  `Type::Any` (el retorno de decode no se tipaba estáticamente), así que
+  ningún programa existente cambia su type-checking.
+- **Tests**: unit `codegen::jwt_decode_heterogeneous_uses_fitz_value_path_v0_41_2`
+  + E2E `compile_e2e::auth_codegen_jwt_decode_heterogeneous_roundtrip_v0_41_2`
+  (encode heterogéneo → decode → aritmética Int sobre claims + Bool, imposible
+  si decode aplastara a Str). Los 4 ejemplos con `jwt.decode` (`28-auth`,
+  `29-ws`, `multi-module-auth`, taskhub `c3`) compilan a binario.
+
+Sin sintaxis nueva; sin impacto en grammar/LSP (bug interno del codegen).
+
 ## [v0.41.1] — 2026-08-15 — LSP: dedup del view-check + cache del project-scan
 
 Dos refinamientos internos del LSP (feature `lsp`) — los dos diferidos que

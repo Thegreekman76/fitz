@@ -7993,6 +7993,39 @@ print(token)\n\
     assert!(claims.contains("\"role\":\"admin\""), "claims: {}", claims);
 }
 
+#[test]
+fn auth_codegen_jwt_decode_heterogeneous_roundtrip_v0_41_2() {
+    // v0.41.2 — `jwt.decode` devuelve un `Map<Str, Any>` heterogéneo:
+    // los claims vuelven con su tipo JSON nativo (Int/Bool/Str), no
+    // stringificados. Paridad con el intérprete. Round-trip: encode
+    // heterogéneo → decode → leer claims tipados. La prueba es que el
+    // binario hace aritmética Int sobre `level`/`count` y usa `admin`
+    // como Bool — imposible si decode aplastara todo a Str.
+    let src = "\
+let secret = \"secret-32-bytes-long-test-aaaaaa\"\n\
+let payload = {\"sub\": \"ada\", \"level\": 42, \"admin\": true, \"count\": 3}\n\
+let token = jwt.encode(payload, secret)\n\
+let claims = match jwt.decode(token, secret) {\n\
+  Ok(c) => c,\n\
+  Err(e) => { print(\"err: {e}\"); {} },\n\
+}\n\
+let level: Int = claims[\"level\"]\n\
+print(\"level+1={level + 1}\")\n\
+let admin: Bool = claims[\"admin\"]\n\
+if (admin) { print(\"is admin\") } else { print(\"not admin\") }\n\
+let sub: Str = claims[\"sub\"]\n\
+print(\"sub={sub}\")\n\
+let count: Int = claims[\"count\"]\n\
+print(\"count*2={count * 2}\")\n\
+";
+    let (stdout, exit) = build_and_run("jwt_decode_hetero_rt_v0_41_2", src);
+    assert_eq!(exit, 0, "exit: {} stdout: {}", exit, stdout);
+    assert!(stdout.contains("level+1=43"), "Int claim: {}", stdout);
+    assert!(stdout.contains("is admin"), "Bool claim: {}", stdout);
+    assert!(stdout.contains("sub=ada"), "Str claim: {}", stdout);
+    assert!(stdout.contains("count*2=6"), "Int claim: {}", stdout);
+}
+
 // ---------------------------------------------------------------------------
 // Fase 9.w.2.c — Tests E2E del codegen WebSocket.
 //

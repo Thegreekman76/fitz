@@ -5904,10 +5904,20 @@ discovery. Mini-fase separada del cap.
 > JSON nativo, paridad bit-a-bit `fitz run` ↔ `fitz build`; el
 > Str→Str fast path queda byte-idéntico. `smtp.send` correctamente
 > fuera de alcance (schema fijo, campos inherentemente `Str`).
-> **Residual**: `jwt.decode` en `fitz build` todavía devuelve
-> `Result<Map<Str, Str>>` (stringifica claims no-Str). El intérprete
-> ya devuelve heterogéneo — cerrar la asimetría del codegen es el
-> follow-up.
+> ~~**Residual**: `jwt.decode` en `fitz build` todavía devuelve
+> `Result<Map<Str, Str>>`~~ **CERRADO v0.41.2** — `jwt.decode` en
+> `fitz build` ahora devuelve `Result<Map<Str, Any>>` heterogéneo
+> (`__fitz_jwt_decode_fv` + `__fitz_json_to_fv`, gated
+> `uses_fitz_value`): los claims vuelven con su tipo JSON nativo
+> (Int/Bool/List), round-trip correcto con el `jwt.encode`
+> heterogéneo de v0.41.0, paridad bit-a-bit `fitz run` ↔ `fitz
+> build`. Cross-module cubierto: un módulo que extrae claims
+> (`claims["email"]`) auto-inyecta `use crate::{__fv_to_*,
+> __fitz_jwt_decode_fv}` (extendido el auto-inject de contenido
+> junto a `__FitzValue`). El detector `program_uses_fitz_value` gana
+> rama `jwt.decode` (dispara el enum). El helper viejo Str→Str
+> `__fitz_jwt_decode` se elimina (muerto). **La paridad run↔build
+> del auth JWT queda completa** (encode v0.41.0 + decode v0.41.2).
 >
 > **Próximo norte**: resto de Fase 9.w — `@ws("/chat")`
 > (WebSockets tipados con `WsConn<T>`), `@cron` + `@background`

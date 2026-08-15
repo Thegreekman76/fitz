@@ -2527,6 +2527,21 @@ fn program_uses_fitz_value(program: &Program) -> bool {
                             }
                         }
                     }
+                    // v0.41.2 — `jwt.decode` now returns a heterogeneous
+                    // `Map<Str, Any>` (parity with the interpreter, which
+                    // decodes via `http::json_to_value`). Any decode call
+                    // marshals claim values through `__fitz_json_to_fv`, so
+                    // fire the flag unconditionally to emit the enum +
+                    // converter. Unlike encode, decode has no Str→Str fast
+                    // path — the claim shape comes from the token, not the
+                    // caller.
+                    if field == "decode" {
+                        if let Expr::Ident(name, _) = object.as_ref() {
+                            if name == "jwt" {
+                                return true;
+                            }
+                        }
+                    }
                 }
                 expr_uses_fv(callee) || args.iter().any(expr_uses_fv)
             }
@@ -5030,16 +5045,45 @@ impl ModuleLoader {
         // (`module_uses_fitz_value`) also makes the crate root emit
         // the `enum __FitzValue` definition.
         let module_emits_fitz_value = rust_content.contains("__FitzValue");
-        if module_emits_fitz_value && !rust_content.contains("use crate::__FitzValue;") {
+        {
             let anchor = "use std::sync::{Arc, Mutex};\n";
             if let Some(pos) = rust_content.find(anchor) {
-                rust_content.insert_str(
-                    pos + anchor.len(),
-                    "#[allow(unused_imports)]\n\
-                     use crate::__FitzValue;\n\
-                     #[allow(unused_imports)]\n\
-                     use crate::__fv_type_name;\n",
-                );
+                let mut injected = String::new();
+                if module_emits_fitz_value && !rust_content.contains("use crate::__FitzValue;") {
+                    injected.push_str(
+                        "#[allow(unused_imports)]\n\
+                         use crate::__FitzValue;\n\
+                         #[allow(unused_imports)]\n\
+                         use crate::__fv_type_name;\n",
+                    );
+                }
+                // v0.41.2 — a module that coerces `Any` → concrete (e.g.
+                // `claims["email"]` from a heterogeneous `jwt.decode`, or
+                // a JSONB `Map<Str, Any>` field access) references the
+                // `__fv_to_*` extractors, which live only in the crate-root
+                // prelude. Inject them by content.
+                if rust_content.contains("__fv_to_")
+                    && !rust_content.contains("use crate::{__fv_to_i64")
+                {
+                    injected.push_str(
+                        "#[allow(unused_imports)]\n\
+                         use crate::{__fv_to_i64, __fv_to_f64, __fv_to_string, __fv_to_bool};\n",
+                    );
+                }
+                // v0.41.2 — the heterogeneous `jwt.decode` helper lives at
+                // the crate root (gated `uses_fitz_value`); a module that
+                // calls `jwt.decode` must import it.
+                if rust_content.contains("__fitz_jwt_decode_fv")
+                    && !rust_content.contains("use crate::__fitz_jwt_decode_fv;")
+                {
+                    injected.push_str(
+                        "#[allow(unused_imports)]\n\
+                         use crate::__fitz_jwt_decode_fv;\n",
+                    );
+                }
+                if !injected.is_empty() {
+                    rust_content.insert_str(pos + anchor.len(), &injected);
+                }
             }
         }
 
@@ -6158,7 +6202,7 @@ fn generate_module_rs_with_bindings(
         ctx.uses_auth = true;
         ctx.emit(
             "#[allow(unused_imports)]\n\
-             use crate::{__fitz_jwt_encode, __fitz_jwt_decode, __fitz_hash_password, __fitz_hash_verify};\n\n",
+             use crate::{__fitz_jwt_encode, __fitz_hash_password, __fitz_hash_verify};\n\n",
         );
         // Phase 9.w.1.iter2.b — when the module uses `auth.X(...)` AND
         // the crate root activated uses_db (the 3 helpers live in the
@@ -10712,7 +10756,7 @@ impl<'a> CodegenCtx<'a> {
     }
 
     /// Phase 9.w.1.d — Emits the prelude of helpers for native auth:
-    /// `__fitz_jwt_encode/__fitz_jwt_decode/__fitz_hash_password/
+    /// `__fitz_jwt_encode/__fitz_jwt_decode_fv/__fitz_hash_password/
     /// __fitz_hash_verify`. Only emitted when `uses_auth` is true
     /// (program uses `jwt.*`/`hash.*` or some auth decorator).
     /// Without uses_auth, the helpers are not emitted and the
@@ -10730,12 +10774,13 @@ impl<'a> CodegenCtx<'a> {
     ///   Secret/alg as Str. Default alg HS256, also HS384/HS512.
     ///   Encode panics on failure (build-time error, shouldn't
     ///   happen with valid args).
-    /// - Decode: token+secret+alg Str. Returns `Result<Map<Str, Str>,
-    ///   String>` with claims serialized as Str (numbers/bools go
-    ///   through `to_string()`). Heterogeneous decode → `Map<Str, Any>`
-    ///   is residual debt (the interpreter already returns heterogeneous;
-    ///   `fitz build` decode still stringifies). Any failure (malformed
-    ///   token, invalid signature, expired) → `Err(msg)`.
+    /// - Decode: token+secret+alg Str. Returns `Result<Map<Str, Any>,
+    ///   String>` (v0.41.2) — claims keep their native JSON type via
+    ///   `__fitz_jwt_decode_fv` + `__fitz_json_to_fv` (gated
+    ///   `uses_fitz_value`), matching the interpreter's
+    ///   `http::json_to_value`. Round-trips with the heterogeneous
+    ///   `jwt.encode` of v0.41.0. Any failure (malformed token, invalid
+    ///   signature, expired) → `Err(msg)`.
     /// - hash.password/verify same as interpreter: Argon2id with
     ///   OWASP default params, PHC string output, verify returns
     ///   Bool (no Result — malformed hash → false for security).
@@ -10816,47 +10861,43 @@ pub(crate) fn __fitz_jwt_encode_fv(
 
 ",
             );
+            self.emit(
+                "\
+/// v0.41.2 — `jwt.decode(token, secret, alg)` returning a heterogeneous
+/// `Map<Str, Any>` (parity with the interpreter's `http::json_to_value`).
+/// Each claim value goes through `__fitz_json_to_fv`; keys stay Str.
+pub(crate) fn __fitz_jwt_decode_fv(
+    token: String,
+    secret: String,
+    alg: Option<String>,
+) -> Result<Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>, String> {
+    let alg_str = alg.as_deref().unwrap_or(\"HS256\");
+    let algorithm = match alg_str {
+        \"HS256\" => jsonwebtoken::Algorithm::HS256,
+        \"HS384\" => jsonwebtoken::Algorithm::HS384,
+        \"HS512\" => jsonwebtoken::Algorithm::HS512,
+        other => return Err(format!(\"`jwt.decode`: alg `{}` no soportado en MVP\", other)),
+    };
+    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = jsonwebtoken::Validation::new(algorithm);
+    validation.required_spec_claims.clear();
+    match jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation) {
+        Ok(data) => {
+            let mut out: Vec<(__FitzValue, __FitzValue)> = Vec::new();
+            if let serde_json::Value::Object(obj) = data.claims {
+                for (k, v) in obj.iter() {
+                    out.push((__FitzValue::Str(k.clone()), __fitz_json_to_fv(v)));
+                }
+            }
+            Ok(Arc::new(Mutex::new(out)))
         }
-        // jwt.decode: verifies + decodes → `Result<Map<Str, Str>,
-        // String>`. Claims are serialized to Str (numbers/bools go
-        // through `to_string()`).
-        self.emit(
-            "/// 9.w.1.d — `jwt.decode(token, secret, alg)` codegen helper.\n\
-             /// Returns `Result<Map<Str, Str>, String>` with claims as Str.\n\
-             /// Any failure → `Err` with the jsonwebtoken crate's message.\n\
-             pub(crate) fn __fitz_jwt_decode(\n    \
-                 token: String,\n    \
-                 secret: String,\n    \
-                 alg: Option<String>,\n\
-             ) -> Result<Arc<Mutex<Vec<(String, String)>>>, String> {\n    \
-                 let alg_str = alg.as_deref().unwrap_or(\"HS256\");\n    \
-                 let algorithm = match alg_str {\n        \
-                     \"HS256\" => jsonwebtoken::Algorithm::HS256,\n        \
-                     \"HS384\" => jsonwebtoken::Algorithm::HS384,\n        \
-                     \"HS512\" => jsonwebtoken::Algorithm::HS512,\n        \
-                     other => return Err(format!(\"`jwt.decode`: alg `{}` no soportado en MVP\", other)),\n    \
-                 };\n    \
-                 let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());\n    \
-                 let mut validation = jsonwebtoken::Validation::new(algorithm);\n    \
-                 validation.required_spec_claims.clear();\n    \
-                 match jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation) {\n        \
-                     Ok(data) => {\n            \
-                         let mut out: Vec<(String, String)> = Vec::new();\n            \
-                         if let serde_json::Value::Object(obj) = data.claims {\n                \
-                             for (k, v) in obj.iter() {\n                    \
-                                 let s = match v {\n                        \
-                                     serde_json::Value::String(s) => s.clone(),\n                        \
-                                     other => other.to_string(),\n                    \
-                                 };\n                    \
-                                 out.push((k.clone(), s));\n                \
-                             }\n            \
-                         }\n            \
-                         Ok(Arc::new(Mutex::new(out)))\n        \
-                     }\n        \
-                     Err(e) => Err(e.to_string()),\n    \
-                 }\n\
-             }\n\n",
-        );
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+",
+            );
+        }
         // hash.password: Argon2id with random salt + default params.
         self.emit(
             "/// 9.w.1.d — `hash.password(plain)` codegen helper. Argon2id\n\
@@ -20038,10 +20079,19 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         } else {
             "None".to_string()
         };
+        // v0.41.2 — decode returns a heterogeneous `Map<Str, Any>`
+        // (parity with the interpreter's `http::json_to_value`): claim
+        // values keep their JSON-native type (`exp` → Int, `admin` →
+        // Bool, `roles` → List) instead of being stringified. The
+        // `__FitzValue` marshalling is required, so flip the flag.
+        self.uses_fitz_value = true;
         Ok((
-            format!("__fitz_jwt_decode({}, {}, {})", token_c, secret_c, alg_code),
+            format!(
+                "__fitz_jwt_decode_fv({}, {}, {})",
+                token_c, secret_c, alg_code
+            ),
             Type::Result {
-                ok: Box::new(Type::Map(Box::new(Type::Str), Box::new(Type::Str))),
+                ok: Box::new(Type::Map(Box::new(Type::Str), Box::new(Type::Any))),
                 err: Box::new(Type::Str),
             },
         ))
@@ -41574,6 +41624,39 @@ mod tests {
         assert!(
             rust.contains("fn __fitz_fv_to_json"),
             "expected the __fitz_fv_to_json converter in the prelude"
+        );
+    }
+
+    #[test]
+    fn jwt_decode_heterogeneous_uses_fitz_value_path_v0_41_2() {
+        // v0.41.2 — `jwt.decode` now returns a heterogeneous
+        // `Map<Str, Any>` (parity with the interpreter). Any decode
+        // call marshals via `__fitz_jwt_decode_fv` + `__fitz_json_to_fv`
+        // with the __FitzValue enum emitted. The old Str→Str helper
+        // `__fitz_jwt_decode(` must be gone (fully dead).
+        let rust = gen(
+            "let m = match jwt.decode(\"tok\", \"secret-key\") {\n  Ok(c) => c,\n  Err(e) => { print(e); {} },\n}\nlet sub: Str = m[\"sub\"]\nprint(sub)\n",
+        )
+        .expect("gen OK");
+        assert!(
+            rust.contains("__fitz_jwt_decode_fv("),
+            "expected the heterogeneous decode helper call"
+        );
+        assert!(
+            rust.contains("pub(crate) fn __fitz_jwt_decode_fv"),
+            "expected the __fitz_jwt_decode_fv helper in the prelude"
+        );
+        assert!(
+            rust.contains("pub(crate) enum __FitzValue"),
+            "decode must pull the __FitzValue enum"
+        );
+        assert!(
+            rust.contains("fn __fitz_json_to_fv"),
+            "expected the __fitz_json_to_fv converter in the prelude"
+        );
+        assert!(
+            !rust.contains("__fitz_jwt_decode("),
+            "the old Str→Str decode helper must be gone (dead code)"
         );
     }
 
