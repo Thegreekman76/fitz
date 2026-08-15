@@ -5624,6 +5624,26 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     }
                 })
                 .collect();
+            // B16 residual (v0.39.2) — `print(...)` and `assert(...)` return
+            // `Null`, not `Any`. Both are variadic builtins typed `Any` (their
+            // arity is not expressible as a `Type::Function`), so without this
+            // a match arm like `Err(_) => print(...)` types `Any` in the
+            // checker but `Null` in codegen — the same checker/codegen split
+            // B16 (v0.39.1) closed for `log.X`. Typing them `Null` here makes
+            // the match LUB promote to `T?` and the real mismatch (e.g.
+            // returning `T?` from a fn `-> T`) surface at `fitz check` with a
+            // clear message instead of an opaque rustc `E0308` at `fitz build`.
+            // The args are already synthesized above (errors surface); nobody
+            // uses the return value of `print`/`assert`. Shadowing: only
+            // applies while the name still resolves to the `Any` builtin
+            // (mirrors the `spawn`/`log` dispatches).
+            if let Expr::Ident(name, _) = callee.as_ref() {
+                if matches!(name.as_str(), "print" | "assert")
+                    && matches!(ctx.lookup_binding(name).map(|b| &b.ty), Some(Type::Any))
+                {
+                    return Type::Null;
+                }
+            }
             match callee_ty {
                 // Gradual: callee with unknown type is not checked.
                 Type::Any => Type::Any,
@@ -16910,6 +16930,48 @@ mod tests {
             errs.is_empty(),
             "a ReturnStatus arm must not widen the match to Row?: {errs:?}"
         );
+    }
+
+    #[test]
+    fn b16_print_and_assert_arms_type_as_null() {
+        // `print(...)` / `assert(...)` return `Null`, not `Any`, so a match
+        // with one as an arm is `T?` (same fix as `log.X`, generalised to
+        // the variadic Ident builtins).
+        let ty_print = type_of_last_let(
+            "let r: Result<Int> = Ok(3)\n\
+             let n = match r { Ok(v) => v, Err(_) => print(\"x\") }\n",
+        );
+        assert_eq!(ty_print, Some(Type::Nullable(Box::new(Type::Int))));
+        let ty_assert = type_of_last_let(
+            "let r: Result<Int> = Ok(3)\n\
+             let n = match r { Ok(v) => v, Err(_) => assert(false) }\n",
+        );
+        assert_eq!(ty_assert, Some(Type::Nullable(Box::new(Type::Int))));
+    }
+
+    #[test]
+    fn b16_print_arm_in_non_nullable_return_is_a_clear_check_error() {
+        // Mirror of the `log.error` case for `print`.
+        let errs = errors_of(
+            "fn classify(x: Int) -> Int {\n\
+             \x20 let r: Result<Int> = Ok(x)\n\
+             \x20 let n = match r { Ok(v) => v, Err(_) => print(\"boom\") }\n\
+             \x20 return n\n\
+             }\n",
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("Int?") && e.message.contains("Int")),
+            "expected a clear return-type mismatch: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn b16_print_as_statement_is_unaffected() {
+        // Typing `print(...)` as `Null` must not break its normal use as a
+        // statement (the value is discarded).
+        let errs = errors_of("fn greet(name: Str) {\n  print(\"hola {name}\")\n}\n");
+        assert!(errs.is_empty(), "print statement must stay clean: {errs:?}");
     }
 
     #[test]

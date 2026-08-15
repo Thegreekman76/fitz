@@ -9,6 +9,27 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.39.2] — 2026-08-14 — Bugfix B16 (residual): `print`/`assert` en match arms
+
+Cierra la deuda residual derivada de B16 (v0.39.1). Los builtins variádicos
+`print(...)` y `assert(...)` se tipaban `Type::Any` en el checker (su aridad no
+se expresa como `Type::Function`) pero devuelven `Null` en runtime/codegen — el
+mismo split checker↔codegen que B16 cerró para `log.X`. Así, `match r { Ok(v) =>
+v, Err(_) => print(...) }` en una fn `-> Int` pasaba `fitz check` (match=`Int`)
+pero rompía `fitz build` con un `E0308` opaco.
+
+**Fix** (`src/types.rs`, arm de Call con callee `Ident`): `print`/`assert` se
+tipan `Null` (respetando shadowing, mismo patrón que `spawn`/`log`). Ahora el
+match promueve a `T?` y el mismatch sale en `fitz check` con mensaje claro. Los
+otros assertion builtins (`assert_eq`/`assert_ne`/`assert_throws`) ya tenían
+`ret: Null` — sin cambio. Uso normal como statement (`print("hola {x}")`)
+intacto (nadie usa el retorno de `print`/`assert`).
+
+3 unit tests `b16_print_*` (+9 total del grupo B16). Verificación full: lib 4106
+(default) / 4270 (lsp), smoke ~290 ejemplos verde, cli_e2e 127, boilerplates
+check, fmt + clippy default+lsp limpios. Bump `Cargo.toml` +
+`editors/vscode/package.json` 0.39.1 → 0.39.2.
+
 ## [v0.39.1] — 2026-08-14 — Bugfix B16: consistencia checker↔codegen en el tipo de un `match`
 
 Cierra la deuda **B16**. La causa raíz era una inconsistencia: el **checker

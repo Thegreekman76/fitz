@@ -3917,8 +3917,18 @@ unificada `Value`).
 > ReturnStatus) se tipan `Any` en el arm, igual que el codegen. 6 unit
 > tests `types::tests::b16_*` + verificación full (lib 4103 / lsp 4267,
 > smoke ~290 ejemplos verde, 10 boilerplates check, cli_e2e 127, fmt +
-> clippy default+lsp limpios). El texto de abajo queda como registro del
-> síntoma original.
+> clippy default+lsp limpios).
+>
+> **Residual cerrado en v0.39.2**: los builtins **variádicos**
+> `print(...)` y `assert(...)` tenían el mismo síntoma (tipan `Type::Any`
+> en el checker pero devuelven `Null` en runtime/codegen). Se tipan
+> `Null` en el checker (arm de Call con callee `Ident`, respetando
+> shadowing, mismo patrón que `log.X`). Los otros assertion builtins
+> (`assert_eq`/`assert_ne`/`assert_throws`) ya tenían `ret: Null`. **No
+> quedan builtins Null-que-tipan-Any conocidos** — los módulos `db`/`jwt`/
+> `http`/`smtp`/`auth` devuelven `Future`/`Result`, no `Null` bare. 3 unit
+> tests `b16_print_*`. El texto de abajo queda como registro del síntoma
+> original.
 
 **Síntoma** (cargo build):
 ```
