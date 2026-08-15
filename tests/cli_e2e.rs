@@ -3105,6 +3105,60 @@ fn gotcha7_check_cross_file_child_composition_resolves_under_check() {
     );
 }
 
+// a2 (v0.40.0) — `fitz check` (no file arg) sweeps every `.fitzv` under
+// `src/`, not only the `[bin].main` entry. A component that isn't the
+// entry still gets checked. An explicit file arg keeps the single-file
+// behaviour (checks only that file).
+
+#[test]
+fn a2_check_no_arg_sweeps_non_entry_fitzv() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "fitz.toml",
+        "[package]\nname = \"a2\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [[bin]]\nname = \"web\"\nmain = \"src/App.fitzv\"\ntarget = \"wasm-client\"\nmount = \"#app\"\n",
+    );
+    // Entry: valid.
+    write_file(
+        root,
+        "src/App.fitzv",
+        "component App {\n  state { n: Int = 0 }\n  <template><span>{n}</span></template>\n}\n",
+    );
+    // NON-entry component with a type error.
+    write_file(
+        root,
+        "src/Broken.fitzv",
+        "component Broken {\n  state { count: Int = \"nope\" }\n  <template><span>{count}</span></template>\n}\n",
+    );
+
+    // No file arg → sweeps src/, catches Broken, exits 1.
+    let (_stdout, stderr, code) = run_fitz(&["check"], root);
+    assert_ne!(code, 0, "a non-entry .fitzv error must fail the check");
+    assert!(
+        stderr.contains("Broken.fitzv"),
+        "the sweep must report the non-entry component: {stderr}"
+    );
+
+    // An explicit file arg checks ONLY that file (single-file behaviour) —
+    // App is clean, so exit 0 even though Broken is still broken.
+    let (_o2, e2, code2) = run_fitz(&["check", "src/App.fitzv"], root);
+    assert_eq!(
+        code2, 0,
+        "explicit file arg must check only that file: {e2}"
+    );
+
+    // Fix Broken → the no-arg sweep is clean.
+    write_file(
+        root,
+        "src/Broken.fitzv",
+        "component Broken {\n  state { count: Int = 0 }\n  <template><span>{count}</span></template>\n}\n",
+    );
+    let (_o3, e3, code3) = run_fitz(&["check"], root);
+    assert_eq!(code3, 0, "all components clean → exit 0: {e3}");
+}
+
 // ===================================================================
 // Phase 11.6.e continuation (§9.bb, 2026-07-16) — cross-module
 // `@live_component` auto-inject.

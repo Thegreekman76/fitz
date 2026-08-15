@@ -1549,6 +1549,31 @@ mod tests {
     }
 
     #[test]
+    fn l4_apostrophe_string_gives_helpful_error() {
+        // L4 (v0.40.0) — `'...'` is not a string in Fitz (`'` opens a loop
+        // label). When `'` is not followed by a label ident, the error must
+        // point the user at double-quoted strings instead of a bare
+        // "expected identifier".
+        let err = tokenize("'/").unwrap_err();
+        assert!(
+            err.message.contains("double quotes") && err.message.contains("loop label"),
+            "expected the string-vs-label hint, was: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn l4_valid_loop_label_still_lexes() {
+        // The label path itself is unchanged: `'outer` still tokenizes.
+        let toks = tokenize("'outer").expect("label must still lex");
+        assert!(
+            toks.iter()
+                .any(|t| matches!(&t.token, Token::Label(n) if n == "outer")),
+            "expected a Label(\"outer\") token, got: {toks:?}"
+        );
+    }
+
+    #[test]
     fn f8_emojis_are_rejected() {
         // Emojis are not `is_alphabetic` (Unicode Symbol, not Letter)
         // — the lexer rejects them with UnexpectedChar.

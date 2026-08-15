@@ -9,6 +9,40 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.40.0] — 2026-08-15 — DX chico: `:load` en Windows (L3) + error de `'...'` string (L4) + `fitz check` barre todo `.fitzv` (a2)
+
+Tres cierres chicos del backlog (L3, L4 del curso + a2 fast-follow de gotcha #7).
+**Incluye también el audit de `if`-como-expresión (v0.39.3)**, que se commiteó pero
+nunca se tageó — sale como parte de este release.
+
+- **L3 — `:load` con path Unix-absoluto en Windows** (`src/main.rs`): en el REPL,
+  `:load /tmp/x.fitz` en Windows resuelve contra el drive actual (`D:\tmp\x.fitz`)
+  y casi nunca existe (comportamiento estándar de la API de Windows, no un bug de
+  Fitz). Ahora, ante el read-error de un path que empieza con `/`, se emite un
+  hint (`nota:`) apuntando a `D:/...` para absolutos o a un path relativo para
+  portabilidad. Windows-only (`#[cfg(windows)]`), no cambia nada en Linux/macOS.
+- **L4 — mensaje de error de `'...'` como string** (`src/lexer.rs`): `'` está
+  reservado para labels de loop (`'outer: loop { break 'outer }`); Fitz no tiene
+  `'...'` strings. Antes, `print('comillas')` daba un críptico "expected an
+  identifier after `'`". Ahora el error explica que las strings usan comillas
+  dobles y el `'` solo abre un loop label. Sin cambio de comportamiento (solo el
+  texto del error; la tokenización válida es idéntica).
+- **a2 — `fitz check` sin args barre todo `.fitzv` de `src/`** (`src/main.rs`):
+  antes chequeaba solo el `[bin].main`. Ahora, sin file arg en un proyecto con
+  manifest, además view-checkea todo `.fitzv` bajo `src/` (un componente que no
+  es el entry igual se valida — útil para CI + librerías de componentes). Los
+  `.fitz` clásicos NO se barren (el checker no resuelve imports cross-module → daría
+  ruido de "unknown import"); los `.fitzv` son self-contained (sus imports resuelven
+  dep-aware). `check_file`/`check_view_file` pasan a devolver `bool` para agregar el
+  exit code; un file arg explícito mantiene el comportamiento single-file.
+
+3 unit tests (`lexer::tests::l4_*`) + 1 E2E (`cli_e2e::a2_check_no_arg_sweeps_non_entry_fitzv`).
+Verificación: lib 4112 (default) / lsp, cli_e2e 128, fmt + clippy default+lsp
+limpios (el smoke `GUIDE_EXAMPLES_COMPILE` no aplica — ninguno toca el codegen).
+Bump `Cargo.toml` + `editors/vscode/package.json` 0.39.3 → 0.40.0. **Ambos L3 y L4
+eran "by design" en su deuda** (docs ya corregidas); el cierre acá es la mejora de
+DX (hint/mensaje claro), no un cambio de semántica.
+
 ## [v0.39.3] — 2026-08-15 — Auditoría de consistencia checker↔codegen: `if`-como-expresión
 
 Continúa la auditoría abierta por B16 (la clase de bugs "pasa `fitz check` pero

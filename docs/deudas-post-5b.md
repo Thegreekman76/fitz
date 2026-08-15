@@ -3298,7 +3298,7 @@ Barrida de los failures de `compile_e2e` (los "8 pre-existentes" que arrastraba 
 
 **Tests** (+3): `view::lexer::tests::tokenizes_comparison_operators_as_single_tokens_v0_28_2`, `lone_bang_is_a_lex_error_v0_28_2`, `generic_lt_still_distinct_from_le_v0_28_2`. Suite view completa: 576/576. Validado end-to-end: `.fitzv` con `payload["v"] == "yes"` / `!= "yes"` muta estado correcto sobre WebSocket; C2 del curso (name list SFC con `it != target` en `.filter`) anda add/filter/remove.
 
-**Deuda residual derivada**: (a) **`fitz check` view-parsea `.fitzv` — CERRADO v0.39.0 (gotcha #7)**. Cuando el entry (`[bin].main` o `fitz check App.fitzv` explícito) es un `.fitzv`, `fitz check` rutea al pipeline de view (parse → expand → type-check) en vez del lexer clásico, con imports cross-file `<Child />` resueltos dep-aware igual que `fitz build --target wasm-client`. Helper nuevo NO-gateado `view::check_view_source(source, base_dir, dep_registry) -> Vec<CheckError>` + constructor `CheckError::syntax(...)` que pliega parse/expand en el mismo `Vec`; dispatch por extensión en el arm `Check` de `src/main.rs` (`check_view_file` sibling de `check_file`, exit-code contract idéntico). Alcance a1 MVP: solo el entry (los imports transitivos SÍ se validan); descubrir TODO `.fitzv` bajo `src/` queda como fast-follow (a2). (b) Operadores compuestos de asignación (`+=`, `-=`) siguen sin round-trip en event bodies (poco comunes; se puede reescribir como `x = x + 1`).
+**Deuda residual derivada**: (a) **`fitz check` view-parsea `.fitzv` — CERRADO v0.39.0 (gotcha #7)**. Cuando el entry (`[bin].main` o `fitz check App.fitzv` explícito) es un `.fitzv`, `fitz check` rutea al pipeline de view (parse → expand → type-check) en vez del lexer clásico, con imports cross-file `<Child />` resueltos dep-aware igual que `fitz build --target wasm-client`. Helper nuevo NO-gateado `view::check_view_source(source, base_dir, dep_registry) -> Vec<CheckError>` + constructor `CheckError::syntax(...)` que pliega parse/expand en el mismo `Vec`; dispatch por extensión en el arm `Check` de `src/main.rs` (`check_view_file` sibling de `check_file`, exit-code contract idéntico). Alcance a1 MVP: solo el entry (los imports transitivos SÍ se validan); ~~descubrir TODO `.fitzv` bajo `src/` queda como fast-follow (a2)~~ → **a2 CERRADO v0.40.0**: `fitz check` sin file arg en un proyecto con manifest ahora barre y view-checkea todo `.fitzv` bajo `src/` (helper `collect_fitzv_recursive` + `check_file`/`check_view_file` devuelven `bool` para agregar el exit code; los `.fitz` clásicos NO se barren por el ruido de imports cross-module; file arg explícito mantiene single-file). Queda el P4 opcional (dedup de `lsp.rs` reusando `check_view_source`). (b) Operadores compuestos de asignación (`+=`, `-=`) siguen sin round-trip en event bodies (poco comunes; se puede reescribir como `x = x + 1`).
 
 ---
 
@@ -9218,7 +9218,14 @@ todos los caps de Listas/Loops/Higher-order.
 **Riesgo**: cambio invasivo del checker. Tests E2E sobre todos los
 ejemplos de la guía + cursos antes/después son decisivos.
 
-### L3 — `:load` con paths absolutos estilo Unix no funciona en Windows (2026-06-05)
+### L3 — `:load` con paths absolutos estilo Unix no funciona en Windows (2026-06-05) — **CERRADO v0.40.0 (Opción 2)**
+
+> **Cierre (v0.40.0)**: implementada la Opción 2 (hint). En `load_into_repl_env`
+> (`src/main.rs`), ante el read-error de un path que empieza con `/` (y no `//`
+> UNC) en Windows, se emite una `nota:` apuntando a `D:/...` para absolutos o a un
+> path relativo para portabilidad. `#[cfg(windows)]`, cero cambio en Linux/macOS.
+> El comportamiento de resolución sigue igual (by-design); solo mejora la UX del
+> error. El texto de abajo queda como registro.
 
 **Qué pasa**: hoy en el REPL, `:load /tmp/helpers.fitz` resuelve a
 `D:/tmp/helpers.fitz` (o `C:/tmp/...` según el drive del cwd) en
@@ -9266,7 +9273,15 @@ Si llega demanda real, opción 2.
 **Impacto**: bajo desde que las docs están corregidas. Pre-fix, el
 alumno Windows se chocaba inmediatamente en el Paso 8 del cap M1.C5.
 
-### L4 — Strings con delimitador `'...'` no existen (curso prometía) (2026-06-05)
+### L4 — Strings con delimitador `'...'` no existen (curso prometía) (2026-06-05) — **CERRADO v0.40.0 (Opción 1 + mensaje claro)**
+
+> **Cierre (v0.40.0)**: se mantiene la Opción 1 (by-design — `'` reservado para
+> loop labels, strings solo con `"..."`), y se mejoró el **mensaje de error** del
+> lexer (`src/lexer.rs`, arm `'\''`): cuando `'` no va seguido de un ident válido,
+> el error ahora explica que las strings usan comillas dobles y el `'` solo abre
+> un loop label, en vez del críptico "expected an identifier after `'`". Sin
+> cambio de comportamiento del lexer (la tokenización válida es idéntica). 2 unit
+> tests `lexer::tests::l4_*`. El texto de abajo queda como registro.
 
 **Qué pasa**: el cap M2.C1 del curso documentaba que Fitz soporta
 strings con dos delimitadores (`"..."` y `'...'`), con escapes
