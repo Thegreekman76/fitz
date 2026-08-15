@@ -45,6 +45,20 @@ corridas (±10% de variabilidad por corrida). El driver Postgres es
 byte-idéntico al de v0.37.8 en el hot path; v0.37.12 revalidó los
 números sin regresión.
 
+!!! note "Revalidado en v0.41.1 (2026-08-15) — sin regresión"
+    El driver Postgres + el ORM no cambiaron desde v0.37.8; v0.38-v0.41
+    tocan otras áreas (`.fitzv`, consistencia checker↔codegen, `jwt.encode`
+    heterogéneo, refactor + cache del LSP). Una mediana de 3 corridas
+    contra `ghcr.io/thegreekman76/fitz:v0.41.1` confirma los mismos
+    ratios, con ambos boilerplates compilando limpio: **memoria
+    byte-idéntica** (Fitz **9.1 MB** vs Python **52.3 MB** = **5.7x**),
+    **reads ~8-9x** (GET /users 8.1x, GET /users/{id} 9.0x en throughput),
+    **POST ~1.1x** (DB-bound, paridad), 100% success rate. Los números
+    absolutos de reads de la corrida local fueron menores en **ambos**
+    impls por carga concurrente de la máquina (otros containers) — el
+    ratio es lo estable y publicable; la tabla de abajo (máquina limpia,
+    v0.37.12) sigue siendo la de referencia.
+
 #### Cold start, image, memory
 
 | Métrica | Fitz ORM | Python+SQLAlchemy | Ratio |
@@ -246,6 +260,17 @@ concurrencia real queda como extensión futura".
 **Hardware del run**: Intel Core Ultra 7 155H, 64 GB RAM, Windows 11
 Pro, Docker 29.2.1 (Desktop con WSL2 backend). **Versión**:
 `ghcr.io/thegreekman76/fitz:v0.37.8` — mediana de 3 corridas.
+
+!!! note "Revalidado en v0.41.1 (2026-08-15) — sin regresión"
+    Los tres stacks compilaron + corrieron limpio contra
+    `ghcr.io/thegreekman76/fitz:v0.41.1` (la app Fitz linkea el driver
+    Postgres + ORM, sin cambios desde v0.37.8). Una corrida confirma los
+    mismos ratios: **memoria byte-idéntica** (Fitz **14.5 MB** vs Python
+    62.7 MB vs Node 171.3 MB = **4.3x / 11.8x**), **cold start** Fitz
+    0.25s vs Python 1.07s vs Node 3.22s, y Fitz sigue aplastando la
+    **tail latency** (p95 ~17-26 ms vs Python 240-526 ms = 10-20x, vs
+    Node 80-100 ms = 4-6x). La tabla de abajo (mediana de 3, v0.37.8)
+    sigue siendo la de referencia.
 
 #### Cold start, image, memory, CPU
 
