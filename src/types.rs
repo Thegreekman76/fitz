@@ -5143,21 +5143,53 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // of its last expression-stmt. For 5.3.1 it's enough for us to
             // walk the blocks (with scope) and return Any.
             // M4 (v0.10.15) — use with_scope helper for auto-pop.
-            ctx.with_scope(|ctx| {
+            // B16-class consistency (v0.39.3): type the `if` as the LUB of
+            // its branches, matching the codegen's `gen_if_expr`. The
+            // codegen treats the `if` as a value (`want_value`) only when
+            // there IS an `else` AND both branches end in a `Stmt::Expr`;
+            // otherwise it's statement-mode with value `Null`. Previously
+            // the checker returned `Type::Any` unconditionally, so
+            // `let n = if c { x } else { print(...) }` passed `fitz check`
+            // (n = Any) but broke `fitz build` with an opaque rustc E0308
+            // (codegen: n = `Int?`). We still check every statement in both
+            // branches regardless of value-ness.
+            let then_ty = ctx.with_scope(|ctx| {
                 if let Some((name, inner_ty, def_span)) = then_narrow {
                     ctx.declare_var(name, inner_ty, def_span);
                 }
-                check_block(ctx, then)
+                check_block_tail_type(ctx, then)
             });
-            if let Some(else_body) = else_ {
+            let else_ty = else_.as_ref().map(|else_body| {
                 ctx.with_scope(|ctx| {
                     if let Some((name, inner_ty, def_span)) = else_narrow {
                         ctx.declare_var(name, inner_ty, def_span);
                     }
-                    check_block(ctx, else_body)
-                });
+                    check_block_tail_type(ctx, else_body)
+                })
+            });
+            // `want_value` mirror: else present AND both branches end in a
+            // `Stmt::Expr` (a divergent/other tail is NOT a value tail).
+            let then_tail_is_expr = matches!(then.last(), Some(Stmt::Expr(..)));
+            match (else_.as_ref(), else_ty) {
+                (Some(else_body), Some(ety))
+                    if then_tail_is_expr && matches!(else_body.last(), Some(Stmt::Expr(..))) =>
+                {
+                    lub(&then_ty, &ety)
+                }
+                // Non-value `if`: no else, or a branch that doesn't end in an
+                // expression. We keep `Type::Any` (gradual) rather than
+                // `Null`: the codegen tracks statement-mode `if` as `Null`,
+                // but for a divergent-else value pattern
+                // (`if c { A } else { return B }`) Rust actually types the
+                // `if` as `A` (the `else` is `!`) — returning `Null` here
+                // would spuriously reject `let x = if c { A } else { return }`
+                // used as `A`. Those cases keep their pre-existing gradual
+                // behaviour; only the common `want_value` shape (both
+                // branches are values) gets the precise LUB. Fully closing
+                // the no-else / divergent-else value cases needs a matching
+                // codegen change (residual).
+                _ => Type::Any,
             }
-            Type::Any
         }
 
         Expr::List(items, _) => {
@@ -9730,6 +9762,41 @@ fn check_block(ctx: &mut CheckCtx, body: &[Stmt]) {
     for s in body {
         check_stmt(ctx, s);
     }
+}
+
+/// Check a block AND return the type of its tail — the value the block
+/// produces when used as an expression. Mirrors the per-arm logic in
+/// `Expr::Match`: the type of the last `Stmt::Expr`; `Type::Any` when the
+/// last stmt diverges (`return`/`break`/`continue`/`return <status>`),
+/// which `lub` yields to the concrete; `Type::Null` otherwise (a block
+/// ending in a non-expression statement produces no value). Every
+/// statement is still checked. Consumed by `Expr::If` so the checker
+/// types an `if`-as-expression as the LUB of its branches — consistent
+/// with the codegen's `gen_if_expr` (B16-class consistency, v0.39.3).
+fn check_block_tail_type(ctx: &mut CheckCtx, body: &[Stmt]) -> Type {
+    let mut t = Type::Null;
+    let n = body.len();
+    for (i, stmt) in body.iter().enumerate() {
+        let is_last = i + 1 == n;
+        match stmt {
+            Stmt::Expr(e, _) => {
+                t = infer_expr(ctx, e);
+            }
+            Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..) | Stmt::ReturnStatus { .. } => {
+                check_stmt(ctx, stmt);
+                if is_last {
+                    t = Type::Any;
+                }
+            }
+            _ => {
+                check_stmt(ctx, stmt);
+                if is_last {
+                    t = Type::Null;
+                }
+            }
+        }
+    }
+    t
 }
 
 /// Walks a single Stmt: checks its expressions, opens scopes,
@@ -16972,6 +17039,81 @@ mod tests {
         // statement (the value is discarded).
         let errs = errors_of("fn greet(name: Str) {\n  print(\"hola {name}\")\n}\n");
         assert!(errs.is_empty(), "print statement must stay clean: {errs:?}");
+    }
+
+    // B16-class consistency (v0.39.3) — `if`-as-expression types as the LUB
+    // of its branches (`want_value` mode), matching the codegen. Previously
+    // the checker returned `Type::Any`, so a divergent tail type slipped
+    // through `fitz check` and broke `fitz build` with an opaque rustc E0308.
+
+    #[test]
+    fn ifexpr_want_value_types_as_lub_of_branches() {
+        // Int + Null (from `print`) → Int?.
+        let ty = type_of_last_let(
+            "let b: Bool = true\n\
+             let n = if (b) { 1 } else { print(\"x\") }\n",
+        );
+        assert_eq!(ty, Some(Type::Nullable(Box::new(Type::Int))));
+        // Int + Float → Float.
+        let ty2 = type_of_last_let(
+            "let b: Bool = true\n\
+             let n = if (b) { 1 } else { 2.5 }\n",
+        );
+        assert_eq!(ty2, Some(Type::Float));
+    }
+
+    #[test]
+    fn ifexpr_wrong_annotation_now_errors_at_check() {
+        // The Int/Float `if` returned from a fn `-> Int` must error at CHECK
+        // time, not as an opaque rustc E0308 at `fitz build`.
+        let errs = errors_of(
+            "fn pick(b: Bool) -> Int {\n\
+             \x20 let n = if (b) { 1 } else { 2.5 }\n\
+             \x20 return n\n\
+             }\n",
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("Float") && e.message.contains("Int")),
+            "expected a clear Float-vs-Int mismatch: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn ifexpr_matching_annotation_and_statement_position_are_clean() {
+        // `let n: Float = if b { 1 } else { 2.5 }` (LUB Float matches).
+        let a = errors_of(
+            "fn pick(b: Bool) -> Float {\n\
+             \x20 let n: Float = if (b) { 1 } else { 2.5 }\n\
+             \x20 return n\n\
+             }\n",
+        );
+        assert!(a.is_empty(), "matching annotation must be clean: {a:?}");
+        // `if` in statement position (value discarded) stays clean.
+        let b = errors_of(
+            "fn f(x: Int) {\n\
+             \x20 if (x > 0) { print(\"pos\") } else { print(\"neg\") }\n\
+             }\n",
+        );
+        assert!(b.is_empty(), "if-statement must stay clean: {b:?}");
+    }
+
+    #[test]
+    fn ifexpr_divergent_else_stays_gradual_no_regression() {
+        // `if c { A } else { return B }` is NOT `want_value` (the else tail
+        // is a `return`, not an expression), so it keeps its pre-existing
+        // gradual (`Any`) type — the checker must NOT add a spurious error
+        // (the `else`-diverges "unwrap-or-return" idiom).
+        let errs = errors_of(
+            "fn unwrap_or(o: Int?) -> Int {\n\
+             \x20 let n = if (o != null) { o } else { return 0 }\n\
+             \x20 return n\n\
+             }\n",
+        );
+        assert!(
+            errs.is_empty(),
+            "divergent-else if must stay gradual (no spurious check error): {errs:?}"
+        );
     }
 
     #[test]

@@ -750,27 +750,50 @@ fn main() {
             }
         }
         Commands::Check { file } => {
+            let no_file_arg = file.is_none();
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
+            let dep_registry = dep_registry_from(&resolved);
+            let mut clean = true;
+            // Check the entry. A `.fitzv` entry routes through the view
+            // pipeline (Phase 11, gotcha #7) resolving cross-file
+            // `<Child />` imports dep-aware; a classic `.fitz` entry runs
+            // the static checker (which does NOT recurse into imported
+            // modules — real cross-module validation happens in
+            // `fitz run`/`build`).
             if view::is_fitzv_extension(&resolved.entry) {
-                // Phase 11 (gotcha #7) — the entry is a `.fitzv`
-                // single-file component. Run the view pipeline (parse →
-                // expand → type-check) instead of the classic lexer,
-                // resolving cross-file `<Child />` imports dep-aware
-                // exactly as `fitz build --target wasm-client` does, so a
-                // `check` result predicts a build result. Imports
-                // transitively reachable from the entry ARE validated;
-                // discovering every non-entry `.fitzv` under `src/` is a
-                // fast-follow (a2).
-                let dep_registry = dep_registry_from(&resolved);
-                check_view_file(&resolved.entry, &dep_registry);
+                clean &= check_view_file(&resolved.entry, &dep_registry);
             } else {
-                // Classic `.fitz`. The checker does not recurse into
-                // imported modules — the importer's names get typed as
-                // Any/nominal placeholders and real validation happens
-                // in `fitz run`/`build`. That's why `check_file` does
-                // not receive the dep_registry.
-                check_file(&resolved.entry);
+                clean &= check_file(&resolved.entry);
+            }
+            // a2 (v0.40.0) — with NO file arg in a manifest project, ALSO
+            // view-check every OTHER `.fitzv` under `src/`, so a component
+            // that isn't the `[bin].main` entry still gets checked (useful
+            // for CI + view-component libraries). Classic `.fitz` files
+            // are NOT swept: the checker doesn't resolve cross-module
+            // imports, so a non-entry `.fitz` would report spurious
+            // "unknown import" noise; `.fitzv` files are self-contained
+            // (their imports resolve dep-aware in `check_view_source`).
+            if no_file_arg {
+                if let Some(ctx) = resolved.manifest_ctx.as_ref() {
+                    let src_dir = ctx.manifest_dir.join("src");
+                    let mut fitzv_files: Vec<PathBuf> = Vec::new();
+                    if src_dir.is_dir() {
+                        collect_fitzv_recursive(&src_dir, &mut fitzv_files);
+                    }
+                    fitzv_files.sort();
+                    let entry_canon = fs::canonicalize(&resolved.entry).ok();
+                    for f in fitzv_files {
+                        // Skip the entry — already checked above.
+                        if entry_canon.is_some() && fs::canonicalize(&f).ok() == entry_canon {
+                            continue;
+                        }
+                        clean &= check_view_file(&f, &dep_registry);
+                    }
+                }
+            }
+            if !clean {
+                std::process::exit(1);
             }
         }
         Commands::Openapi { file } => {
@@ -2166,37 +2189,42 @@ fn openapi_file(path: &PathBuf) {
 }
 
 /// `fitz check <file>` — runs lexer + parser + static checker and
-/// reports errors. Exit code 0 if clean, 1 if there are errors of
-/// any kind.
-fn check_file(path: &PathBuf) {
-    let source = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Error leyendo {}: {}", path.display(), e);
-        std::process::exit(1);
-    });
+/// reports errors. Returns `true` when the file is clean, `false` when
+/// it has errors of any kind (read/lex/parse/type). The caller owns the
+/// exit code so `fitz check` (no arg) can aggregate several files (a2).
+fn check_file(path: &PathBuf) -> bool {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error leyendo {}: {}", path.display(), e);
+            return false;
+        }
+    };
     let tokens = match lexer::tokenize(&source) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{}", e);
-            std::process::exit(1);
+            return false;
         }
     };
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", e);
-            std::process::exit(1);
+            return false;
         }
     };
     // 8-pyi.B: loads adjacent .pyi stubs before the check.
     let (_env, _types, _defs, errors) = check_program_with_pyi_stubs(&program, path);
     if errors.is_empty() {
         println!("✓ {} — no type errors", path.display());
+        true
     } else {
         eprintln!("✗ {} — {} type error(s):", path.display(), errors.len());
         for e in &errors {
             eprintln!("  {}", e);
         }
-        std::process::exit(1);
+        false
     }
 }
 
@@ -2208,11 +2236,17 @@ fn check_file(path: &PathBuf) {
 /// dep-aware (via `dep_registry`), matching the
 /// `fitz build --target wasm-client` path so a `check` failure
 /// predicts a build failure.
-fn check_view_file(path: &Path, dep_registry: &manifest::DepRegistry) {
-    let source = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Error leyendo {}: {}", path.display(), e);
-        std::process::exit(1);
-    });
+///
+/// Returns `true` when the file is clean, `false` on any error, so the
+/// caller can aggregate several files (a2) and own the exit code.
+fn check_view_file(path: &Path, dep_registry: &manifest::DepRegistry) -> bool {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error leyendo {}: {}", path.display(), e);
+            return false;
+        }
+    };
     let base_dir = path
         .parent()
         .map(|p| p.to_path_buf())
@@ -2220,12 +2254,40 @@ fn check_view_file(path: &Path, dep_registry: &manifest::DepRegistry) {
     let errors = view::check_view_source(&source, &base_dir, dep_registry);
     if errors.is_empty() {
         println!("✓ {} — no type errors", path.display());
+        true
     } else {
         eprintln!("✗ {} — {} view error(s):", path.display(), errors.len());
         for e in &errors {
             eprintln!("  {}", e);
         }
-        std::process::exit(1);
+        false
+    }
+}
+
+/// a2 (v0.40.0) — collect every `.fitzv` file under `dir` (recursively),
+/// skipping hidden dirs and `target/`. Parallel to
+/// [`collect_fitz_recursive`] (which collects `.fitz`). Used by
+/// `fitz check` with no file arg to view-check every component in the
+/// project, not only the `[bin].main` entry.
+fn collect_fitzv_recursive(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_fitzv_recursive(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("fitzv") {
+            out.push(path);
+        }
     }
 }
 
@@ -5568,6 +5630,19 @@ async fn load_into_repl_env(
         Ok(s) => s,
         Err(e) => {
             println!("✗ no se pudo leer `{}`: {e}", resolved.display());
+            // L3 (v0.40.0) — en Windows un path estilo Unix (`/tmp/...`) NO
+            // es absoluto (le falta el drive), así que `join` lo resuelve
+            // contra el drive actual y casi nunca existe. Apuntamos al
+            // usuario a la forma portable en vez de dejarlo adivinando.
+            #[cfg(windows)]
+            if path_str.starts_with('/') && !path_str.starts_with("//") {
+                println!(
+                    "  nota: en Windows `{path_str}` se resolvió contra el drive \
+                     actual (`{}`). Para un path absoluto usá `D:/...`; para que \
+                     funcione igual en todos los OS, usá un path relativo al REPL.",
+                    resolved.display()
+                );
+            }
             return;
         }
     };

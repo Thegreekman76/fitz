@@ -9,6 +9,34 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.39.3] — 2026-08-15 — Auditoría de consistencia checker↔codegen: `if`-como-expresión
+
+Continúa la auditoría abierta por B16 (la clase de bugs "pasa `fitz check` pero
+rompe `fitz build` con un `E0308` opaco"). Confirmado y cerrado el hermano más
+común: **`if`-como-expresión**. El checker devolvía `Type::Any` para todo `if`,
+mientras el codegen computa el LUB de las ramas. Así `let n = if (b) { 1 } else
+{ print("x") }` (o `{ 2.5 }`) en una fn `-> Int` pasaba `fitz check` (n=`Any`)
+pero rompía `fitz build` (codegen: n=`Int?` / `Float`).
+
+**Fix** (`src/types.rs`, `Expr::Match` helper compartido `check_block_tail_type`
++ `Expr::If`): el checker tipa el `if` como el **LUB de sus ramas** cuando es una
+expresión-valor (`want_value`: hay `else` Y ambas ramas terminan en una
+expresión), replicando exactamente el `gen_if_expr` del codegen. El caso
+non-`want_value` (sin `else`, o una rama que no termina en expresión, incluido el
+idiom divergente `if c { A } else { return B }`) mantiene su comportamiento
+gradual (`Any`) para no introducir regresiones. Ahora el mismatch sale en
+`fitz check` con mensaje claro.
+
+4 unit tests `ifexpr_*`. Verificación full: lib 4110 (default) / 4274 (lsp),
+smoke ~290 ejemplos verde, cli_e2e 127, fmt + clippy default+lsp limpios. Bump
+`Cargo.toml` + `editors/vscode/package.json` 0.39.2 → 0.39.3.
+
+**Residuales de la misma clase** (más raros, requieren cambio de codegen además
+del checker — documentados en `docs/deudas-post-5b.md`): (a) `if c { A } else {
+return B }` usado como valor — el codegen trackea el statement-mode `if` como
+`Null` aunque Rust lo tipa `A`; (b) literales `[...]`/`{...}` heterogéneos
+(`[1, 2.5]`) — el checker toma "primer elemento o Any" vs el LUB del codegen.
+
 ## [v0.39.2] — 2026-08-14 — Bugfix B16 (residual): `print`/`assert` en match arms
 
 Cierra la deuda residual derivada de B16 (v0.39.1). Los builtins variádicos

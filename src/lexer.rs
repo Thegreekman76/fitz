@@ -1261,11 +1261,18 @@ impl Lexer {
                     }
                 }
                 if start_pos == self.pos {
+                    // L4 (v0.40.0) — clearer error for the common mistake of
+                    // reaching for `'...'` as a string delimiter (some other
+                    // languages allow it; Fitz does not). Fitz strings use
+                    // double quotes; the apostrophe only opens a loop label.
                     return Err(FitzError::new(
                         ErrorKind::InvalidSyntax,
                         line,
                         column,
-                        "expected an identifier after `'` (label)".to_string(),
+                        "expected an identifier after `'`. In Fitz the apostrophe \
+                         `'` only opens a loop label (`'outer: loop { break 'outer }`); \
+                         strings use double quotes (`\"...\"`), not `'...'`."
+                            .to_string(),
                     ));
                 }
                 let name: String = self.chars[start_pos..self.pos].iter().collect();
