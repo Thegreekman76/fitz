@@ -35,7 +35,10 @@ pub mod parser;
 pub mod wasm_build;
 
 pub use check::{check, check_with_imported_components, CheckError};
-pub use codegen_ssr::{emit_component_ssr, emit_module_ssr, SsrEmitError, SsrEmitResult};
+pub use codegen_ssr::{
+    emit_component_ssr, emit_module_ssr, emit_module_ssr_with_components, SsrEmitError,
+    SsrEmitResult,
+};
 pub use codegen_wasm::{
     component_is_hydratable, emit_component, emit_module, emit_module_with_components,
     emit_module_with_imports, emit_module_with_nominals, file_uses_hydration,
@@ -96,6 +99,38 @@ pub fn transform_fitzv_source(
     source: &str,
     file_path_for_errors: &std::path::Path,
 ) -> Result<String, crate::error::FitzError> {
+    // Legacy entry (no project context): resolve cross-file `<Child />`
+    // against sibling `.fitzv` only (empty dep registry). base_dir is the
+    // `.fitzv`'s own directory. Loader call sites that HAVE a dep registry
+    // (evaluator.rs / codegen.rs) call `transform_fitzv_source_with_deps`
+    // so dotted-dep imports (`from fitz_liveviews.ui.Badge import Badge`)
+    // resolve; pre-scan / LSP sites keep this sibling-only wrapper.
+    let base_dir = file_path_for_errors
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    transform_fitzv_source_with_deps(
+        source,
+        file_path_for_errors,
+        base_dir,
+        &crate::manifest::DepRegistry::new(),
+    )
+}
+
+/// Dep-aware variant of [`transform_fitzv_source`]. Resolves cross-file
+/// `<Child />` composition through the classic module loader: walks the
+/// `.fitzv` import graph (dep-aware, mirroring the `fitz build --target
+/// wasm-client` path / CW.8) and threads the loaded component surfaces
+/// into both the checker (`check_with_imported_components`) and the SSR
+/// emitter (`emit_module_ssr_with_components`). With no imports (or none
+/// that compose a child) the loaded registry is empty → byte-identical to
+/// the single-file path. Best-effort loading: a load failure degrades to
+/// an empty registry (composition then reports `unknown component`).
+pub fn transform_fitzv_source_with_deps(
+    source: &str,
+    file_path_for_errors: &std::path::Path,
+    base_dir: &std::path::Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> Result<String, crate::error::FitzError> {
     use crate::error::{ErrorKind, FitzError};
 
     let path_display = file_path_for_errors.display();
@@ -121,7 +156,16 @@ pub fn transform_fitzv_source(
         )
     })?;
 
-    let check_errs = check(&expanded);
+    // Cross-file `<Child />` — mirror the build path (CW.8): walk the
+    // `.fitzv` import graph (dep-aware) and load every reachable imported
+    // component surface so composition resolves + validates against the
+    // real shape. Best-effort: a load failure degrades to an empty registry.
+    let all_imports =
+        collect_transitive_view_imports_with_deps(&expanded.imports, base_dir, dep_registry);
+    let imported = load_imported_components_with_deps(&all_imports, base_dir, dep_registry)
+        .unwrap_or_default();
+
+    let check_errs = check_with_imported_components(&expanded, imported.components());
     if !check_errs.is_empty() {
         // Only the first error's location is carried in the
         // FitzError — the message concatenates every check
@@ -147,7 +191,7 @@ pub fn transform_fitzv_source(
         ));
     }
 
-    emit_module_ssr(&expanded).map_err(|e| {
+    emit_module_ssr_with_components(&expanded, &imported, &all_imports).map_err(|e| {
         FitzError::new(
             ErrorKind::InvalidSyntax,
             0,
@@ -535,5 +579,64 @@ mod loader_bridge_tests {
             .unwrap_or_else(|e| panic!("classic lex must succeed on emitted source: {e}\n\n{out}"));
         crate::parser::parse(tokens)
             .unwrap_or_else(|e| panic!("classic parse must succeed: {e}\n\n{out}"));
+    }
+
+    #[test]
+    fn transform_fitzv_source_with_deps_resolves_sibling_child() {
+        // v0.41.3 — cross-file `<Child />` composition through the CLASSIC
+        // loader (SSR path). `App.fitzv` imports + composes `<Card/>` from a
+        // SIBLING `Card.fitzv`; with an empty dep registry the child resolves
+        // by sibling path. The emitted classic Fitz must inline `Card_render`
+        // (so `App_render` can call it) and register both components.
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Card.fitzv"),
+            "component Card {\n  state { title: Str = \"\" }\n  <template><article class=\"c\"><span>{title}</span></article></template>\n}\n",
+        )
+        .unwrap();
+        let app_src = "from Card import Card\n\ncomponent App {\n  state { n: Int = 0 }\n  <template><div><Card title=\"hi\" /><span>{n}</span></div></template>\n}\n";
+        let out = transform_fitzv_source_with_deps(
+            app_src,
+            &tmp.path().join("App.fitzv"),
+            tmp.path(),
+            &crate::manifest::DepRegistry::new(),
+        )
+        .expect("cross-file sibling composition resolves");
+        assert!(
+            out.contains("@live_component(\"Card\")"),
+            "the imported Card must be registered in the emitted module:\n{out}"
+        );
+        assert!(
+            out.contains("fn Card_render(state: Card)"),
+            "Card's render fn must be emitted inline:\n{out}"
+        );
+        assert!(
+            out.contains("fn App_render(state: App)"),
+            "App's render fn:\n{out}"
+        );
+        assert!(
+            out.contains("Card_render(Card {"),
+            "App must compose Card via its render fn:\n{out}"
+        );
+    }
+
+    #[test]
+    fn transform_fitzv_source_with_deps_unknown_cross_file_child_still_errors() {
+        // A `<Child/>` whose sibling file does not exist stays an error
+        // (best-effort load → empty registry → `unknown component`).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let app_src = "from Ghost import Ghost\n\ncomponent App {\n  <template><div><Ghost /></div></template>\n}\n";
+        let err = transform_fitzv_source_with_deps(
+            app_src,
+            &tmp.path().join("App.fitzv"),
+            tmp.path(),
+            &crate::manifest::DepRegistry::new(),
+        )
+        .expect_err("unknown cross-file child must error");
+        assert!(
+            err.message.contains("unknown component"),
+            "expected `unknown component`, got: {}",
+            err.message
+        );
     }
 }

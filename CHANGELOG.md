@@ -9,6 +9,45 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.41.3] — 2026-08-16 — `.fitzv`: composición cross-file `<Child />` en el target SSR
+
+Cierra un gap dual-target de los componentes single-file `.fitzv`: la composición
+`<Child />` de un componente declarado en **otro** archivo `.fitzv` funcionaba en
+el target **client-WASM** (`fitz build --target wasm-client`, feature CW.8) pero
+**no en el target SSR** cuando se compila a través del loader clásico de módulos.
+Un programa que hacía `from App import App_render` sobre un `App.fitzv` que
+componía `<Badge/>` (importado de otro `.fitzv`) fallaba con `unknown component
+<Badge />` — el emisor SSR compilaba el `.fitzv` en aislamiento. Ahora resuelve.
+
+- **La maquinaria ya existía** (checker `check_with_imported_components`, emit de
+  `ChildComponent` que llama `<Child>_render(...)`, `merge_imported_components`,
+  loaders CW.8 dep-aware); el hueco era puro **threading**: `transform_fitzv_source`
+  (el único path del loader clásico que quedó en la variante "aislada") no cargaba
+  los `<Child />` importados. Nueva `transform_fitzv_source_with_deps(source, path,
+  base_dir, dep_registry)` (molde de `check_view_source`) camina el grafo de imports
+  del `.fitzv` (dep-aware) y threadea las surfaces al checker + al emisor SSR nuevo
+  `emit_module_ssr_with_components`. El wrapper legacy `transform_fitzv_source`
+  resuelve sibling-only (registro vacío). Los 2 call sites que importan (evaluator
+  `fitz run`, codegen `fitz build`) pasan su `dep_registry` — así resuelven imports
+  punteados por dependencia (`from fitz_liveviews.ui.Badge import badge as Badge`).
+- **Imports transitivos del child**: `emit_module_ssr_with_components` une los
+  imports transitivos (el `from fitz_liveviews import flv` que usa la companion
+  `Badge`, o nominales/fns del child) al módulo merged, podando (a) los imports que
+  resuelven a un componente merged (ahora inlineado → evita redeclararlo) y (b)
+  `Html`/`html` que el header ya provee (evita doble-import).
+- **Byte-compat**: un `.fitzv` sin composición cross-file emite SSR byte-idéntico
+  (registro vacío → short-circuit sin clone). Guard con test dedicado; los 734 tests
+  de la suite `view` + la gallery `@test` de fitz-liveviews (227) + el Admin ABM
+  chequean sin cambios.
+- **Tests**: 3 unit (`transform_fitzv_source_with_deps_resolves_sibling_child`,
+  `..._unknown_cross_file_child_still_errors`,
+  `emit_module_ssr_with_components_empty_is_byte_identical`) + 1 E2E
+  (`cross_file_child_composition_ssr_via_classic_loader_v0_41_3`).
+
+Sin sintaxis nueva; sin impacto en grammar/LSP (el `fitz check` de `.fitzv` ya
+resolvía cross-file desde v0.39.0 — este cierre alinea `run`/`build` con `check`).
+Destraba SSR-componer una companion via `<Child/>` tags (antes solo vía render-fns).
+
 ## [v0.41.2] — 2026-08-15 — `jwt.decode` heterogéneo en `fitz build` (cierra la paridad JWT)
 
 Cierra la deuda residual de v0.41.0: `jwt.decode` en `fitz build` devolvía

@@ -181,6 +181,7 @@
 //! offending component + event / template node) so the caller
 //! can format a useful error. [`SsrEmitResult`] is the alias.
 
+use super::codegen_wasm::{merge_imported_components, ImportedComponentRegistry};
 use super::expand::{
     ExpandedAttr, ExpandedComponent, ExpandedEventHandler, ExpandedTemplateNode, ExpandedViewFile,
     ExpandedViewImport,
@@ -225,6 +226,66 @@ pub type SsrEmitResult<T> = Result<T, SsrEmitError>;
 /// is auto-generated but still developer-inspectable — the
 /// counter demo baseline pattern from 11.5).
 pub fn emit_module_ssr(file: &ExpandedViewFile) -> SsrEmitResult<String> {
+    emit_module_ssr_inner(file)
+}
+
+/// Cross-file `<Child />` composition in SSR (parallel to the WASM
+/// `emit_module_with_components`). Merges the reachable imported
+/// component surfaces into the file before emitting, so
+/// `App_render` can compose a companion `<Badge />` declared in a
+/// SEPARATE `.fitzv`. The `ChildComponent` emit (which calls
+/// `<Child>_render(...)`) and the SSR-4 machinery (hydrate
+/// propagation, composed-child state-script suppression, child
+/// wrappers) already handle the merged tree — the only gap was the
+/// classic loader never loading the imports. With an empty registry
+/// this short-circuits to the byte-identical single-file path (no
+/// clone), so every `.fitzv` without cross-file composition emits
+/// exactly as before.
+pub fn emit_module_ssr_with_components(
+    file: &ExpandedViewFile,
+    imported: &ImportedComponentRegistry,
+    transitive_imports: &[ExpandedViewImport],
+) -> SsrEmitResult<String> {
+    if imported.is_empty() {
+        return emit_module_ssr_inner(file);
+    }
+    let mut merged = merge_imported_components(file, imported);
+    // The merged module must carry the TRANSITIVE imports, not just the
+    // entry's: a merged child's OWN imports (e.g. the companion `Badge`'s
+    // `from fitz_liveviews import flv`, or a child's nominal/fn) must be in
+    // scope in the emitted classic Fitz, or its `<Child>_render` fn won't
+    // resolve. `merge_imported_components` only copies the entry's
+    // `file.imports`; `transitive_imports` (from
+    // `collect_transitive_view_imports_with_deps`) is the full reachable set.
+    //
+    // Two prunings on that set:
+    //   - drop imports that resolve to a merged-in COMPONENT — it is inlined
+    //     now (`@live_component` + `<Child>_render`), so a verbatim
+    //     `from ...Badge import Badge` would REDECLARE it. The registry keys
+    //     each component under its LOCAL binding (the alias when present),
+    //     which is also the import binding's local name — so they match.
+    //   - drop `Html` / `html` from `fitz_liveviews` — `emit_module_header`
+    //     already imports them, so keeping them here double-imports the name.
+    // The wasm path sidesteps all of this by never emitting classic imports.
+    let comp_names: std::collections::HashSet<&str> = imported
+        .components()
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    let mut imports: Vec<ExpandedViewImport> = transitive_imports.to_vec();
+    for imp in &mut imports {
+        let from_flv = imp.path.len() == 1 && imp.path[0] == "fitz_liveviews";
+        imp.names.retain(|(orig, alias)| {
+            let local = alias.as_deref().unwrap_or(orig.as_str());
+            !(comp_names.contains(local) || from_flv && matches!(orig.as_str(), "Html" | "html"))
+        });
+    }
+    imports.retain(|imp| !imp.names.is_empty());
+    merged.imports = imports;
+    emit_module_ssr_inner(&merged)
+}
+
+fn emit_module_ssr_inner(file: &ExpandedViewFile) -> SsrEmitResult<String> {
     // Phase 11.12 SSR-4 — propagate the root `hydrate` marker across the whole
     // component tree (parallel to the WASM `propagate_root_hydrate`) BEFORE any
     // emit, so a composed child emits the isomorphic `fi`/`fr` markers its
@@ -2955,6 +3016,24 @@ mod tests {
     fn parse_expand(src: &str) -> ExpandedViewFile {
         let raw = parse(src).expect("view::parse");
         expand(&raw).expect("view::expand")
+    }
+
+    #[test]
+    fn emit_module_ssr_with_components_empty_is_byte_identical() {
+        // v0.41.3 — the cross-file entry with an EMPTY imported registry emits
+        // byte-for-byte the same as the single-file path (`emit_module_ssr`).
+        // Guards byte-compat for every `.fitzv` without cross-file composition.
+        let file = parse_expand(
+            "component App {\n  state { n: Int = 0 }\n  <template><div><span>{n}</span></div></template>\n}\n",
+        );
+        let plain = emit_module_ssr(&file).expect("emit");
+        let with_empty =
+            emit_module_ssr_with_components(&file, &ImportedComponentRegistry::new(), &[])
+                .expect("emit");
+        assert_eq!(
+            plain, with_empty,
+            "an empty imported registry must emit byte-identical SSR"
+        );
     }
 
     // ---- Header ----------------------------------------------

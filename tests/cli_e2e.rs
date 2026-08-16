@@ -2925,6 +2925,53 @@ fn phase_11_6_d_import_of_fitzv_sibling_is_transformed_through_view_pipeline() {
 }
 
 #[test]
+fn cross_file_child_composition_ssr_via_classic_loader_v0_41_3() {
+    // v0.41.3 — a `.fitzv` that composes a `<Child/>` declared in a SEPARATE
+    // `.fitzv` now resolves through the classic module loader (SSR path), not
+    // just the `fitz build --target wasm-client` build. 3-file project:
+    // main.fitz imports App_render; App.fitzv imports + composes <Card/> from
+    // a sibling Card.fitzv. `fitz run` runs App.fitzv's view pipeline with the
+    // cross-file child loaded → composition resolves → the run only fails
+    // later on the emitted `from fitz_liveviews import ...`.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "main.fitz",
+        "from App import App_render\nprint(\"hi\")\n",
+    );
+    write_file(
+        root,
+        "App.fitzv",
+        "from Card import Card\n\ncomponent App {\n  state { n: Int = 0 }\n  <template><div><Card title=\"hi\" /><span>{n}</span></div></template>\n}\n",
+    );
+    write_file(
+        root,
+        "Card.fitzv",
+        "component Card {\n  state { title: Str = \"\" }\n  <template><article><span>{title}</span></article></template>\n}\n",
+    );
+
+    let (_stdout, stderr, code) = run_fitz(&["run", "main.fitz"], root);
+    assert_ne!(
+        code, 0,
+        "run fails on the missing fitz_liveviews dep: {stderr}"
+    );
+    // The bug this closes: the SSR transform of App.fitzv failed with
+    // `unknown component <Card />` because the classic loader never loaded the
+    // cross-file child. That regression must be GONE.
+    assert!(
+        !stderr.contains("unknown component"),
+        "cross-file `<Card />` must resolve through the classic loader; stderr:\n{stderr}"
+    );
+    // It reaches the emitted fitz_liveviews import instead — proof the
+    // transform + cross-file composition ran to completion.
+    assert!(
+        stderr.contains("fitz_liveviews"),
+        "the transform + composition ran, hitting the missing fitz_liveviews dep; stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn phase_11_6_d_import_prefers_dot_fitz_over_dot_fitzv_when_both_exist() {
     // Backward-compat: if a sibling has BOTH `Card.fitz` and
     // `Card.fitzv`, the classic `.fitz` wins. The user

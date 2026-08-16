@@ -4743,7 +4743,19 @@ impl ModuleLoader {
         // run the view pipeline to produce classic Fitz
         // source and feed THAT to the classic lexer.
         let source = if crate::view::is_fitzv_extension(canonical) {
-            crate::view::transform_fitzv_source(&source_raw, canonical)?
+            // v0.41.3 — thread the dep registry + base_dir so cross-file
+            // `<Child />` composition resolves through the classic loader
+            // (dotted-dep imports like `from fitz_liveviews.ui.Badge import
+            // Badge`), mirroring the `fitz build --target wasm-client` path.
+            let base_dir = canonical
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            crate::view::transform_fitzv_source_with_deps(
+                &source_raw,
+                canonical,
+                base_dir,
+                &self.dep_registry,
+            )?
         } else {
             source_raw
         };

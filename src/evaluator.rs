@@ -2897,7 +2897,26 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     // classic lexer + parser. The classic side never sees a
     // `.fitzv` token.
     let source: String = if crate::view::is_fitzv_extension(&canonical) {
-        crate::view::transform_fitzv_source(&source_raw, &canonical).map_err(EvalSignal::Error)?
+        // v0.41.3 — thread the dep registry + base_dir so cross-file
+        // `<Child />` composition resolves through the classic loader
+        // (dotted-dep imports like `from fitz_liveviews.ui.Badge import
+        // Badge`), mirroring the `fitz build --target wasm-client` path.
+        let dep_registry = LOADER.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|l| l.dep_registry.clone())
+                .unwrap_or_default()
+        });
+        let base_dir = canonical
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        crate::view::transform_fitzv_source_with_deps(
+            &source_raw,
+            &canonical,
+            base_dir,
+            &dep_registry,
+        )
+        .map_err(EvalSignal::Error)?
     } else {
         source_raw
     };
