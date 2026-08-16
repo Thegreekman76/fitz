@@ -569,8 +569,9 @@ pub fn emit_module_with_components(
     // DOM reused). Runtime-safe because the entry wrapper falls back to a
     // fresh `mount` when the root has no server DOM, so empty-mount
     // deployments are unchanged. A composition tree with `{#if}`/`{#for}`
-    // regions is EXCLUDED (naive-region adopt is not modelled — it would hit
-    // the region EmitError), so it stays fresh-mount. Non-composition naive
+    // regions is EXCLUDED from AUTO-hydration (conservative — it keeps its
+    // fresh-mount baseline); the explicit `hydrate` marker instead adopts such
+    // a region via the handle-less skip (v0.41.4). Non-composition naive
     // components are left as-is (this residual is scoped to composition).
     if !merged.components.iter().any(|c| c.hydrate) && tree_auto_hydratable(&merged, &bubbled) {
         for c in &mut merged.components {
@@ -1415,8 +1416,11 @@ fn component_has_regions(component: &ExpandedComponent) -> bool {
 ///   component keeps its fresh-mount baseline), AND
 /// - every component is adoptable: either keep-node (its adopt walk handles
 ///   regions itself) or a region-free naive component. A naive component WITH
-///   regions would hit the naive-region `EmitError`, so it blocks the whole
-///   tree (it stays fresh-mount).
+///   regions is EXCLUDED from AUTO-hydration and stays fresh-mount — a
+///   conservative default (its behaviour is unchanged). The explicit `hydrate`
+///   marker DOES adopt such a region (v0.41.4, handle-less skip via
+///   `emit_naive_region_skip`); auto-hydration keeps the stricter gate so an
+///   un-marked tree never changes its fresh-mount baseline.
 fn tree_auto_hydratable(
     file: &ExpandedViewFile,
     bubbled: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
@@ -1446,7 +1450,13 @@ fn any_component_hydratable_with_regions(
     let empty = std::collections::BTreeSet::new();
     file.components.iter().any(|c| {
         let tb = bubbled.get(&c.name).unwrap_or(&empty);
-        component_is_hydratable(c, tb) && component_uses_keep_regions(c)
+        // Any hydratable component whose adopt walk calls `__flv_next_comment`:
+        // keep-node regions (`emit_keep_region_adopt`) OR naive-composition
+        // regions (`emit_naive_region_skip`, v0.41.4). `component_has_regions`
+        // covers both; the old `component_uses_keep_regions` missed the naive
+        // case (it requires a value input + no composition), so a marked
+        // composition+region tree failed to emit the helper it referenced.
+        component_is_hydratable(c, tb) && component_has_regions(c)
     })
 }
 
@@ -3141,23 +3151,19 @@ fn emit_template_node(
                     // Keep-node path (slice 2): adopt the region's server anchors.
                     emit_keep_region_adopt(ctx, parent_var, out)
                 } else {
-                    // Naive hydration (slice 4) does not model `{#if}`/`{#for}`
-                    // adoption yet — a naive region re-renders inline and the
-                    // adopt walk has no anchors to line up on. The composition
-                    // demo has no regions; a naive component that both composes
-                    // AND has a region is out of scope for this slice.
-                    // PRIORITY TODO (docs/deudas-post-5b.md): naive-region adopt
-                    // (evaluate the restored condition, walk the taken branch's
-                    // nodes against the cursor).
-                    Err(EmitError {
-                        message: "hydration of a `{#if}`/`{#for}` region inside a \
-                             NAIVE (composition) component is not supported in this \
-                             slice — only keep-node components adopt regions. Move \
-                             the region into a keep-node child, or drop `hydrate` \
-                             from this component."
-                            .to_string(),
-                        context: format!("component `{}`", ctx.component_name),
-                    })
+                    // Naive (composition) hydration, v0.41.4. The naive render()
+                    // wipes-and-rebuilds the whole root on every state change, so
+                    // there is no in-place region patch to keep (unlike
+                    // keep-node) — no `__astart`/`__aend` handles. But the FIRST
+                    // paint is server-painted between `<!--fr-->`/`<!--/fr-->`
+                    // anchors (the SSR emitter writes them inside a composed
+                    // child when hydratable), so the adopt walk must ADVANCE the
+                    // cursor past the region's server nodes to keep siblings
+                    // aligned, leaving the content in place until the first naive
+                    // re-render rebuilds it from state. Static regions only; a
+                    // `<Child/>` inside `{#for}` (dynamic composition) still
+                    // errors below (keyed reconciliation is a separate slice).
+                    emit_naive_region_skip(parent_var, out)
                 }
             }
             ExpandedTemplateNode::Slot { name, fallback, .. } => {
@@ -3571,6 +3577,31 @@ fn emit_keep_region(
 /// inside it — landing on the region's own `<!--fr-->` / `<!--/fr-->`. Uses the
 /// same `keep_region_index()` the build walk did, so (visiting regions in the
 /// same DFS order) the field names line up.
+/// v0.41.4 — adopt a `{#if}`/`{#for}` region inside a NAIVE (composition)
+/// component: advance the cursor past the region's server-painted
+/// `<!--fr-->` … `<!--/fr-->` anchors so the following siblings line up on the
+/// adopt walk, WITHOUT keeping anchor handles. Parallel to
+/// `emit_keep_region_adopt` but handle-less: naive has no in-place region patch
+/// (the whole root is wiped-and-rebuilt on the first state change), so the
+/// server-painted region content is simply left in place for the first paint.
+/// `__flv_next_comment` leaves the cursor just past each matched comment, so the
+/// two calls skip the entire region (including any nested `<!--fi-->` markers).
+fn emit_naive_region_skip(cursor_var: &str, out: &mut String) -> EmitResult<()> {
+    writeln!(
+        out,
+        "        let _ = __flv_next_comment(&mut {}, \"fr\");",
+        cursor_var
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        let _ = __flv_next_comment(&mut {}, \"/fr\");",
+        cursor_var
+    )
+    .unwrap();
+    Ok(())
+}
+
 fn emit_keep_region_adopt(
     ctx: &mut RenderCtx,
     cursor_var: &str,
@@ -9222,6 +9253,39 @@ component Card {
     }
 
     #[test]
+    fn phase_11_12_marked_composition_with_region_adopts_via_skip_v0_41_4() {
+        // v0.41.4 — an EXPLICITLY-marked (`hydrate`) composition tree that ALSO
+        // has a `{#if}`/`{#for}` region now emits `hydrate()` and ADOPTS the
+        // region via the handle-less cursor skip (`__flv_next_comment(&mut ...,
+        // "fr")` / "/fr"), instead of the old naive-region EmitError. The
+        // un-marked case still stays fresh-mount (see the residual1 test above).
+        let src = r#"component App hydrate {
+  state { show: Bool = true, title: Str = "d" }
+  event go() { show = false }
+  <template>
+    <div>
+      {#if show}<p class="x">visible</p>{/if}
+      <Card title="{title}" />
+    </div>
+  </template>
+}
+
+component Card {
+  state { title: Str = "" }
+  <template><span class="c">{title}</span></template>
+}"#;
+        let out = emit_module(&parse_expand(src)).expect("marked composition+region must emit");
+        assert!(
+            out.contains("pub fn hydrate("),
+            "an explicitly-marked composition+region tree must emit hydrate():\n{out}"
+        );
+        assert!(
+            out.contains("__flv_next_comment(&mut") && out.contains("\"fr\""),
+            "the region must be adopted via the handle-less skip:\n{out}"
+        );
+    }
+
+    #[test]
     fn phase_11_12_slice4_gate_and_propagation() {
         let empty = std::collections::BTreeSet::new();
         let mut file = parse_expand(SLICE4_COMPOSITION_SRC);
@@ -9251,10 +9315,13 @@ component Card {
     }
 
     #[test]
-    fn phase_11_12_slice4_naive_region_hydration_is_rejected() {
-        // A naive component (no value-input → not keep-node) marked `hydrate`
-        // with a `{#if}` region: the naive hydration path does not adopt regions
-        // in this slice, so emit errors with a clear message.
+    fn phase_11_12_slice4_naive_region_hydration_adopts_via_skip_v0_41_4() {
+        // v0.41.4 — a naive component (no value-input → not keep-node) marked
+        // `hydrate` with a `{#if}` region now ADOPTS the region via the
+        // handle-less cursor skip (`__flv_next_comment(&mut ..., "fr")` / "/fr").
+        // Before v0.41.4 this emitted a clear EmitError ("naive-region adopt not
+        // supported"). Applies to any marked naive component with a static
+        // region, composition or not (the companion demo uses composition).
         let src = r#"component App hydrate {
   state { on: Bool = true }
   event flip() { on = false }
@@ -9265,11 +9332,14 @@ component Card {
     </div>
   </template>
 }"#;
-        let err = emit_module(&parse_expand(src)).unwrap_err();
+        let out = emit_module(&parse_expand(src)).expect("marked naive+region must emit");
         assert!(
-            err.message.contains("NAIVE") && err.message.contains("region"),
-            "region-in-naive-hydrate rejected with a clear message: {}",
-            err.message
+            out.contains("pub fn hydrate("),
+            "must emit hydrate():\n{out}"
+        );
+        assert!(
+            out.contains("__flv_next_comment(&mut") && out.contains("\"fr\""),
+            "region adopted via the handle-less skip:\n{out}"
         );
     }
 

@@ -103,12 +103,24 @@ para próximas iteraciones.
    por slice 4 (`hydrate-composition` 10/10), así que los 7 usan un path ya
    probado — no se re-validó en browser cada uno (empty-mount runtime idéntico).
 
-2. **`{#if}`/`{#for}` en un componente naive hidratable** — el adopt walk naive
-   (slice 4) NO adopta regiones: emite un `EmitError` claro si un componente con
-   `hydrate` (y sin ser keep-node) contiene un `{#if}`/`{#for}`. Los keep-node SÍ
-   las adoptan (slice 2). **Fix futuro**: naive-region adopt = evaluar la condición
-   restaurada y caminar la rama tomada contra el cursor (paralelo a `emit_if`/
-   `emit_for` en modo adopt). El demo de composición no usa regiones.
+2. **`{#if}`/`{#for}` en un componente naive hidratable — 🟢 CERRADO 2026-08-16
+   (v0.41.4)** — un componente naive (composición) con el marcador `hydrate`
+   explícito que contiene un `{#if}`/`{#for}` **estático** ahora ADOPTA la región
+   en vez de emitir el EmitError. Como el `render()` naive tira-y-reconstruye el
+   root entero en cada cambio de state, no hay patch in-place que preservar
+   (a diferencia de keep-node): el adopt solo **avanza el cursor** más allá de los
+   anchors server-pintados `<!--fr-->`/`<!--/fr-->` (helper `emit_naive_region_skip`,
+   handle-less, reusa `__flv_next_comment`), dejando el contenido del primer paint
+   en su lugar hasta el primer re-render. El SSR ya emitía los anchors dentro de un
+   `<div __fitz-child>` hidratable (SSR-3). Gate del helper corregido: de
+   `component_uses_keep_regions` (exige value-input + sin composición) a
+   `component_has_regions` (cualquier hidratable con región). **Conservador**:
+   `tree_auto_hydratable` NO cambia — un árbol composición+región SIN marcador
+   sigue fresh-mount (cero cambio byte-compat); solo el marcador explícito
+   habilita el adopt de región. Validado en Chrome real 7/7 (composición + `{#for}`
+   adoptada del server + naive re-render reconstruye la región). Test
+   `phase_11_12_marked_composition_with_region_adopts_via_skip_v0_41_4`. **Queda el
+   sub-caso (3)**: `<Child />` dinámico dentro de `{#for}` (reconciliación keyed).
 
 3. **`<Child />` dinámico dentro de `{#for}` en hidratación naive** — mismo límite
    que (2): `emit_child_component_adopt` rechaza `ctx.in_for`. La composición

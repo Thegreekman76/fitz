@@ -9,6 +9,38 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.41.4] — 2026-08-16 — `.fitzv`: hidratación de regiones `{#if}`/`{#for}` en un árbol de composición
+
+Cierra el ítem 2 de las deudas residuales de hidratación de composición (Fase
+11.12): un componente naive (composición) con el marcador `hydrate` explícito
+que contiene una región `{#if}`/`{#for}` **estática** ahora ADOPTA la región del
+DOM server-pintado en vez de abortar con el EmitError "naive-region adopt not
+supported". Desbloquea tabs/steppers/accordions compuestos sin un `<input>` vivo
+(que hoy no tenían workaround limpio — keep-node exige `@input`).
+
+- Como el `render()` naive tira-y-reconstruye el root entero en cada cambio de
+  state, no hay patch in-place que preservar (a diferencia de keep-node): el
+  adopt solo **avanza el cursor** más allá de los anchors server-pintados
+  `<!--fr-->`/`<!--/fr-->` (nuevo `emit_naive_region_skip`, handle-less, reusa el
+  helper `__flv_next_comment` que ya existía), dejando el contenido del primer
+  paint en su lugar hasta el primer re-render (que lo reconstruye del state). La
+  mitad SSR ya emitía los anchors dentro de un `<div __fitz-child>` hidratable.
+- Gate del helper corregido: `any_component_hydratable_with_regions` pasa de
+  `component_uses_keep_regions` (exige value-input + sin composición) a
+  `component_has_regions` (cualquier componente hidratable con región), así el
+  `__flv_next_comment` que el skip referencia se emite también en el caso naive.
+- **Conservador**: `tree_auto_hydratable` NO cambia — un árbol composición+región
+  SIN marcador sigue fresh-mount (cero cambio byte-compat). Solo el marcador
+  `hydrate` explícito habilita el adopt de región.
+- **Queda como límite** (deuda 11.12 ítem 3): `<Child />` **dinámico** dentro de
+  `{#for}` (reconciliación keyed) sigue rechazado con error claro — es un slice
+  grande de bajo valor (choca con el modelo naive de wipe-and-rebuild).
+- Validado en Chrome real 7/7 (boot · state restaurado · Badge compuesto adoptado
+  · región `{#for}` adoptada del server · naive re-render reconstruye la región ·
+  sin errores). Test `phase_11_12_marked_composition_with_region_adopts_via_skip_v0_41_4`.
+
+Sin sintaxis nueva; sin impacto en grammar/LSP (cambio interno del emisor WASM).
+
 ## [v0.41.3] — 2026-08-16 — `.fitzv`: composición cross-file `<Child />` en el target SSR
 
 Cierra un gap dual-target de los componentes single-file `.fitzv`: la composición
