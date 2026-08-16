@@ -9,6 +9,40 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.41.5] — 2026-08-16 — `.fitzv`: `<style scoped>` en un root que hidrata
+
+Levanta una restricción de autoría de la hidratación: un componente que hidrata
+ahora puede llevar `<style scoped>` (o `<style global>`) en su RAÍZ. Antes había
+que poner el CSS del componente en el `<head>` del host (o dejaba el árbol
+hidratado "muerto" — los eventos nunca se cableaban).
+
+- **Causa raíz**: el emisor SSR prepende el bloque `<style>` scoped como el
+  primer hijo del render, y el build cliente inyecta ese CSS al `<head>`. El
+  adopt walk arrancaba en `root.first_child()` y — como `<style>` es un Element —
+  `__flv_next_element` lo tomaba como la raíz del template, desalineando todo el
+  walk un nodo (el `@input`/`@click` nunca se cableaba, sin panic ni error de
+  compilación — un árbol hidratado silenciosamente roto).
+- **Fix (CHICO)**: `emit_hydrate_method` (la fn compartida por root y child)
+  saltea un `<style>` líder al inicio del walk (`tag_name() == "STYLE"` →
+  `next_sibling`), **gated por `component.style.is_some()`** — un componente sin
+  estilo emite código byte-idéntico. Como la fn es compartida, además vuelve
+  **correcto-por-construcción** un child compuesto estilado (antes "funcionaba"
+  solo porque el adopt de un child naive es inerte; un child keep-node estilado
+  habría roto).
+- **Byte-compat**: los `examples/view/*` del core no llevan scoped style en
+  componentes hidratables → SSR + WASM byte-idénticos (view suite 736 verde). Los
+  demos de composición de fitz-liveviews (Badge estilado compuesto) rebuildean con
+  el adopt del child mejorado — mismo DOM runtime, re-validados headless.
+- **Validado en Chrome real 6/6**: un root `component App hydrate` con
+  `<style scoped>` + un `<input>` vivo → state restaurado, DOM adoptado (witness
+  sobrevive), el estilo scoped aplica, **el `@input` se cablea + actualiza** (lo
+  que rompía pre-fix), sin errores. Test
+  `phase_11_12_hydrating_root_with_scoped_style_skips_leading_style_v0_41_5`.
+
+Sin sintaxis nueva; sin impacto en grammar/LSP (cambio interno del emisor WASM).
+Simplifica la autoría: los estilos del componente pueden vivir co-locados
+(`<style scoped>`) en vez del `<head>` del host.
+
 ## [v0.41.4] — 2026-08-16 — `.fitzv`: hidratación de regiones `{#if}`/`{#for}` en un árbol de composición
 
 Cierra el ítem 2 de las deudas residuales de hidratación de composición (Fase

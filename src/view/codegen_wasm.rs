@@ -1908,6 +1908,24 @@ fn emit_hydrate_method(
         writeln!(out, "        self.__recompute_derived();").unwrap();
     }
     writeln!(out, "        let mut __cur_root = root.first_child();").unwrap();
+    // v0.41.5 — a hydrating component may carry `<style scoped>` / `<style
+    // global>`: the SSR emitter prepends that block as the FIRST child of the
+    // render output, and the client build injects the CSS into `<head>` (the
+    // style-helper call at the top of this method), so the server-painted
+    // `<style>` is a leftover the adopt walk must skip to line up with the
+    // template's REAL root. Without this the walk maps the template root onto
+    // the `<style>` and silently mis-adopts (events never wire; the tree
+    // hydrates dead). Gated on `component.style` so styleless components emit
+    // byte-identical code. Because this method is shared by root + child, it
+    // also makes a styled composed child correct-by-construction (before it
+    // only "worked" because a naive child's adopt is inert).
+    if component.style.is_some() {
+        writeln!(
+            out,
+            "        while let Some(__n) = __cur_root.clone() {{ if __n.dyn_ref::<web_sys::Element>().map(|__e| __e.tag_name() == \"STYLE\").unwrap_or(false) {{ __cur_root = __n.next_sibling(); }} else {{ break; }} }}"
+        )
+        .unwrap();
+    }
     writeln!(out, "        *self.root.borrow_mut() = Some(root);").unwrap();
     out.push_str(hydrate_body);
     // Keep-node components flip `__built` so the next state change patches in
@@ -9340,6 +9358,43 @@ component Card {
         assert!(
             out.contains("__flv_next_comment(&mut") && out.contains("\"fr\""),
             "region adopted via the handle-less skip:\n{out}"
+        );
+    }
+
+    #[test]
+    fn phase_11_12_hydrating_root_with_scoped_style_skips_leading_style_v0_41_5() {
+        // v0.41.5 — a hydratable component that carries `<style scoped>` now
+        // emits a leading-`<style>` skip at the start of its adopt walk, so the
+        // walk maps the template root onto the real first element (not the
+        // server-painted `<style>` the SSR emitter prepends). Before this, the
+        // walk mapped onto the `<style>` and silently mis-adopted (the `@input`
+        // never wired). A styleless hydratable component emits no skip.
+        let styled = r#"component App hydrate {
+  state { label: Str = "x" }
+  event on_label() { label = payload["value"] }
+  <template><div class="c"><span class="l">{label}</span><input class="i" @input="on_label" value="{label}" /></div></template>
+  <style scoped>
+    .c { color: red; }
+  </style>
+}"#;
+        let out = emit_component(&parse_expand(styled).components[0]).unwrap();
+        let hbody = &out[out.find("pub fn hydrate(").expect("hydrate present")..];
+        assert!(
+            hbody.contains("tag_name() == \"STYLE\"")
+                && hbody.contains("__cur_root = __n.next_sibling()"),
+            "a hydrating root with <style scoped> must skip the leading <style>:\n{out}"
+        );
+
+        // A styleless hydratable component emits no skip (byte-compat).
+        let plain = r#"component App hydrate {
+  state { label: Str = "x" }
+  event on_label() { label = payload["value"] }
+  <template><div class="c"><span class="l">{label}</span><input class="i" @input="on_label" value="{label}" /></div></template>
+}"#;
+        let out2 = emit_component(&parse_expand(plain).components[0]).unwrap();
+        assert!(
+            !out2.contains("tag_name() == \"STYLE\""),
+            "a styleless hydratable component must not emit the <style> skip:\n{out2}"
         );
     }
 
