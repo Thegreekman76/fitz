@@ -3544,6 +3544,9 @@ fn run_file(
     // without the eval's thread-local) resolves the persistence config.
     // Cheap even when there are no `@background(store=db)` fns.
     http::install_background_registry(registry.background_registry.clone());
+    // Phase 3c — same, for the WS broadcaster: an `@every`/`@cron` fn calling
+    // `ws_broadcast(...)` runs on a worker without the thread-local registry.
+    http::install_ws_broadcaster(registry.ws_broadcaster.clone());
 
     // v0.37.7 — `@background(store=db, catch_up=true)`: at boot, mark
     // orphaned rows (`running`/`retrying` left mid-flight by a crash)

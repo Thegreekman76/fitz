@@ -774,11 +774,34 @@ pub fn has_active_registry() -> bool {
 /// behavior degrades to a pedagogically acceptable no-op: the
 /// endpoint doesn't exist, there are no clients.
 pub fn ws_broadcast_to_endpoint(endpoint: &str, payload: String) {
-    HTTP_REGISTRY.with(|cell| {
-        if let Some(reg) = cell.borrow().as_ref() {
-            reg.ws_broadcaster.broadcast_text(endpoint, payload);
-        }
-    });
+    // Prefer the thread-local registry (active during eval / on the main
+    // thread); fall back to the global installed at serve boot so a scheduler
+    // task (`@every` / `@cron`) on a tokio worker — which has no thread-local —
+    // can still broadcast to the endpoint.
+    let broadcaster = HTTP_REGISTRY
+        .with(|cell| cell.borrow().as_ref().map(|reg| reg.ws_broadcaster.clone()))
+        .or_else(|| ws_broadcaster_slot().lock().clone());
+    if let Some(b) = broadcaster {
+        b.broadcast_text(endpoint, payload);
+    }
+}
+
+/// Phase 3c — global WS broadcaster slot, so `ws_broadcast(endpoint, msg)` works
+/// from a scheduler task (`@every` / `@cron`) that runs on a tokio worker
+/// without the thread-local registry. Installed at serve boot (`run_file`) from
+/// the same `Arc` the registry holds.
+static INSTALLED_WS_BROADCASTER: std::sync::OnceLock<
+    parking_lot::Mutex<Option<std::sync::Arc<WsBroadcaster>>>,
+> = std::sync::OnceLock::new();
+
+fn ws_broadcaster_slot() -> &'static parking_lot::Mutex<Option<std::sync::Arc<WsBroadcaster>>> {
+    INSTALLED_WS_BROADCASTER.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// Phase 3c — installs the global WS broadcaster (called from `run_file` after
+/// eval, before serving), mirroring `install_background_registry`.
+pub fn install_ws_broadcaster(b: std::sync::Arc<WsBroadcaster>) {
+    *ws_broadcaster_slot().lock() = Some(b);
 }
 
 /// Phase 9.w.1.c — `true` if the active registry has an
@@ -5631,6 +5654,17 @@ mod tests {
         let r = HttpRegistry::new();
         assert!(r.is_empty());
         assert_eq!(r.routes.len(), 0);
+    }
+
+    #[test]
+    fn ws_broadcast_uses_global_fallback_without_thread_local() {
+        // Phase 3c — an @every/@cron fn broadcasting from a worker thread has no
+        // thread-local registry; install_ws_broadcaster + the global fallback
+        // let ws_broadcast_to_endpoint resolve the broadcaster. No connections →
+        // a no-op that must not panic (exercises the global path).
+        let b = std::sync::Arc::new(WsBroadcaster::new());
+        install_ws_broadcaster(b);
+        ws_broadcast_to_endpoint("/live/none", "{}".to_string());
     }
 
     #[tokio::test(flavor = "current_thread")]

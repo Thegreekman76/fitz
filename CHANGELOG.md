@@ -9,6 +9,22 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.42.1] — 2026-08-17 — `ws_broadcast(...)` funciona desde un scheduler (`@every`/`@cron`)
+
+Fix que destraba el patrón canónico de `@every` en fitz-liveviews: un reloj /
+heartbeat **global** que `ws_broadcast(...)` a un endpoint LiveView cada segundo.
+
+### Arreglado
+
+- **`ws_broadcast(endpoint, msg)` desde un `@every`/`@cron` fn** — el builtin
+  resolvía el broadcaster **solo** por el thread-local `HTTP_REGISTRY`, que NO
+  está seteado en los workers tokio donde corren los schedulers → el broadcast
+  era un **no-op silencioso**. Ahora hay un **broadcaster global instalado** al
+  boot (`install_ws_broadcaster`, paralelo a `install_background_registry`) y
+  `ws_broadcast_to_endpoint` cae a él cuando el thread-local no está presente.
+  Un `@every(1)` que `ws_broadcast(...)` a `/live/clock` ahora llega a todos los
+  clientes conectados. Validado headless: la hora del reloj avanza cada segundo.
+
 ## [v0.42.0] — 2026-08-17 — `@every(N)`: decorator de tareas periódicas por intervalo
 
 Decorator nuevo del lenguaje **`@every(N)`**: corre una fn top-level cada N
