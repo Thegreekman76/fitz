@@ -960,6 +960,151 @@ pub fn run_scheduler_on_runtime(
 }
 
 // ============================================================
+// Phase 3c — `@every(N)` interval jobs.
+// ============================================================
+//
+// The interval analogue of `@cron`: a fixed period (in seconds) instead of a
+// cron `Schedule`, so `@every(90)` (90 s) and `@every(0.5)` (sub-second) work
+// where a cron expression can't. A separate, minimal path — no tz/retry/store —
+// that reuses the same boot lifecycle (a registry on `HttpRegistry`, one tokio
+// task per job, invoke via `invoke_value`) alongside the cron + HTTP schedulers.
+
+/// A registered `@every(N)` job: run `handler` every `interval_secs` seconds.
+#[derive(Clone, Debug)]
+pub struct EveryJob {
+    /// Name of the fn — for logging.
+    pub name: String,
+    /// Interval in seconds (`> 0`, checker-validated).
+    pub interval_secs: f64,
+    /// The registered `Value::Function` (invoked with no args).
+    pub handler: Value,
+    /// `true` if the fn is `async fn` (dispatch awaits the returned Future).
+    pub is_async: bool,
+    /// The `EnvRef` captured at registration, so lookups see the program state.
+    pub env: EnvRef,
+}
+
+#[derive(Default, Debug)]
+pub struct EveryRegistry {
+    jobs: parking_lot::Mutex<Vec<EveryJob>>,
+}
+
+impl EveryRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &self,
+        name: String,
+        interval_secs: f64,
+        handler: Value,
+        is_async: bool,
+        env: EnvRef,
+    ) {
+        self.jobs.lock().push(EveryJob {
+            name,
+            interval_secs,
+            handler,
+            is_async,
+            env,
+        });
+    }
+
+    pub fn has_jobs(&self) -> bool {
+        !self.jobs.lock().is_empty()
+    }
+
+    pub fn jobs_snapshot(&self) -> Vec<EveryJob> {
+        self.jobs.lock().clone()
+    }
+}
+
+/// Spawn one tokio task per interval job. Additive alongside the cron + HTTP
+/// schedulers (never instead of them).
+pub fn spawn_every_scheduler(registry: Arc<EveryRegistry>) {
+    let jobs = registry.jobs_snapshot();
+    if jobs.is_empty() {
+        return;
+    }
+    eprintln!(
+        "⏱ Fitz every-scheduler started with {} interval job(s)",
+        jobs.len()
+    );
+    for job in &jobs {
+        eprintln!("   @every {} ({}s)", job.name, job.interval_secs);
+    }
+    for job in jobs {
+        tokio::spawn(run_every_job(job));
+    }
+}
+
+/// One interval job: fire `handler` every `interval_secs`. The first run
+/// happens AFTER the first interval (no immediate-at-boot tick — matches "every
+/// N seconds"). Missed ticks are skipped (a slow handler doesn't queue a
+/// backlog). Handler failures are logged; the loop keeps running.
+async fn run_every_job(job: EveryJob) {
+    let period = std::time::Duration::from_secs_f64(job.interval_secs);
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // `interval` yields immediately on the first `tick()`; consume it so the
+    // first real run is after `interval_secs`, not at t=0.
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        if let Err(e) = invoke_every_handler(&job).await {
+            eprintln!("⏱ @every job '{}' failed: {}", job.name, e);
+        }
+    }
+}
+
+async fn invoke_every_handler(job: &EveryJob) -> Result<(), String> {
+    use crate::ast::Span;
+    use crate::evaluator::invoke_value;
+    let _ = job.is_async; // implicit in the handler's returned value shape.
+    let result = invoke_value(job.handler.clone(), Vec::new(), &job.name, Span::ZERO).await;
+    match result {
+        Ok(value) => match value {
+            Value::Future(cell) => {
+                let inner = cell.0.lock().take();
+                if let Some(future) = inner {
+                    let _ = future.await;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        },
+        Err(signal) => Err(format!("{:?}", signal)),
+    }
+}
+
+/// Scheduler-only mode (no HTTP): spawn the cron AND every schedulers on the
+/// given runtime and block on Ctrl+C. Covers cron-only, every-only, and
+/// cron+every programs with no `@server`/`@ws`/HTTP routes.
+pub fn run_schedulers_on_runtime(
+    runtime: &tokio::runtime::Runtime,
+    cron_registry: Arc<CronRegistry>,
+    every_registry: Arc<EveryRegistry>,
+) -> std::io::Result<()> {
+    if !cron_registry.has_jobs() && !every_registry.has_jobs() {
+        return Ok(());
+    }
+    runtime.block_on(async move {
+        spawn_cron_scheduler(cron_registry);
+        spawn_every_scheduler(every_registry);
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                eprintln!("\n🕐 Fitz scheduler received Ctrl+C, terminating.");
+            }
+            Err(e) => {
+                eprintln!("\n🕐 Fitz scheduler error in signal handler: {}", e);
+            }
+        }
+    });
+    Ok(())
+}
+
+// ============================================================
 // 9.w.3.iter2 — Registry extension tests.
 // ============================================================
 
@@ -1139,5 +1284,33 @@ mod tests {
         assert!(res.is_err());
         let msg = res.unwrap_err();
         assert!(msg.contains("cron expression"), "msg: {}", msg);
+    }
+
+    // ---- Phase 3c — @every(N) interval registry ----
+
+    #[test]
+    fn every_registry_register_and_snapshot() {
+        let registry = EveryRegistry::new();
+        assert!(!registry.has_jobs());
+        let env = Environment::new();
+        registry.register("tick".to_string(), 1.5, Value::Null, false, env);
+        assert!(registry.has_jobs());
+        let jobs = registry.jobs_snapshot();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "tick");
+        assert_eq!(jobs[0].interval_secs, 1.5);
+        assert!(!jobs[0].is_async);
+    }
+
+    #[test]
+    fn every_registry_holds_multiple_jobs() {
+        let registry = EveryRegistry::new();
+        registry.register("a".to_string(), 1.0, Value::Null, false, Environment::new());
+        registry.register("b".to_string(), 0.5, Value::Null, true, Environment::new());
+        let jobs = registry.jobs_snapshot();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs
+            .iter()
+            .any(|j| j.name == "b" && j.is_async && j.interval_secs == 0.5));
     }
 }

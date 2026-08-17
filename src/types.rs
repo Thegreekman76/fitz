@@ -10225,6 +10225,9 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // `@cron + @get/@post/...` are rejected.
             check_cron_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
             check_background_decorator(ctx, fn_name, decorators, *fn_span);
+            // Phase 3c — validate `@every(N)` (server-wide periodic tasks, the
+            // interval analogue of `@cron`).
+            check_every_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
             // Phase 11.11 — validate `@rpc` (server functions): an `async fn`
             // callable from a client-WASM `.fitzv` over a generated HTTP
             // endpoint. Bare decorator, async required, mutually exclusive
@@ -12152,6 +12155,7 @@ fn check_cron_decorator(
         "background",
         "auth_provider",
         "test",
+        "every",
     ];
     for other in decorators {
         if conflicting.contains(&other.name.as_str()) {
@@ -12359,6 +12363,7 @@ fn check_background_decorator(
         "cron",
         "auth_provider",
         "test",
+        "every",
     ];
     for other in decorators {
         if conflicting.contains(&other.name.as_str()) {
@@ -12372,6 +12377,167 @@ fn check_background_decorator(
                 ),
             ));
             return;
+        }
+    }
+}
+
+/// Phase 3c (`@every(N)`) — validates the interval decorator on top-level
+/// `fn`s. A server-wide periodic task (the interval analogue of `@cron`):
+///   1. Exactly 1 positional arg: a positive numeric literal = seconds
+///      (`@every(1)`, `@every(0.5)`). Not a Str, not an expr, min 0.001 s.
+///   2. No kwargs in the MVP (unlike `@cron`'s tz/retry/catch_up/store).
+///   3. Not combinable with HTTP/WS/cron/background/auth/test/CLI decorators.
+///   4. No params.
+///   5. Return `Null`/`Result<...>`/`Any` (or the async `Future<...>` form).
+fn check_every_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    ret: &Type,
+    is_async: bool,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let every_deco = match decorators.iter().find(|d| d.name == "every") {
+        Some(d) => d,
+        None => return,
+    };
+    let err = |ctx: &mut CheckCtx, msg: String| {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            msg,
+        ));
+    };
+    // 1) Args: exactly 1 positional numeric literal (seconds).
+    if every_deco.args.len() != 1 {
+        err(
+            ctx,
+            format!(
+                "@every on fn '{}': expects exactly 1 positional argument (interval in seconds). Syntax: `@every(1)` or `@every(0.5)`.",
+                fn_name
+            ),
+        );
+        return;
+    }
+    let secs: f64 = match &every_deco.args[0] {
+        Expr::Int(n, _) => *n as f64,
+        Expr::Float(f, _) => *f,
+        _ => {
+            err(
+                ctx,
+                format!(
+                    "@every on fn '{}': the argument must be a positive number literal (seconds), e.g. `@every(1)` or `@every(0.5)` — not an expression, a variable, or a Str.",
+                    fn_name
+                ),
+            );
+            return;
+        }
+    };
+    if secs <= 0.0 {
+        err(
+            ctx,
+            format!(
+                "@every on fn '{}': interval must be > 0 seconds (is {}).",
+                fn_name, secs
+            ),
+        );
+        return;
+    }
+    if secs < 0.001 {
+        err(
+            ctx,
+            format!(
+                "@every on fn '{}': interval {} s is too small (minimum 0.001 s) — a tighter loop would busy-spin.",
+                fn_name, secs
+            ),
+        );
+        return;
+    }
+    // 2) No kwargs in the MVP (tz/retry/catch_up/store are @cron-only for now).
+    if !every_deco.kwargs.is_empty() {
+        err(
+            ctx,
+            format!(
+                "@every on fn '{}': kwargs are not supported yet — only a positive seconds interval. (Unlike @cron, there is no tz/retry/catch_up/store here.)",
+                fn_name
+            ),
+        );
+        return;
+    }
+    // 3) Conflicts with other runtime decorators.
+    let conflicting = [
+        "get",
+        "post",
+        "put",
+        "delete",
+        "ws",
+        "cron",
+        "background",
+        "auth_provider",
+        "authenticated",
+        "admin",
+        "requires",
+        "test",
+        "command",
+        "healthz",
+        "readyz",
+        "render_for",
+        "on",
+    ];
+    for other in decorators {
+        if conflicting.contains(&other.name.as_str()) {
+            err(
+                ctx,
+                format!(
+                    "@every on fn '{}' is not combinable with `@{}`: @every is a server-wide periodic task, not an HTTP/WS handler, a cron job, nor a spawn target.",
+                    fn_name, other.name
+                ),
+            );
+            return;
+        }
+    }
+    // 4) No params.
+    if !params.is_empty() {
+        err(
+            ctx,
+            format!(
+                "@every on fn '{}': handler does not accept params (periodic tasks receive no input). Has {}.",
+                fn_name,
+                params.len()
+            ),
+        );
+        return;
+    }
+    // 5) Return type: Null / Result / Future<Null|Result> / Any (parallel to @cron).
+    let _ = is_async;
+    match ret {
+        Type::Null | Type::Any => {}
+        Type::Result { .. } => {}
+        Type::Future(inner) => match inner.as_ref() {
+            Type::Null | Type::Any => {}
+            Type::Result { .. } => {}
+            other => {
+                err(
+                    ctx,
+                    format!(
+                        "@every on fn '{}': async return type must be `Future<Null>` or `Future<Result<...>>`, is `Future<{}>`. The runtime discards the value — use `Result` to log failures.",
+                        fn_name,
+                        other.display(ctx.types),
+                    ),
+                );
+            }
+        },
+        other => {
+            err(
+                ctx,
+                format!(
+                    "@every on fn '{}': return type must be `Null`, `Result<...>`, or the async equivalent (`Future<...>`). Is `{}`. The runtime discards the value.",
+                    fn_name,
+                    other.display(ctx.types),
+                ),
+            );
         }
     }
 }
@@ -12398,6 +12564,7 @@ const LIVE_HANDLER_CONFLICTING: &[&str] = &[
     "command",
     "healthz",
     "readyz",
+    "every",
 ];
 
 // Phase 4 (fitz-liveviews Y-B, session 1.b) — validates the
@@ -19739,6 +19906,111 @@ print(total)
                    fn tick() -> Null { return null }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "expected 0 errors, were {:?}", errors);
+    }
+
+    // ---- Phase 3c — @every(N) checker ----
+
+    #[test]
+    fn every_int_interval_passes_checker() {
+        let src = "@every(1)\nfn tick() -> Null { return null }";
+        assert!(errors_of(src).is_empty());
+        let src_async = "@every(5)\nasync fn tick() -> Null { return null }";
+        assert!(errors_of(src_async).is_empty());
+    }
+
+    #[test]
+    fn every_float_interval_passes_checker() {
+        let src = "@every(0.5)\nfn tick() -> Null { return null }";
+        assert!(errors_of(src).is_empty(), "were {:?}", errors_of(src));
+    }
+
+    #[test]
+    fn every_without_args_is_error() {
+        let src = "@every\nfn tick() -> Null { return null }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("@every") && e.message.contains("1 positional argument")));
+    }
+
+    #[test]
+    fn every_with_str_arg_is_error() {
+        let src = "@every(\"1s\")\nfn tick() -> Null { return null }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("positive number literal")));
+    }
+
+    #[test]
+    fn every_with_zero_is_error() {
+        let src = "@every(0)\nfn tick() -> Null { return null }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("must be > 0")));
+    }
+
+    #[test]
+    fn every_with_negative_is_error() {
+        let src = "@every(-1)\nfn tick() -> Null { return null }";
+        // `-1` parses as UnaryOp(Neg, Int) → not a bare numeric literal.
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("positive number literal")));
+    }
+
+    #[test]
+    fn every_too_small_is_error() {
+        let src = "@every(0.0005)\nfn tick() -> Null { return null }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("too small")));
+    }
+
+    #[test]
+    fn every_with_params_is_error() {
+        let src = "@every(1)\nfn tick(x: Int) -> Null { return null }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("does not accept params")));
+    }
+
+    #[test]
+    fn every_with_kwarg_is_error() {
+        let src = "@every(1, tz=\"UTC\")\nfn tick() -> Null { return null }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("kwargs are not supported")));
+    }
+
+    #[test]
+    fn every_combined_with_get_is_error() {
+        let src = "@every(1)\n@get(\"/x\")\nfn h() -> Null { return null }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("is not combinable") && e.message.contains("get")));
+    }
+
+    #[test]
+    fn every_combined_with_cron_is_error() {
+        let src = "@every(1)\n@cron(\"0 0 * * *\")\nfn h() -> Null { return null }";
+        // Either decorator's conflict check fires; both mention @every/@cron.
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("is not combinable")
+                && (e.message.contains("every") || e.message.contains("cron"))));
+    }
+
+    #[test]
+    fn every_return_int_is_error() {
+        let src = "@every(1)\nfn h() -> Int { return 1 }";
+        assert!(errors_of(src)
+            .iter()
+            .any(|e| e.message.contains("@every") && e.message.contains("Null")));
+    }
+
+    #[test]
+    fn every_return_result_is_ok() {
+        let src = "@every(1)\nfn h() -> Result<Null> { return Ok(null) }";
+        assert!(errors_of(src).is_empty(), "were {:?}", errors_of(src));
     }
 
     #[test]

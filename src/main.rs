@@ -3601,15 +3601,17 @@ fn run_file(
             eprintln!("Error del servidor HTTP: {}", e);
             std::process::exit(1);
         }
-    } else if registry.cron_registry.has_jobs() {
-        // Phase 9.w.3 — cron-only mode: the program has NO HTTP
-        // routes but DOES have `@cron` jobs. We start the
-        // scheduler standalone and block until SIGINT/Ctrl+C
-        // (decision confirmed with the author: live blocking,
-        // systemd-friendly mode).
+    } else if registry.cron_registry.has_jobs() || registry.every_registry.has_jobs() {
+        // Phase 9.w.3 + Phase 3c — scheduler-only mode: the program has NO HTTP
+        // routes but DOES have `@cron` and/or `@every` jobs. We start both
+        // schedulers standalone and block until SIGINT/Ctrl+C (decision
+        // confirmed with the author: live blocking, systemd-friendly mode).
         let cron_registry = registry.cron_registry.clone();
-        if let Err(e) = cron_jobs::run_scheduler_on_runtime(&shared_runtime, cron_registry) {
-            eprintln!("Error del cron scheduler: {}", e);
+        let every_registry = registry.every_registry.clone();
+        if let Err(e) =
+            cron_jobs::run_schedulers_on_runtime(&shared_runtime, cron_registry, every_registry)
+        {
+            eprintln!("Error del scheduler: {}", e);
             std::process::exit(1);
         }
     }

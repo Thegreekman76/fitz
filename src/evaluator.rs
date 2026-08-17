@@ -465,6 +465,14 @@ fn process_decorator(
         return register_cron_job(deco, fn_name, handler, env, fn_def_span);
     }
 
+    // Phase 3c — `@every(N)`: registers the fn as an interval job (runs every
+    // N seconds from boot). The scheduler starts alongside axum + cron in
+    // `serve()`, or blocks in scheduler-only mode. The checker validated the
+    // shape (positive numeric literal, no params, no kwargs, conflicts).
+    if deco.name == "every" {
+        return register_every_job(deco, fn_name, handler, env, fn_def_span);
+    }
+
     // Phase 9.w.3 — `@background`: marks the fn as authorized for
     // `spawn(...)`. The fn remains defined in the env like any other;
     // the callsite `spawn(call)` invokes it via `tokio::spawn`.
@@ -514,7 +522,7 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' not implemented (on fn '{}'). \
-             Decorators supported today: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command, @healthz, @readyz, @render_for, @on.",
+             Decorators supported today: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @every, @background, @command, @healthz, @readyz, @render_for, @on.",
             deco.name, fn_name,
         ),
     )))
@@ -712,6 +720,57 @@ fn register_cron_job(
         is_async,
         env.clone(),
         options,
+    )
+    .map_err(err)
+}
+
+/// Phase 3c — Processes `@every(N)`: registers the fn as an interval job
+/// (run every N seconds). The checker validated the arg is a positive
+/// numeric literal; we re-extract it defensively as seconds.
+fn register_every_job(
+    deco: &Decorator,
+    fn_name: &str,
+    handler: &Value,
+    env: &EnvRef,
+    fn_def_span: Span,
+) -> Result<(), EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            fn_def_span.line,
+            fn_def_span.column,
+            msg,
+        ))
+    };
+    if deco.args.len() != 1 {
+        return Err(err(format!(
+            "@every on fn '{}': expects exactly 1 positional argument (interval in seconds).",
+            fn_name,
+        )));
+    }
+    let interval_secs: f64 = match &deco.args[0] {
+        Expr::Int(n, _) => *n as f64,
+        Expr::Float(f, _) => *f,
+        _ => {
+            return Err(err(format!(
+                "@every on fn '{}': the argument must be a positive number literal (seconds).",
+                fn_name,
+            )));
+        }
+    };
+    if interval_secs <= 0.0 {
+        return Err(err(format!(
+            "@every on fn '{}': interval must be > 0 seconds (is {}).",
+            fn_name, interval_secs,
+        )));
+    }
+    let is_async = matches!(handler, Value::Function { is_async: true, .. });
+    crate::http::register_every_job(
+        fn_name.to_string(),
+        interval_secs,
+        handler.clone(),
+        is_async,
+        env.clone(),
     )
     .map_err(err)
 }

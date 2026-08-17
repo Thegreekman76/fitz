@@ -601,6 +601,9 @@ pub struct HttpRegistry {
     /// (`run_scheduler_only`). `Arc` to share with the tokio workers
     /// that run the jobs.
     pub cron_registry: std::sync::Arc<crate::cron_jobs::CronRegistry>,
+    /// Phase 3c — registry of `@every(N)` interval jobs. Started alongside
+    /// the cron + HTTP schedulers.
+    pub every_registry: std::sync::Arc<crate::cron_jobs::EveryRegistry>,
     /// v0.37.7 — Registry of `@background(store=db)` fns. Populated
     /// during evaluation (`process_decorator`); consulted per
     /// `spawn(...)` by `eval_spawn_call` to decide whether to persist
@@ -633,6 +636,7 @@ impl HttpRegistry {
             auth_provider: None,
             ws_broadcaster: std::sync::Arc::new(WsBroadcaster::new()),
             cron_registry: std::sync::Arc::new(crate::cron_jobs::CronRegistry::new()),
+            every_registry: std::sync::Arc::new(crate::cron_jobs::EveryRegistry::new()),
             background_registry: std::sync::Arc::new(
                 crate::background_jobs::BackgroundRegistry::new(),
             ),
@@ -940,6 +944,42 @@ pub fn registry_has_cron_jobs() -> bool {
 /// (cron-only mode uses it for `run_scheduler_only`).
 pub fn current_cron_registry() -> Option<std::sync::Arc<crate::cron_jobs::CronRegistry>> {
     HTTP_REGISTRY.with(|cell| cell.borrow().as_ref().map(|reg| reg.cron_registry.clone()))
+}
+
+/// Phase 3c — registers an `@every(N)` fn in the active registry's
+/// `EveryRegistry`. Without an active registry → `Err` (same context rule
+/// as `register_cron_job`).
+pub fn register_every_job(
+    fn_name: String,
+    interval_secs: f64,
+    handler: crate::value::Value,
+    is_async: bool,
+    env: crate::env::EnvRef,
+) -> Result<(), String> {
+    HTTP_REGISTRY.with(|cell| {
+        let borrow = cell.borrow();
+        let reg = borrow.as_ref().ok_or_else(|| {
+            "@every sin contexto activo: solo aplica ejecutando con `fitz run` un archivo del programa.".to_string()
+        })?;
+        reg.every_registry
+            .register(fn_name, interval_secs, handler, is_async, env);
+        Ok(())
+    })
+}
+
+/// Phase 3c — `true` if the active registry has at least one `@every` job.
+pub fn registry_has_every_jobs() -> bool {
+    HTTP_REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|reg| reg.every_registry.has_jobs())
+            .unwrap_or(false)
+    })
+}
+
+/// Phase 3c — clone of the active registry's `Arc<EveryRegistry>`.
+pub fn current_every_registry() -> Option<std::sync::Arc<crate::cron_jobs::EveryRegistry>> {
+    HTTP_REGISTRY.with(|cell| cell.borrow().as_ref().map(|reg| reg.every_registry.clone()))
 }
 
 /// v0.37.7 — Registers a `@background(store=db)` fn in the active
@@ -4716,6 +4756,8 @@ pub fn serve_on_runtime(
     // `Arc<HttpRegistry>` into the router. Scheduler spawned
     // inside the runtime, in parallel with axum.
     let cron_registry_for_scheduler = registry.cron_registry.clone();
+    // Phase 3c — same, for the @every interval scheduler.
+    let every_registry_for_scheduler = registry.every_registry.clone();
     // Phase 12.1.b — capture draining + shutdown_timeout BEFORE
     // moving `registry` into the router; the shutdown signal
     // needs them.
@@ -4754,6 +4796,8 @@ pub fn serve_on_runtime(
         // runtime. When `with_graceful_shutdown(ctrl_c)` fires and
         // we drop the runtime, cron tasks are also cancelled.
         crate::cron_jobs::spawn_cron_scheduler(cron_registry_for_scheduler);
+        // Phase 3c — start the @every interval scheduler alongside cron + axum.
+        crate::cron_jobs::spawn_every_scheduler(every_registry_for_scheduler);
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal(
                 draining_for_shutdown,
