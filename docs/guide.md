@@ -7920,6 +7920,36 @@ async fn ping() -> Null {
 }
 ```
 
+**`@every(N)`** — tareas periódicas por **intervalo**, más simple que
+`@cron` cuando no necesitás una expresión cron. Corre la fn cada N
+segundos (acepta `Int` o `Float`, ej. `@every(0.5)`), server-wide desde
+el boot. A diferencia de `@cron`, un intervalo arbitrario como
+`@every(90)` (90 s) — que no es expresable como cron estándar — funciona
+directo:
+
+```fitz
+@every(60)
+async fn flush_metrics() -> Null {
+    log.info("metrics.flush")
+    return null
+}
+```
+
+- Primer tick **después** del primer intervalo (no al arrancar). Ticks
+  perdidos se saltean (un handler lento no acumula backlog).
+- Sin params ni kwargs (a diferencia de `@cron`; `tz`/`retry`/`store` son
+  cron-only por ahora). Return `Null`/`Result` (el valor se descarta).
+- Convive con `@server`/`@ws`/`@cron`: el every-scheduler arranca junto a
+  axum + el cron-scheduler. Un programa `@every`-only (sin HTTP) queda
+  vivo bloqueando en Ctrl+C (systemd-friendly, igual que cron-only).
+- Paridad bit-a-bit `fitz run` ↔ `fitz build`. (Debe declararse en el
+  archivo principal — `@every` en un módulo importado es soporte de
+  `fitz run` por ahora; `fitz build` lo rechaza con un error claro.)
+
+En fitz-liveviews el patrón canónico es un reloj/heartbeat global que
+`ws_broadcast(...)` a un endpoint LiveView cada segundo — un solo ticker
+para todos los clientes, en vez de uno por conexión.
+
 **Auth Bearer + `spawn(...)` — patrón canónico** (Stripe / Resend /
 OpenAI / Mailgun / etc.). Desde v0.19.4 el codegen emite el snapshot
 correcto del `headers: Map` para que el future generado sea `Send` y

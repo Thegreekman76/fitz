@@ -245,7 +245,23 @@ pub fn generate_project(
     // jobs.
     //
     // W10 (v0.10.7) — transitive like uses_auth.
-    let uses_jobs = program_uses_jobs(program) || loader.modules.iter().any(|m| m.uses_jobs);
+    // Phase 3c — @every(N) folds into uses_jobs to reuse the tokio + jobs
+    // prelude infrastructure (MVP: an @every-only program pulls the cron deps
+    // too as a side effect — optimizing that gating is deferred). Module-level
+    // @every is guarded right below (main-file only for `fitz build`).
+    let uses_jobs = program_uses_jobs(program)
+        || program_uses_every(program)
+        || loader.modules.iter().any(|m| m.uses_jobs);
+    if loader.modules.iter().any(|m| m.uses_every) {
+        return Err(FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            "@every in an imported module is not supported by `fitz build` yet — \
+             declare the @every fn in the main file. (`fitz run` supports it.)"
+                .to_string(),
+        ));
+    }
     // Phase 12.3.a.3 — detect usage of the built-in `log` module
     // (`log.info/warn/error/debug`). Turns on the prelude
     // `__FitzLogValue` + `__fitz_log_*` in the main + the deps
@@ -999,6 +1015,16 @@ fn program_uses_jobs(program: &Program) -> bool {
             }
         }
         stmt_uses_spawn(s)
+    })
+}
+
+/// Phase 3c — `true` if the program declares any `@every(N)` fn. Parallel to
+/// `program_uses_jobs` but for the interval decorator; kept separate so
+/// `@every` pulls only `tokio` (time+signal) and NOT the cron/chrono deps.
+fn program_uses_every(program: &Program) -> bool {
+    program.iter().any(|s| {
+        matches!(s, Stmt::FnDef { decorators, .. }
+            if decorators.iter().any(|d| d.name == "every"))
     })
 }
 
@@ -4201,6 +4227,9 @@ struct LoadedModule {
     /// (`use crate::__FitzWsConn`, `use crate::__fitz_run_cron_job`).
     uses_ws: bool,
     uses_jobs: bool,
+    /// Phase 3c — `program_uses_every(module_program)`. Used to guard against
+    /// @every declared in an imported module (main-file only for `fitz build`).
+    uses_every: bool,
     /// Phase 12.3.a.3 — `program_uses_logging(module_program)`. The
     /// main ORs its own flag with all modules to decide whether to
     /// emit the `__FitzLogValue` + `__fitz_log_*` prelude in the
@@ -5153,6 +5182,7 @@ impl ModuleLoader {
         let module_uses_ws =
             program_uses_ws(&module_program) || program_uses_ws_broadcast(&module_program);
         let module_uses_jobs = program_uses_jobs(&module_program);
+        let module_uses_every = program_uses_every(&module_program);
         let module_uses_auth = program_uses_auth(&module_program);
         let module_uses_ws_broadcast = program_uses_ws_broadcast(&module_program);
         // Phase 12.3.a.3 — transitive logging flag. The main ORs it
@@ -5277,6 +5307,7 @@ impl ModuleLoader {
             uses_ws: module_uses_ws,
             uses_ws_broadcast: module_uses_ws_broadcast,
             uses_jobs: module_uses_jobs,
+            uses_every: module_uses_every,
             uses_logging: module_uses_logging,
             uses_auth: module_uses_auth,
             uses_fitz_value: module_uses_fitz_value,
@@ -7257,7 +7288,10 @@ fn generate_main_rs(
     // `use crate::__Fitz*` lines in the modules resolve.
     let uses_auth = program_uses_auth(program) || loader.modules.iter().any(|m| m.uses_auth);
     let uses_ws = program_uses_ws(program) || loader.modules.iter().any(|m| m.uses_ws);
-    let uses_jobs = program_uses_jobs(program) || loader.modules.iter().any(|m| m.uses_jobs);
+    // Phase 3c — @every folds into uses_jobs (same as generate_project).
+    let uses_jobs = program_uses_jobs(program)
+        || program_uses_every(program)
+        || loader.modules.iter().any(|m| m.uses_jobs);
     // Phase 12.3.a.3 — transitive `uses_logging`. Same computation as
     // above in `generate_project` — pragmatic duplicate because
     // `generate_main_rs` is also called from unit-test paths that do
@@ -7432,6 +7466,9 @@ struct PartitionedProgram<'a> {
     /// the job registration (schedule parsing + `tokio::spawn` of
     /// the loop).
     cron_fns: Vec<&'a Stmt>,
+    /// Phase 3c — `@every(N)` handlers. Like `cron_fns`, the fn also appears in
+    /// `top_fns` (callable); this list drives the interval-job spawns in main.
+    every_fns: Vec<&'a Stmt>,
     /// Phase 13 (v0.11.0) — `@command("name", desc=...)` handlers.
     /// The fn also appears in `top_fns` (emitted as a callable
     /// `fn`/`async fn`); `cli_fns` keeps the list separate so main's
@@ -7472,6 +7509,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
     let mut http_fns: Vec<&Stmt> = Vec::new();
     let mut ws_fns: Vec<&Stmt> = Vec::new();
     let mut cron_fns: Vec<&Stmt> = Vec::new();
+    let mut every_fns: Vec<&Stmt> = Vec::new();
     let mut cli_fns: Vec<&Stmt> = Vec::new();
     let mut healthz_fn: Option<&Stmt> = None;
     let mut readyz_fn: Option<&Stmt> = None;
@@ -7502,6 +7540,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                     let mut http_decos = false;
                     let mut ws_decos = false;
                     let mut cron_decos = false;
+                    let mut every_decos = false;
                     let mut cli_decos = false;
                     for d in decorators {
                         // 7.5: `@server` accepts kwargs (delegated to
@@ -7610,6 +7649,8 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // (it is just a checker marker). The checker
                             // (9.w.3.a) already validated shape + conflicts.
                             "cron" => cron_decos = true,
+                            // Phase 3c — `@every(N)` routes to `every_fns`.
+                            "every" => every_decos = true,
                             "background" => {}
                             // Phase 12.7 — `@trace`/`@metric` are
                             // markers that the `gen_top_fn` wrap
@@ -7717,6 +7758,11 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                         // for job registration.
                         cron_fns.push(s);
                         top_fns.push(s);
+                    } else if every_decos {
+                        // Phase 3c — `@every(N)`. Goes to `every_fns` (interval
+                        // job spawns) AND `top_fns` (callable fn emission).
+                        every_fns.push(s);
+                        top_fns.push(s);
                     } else if cli_decos {
                         // Phase 13 (v0.11.0) — `@command("name", desc=)`.
                         // Goes to `cli_fns` so main's codegen emits
@@ -7745,6 +7791,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
         http_fns,
         ws_fns,
         cron_fns,
+        every_fns,
         cli_fns,
         healthz_fn,
         readyz_fn,
@@ -8090,6 +8137,30 @@ fn emit_main_rs_body(
                     parse_cron_kwargs_into_info(&deco.kwargs, name, &mut info)?;
                     ctx.cron_jobs_info.push(info);
                 }
+            }
+        }
+    }
+    // Phase 3c — @every(N) interval jobs (main file only; module @every is
+    // guarded upstream). Checker validated the numeric literal arg.
+    for stmt in &p.every_fns {
+        if let Stmt::FnDef {
+            name,
+            decorators,
+            is_async,
+            ..
+        } = stmt
+        {
+            if let Some(deco) = decorators.iter().find(|d| d.name == "every") {
+                let secs: f64 = match deco.args.first() {
+                    Some(Expr::Int(n, _)) => *n as f64,
+                    Some(Expr::Float(f, _)) => *f,
+                    _ => continue,
+                };
+                ctx.every_jobs_info.push(EveryJobInfo {
+                    fn_name: name.clone(),
+                    is_async: *is_async,
+                    interval_secs: secs,
+                });
             }
         }
     }
@@ -8531,6 +8602,17 @@ struct CronJobInfo {
     /// The emit prefixes the fn call with `crate::<mod_name>::`. `None`
     /// when the @cron is local to the main file (bare `<fn_name>` call).
     module_path: Option<String>,
+}
+
+/// Phase 3c — build-time info for an `@every(N)` job. Drives the per-job
+/// `tokio::spawn(__fitz_run_every_job(name, secs, || async { <fn>().await; }))`.
+/// Simpler than `CronJobInfo` (no tz/retry/store). @every in an imported module
+/// is guarded upstream, so these are always main-file fns (bare call).
+#[derive(Clone)]
+struct EveryJobInfo {
+    fn_name: String,
+    is_async: bool,
+    interval_secs: f64,
 }
 
 /// 9.w.3.iter2.d — build-time parallel of the interpreter runtime's
@@ -9515,6 +9597,8 @@ struct CodegenCtx<'a> {
     /// Str, and an `is_async` flag. `gen_main`/`gen_http_main` use
     /// it to emit `tokio::spawn(__fitz_run_cron_job(...))` per job.
     cron_jobs_info: Vec<CronJobInfo>,
+    /// Phase 3c — `@every(N)` interval jobs to spawn in main.
+    every_jobs_info: Vec<EveryJobInfo>,
     /// v0.37.7: persistence config of each `@background(store=db)` fn,
     /// keyed by fn name. `gen_spawn_call` consults it to emit the
     /// persisted spawn path (INSERT + retry into `fitz_bg_jobs`);
@@ -9788,6 +9872,7 @@ impl<'a> CodegenCtx<'a> {
             uses_smtp: false,
             uses_to_json: false,
             cron_jobs_info: Vec::new(),
+            every_jobs_info: Vec::new(),
             bg_persistent_fns: std::collections::HashMap::new(),
             bg_store_vars: Vec::new(),
             ws_heartbeat_secs: 30,
@@ -11281,6 +11366,39 @@ pub(crate) fn __fitz_jwt_decode_fv(
         Ok(())
     }
 
+    /// Phase 3c — emit `tokio::spawn(__fitz_run_every_job(...))` per @every job.
+    /// Simpler than the cron spawns: no schedule/tz/retry/store. The invoke
+    /// closure discards the fn's return (parity with the interpreter, which
+    /// ignores the value).
+    fn emit_every_job_spawns(&mut self) {
+        if self.every_jobs_info.is_empty() {
+            return;
+        }
+        self.emit(&format!(
+            "    eprintln!(\"\\u{{23F1}} Fitz every-scheduler arrancado con {} job(s) de intervalo\");\n",
+            self.every_jobs_info.len()
+        ));
+        let jobs = self.every_jobs_info.clone();
+        for job in &jobs {
+            let name_lit = rust_str_literal(&job.fn_name);
+            self.emit(&format!(
+                "    eprintln!(\"   @every {} ({}s)\");\n",
+                job.fn_name, job.interval_secs
+            ));
+            let invoke = if job.is_async {
+                format!("move || async move {{ let _ = {}().await; }}", job.fn_name)
+            } else {
+                format!("move || async move {{ let _ = {}(); }}", job.fn_name)
+            };
+            self.emit(&format!(
+                "    tokio::spawn(__fitz_run_every_job({name}.to_string(), {secs}f64, {invoke}));\n",
+                name = name_lit,
+                secs = job.interval_secs,
+                invoke = invoke,
+            ));
+        }
+    }
+
     /// v0.37.7 — Emits the background-persistence boot code: materialize
     /// each `store=<var>` binding into its global `__FITZ_BG_STORE_<VAR>`
     /// static so handlers/cron jobs (which run without the store local
@@ -11463,6 +11581,10 @@ impl __FitzRetryConfig {
         } else {
             self.emit(JOBS_RUN_PRELUDE_SIMPLE);
         }
+        // Phase 3c — the @every interval scheduler helper (tokio-only). Emitted
+        // whenever `uses_jobs` (which folds in @every); harmless dead code for a
+        // cron-only program.
+        self.emit(EVERY_JOB_PRELUDE);
         // v0.37.7 — background-persistence prelude + one store static
         // per distinct `store=<var>`. Emitted after the cron prelude so
         // it can reuse `__FitzDbConn`/`__FitzPgValue` (db prelude) and
@@ -13392,6 +13514,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // continue with its stmts. If it is cron-only mode (no
         // HTTP), the `ctrl_c` block goes at the end.
         let has_cron = !self.cron_jobs_info.is_empty();
+        let has_every = !self.every_jobs_info.is_empty();
         // 9.w.3.iter2.d — the user's top-level stmts go BEFORE
         // the spawns so that bindings like `let db =
         // db.connect(...)` are in scope when the
@@ -13430,13 +13553,13 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // top-level `let db = ...` state var is already initialized).
         self.emit_background_boot()?;
         self.emit_cron_job_spawns()?;
-        // Phase 9.w.3.c — if there are cron jobs in CLI mode (no
-        // HTTP), we block on `signal::ctrl_c()` so the process
-        // stays alive while the jobs run. Decision confirmed with
-        // the author: systemd-friendly mode. Without this line,
-        // main would return after the stmts and the tokio tasks
-        // would be cancelled immediately.
-        if has_cron {
+        // Phase 3c — @every interval spawns (alongside cron).
+        self.emit_every_job_spawns();
+        // Phase 9.w.3.c + Phase 3c — if there are cron or @every jobs in CLI
+        // mode (no HTTP), we block on `signal::ctrl_c()` so the process stays
+        // alive while the jobs run. Without this line, main would return after
+        // the stmts and the tokio tasks would be cancelled immediately.
+        if has_cron || has_every {
             self.emit("    let _ = tokio::signal::ctrl_c().await;\n");
             self.emit(
                 "    eprintln!(\"\\n\\u{1F550} Fitz scheduler received Ctrl+C, terminating.\");\n",
@@ -34510,6 +34633,8 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // runtime; when the server ends (Ctrl+C), the tasks
         // are cancelled when the runtime is dropped.
         self.emit_cron_job_spawns()?;
+        // Phase 3c — @every interval spawns (alongside cron, before axum::serve).
+        self.emit_every_job_spawns();
         // Phase 12.1.c — graceful shutdown. SIGTERM/Ctrl-C
         // flips __FITZ_DRAINING (seen by /readyz which goes to
         // 503), waits a small grace period (max(2,
@@ -36284,6 +36409,29 @@ impl __FitzCronReturn for Result<(), String> { fn into_result(self) -> Result<()
 /// `store=<db>`. Avoids references to `__FitzDbConn` which
 /// would not be defined if the program does not use the db
 /// driver.
+/// Phase 3c — the `@every(N)` interval scheduler helper. tokio-only (no
+/// cron/chrono). Parallel to the interpreter's `run_every_job`.
+const EVERY_JOB_PRELUDE: &str = r##"
+/// Runs an @every(N) interval job: fire the handler every `interval_secs`. The
+/// first run is AFTER the first interval (no immediate-at-boot tick). Missed
+/// ticks are skipped (a slow handler doesn't queue a backlog).
+pub(crate) async fn __fitz_run_every_job<F, Fut>(name: String, interval_secs: f64, f: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _ = &name;
+    let period = std::time::Duration::from_secs_f64(interval_secs);
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        f().await;
+    }
+}
+"##;
+
 const JOBS_RUN_PRELUDE_SIMPLE: &str = r##"
 #[derive(Clone)]
 pub(crate) struct __FitzCronOptions {

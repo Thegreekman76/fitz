@@ -277,6 +277,33 @@ print(to_json(u))
 }
 
 #[test]
+fn every_decorator_builds_to_binary_phase_3c() {
+    // Phase 3c — a program with `@every(N)` compiles to a native binary via
+    // `fitz build` (interval scheduler emitted, tokio-only). CLI-only (no HTTP):
+    // the every-scheduler + the ctrl_c block keep the process alive. We assert
+    // build success (the tick cadence + run↔build parity are smoke-validated
+    // manually — a timed run would be flaky here).
+    let src_cli = "@every(1)\nasync fn tick() -> Null {\n    print(\"tick\")\n    return null\n}\n";
+    build_expect_ok("every-cli-phase3c", src_cli);
+
+    // HTTP + @every coexist: the every-scheduler starts alongside axum.
+    let src_http = "\
+@every(2)
+async fn heartbeat() -> Null {
+    print(\"beat\")
+    return null
+}
+
+@get(\"/ping\")
+fn ping() -> Str => \"pong\"
+
+@server(3941)
+fn main() => 0
+";
+    build_expect_ok("every-http-phase3c", src_http);
+}
+
+#[test]
 fn if_else_works_in_binary() {
     let src = "\
 let x = 5

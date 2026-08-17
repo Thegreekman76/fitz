@@ -9,6 +9,48 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.42.0] — 2026-08-17 — `@every(N)`: decorator de tareas periódicas por intervalo
+
+Decorator nuevo del lenguaje **`@every(N)`**: corre una fn top-level cada N
+segundos, server-wide desde el boot — el análogo de intervalo de `@cron`, más
+simple (un período, sin expresión cron, así `@every(90)` y `@every(0.5)`
+funcionan donde una expresión cron no puede). Paridad bit-a-bit `fitz run` ↔
+`fitz build`.
+
+### Añadido
+
+- **`@every(N)`** sobre una fn top-level (sync o async): la corre cada N
+  segundos (`N` un literal numérico positivo, Int o Float; mínimo 0.001 s). Sin
+  params, sin kwargs (a diferencia de `@cron`; `tz`/`retry`/`catch_up`/`store`
+  son cron-only por ahora), return `Null`/`Result`/`Future` (el valor se
+  descarta). Primer tick **después** del primer intervalo (no al arrancar); los
+  ticks perdidos se saltean. No combinable con `@get`/`@post`/`@ws`/`@cron`/
+  `@background`/`@auth_provider`/`@test`/CLI/live-handlers.
+- **Runtime (`fitz run`)**: `EveryJob`/`EveryRegistry` + `spawn_every_scheduler`
+  en `cron_jobs.rs` (un `tokio::spawn` por job con `tokio::time::interval`,
+  `MissedTickBehavior::Skip`); registrado vía `HttpRegistry.every_registry`. El
+  every-scheduler arranca junto a axum + el cron-scheduler; un programa
+  `@every`-only (sin HTTP) queda vivo bloqueando en Ctrl+C.
+- **Codegen (`fitz build`)**: prelude `__fitz_run_every_job` (tokio-only) +
+  `emit_every_job_spawns` (un `tokio::spawn` por job, invoke que descarta el
+  return, paridad con el intérprete). `docker init` trata `@every` como servicio
+  long-running (`restart: unless-stopped`).
+- **LSP**: completion de `@every` en la lista de decoradores. **Guía**:
+  sub-sección `@every` en el cap 30 (Jobs sin Celery), junto a `@cron`.
+
+### Notas
+
+- **Uso canónico en fitz-liveviews**: un reloj/heartbeat global que
+  `ws_broadcast(...)` a un endpoint LiveView cada segundo — un solo ticker para
+  todos los clientes (en vez de uno por conexión con `spawn`).
+- **MVP**: `@every` debe declararse en el archivo principal — `@every` en un
+  módulo importado es soporte de `fitz run` por ahora; `fitz build` lo rechaza
+  con un error claro. Deuda menor de codegen: un programa `@every`-only también
+  arrastra las deps de cron (el gating se pliega en `uses_jobs`) — optimizable.
+- Validado: `fitz check` acepta/rechaza los shapes correctos; `fitz run` y el
+  binario de `fitz build` ambos dan la misma cadencia de ticks; regresión
+  cron/background verde.
+
 ## [v0.41.5] — 2026-08-16 — `.fitzv`: `<style scoped>` en un root que hidrata
 
 Levanta una restricción de autoría de la hidratación: un componente que hidrata

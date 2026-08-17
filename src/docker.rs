@@ -55,7 +55,9 @@ pub fn detect_shape(program: &Program, package_name: String) -> DockerShape {
     let server_port = find_server_port(program);
     let uses_db = program.iter().any(stmt_uses_db);
     let uses_python = program.iter().any(stmt_uses_python);
-    let uses_cron = program.iter().any(stmt_uses_cron);
+    // Phase 3c — @every is also a long-running periodic service; fold it into
+    // uses_cron so the compose gets `restart: unless-stopped`.
+    let uses_cron = program.iter().any(stmt_uses_cron) || program.iter().any(stmt_uses_every);
     DockerShape {
         package_name,
         server_port,
@@ -77,6 +79,13 @@ fn stmt_uses_python(s: &Stmt) -> bool {
 fn stmt_uses_cron(s: &Stmt) -> bool {
     match s {
         Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| d.name == "cron"),
+        _ => false,
+    }
+}
+
+fn stmt_uses_every(s: &Stmt) -> bool {
+    match s {
+        Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| d.name == "every"),
         _ => false,
     }
 }

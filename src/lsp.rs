@@ -2444,6 +2444,14 @@ fn decorator_completions() -> Vec<CompletionItem> {
              `store=db` (persists runs in fitz_cron_jobs/fitz_cron_runs).",
         ),
         (
+            "every",
+            "every(${1:1})",
+            "@every(N) — periodic job every N seconds",
+            "Interval analogue of @cron (simpler: a period, no cron expression, so @every(90) / @every(0.5) work). \
+             Runs the fn every N seconds (Int or Float, > 0) from boot. Sync or async, no params, no kwargs, \
+             return Null/Result/Future (value discarded). First tick after N. Declare in the main file for `fitz build`.",
+        ),
+        (
             "background",
             "background",
             "@background — marks fn as spawnable via spawn(fn(...))",
