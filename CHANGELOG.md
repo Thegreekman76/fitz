@@ -9,6 +9,22 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.42.2] — 2026-08-17 — `@every` en un módulo importado compila a binario (`fitz build`)
+
+Cierra la deuda D4 de `@every`: paridad `fitz run` ↔ `fitz build` para un
+`@every(N)` declarado en un **módulo importado** (antes `fitz build` lo rechazaba
+con un guard; `fitz run` sí lo soportaba).
+
+### Arreglado
+
+- **`@every` cross-module en `fitz build`** — igual que `@cron` (B19):
+  `LoadedModule` suma `every_fn_stmts`, el codegen puebla `every_jobs_info` desde
+  los módulos con `module_path: Some(mod)`, y `emit_every_job_spawns` emite
+  `crate::<mod>::<fn>` cuando el `@every` vive en un módulo importado (antes solo
+  el bare `<fn>` del main file). Un programa que hace `import worker` de un
+  módulo con `@every(1)` ahora compila y tickea desde el binario nativo. Nuevo
+  compile_e2e `every_in_imported_module_builds_and_ticks_d4`.
+
 ## [v0.42.1] — 2026-08-17 — `ws_broadcast(...)` funciona desde un scheduler (`@every`/`@cron`)
 
 Fix que destraba el patrón canónico de `@every` en fitz-liveviews: un reloj /

@@ -7942,9 +7942,8 @@ async fn flush_metrics() -> Null {
 - Convive con `@server`/`@ws`/`@cron`: el every-scheduler arranca junto a
   axum + el cron-scheduler. Un programa `@every`-only (sin HTTP) queda
   vivo bloqueando en Ctrl+C (systemd-friendly, igual que cron-only).
-- Paridad bit-a-bit `fitz run` ↔ `fitz build`. (Debe declararse en el
-  archivo principal — `@every` en un módulo importado es soporte de
-  `fitz run` por ahora; `fitz build` lo rechaza con un error claro.)
+- Paridad bit-a-bit `fitz run` ↔ `fitz build`, incluido `@every` declarado
+  en un módulo importado (cross-module, igual que `@cron`).
 
 En fitz-liveviews el patrón canónico es un reloj/heartbeat global que
 `ws_broadcast(...)` a un endpoint LiveView cada segundo — un solo ticker

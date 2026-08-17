@@ -247,21 +247,12 @@ pub fn generate_project(
     // W10 (v0.10.7) — transitive like uses_auth.
     // Phase 3c — @every(N) folds into uses_jobs to reuse the tokio + jobs
     // prelude infrastructure (MVP: an @every-only program pulls the cron deps
-    // too as a side effect — optimizing that gating is deferred). Module-level
-    // @every is guarded right below (main-file only for `fitz build`).
+    // too as a side effect — optimizing that gating is deferred). D4: @every in
+    // an imported module is supported via `every_fn_stmts` (parallel to cron's
+    // B19), so a module-level @every triggers the infrastructure too.
     let uses_jobs = program_uses_jobs(program)
         || program_uses_every(program)
-        || loader.modules.iter().any(|m| m.uses_jobs);
-    if loader.modules.iter().any(|m| m.uses_every) {
-        return Err(FitzError::new(
-            ErrorKind::TypeError,
-            0,
-            0,
-            "@every in an imported module is not supported by `fitz build` yet — \
-             declare the @every fn in the main file. (`fitz run` supports it.)"
-                .to_string(),
-        ));
-    }
+        || loader.modules.iter().any(|m| m.uses_jobs || m.uses_every);
     // Phase 12.3.a.3 — detect usage of the built-in `log` module
     // (`log.info/warn/error/debug`). Turns on the prelude
     // `__FitzLogValue` + `__fitz_log_*` in the main + the deps
@@ -4309,6 +4300,10 @@ struct LoadedModule {
     /// and the user saw the [ready] banner (a user `print(...)`) but
     /// no actual cron activity.
     cron_fn_stmts: Vec<Stmt>,
+    /// D4 — parallel to `cron_fn_stmts` but for `@every`: the FnDef stmts with
+    /// an `@every(N)` decorator declared in this module. Main scans these to
+    /// register cross-module @every jobs (`module_path: Some(mod)`).
+    every_fn_stmts: Vec<Stmt>,
     /// v0.37.8 — parallel to `cron_fn_stmts` but for `@background`: the
     /// FnDef stmts with a `@background(...)` decorator declared in this
     /// module. Main scans these to populate `bg_persistent_fns`
@@ -5256,6 +5251,7 @@ impl ModuleLoader {
         // B19 (v0.18.2) — parallel to W16/10.8.6: capture FnDef stmts
         // with `@cron(...)` so main can register them in the scheduler.
         let mut module_cron_fn_stmts: Vec<Stmt> = Vec::new();
+        let mut module_every_fn_stmts: Vec<Stmt> = Vec::new();
         // v0.37.8 — parallel to cron: capture FnDef stmts with
         // `@background(...)` so main can populate `bg_persistent_fns`
         // cross-module (`module_path: Some(mod)`).
@@ -5278,6 +5274,9 @@ impl ModuleLoader {
                 let is_cron = decorators.iter().any(|d| d.name == "cron");
                 if is_cron {
                     module_cron_fn_stmts.push(stmt.clone());
+                }
+                if decorators.iter().any(|d| d.name == "every") {
+                    module_every_fn_stmts.push(stmt.clone());
                 }
                 let is_background = decorators.iter().any(|d| d.name == "background");
                 if is_background {
@@ -5319,6 +5318,7 @@ impl ModuleLoader {
             http_fn_stmts: module_http_fn_stmts,
             ws_fn_stmts: module_ws_fn_stmts,
             cron_fn_stmts: module_cron_fn_stmts,
+            every_fn_stmts: module_every_fn_stmts,
             background_fn_stmts: module_background_fn_stmts,
             hoisted_cron_store_vars: module_hoisted_cron_store_vars,
             hoisted_background_store_vars: module_hoisted_background_store_vars,
@@ -7288,10 +7288,11 @@ fn generate_main_rs(
     // `use crate::__Fitz*` lines in the modules resolve.
     let uses_auth = program_uses_auth(program) || loader.modules.iter().any(|m| m.uses_auth);
     let uses_ws = program_uses_ws(program) || loader.modules.iter().any(|m| m.uses_ws);
-    // Phase 3c — @every folds into uses_jobs (same as generate_project).
+    // Phase 3c — @every folds into uses_jobs (same as generate_project); D4
+    // includes module-level @every.
     let uses_jobs = program_uses_jobs(program)
         || program_uses_every(program)
-        || loader.modules.iter().any(|m| m.uses_jobs);
+        || loader.modules.iter().any(|m| m.uses_jobs || m.uses_every);
     // Phase 12.3.a.3 — transitive `uses_logging`. Same computation as
     // above in `generate_project` — pragmatic duplicate because
     // `generate_main_rs` is also called from unit-test paths that do
@@ -8160,7 +8161,37 @@ fn emit_main_rs_body(
                     fn_name: name.clone(),
                     is_async: *is_async,
                     interval_secs: secs,
+                    module_path: None,
                 });
+            }
+        }
+    }
+    // D4 — cross-module @every registration. Each loaded module's
+    // `every_fn_stmts` is walked; the resulting EveryJobInfos carry
+    // `module_path: Some(mod_name)` so the spawn emits `crate::<mod>::<fn>`.
+    for module in &loader.modules {
+        let mod_name = module.mod_name.clone();
+        for stmt in &module.every_fn_stmts {
+            if let Stmt::FnDef {
+                name,
+                decorators,
+                is_async,
+                ..
+            } = stmt
+            {
+                if let Some(deco) = decorators.iter().find(|d| d.name == "every") {
+                    let secs: f64 = match deco.args.first() {
+                        Some(Expr::Int(n, _)) => *n as f64,
+                        Some(Expr::Float(f, _)) => *f,
+                        _ => continue,
+                    };
+                    ctx.every_jobs_info.push(EveryJobInfo {
+                        fn_name: name.clone(),
+                        is_async: *is_async,
+                        interval_secs: secs,
+                        module_path: Some(mod_name.clone()),
+                    });
+                }
             }
         }
     }
@@ -8613,6 +8644,9 @@ struct EveryJobInfo {
     fn_name: String,
     is_async: bool,
     interval_secs: f64,
+    /// D4 — `Some(mod_name)` if the @every fn lives in an imported module (the
+    /// spawn emits `crate::<mod_name>::<fn>`); `None` for a main-file fn.
+    module_path: Option<String>,
 }
 
 /// 9.w.3.iter2.d — build-time parallel of the interpreter runtime's
@@ -11385,10 +11419,17 @@ pub(crate) fn __fitz_jwt_decode_fv(
                 "    eprintln!(\"   @every {} ({}s)\");\n",
                 job.fn_name, job.interval_secs
             ));
+            // D4 — if the @every lives in an imported module, qualify the call
+            // with `crate::<mod>::` so it resolves cross-module (bare name only
+            // works for a main-file fn).
+            let fn_call_path = match &job.module_path {
+                Some(mod_name) => format!("crate::{}::{}", mod_name, job.fn_name),
+                None => job.fn_name.clone(),
+            };
             let invoke = if job.is_async {
-                format!("move || async move {{ let _ = {}().await; }}", job.fn_name)
+                format!("move || async move {{ let _ = {}().await; }}", fn_call_path)
             } else {
-                format!("move || async move {{ let _ = {}(); }}", job.fn_name)
+                format!("move || async move {{ let _ = {}(); }}", fn_call_path)
             };
             self.emit(&format!(
                 "    tokio::spawn(__fitz_run_every_job({name}.to_string(), {secs}f64, {invoke}));\n",

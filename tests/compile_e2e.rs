@@ -304,6 +304,72 @@ fn main() => 0
 }
 
 #[test]
+fn every_in_imported_module_builds_and_ticks_d4() {
+    // D4 — `@every(N)` declared in an IMPORTED module (not the main file) now
+    // compiles to a native binary (before, `fitz build` rejected it with a
+    // guard). Mirror of the cron B19 cross-module test: `LoadedModule` carries
+    // `every_fn_stmts`, main populates `every_jobs_info` with
+    // `module_path: Some(mod)`, and `emit_every_job_spawns` emits
+    // `crate::<mod>::<fn>`.
+    let stem = "every_cross_module_d4";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("worker.fitz"),
+        "@every(1)\nfn heartbeat() {\n  print(\"beat\")\n}\n",
+    )
+    .expect("escribir worker.fitz");
+
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, "import worker\n\nprint(\"main up\")\n")
+        .expect("escribir main.fitz");
+
+    let output = std::process::Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (D4 cross-module @every):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin_path = dir.join(&bin_name);
+    assert!(bin_path.exists(), "binario {} no existe", bin_name);
+
+    // Run ~2.5s: the every-scheduler banner prints at boot, then the module's
+    // @every fires (print "beat" every second).
+    let mut child = std::process::Command::new(&bin_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn D4 test binary");
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("wait child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("every-scheduler"),
+        "expected the every-scheduler banner (D4 cross-module @every), stderr was: {}",
+        stderr
+    );
+    assert!(
+        stdout.matches("beat").count() >= 1,
+        "expected at least 1 `beat` tick from the module @every, stdout was: {:?}",
+        stdout
+    );
+}
+
+#[test]
 fn if_else_works_in_binary() {
     let src = "\
 let x = 5
