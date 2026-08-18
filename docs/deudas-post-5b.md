@@ -6984,16 +6984,19 @@ con relations virtuales declarados en módulos.
   Custom methods siguen ganando (se resuelven antes del ORM). E2E real
   Postgres `orm_type_static_read_methods_v047`.
 
-- ⚠️ **`Map<Str, Any>` en HTTP response de handlers cross-module**.
-  El handler que retorna `Map<Str, Any>` (caso típico GROUP BY +
-  db.query crudo) funciona OK en single-file. En cross-module,
-  cuando el handler vive en módulo B y el `Map<Str, Any>` arrastra
-  Vec<__FitzValue> al codegen del módulo, los impls
-  `__ToFitzJson`/`__FromFitzJson` necesarios se buscan en main.rs.
-  W17 no toca este caso (es un workaround del cap 31 sec 28 ya
-  documentado para single-file). Refinement futuro: replicar la
-  Decisión W17 (skip lookup local, usar Default::default) para
-  Vec<__FitzValue> en módulos. No bloquea casos actuales.
+- **`Map<Str, Any>` en HTTP response de handlers cross-module** — 🟢
+  **CERRADO (stale, verificado 2026-08-18 contra v0.47.0)**. La nota decía
+  que un handler en un módulo importado que retorna `Map<Str, Any>` (GROUP
+  BY / `db.query` crudo) rompía el codegen porque el `Vec<__FitzValue>`
+  arrastrado buscaba sus impls `__ToFitzJson`/`__FromFitzJson` en main.rs.
+  **Ya no pasa**: repro-confirmado stale en 3 variantes cross-module (handler
+  con Map literal heterogéneo `{"total": 5, "label": "hi", "active": true}`;
+  `db.query("... GROUP BY ...")` → `List<Map<Str, Any>>`; `db.query` →
+  `Map<Str, Any>` de una fila) — TODAS compilan a binario. Algún fix
+  intermedio lo cerró (v0.10.4 `impl __MapKey for __FitzValue`, W18/W19/W20
+  de serialización cross-module, v0.19.1). Entrada marcada CERRADA en la
+  limpieza de docs de esta sesión (junto con B, #2 forward-refs — el doc
+  append-only acumuló varias notas stale sin tachar).
 
 ### Mini-fase W18+ (2026-05-28) — Gaps cerrados durante api-orm-full multi-archivo
 
