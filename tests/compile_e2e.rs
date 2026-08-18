@@ -7314,6 +7314,142 @@ fn main() => 0\n\
     }
 }
 
+// Deuda ORM cross-module (v0.45.0) — un `.preload("relation")` de un
+// `@has_many`/`@has_one`/companion sobre un @table type importado
+// resuelve el target type SIN que el usuario lo importe explícitamente.
+// El codegen auto-registra el target desde el loader (Opción B: clon local
+// del env + declare_nominal + binding sintético). Antes fallaba con
+// "type `Post` no registrado en el TypeEnv" a menos que se importara
+// `from models import User, Post` (todos los targets).
+#[test]
+fn cross_module_orm_preload_auto_registers_target_in_main_v045() {
+    let stem = "cross_module_orm_preload_main_v045";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // models.fitz — User @has_many Post; Post @belongs_to User.
+    std::fs::write(
+        dir.join("models.fitz"),
+        "@table(\"users\") type User {\n\
+             @primary id: Int = 0\n\
+             name: Str = \"\"\n\
+             @has_many(\"Post\", via=\"user_id\") posts: List<Post> = []\n\
+         }\n\
+         \n\
+         @table(\"posts\") type Post {\n\
+             @primary id: Int = 0\n\
+             @belongs_to(\"User\") user_id: Int = 0\n\
+             title: Str = \"\"\n\
+             user: User?\n\
+         }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // Main imports ONLY User (not Post) yet uses `.preload("posts")`,
+    // which needs the `Post` target registered in the TypeEnv.
+    let main_src = "\
+from models import User\n\
+\n\
+@get(\"/users\")\n\
+async fn list_users() -> Result<List<User>> {\n\
+  let conn = db.connect(\"postgres://x\").await?\n\
+  let users = User.preload(\"posts\").all(conn).await?\n\
+  return Ok(users)\n\
+}\n\
+\n\
+@server(43945)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build debe compilar con el target auto-registrado:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+}
+
+// Deuda ORM cross-module (v0.45.0) — misma auto-resolución pero con el
+// `.preload(...)` viviendo en un MÓDULO importado (no el main), para candar
+// el path `generate_module_rs_with_bindings`.
+#[test]
+fn cross_module_orm_preload_auto_registers_target_in_module_v045() {
+    let stem = "cross_module_orm_preload_module_v045";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("models.fitz"),
+        "@table(\"users\") type User {\n\
+             @primary id: Int = 0\n\
+             name: Str = \"\"\n\
+             @has_many(\"Post\", via=\"user_id\") posts: List<Post> = []\n\
+         }\n\
+         \n\
+         @table(\"posts\") type Post {\n\
+             @primary id: Int = 0\n\
+             @belongs_to(\"User\") user_id: Int = 0\n\
+             title: Str = \"\"\n\
+             user: User?\n\
+         }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // users.fitz (module) imports ONLY User and does the preload.
+    std::fs::write(
+        dir.join("users.fitz"),
+        "from models import User\n\
+         \n\
+         @get(\"/users\")\n\
+         async fn list_users() -> Result<List<User>> {\n\
+           let conn = db.connect(\"postgres://x\").await?\n\
+           let users = User.preload(\"posts\").all(conn).await?\n\
+           return Ok(users)\n\
+         }\n",
+    )
+    .expect("escribir users.fitz");
+
+    let main_src = "\
+import users\n\
+\n\
+@server(43946)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build debe compilar el preload en un módulo con el target auto-registrado:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[test]
 fn cross_module_orm_virtual_fields_skip_w17() {
     // W17 (v0.10.7) — @table type con relations virtuales

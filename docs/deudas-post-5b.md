@@ -6933,14 +6933,28 @@ con relations virtuales declarados en módulos.
     target. **Workaround**: declarar Target ANTES de User, y
     los companion fields (`user: User?`) backward-ref a User.
   - **Importar TODOS los `@table` types al módulo que usa
-    cualquier uno**: el codegen valida ALL los targets de
-    relations de un type al procesarlo. Si User declara
-    `@has_many("Post", ...)` pero el módulo solo hace
-    `from models import User`, el codegen falla con "type Post
-    no registrado". **Workaround**: `from models import User,
-    Post, ...` (todos los referenciados). Refinement futuro:
-    el codegen podría auto-resolver los target types desde el
-    loader sin requerirlos en el `from import`.
+    cualquier uno** — 🟢 **CERRADO (v0.45.0, 2026-08-18)**: el
+    codegen validaba ALL los targets de relations al procesar un
+    type; si User declaraba `@has_many("Post", ...)` pero el
+    módulo solo hacía `from models import User`, fallaba con
+    "type Post no registrado en el TypeEnv" (solo al USAR la
+    relation vía `.preload`/navigation; retornar `List<User>`
+    sin usarla no lo pegaba — W17 skipea el virtual field).
+    **Fix (Opción B, codegen-only)**: `auto_register_relation_targets`
+    recorre las relations de cada `@table` type importado y
+    auto-registra los targets faltantes en un **clon local del
+    TypeEnv** (mint de `TypeId` vía `declare_nominal` + binding
+    sintético `Named{Type}` con `entry().or_insert` → el import
+    real gana). Worklist a fixpoint (targets transitivos). Aplica
+    a main + módulos. El loader ya tenía `Post` completo (fields
+    + metadata); solo faltaba el `TypeId`. `TypeEnv` gana `Clone`.
+    2 E2E (`cross_module_orm_preload_auto_registers_target_in_{main,module}_v045`).
+    **Deuda paralela abierta (NO cerrada por este fix)**: `fitz run`
+    (intérprete) tiene un gap análogo por otra vía — resuelve el
+    relation target desde el value-env en runtime (`orm_instance_navigate`,
+    `env.get(target_type)` con solo User en scope) y NO implementa
+    `.preload`. Fix futuro sugerido: fallback al env del módulo
+    definidor (el `Value::Type` de User sabe su módulo).
 
 - ⚠️ **`Map<Str, Any>` en HTTP response de handlers cross-module**.
   El handler que retorna `Map<Str, Any>` (caso típico GROUP BY +

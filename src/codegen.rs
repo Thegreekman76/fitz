@@ -6049,6 +6049,13 @@ fn generate_module_rs_with_bindings(
     // `check_program`. We do a quick check here just to have the
     // side-table; the errors were already reported upstream.
     let (_e, type_info, _d, _errs) = crate::types::check_program(program);
+    // Deuda ORM cross-module (v0.45.0) — same relation-target auto-
+    // registration as `generate_main_rs`, for a `.preload(...)`/navigation
+    // living in a MODULE (not the entry). Local clone of the env + shadow.
+    let mut owned_env = env.clone();
+    let synth_rel_targets =
+        auto_register_relation_targets(&mut owned_env, local_bindings, loaded_modules);
+    let env = &owned_env;
     let mut ctx = CodegenCtx::new_for_module(env, &type_info);
     // B20 — the cron-store hoist set is consulted by
     // `gen_module_top_let` when emitting the module's top-level lets.
@@ -6106,6 +6113,13 @@ fn generate_module_rs_with_bindings(
     for (name, binding) in local_bindings {
         ctx.module_bindings.insert(name.clone(), binding.clone());
     }
+    // Deuda ORM cross-module (v0.45.0) — merge auto-registered relation
+    // targets (after local bindings; `or_insert` keeps real imports).
+    for (name, binding) in &synth_rel_targets {
+        ctx.module_bindings
+            .entry(name.clone())
+            .or_insert_with(|| binding.clone());
+    }
     // Phase 8.7.1 transitive — registers the module's local Python
     // bindings (binding_name → dotted_path + PyAny type in the root
     // scope). Parallel to main's `install_python_bindings`.
@@ -6145,7 +6159,21 @@ fn generate_module_rs_with_bindings(
     // declared as `mod foo;` in main.rs, living at the crate root
     // accessible as `crate::foo`. References are emitted with the
     // `crate::` prefix in modules (see `mod_path_prefix`).
-    ctx.emit_module_use_decls(local_bindings, loaded_modules);
+    //
+    // Deuda ORM cross-module (v0.45.0) — include the auto-registered
+    // relation targets so a `.preload(...)` in THIS module that references
+    // `PostData` gets its `use crate::models::{Post, PostData};` (the main
+    // path is covered by `emit_helpers_for_imported_types`, which emits a
+    // `use` for every type of every module; the module path only emits
+    // `use`s for its own bindings). Byte-identical for modules with no
+    // synthetic target (`use_bindings` == `local_bindings`).
+    let mut use_bindings = local_bindings.clone();
+    for (name, binding) in &synth_rel_targets {
+        use_bindings
+            .entry(name.clone())
+            .or_insert_with(|| binding.clone());
+    }
+    ctx.emit_module_use_decls(&use_bindings, loaded_modules);
 
     // W8 (v0.10.7) — the module needs the DB prelude when:
     //   (a) it declares `@table` types (emits `impl __FromFitzDbRow`)
@@ -7240,6 +7268,107 @@ pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzErr
 /// emits an async `fn main()` with the Router + `axum::serve` (HTTP
 /// mode); otherwise it follows the classic single-threaded flow (CLI
 /// mode).
+/// Deuda ORM cross-module (v0.45.0) — auto-registers into `env` every
+/// relation-target `@table` type reachable from an imported `@table` type
+/// that isn't already registered, so ORM `.preload(...)` / navigation
+/// codegen can resolve the target without the user importing it
+/// explicitly. Returns synthetic `Named{Type}` bindings to merge into
+/// `module_bindings`; the existing `pre_register_types` loop then copies
+/// the target's fields + `TableMetadata` exactly as for a real import.
+///
+/// The problem: the codegen's `env` is immutable and `TypeId`s are only
+/// minted by the checker for the names literally in `from ... import ...`.
+/// With `from models import User`, `User.preload("posts")` (a `@has_many`
+/// to `Post`) fails with `type 'Post' no registrado en el TypeEnv` because
+/// `Post` never got a `TypeId`. The loader already holds `Post` fully
+/// (fields + metadata); this only mints its `TypeId` in a LOCAL clone of
+/// the env used for emission.
+///
+/// Worklist to fixpoint so a transitive target (`Post → Tag`) is covered
+/// too. Only registers a target that SOME loaded module actually defines
+/// in `type_sigs` (else `pre_register_types` would abort with "module does
+/// not expose type"); a target no module defines is left as-is (the
+/// pre-existing error stands, which is correct).
+fn auto_register_relation_targets(
+    env: &mut TypeEnv,
+    bindings: &HashMap<String, ResolvedBinding>,
+    modules: &[LoadedModule],
+) -> Vec<(String, ResolvedBinding)> {
+    let mut synth: Vec<(String, ResolvedBinding)> = Vec::new();
+    let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Seed: every imported `@table` type (module defines its metadata).
+    for binding in bindings.values() {
+        if let ResolvedBinding::Named {
+            module_index,
+            item,
+            kind: NamedKind::Type,
+        } = binding
+        {
+            if modules
+                .get(*module_index)
+                .is_some_and(|m| m.table_metadata.contains_key(item))
+                && seen.insert(item.clone())
+            {
+                queue.push_back((item.clone(), *module_index));
+            }
+        }
+    }
+    while let Some((type_name, owner_idx)) = queue.pop_front() {
+        let Some(owner) = modules.get(owner_idx) else {
+            continue;
+        };
+        let Some(meta) = owner.table_metadata.get(&type_name) else {
+            continue;
+        };
+        // Collect target names first (releases the borrow of `meta`/`owner`
+        // before mutating `env` and searching `modules`).
+        let targets: Vec<String> = meta
+            .relations
+            .values()
+            .map(|r| r.target_type.clone())
+            .collect();
+        for target in targets {
+            if env.lookup(&target).is_some() {
+                continue; // already registered (imported or local)
+            }
+            // The module that DEFINES the target (has its fields). Prefer
+            // the owner module if it defines it.
+            let def_idx = if modules
+                .get(owner_idx)
+                .is_some_and(|m| m.type_sigs.contains_key(&target))
+            {
+                Some(owner_idx)
+            } else {
+                modules
+                    .iter()
+                    .position(|m| m.type_sigs.contains_key(&target))
+            };
+            let Some(def_idx) = def_idx else {
+                continue; // no module defines it — leave the pre-existing error
+            };
+            // Mint a real `TypeId` (guarded by the `lookup` None above).
+            if env.declare_nominal(target.clone()).is_err() {
+                continue;
+            }
+            synth.push((
+                target.clone(),
+                ResolvedBinding::Named {
+                    module_index: def_idx,
+                    item: target.clone(),
+                    kind: NamedKind::Type,
+                },
+            ));
+            // Transitivity: process the newly-registered target's own
+            // relations too.
+            if seen.insert(target.clone()) {
+                queue.push_back((target, def_idx));
+            }
+        }
+    }
+    synth
+}
+
 fn generate_main_rs(
     program: &Program,
     env: &TypeEnv,
@@ -7344,6 +7473,17 @@ fn generate_main_rs(
         // v0.37.7 — persisted @background serializes spawn args to JSON.
         || program_has_persistent_background(program);
 
+    // Deuda ORM cross-module (v0.45.0) — mint TypeIds for relation targets
+    // not explicitly imported, in a LOCAL clone of the env used only for
+    // emission. The synthetic bindings are merged into `module_bindings`
+    // below (after `install_loader_bindings`) so `pre_register_types`
+    // copies each target's fields + `TableMetadata`. Shadowing `env` keeps
+    // the rest of this fn (ctx + `resolve_state_var_types`) consistent.
+    let mut owned_env = env.clone();
+    let synth_rel_targets =
+        auto_register_relation_targets(&mut owned_env, &loader.bindings, &loader.modules);
+    let env = &owned_env;
+
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
     ctx.uses_python = uses_python;
@@ -7440,6 +7580,12 @@ fn generate_main_rs(
     }
     ctx.install_python_bindings(python_imports);
     ctx.install_loader_bindings(loader);
+    // Deuda ORM cross-module (v0.45.0) — merge the auto-registered relation
+    // targets so `pre_register_types` copies their fields + metadata. Real
+    // user imports win (`or_insert` never overwrites an existing binding).
+    for (name, binding) in synth_rel_targets {
+        ctx.module_bindings.entry(name).or_insert(binding);
+    }
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
 

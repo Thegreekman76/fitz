@@ -823,7 +823,7 @@ pub struct ImportedLiveComponent {
 /// No nested scopes yet: 5.2 works at the whole-program level.
 /// When body checks arrive (5.3), local scopes for `let`/params
 /// will be added.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TypeEnv {
     nominals: Vec<NominalInfo>,
     by_name: HashMap<String, TypeId>,

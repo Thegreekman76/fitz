@@ -9,6 +9,43 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.45.0] — 2026-08-18 — ORM cross-module: auto-resolución de relation targets en `fitz build`
+
+Cierra la deuda residual de W17 (v0.10.7): un `.preload("relation")` (o navigation
+method) de un `@has_many`/`@has_one`/companion sobre un `@table` type importado ya
+NO exige importar el target type explícitamente. Antes `from models import User`
++ `User.preload("posts").all(db)` (con `@has_many("Post")`) fallaba en `fitz build`
+con `type 'Post' no registrado en el TypeEnv`; el workaround era `from models
+import User, Post` con TODOS los targets referenciados.
+
+### Arreglado
+
+- **Auto-registro de relation targets** — el codegen ahora, antes de emitir,
+  recorre las relations de cada `@table` type importado y auto-registra los
+  targets que faltan (`Post`) en un **clon local del TypeEnv** usado solo para
+  la emisión. Reutiliza toda la maquinaria de imports existente (el loader ya
+  tenía `Post` completo: fields + `TableMetadata`; solo faltaba mint-earle un
+  `TypeId`). Worklist a fixpoint → cubre targets transitivos (`Post → Tag`).
+  Aplica tanto al main (`generate_main_rs`) como a un `.preload` que vive en un
+  módulo importado (`generate_module_rs_with_bindings`).
+
+### Detalles
+
+- **Opción B (clon del env)**: el `env` del codegen es inmutable y los `TypeId`
+  solo nacen en el checker para los nombres literalmente importados. El fix
+  clona el env localmente, hace `declare_nominal` de los targets faltantes, e
+  inyecta bindings sintéticos `Named{Type}` en `module_bindings` con
+  `entry().or_insert` (un import real del usuario siempre gana → no-op cuando el
+  target ya está importado). No toca el checker ni el intérprete.
+- Solo registra un target que ALGÚN módulo cargado define en `type_sigs`; un
+  target inexistente deja el error pre-existente en pie.
+- **Alcance codegen-only**: `fitz run` (intérprete) tiene un gap análogo por
+  otra vía (resuelve el target desde el value-env en runtime, y no implementa
+  `.preload`) — queda como deuda paralela documentada, fuera de este fix.
+- 2 tests E2E nuevos (`cross_module_orm_preload_auto_registers_target_in_{main,module}_v045`).
+  El smoke `cross_module_orm_virtual_fields_skip_w17` (importa todos los types)
+  sigue verde: con el target ya importado, el auto-registro es no-op.
+
 ## [v0.44.0] — 2026-08-18 — Named slots en el emitter SSR (`.fitzv` paridad WASM↔SSR)
 
 Cierra la **Deuda C**: el emitter SSR de `.fitzv` ahora soporta **named slots**
