@@ -174,10 +174,42 @@ para próximas iteraciones.
    `phase_11_12_marked_composition_with_region_adopts_via_skip_v0_41_4`. **Queda el
    sub-caso (3)**: `<Child />` dinámico dentro de `{#for}` (reconciliación keyed).
 
-3. **`<Child />` dinámico dentro de `{#for}` en hidratación naive** — mismo límite
-   que (2): `emit_child_component_adopt` rechaza `ctx.in_for`. La composición
-   estática (`__child_slot_<n>`) sí hidrata; la keyed dinámica (`__child_map_<n>`)
-   no, porque depende de la adopción de regiones.
+3. **`<Child />` dinámico dentro de `{#for}` en hidratación naive — 🟢 CERRADO
+   2026-08-18 (v0.48.0)** — un `<Child key="{...}" />` dentro de un `{#for}` en un
+   componente naive hidratable ahora ADOPTA el DOM server-pintado y reconcilia cada
+   ítem por su keyed instance cache (`__child_map_<n>`), en vez de dejar la lista
+   muerta hasta el primer re-render. **Diagnóstico real** (repro-confirmado): el
+   guard `if ctx.in_for` de `emit_child_component_adopt` era **código muerto** —
+   en el adopt walk el `{#for}` nunca pasaba por `emit_for` (que setea `in_for`),
+   sino que el dispatch de región ruteaba a `emit_naive_region_skip`, que solo
+   consumía los anchors `<!--fr-->`/`<!--/fr-->` sin descender. Comportamiento
+   pre-fix: los wrappers `<div class="__fitz-child-<Name>">` server-pintados
+   quedaban visibles pero **muertos** al boot (sin listeners, sin instancia), y el
+   primer re-render naive los reconstruía perdiendo la identidad del DOM server —
+   un silent no-op, no un rechazo de build. **Fix (~55 LoC de núcleo, solo
+   `codegen_wasm.rs`)**: (a) borrar el guard muerto de `emit_child_component_adopt`
+   (su cuerpo ya era dual static/dynamic — delega a `emit_child_get_or_create`, que
+   ya bifurca por `ctx.in_for` a la rama keyed); (b) partir el arm `If | For` del
+   dispatch del hydrate walk — cuando el `{#for}` tiene sitios dinámicos
+   (`count_dynamic_child_sites(children) > 0`), el nuevo helper
+   `emit_naive_dynamic_region_adopt` consume `<!--fr-->`, corre `emit_for` (que
+   snapshotea la lista de state YA restaurada por `__apply_state_json`, adopta un
+   wrapper por ítem con `__flv_next_element`, y reconcilia vía `__child_map_<n>` /
+   `__seen_<n>` / `retain` — la EXACTA maquinaria del build walk), y consume
+   `<!--/fr-->`. El `{#for}` estático (sin `<Child>` dinámico) sigue en
+   `emit_naive_region_skip` byte-idéntico. **El SSR no cambia**: `push_region_expr`
+   ya envuelve el loop en `<!--fr-->`/`<!--/fr-->` y el gate `component.hydrate`
+   pinta un `<div class="__fitz-child-<Name>">` por ítem. **Decisión** (matcheo
+   posicional): ítem `i` ↔ wrapper `i` (mismo orden que serializó el server); un
+   desalineo se autocorrige en el primer re-render naive (misma filosofía que el
+   skip estático). **Byte-compat**: aditivo — los 25 ejemplos `examples/view/`
+   previos regeneran byte-idénticos (`git status examples/view/` solo muestra el
+   ejemplo nuevo). Validado en Chrome real 7/7 (adopción cross-boundary del wrapper
+   dinámico con witness JS + keyed cache que preserva `taps` a través del
+   re-render + listeners vivos al boot). Ejemplo nuevo `hydrate-keyed-composition/`
+   + smoke `view_hydrate_keyed_composition_wasm_smoke.rs`. **Cierra el catálogo de
+   composición del `.fitzv` en hidratación entero** (estática slice 4 v0.30.4 +
+   región estática v0.41.4 + keyed dinámica v0.48.0).
 
 4. **`use std::sync::atomic::{AtomicBool, Ordering};` sin usar en crates sin
    `<style>` — 🟢 CERRADO 2026-08-07** — `emit_module_header` (`codegen_wasm.rs`)

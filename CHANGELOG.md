@@ -9,6 +9,44 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.48.0] — 2026-08-18 — Hidratación de composición dinámica keyed (`<Child key>` dentro de `{#for}`) en el target client-WASM de `.fitzv`
+
+Cierra la última deuda de composición del `.fitzv` en hidratación: un
+`<Child key="{...}" />` dentro de un `{#for}` en un componente naive
+hidratable (`component App hydrate`) ahora ADOPTA el DOM server-pintado
+en vez de dejar la lista muerta hasta el primer re-render. Cada ítem se
+reconcilia por su keyed instance cache (`__child_map_<n>`), así que el
+estado local del hijo (ej. un contador) sobrevive los re-renders naive.
+
+**Diagnóstico** (repro-confirmado): no había un rechazo de build — el
+guard `if ctx.in_for` de `emit_child_component_adopt` era código muerto
+(inalcanzable), y el `{#for}` en modo adopt solo consumía los anchors
+`<!--fr-->`/`<!--/fr-->` sin descender. Los wrappers
+`<div class="__fitz-child-<Name>">` server-pintados quedaban visibles
+pero muertos al boot (sin listeners), y el primer re-render los
+reconstruía perdiendo la identidad del DOM server.
+
+**Fix** (~55 LoC de núcleo, solo `src/view/codegen_wasm.rs`): borrar el
+guard muerto (el cuerpo del adopt ya era dual static/dynamic, delega a
+`emit_child_get_or_create` que bifurca por `ctx.in_for`) + rutear el
+`{#for}` con sitios dinámicos al nuevo helper
+`emit_naive_dynamic_region_adopt`, que consume `<!--fr-->`, corre
+`emit_for` (snapshot de la lista de state ya restaurada + adopción de un
+wrapper por ítem con `__flv_next_element` + reconciliación keyed
+`__child_map_<n>`/`__seen_<n>`/`retain` — la exacta maquinaria del build
+walk), y consume `<!--/fr-->`. El SSR no cambia (ya pinta los anchors +
+los wrappers `__fitz-child-` por ítem). El `{#for}` estático sigue en
+`emit_naive_region_skip` byte-idéntico.
+
+**Byte-compat**: aditivo, gated tras el marcador `hydrate` — los 25
+ejemplos `examples/view/` previos regeneran byte-idénticos. Validado en
+Chrome real 7/7 (adopción cross-boundary del wrapper dinámico + keyed
+cache que preserva `taps` a través del re-render + listeners vivos al
+boot). Ejemplo nuevo `examples/view/hydrate-keyed-composition/` + smoke
+`view_hydrate_keyed_composition_wasm_smoke.rs`. Cierra el catálogo de
+composición del `.fitzv` en hidratación entero (estática v0.30.4 +
+región estática v0.41.4 + keyed dinámica v0.48.0).
+
 ## [v0.47.0] — 2026-08-18 — ORM read/chain methods directos sobre el `@table` type en `fitz run` (paridad con el codegen)
 
 Cierra una discrepancia intérprete↔codegen descubierta al repro-confirmar

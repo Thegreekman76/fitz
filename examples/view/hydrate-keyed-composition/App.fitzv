@@ -1,0 +1,70 @@
+// v0.48.0 — SSR → client hydration of DYNAMIC keyed composition
+// (`<Child key=... />` inside `{#for}`).
+//
+// Slice 4 (v0.30.4) hydrated STATIC composition — a `<Child />` at a fixed
+// site. This lifts the last composition restriction: a `<Child key="{...}" />`
+// INSIDE a `{#for}` — dynamic composition with keyed reconciliation — can now
+// hydrate the server-painted DOM instead of leaving it dead until the first
+// re-render.
+//
+// The server paints the loop between `<!--fr-->`/`<!--/fr-->` anchors, one
+// `<div class="__fitz-child-Column">` wrapper per item (the SSR emitter's
+// hydratable region + composed-child wrappers). On boot the client-WASM ADOPTS
+// each wrapper positionally (item i ↔ wrapper i, same order the server
+// serialized), get-or-creates the keyed instance from `__child_map_0`, wires
+// its listeners, and calls `Column.hydrate(wrapper)` — reusing the EXACT keyed
+// reconciliation machinery of the build walk. No wipe: any JS already on the
+// server-painted nodes survives the first paint (the adoption proof).
+//
+// A later state change (`bump`) re-renders the whole root naively (naive
+// composition has no in-place patch), but each key maps to the SAME cached
+// `Column` instance, so its local `taps` state PERSISTS across the re-render.
+//
+// OPT-IN: `component App hydrate` on the root turns the whole tree hydratable
+// (propagates to `Column`). Without it, the tree fresh-mounts (pre-v0.48.0
+// examples stay byte-identical).
+//
+// AUTHORING CONSTRAINTS (naive path): each dynamic `{expr}` is the SOLE child
+// of its element (wrap it in a `<span>`); significant text sits tight after the
+// open tag; no `<style scoped>` here so the hand-authored `index.html` server
+// DOM carries plain (un-hashed) class names.
+
+component App hydrate {
+  state {
+    // Default is a single placeholder — DIFFERENT from the server list below —
+    // so the boot restore of `columns` is observable (after the first `bump`,
+    // the 3 server columns must remain, not collapse to `["placeholder"]`).
+    columns: List<Str> = ["placeholder"]
+    bumps: Int = 0
+  }
+
+  event bump() { bumps = bumps + 1 }
+
+  <template>
+    <div class="board">
+      <h1>Keyed composition hydration</h1>
+      <button class="bump" @click="bump">re-render parent</button>
+      <div class="columns">
+        {#for name in columns}
+          <Column key="{name}" title="{name}" />
+        {/for}
+      </div>
+    </div>
+  </template>
+}
+
+component Column {
+  state {
+    title: Str = ""
+    taps: Int = 0
+  }
+
+  event tap() { taps = taps + 1 }
+
+  <template>
+    <div class="column">
+      <div class="title"><span class="tt">{title}</span></div>
+      <button class="tap" @click="tap">taps: <span class="tn">{taps}</span></button>
+    </div>
+  </template>
+}

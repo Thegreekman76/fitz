@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fitz — SSR → client hydration: keyed composition</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+      .board { display: flex; flex-direction: column; gap: 0.75rem; align-items: flex-start; }
+      .columns { display: flex; flex-wrap: wrap; gap: 12px; width: 100%; }
+      .column { flex: 1 1 140px; min-width: 120px; border: 1px solid #ddd; border-radius: 8px; padding: 16px; background: #fafafa; }
+      .title { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: #666; margin-bottom: 8px; }
+      button { padding: 0.4rem 0.8rem; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Server-painted DOM. In a real deployment a Fitz HTTP server (or a
+      build-time prerender) emits this markup with the current state already
+      interpolated (columns = ["To Do","In Progress","Done"], NOT the component
+      default ["placeholder"]), plus the state <script> below. The wasm bundle
+      ADOPTS this DOM on boot instead of wiping + rebuilding it.
+
+      The DYNAMIC region shape must match the SSR emitter exactly: the `{#for}`
+      loop is wrapped once in `<!--fr-->`/`<!--/fr-->`, and each item is a
+      `<div class="__fitz-child-Column">` wrapper (the same wrapper the WASM
+      build walk creates). The client adopt walk consumes `<!--fr-->`, then
+      adopts one wrapper per list item (item i ↔ wrapper i), get-or-creates the
+      keyed `Column` instance, and calls `Column.hydrate(wrapper)`. Significant
+      text sits tight after each open tag so the adopt cursor lines up.
+    -->
+    <div id="app">
+      <div class="board">
+        <h1>Keyed composition hydration</h1>
+        <button class="bump">re-render parent</button>
+        <div class="columns"><!--fr--><div class="__fitz-child-Column"><div class="column"><div class="title"><span class="tt">To Do</span></div><button class="tap">taps: <span class="tn">0</span></button></div></div><div class="__fitz-child-Column"><div class="column"><div class="title"><span class="tt">In Progress</span></div><button class="tap">taps: <span class="tn">0</span></button></div></div><div class="__fitz-child-Column"><div class="column"><div class="title"><span class="tt">Done</span></div><button class="tap">taps: <span class="tn">0</span></button></div></div><!--/fr--></div>
+      </div>
+    </div>
+
+    <!-- Serialized initial state — read by App::hydrate() at boot. -->
+    <script type="application/json" id="__flv_state_App">{"columns":["To Do","In Progress","Done"],"bumps":0}</script>
+
+    <script type="module">
+      // Tag a node INSIDE the 2nd column's server-painted wrapper BEFORE
+      // hydration. If the wasm adopts that dynamic `<div class="__fitz-child-
+      // Column">` wrapper (rather than recreating it), this JS property survives
+      // the first paint — the proof that keyed composition hydration reused the
+      // existing per-item nodes across the parent(`{#for}`)/child(`Column`)
+      // boundary. It disappears after the first `bump` (the naive re-render
+      // rebuilds the DOM); the persisted `taps` below prove the instance cache.
+      const col2 = document.querySelector('#app .columns > .__fitz-child-Column:nth-child(2) .tt');
+      if (col2) col2.__hydrationWitness = 'server-col-2';
+
+      import init from './wasm-crate/pkg/hydrate_keyed_composition.js';
+      await init();
+
+      window.__flvHydrated = true;
+    </script>
+  </body>
+</html>

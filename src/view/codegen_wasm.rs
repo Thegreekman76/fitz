@@ -3164,7 +3164,7 @@ fn emit_template_node(
                 children,
                 ..
             } => emit_element_adopt(tag, attrs, children, parent_var, ctx, out),
-            ExpandedTemplateNode::If { .. } | ExpandedTemplateNode::For { .. } => {
+            ExpandedTemplateNode::If { .. } => {
                 if ctx.keep.is_some() {
                     // Keep-node path (slice 2): adopt the region's server anchors.
                     emit_keep_region_adopt(ctx, parent_var, out)
@@ -3178,9 +3178,28 @@ fn emit_template_node(
                     // child when hydratable), so the adopt walk must ADVANCE the
                     // cursor past the region's server nodes to keep siblings
                     // aligned, leaving the content in place until the first naive
-                    // re-render rebuilds it from state. Static regions only; a
-                    // `<Child/>` inside `{#for}` (dynamic composition) still
-                    // errors below (keyed reconciliation is a separate slice).
+                    // re-render rebuilds it from state.
+                    emit_naive_region_skip(parent_var, out)
+                }
+            }
+            ExpandedTemplateNode::For {
+                var,
+                iter,
+                children,
+                ..
+            } => {
+                if ctx.keep.is_some() {
+                    // Keep-node path (slice 2): adopt the region's server anchors.
+                    emit_keep_region_adopt(ctx, parent_var, out)
+                } else if count_dynamic_child_sites(children) > 0 {
+                    // v0.48.0 — naive KEYED composition: `{#for}` with a dynamic
+                    // `<Child key=... />`. Descend and adopt one server-painted
+                    // child wrapper per item, reconciling through the keyed cache.
+                    emit_naive_dynamic_region_adopt(var, iter, children, parent_var, ctx, out)
+                } else {
+                    // Static naive region (no dynamic child) — advance the cursor
+                    // past the `<!--fr-->`/`<!--/fr-->` anchors only, leaving the
+                    // server content in place until the first naive re-render.
                     emit_naive_region_skip(parent_var, out)
                 }
             }
@@ -3611,6 +3630,45 @@ fn emit_naive_region_skip(cursor_var: &str, out: &mut String) -> EmitResult<()> 
         cursor_var
     )
     .unwrap();
+    writeln!(
+        out,
+        "        let _ = __flv_next_comment(&mut {}, \"/fr\");",
+        cursor_var
+    )
+    .unwrap();
+    Ok(())
+}
+
+/// Naive KEYED composition hydration (v0.48.0) — adopt a `{#for}` whose body
+/// holds a dynamic `<Child key=... />`. The SSR emitter paints the region as
+/// `<!--fr--><div class="__fitz-child-<Name>">…</div>×N<!--/fr-->` (one child
+/// wrapper per list item: `push_region_expr` wraps the loop in the anchors, and
+/// the `component.hydrate` gate wraps each composed child in `__fitz-child-`).
+///
+/// Consume the opening `<!--fr-->`, then run [`emit_for`] — which snapshots the
+/// state list (already restored by `__apply_state_json`, so N == the wrapper
+/// count the server painted) and, per iteration, adopts the next child wrapper
+/// from the cursor via [`emit_child_component_adopt`] and reconciles it through
+/// this site's keyed instance cache (`__child_map_<n>` / `__seen_<n>` / the
+/// post-loop `retain`), reusing the EXACT build-walk machinery. Consume the
+/// closing `<!--/fr-->` after. Positional match: wrapper `i` ↔ list item `i`
+/// (same order the server serialized); a mismatch self-corrects on the first
+/// naive re-render (same philosophy as the static naive region skip).
+fn emit_naive_dynamic_region_adopt(
+    var: &str,
+    iter: &Expr,
+    children: &[ExpandedTemplateNode],
+    cursor_var: &str,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) -> EmitResult<()> {
+    writeln!(
+        out,
+        "        let _ = __flv_next_comment(&mut {}, \"fr\");",
+        cursor_var
+    )
+    .unwrap();
+    emit_for(var, iter, children, cursor_var, ctx, out)?;
     writeln!(
         out,
         "        let _ = __flv_next_comment(&mut {}, \"/fr\");",
@@ -4842,14 +4900,20 @@ fn emit_child_slot_wiring(
     Ok(())
 }
 
-/// Phase 11.12 slice 4 — hydration adopt of a `<Child />` composition site.
-/// Mirrors [`emit_child_component`] but ACQUIRES the child's server-painted
+/// Phase 11.12 slice 4 / v0.48.0 — hydration adopt of a `<Child />` composition
+/// site. Mirrors [`emit_child_component`] but ACQUIRES the child's server-painted
 /// wrapper (`<div class="__fitz-child-<Name>">`) from the parent cursor instead
 /// of creating it, get-or-creates the same cached instance, wires props/events/
 /// slots (registering the `__hslot` adopt callback too), and calls
 /// `child.hydrate(wrapper)` instead of `mount_into`. A later parent re-render
 /// falls back to the naive build path (`emit_child_component`), reusing the same
 /// cached instance so child state persists.
+///
+/// Works for BOTH a STATIC site (`__child_slot_<n>`) and a DYNAMIC keyed site
+/// inside a `{#for}` (`__child_map_<n>`) — [`emit_child_get_or_create`] picks the
+/// right cache by `ctx.in_for`, exactly as the build walk does. The dynamic case
+/// is reached from [`emit_naive_dynamic_region_adopt`], which adopts one wrapper
+/// per loop iteration between the region's `<!--fr-->`/`<!--/fr-->` anchors.
 #[allow(clippy::too_many_arguments)]
 fn emit_child_component_adopt(
     child_name: &str,
@@ -4861,21 +4925,6 @@ fn emit_child_component_adopt(
     ctx: &mut RenderCtx,
     out: &mut String,
 ) -> EmitResult<()> {
-    if ctx.in_for {
-        // A dynamic `{#for}` child would need region adoption, which the naive
-        // hydration path does not model in this slice (see the `{#if}`/`{#for}`
-        // guard in `emit_template_node`).
-        return Err(EmitError {
-            message: format!(
-                "hydration of a `<{child_name} />` inside a `{{#for}}` (dynamic \
-                 composition) is not supported in this slice — a naive component \
-                 hydrates static composition only. Drop `hydrate`, or move the loop \
-                 into a keep-node child."
-            ),
-            context: format!("template of component `{}`", ctx.component_name),
-        });
-    }
-
     // Adopt the wrapper `<div class="__fitz-child-<Name>">` the server painted.
     let wrapper_var = ctx.fresh("hchild");
     writeln!(
