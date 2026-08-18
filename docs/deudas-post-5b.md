@@ -4,6 +4,58 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 Deuda A — `fitz check` valida los módulos `.fitz` importados (CERRADO v0.43.0, 2026-08-18)
+
+**El gap**: `fitz check` sobre un `.fitz` clásico chequeaba **solo el entry**.
+Los módulos importados nunca se parseaban ni type-checkeaban — solo se
+pre-escaneaban señales (auth provider W12 / background B10 / live components
+§9.bb). Un error de sintaxis (o de tipos) en un módulo importado pasaba
+`fitz check` limpio y solo explotaba en `fitz run` (parse) o `fitz build`
+(type-check del loader). El repro que lo destapó: un `Err(_) => return,` bare
+(return como valor de arm) en un `empleados.fitz` importado.
+
+**El fix** (`src/main.rs`, ~180 LoC, sin tocar el checker ni el codegen): el
+entry rutea por `check_file_with_deps` (dep-aware) que, tras chequear el entry,
+llama `check_imported_fitz_modules` — un walker que recorre el grafo de imports
+(transitivo) y corre lexer + parser + `check_program_with_context` sobre cada
+módulo local `.fitz`. Decisiones:
+- **Walker dedicado, NO reuso del `codegen::ModuleLoader`** — el loader corre
+  codegen por módulo (emite `.rs`), lo que agrega superficie de fallo y peores
+  diagnósticos (solo el primer error, sin span). El walker reusa las piezas que
+  importan (`resolve_import_file_path`, los pre-scans, el checker) con cero
+  acoplamiento al codegen.
+- **Contexto del proyecto heredado** (`ProjectCheckContext`): el provider / bg
+  fns / live components pre-escaneados de los imports DIRECTOS del entry se pasan
+  como fallback a cada módulo (paralelo a los `main_imported_*` del loader). Sin
+  esto, un handler `@authenticated` en `comments.fitz` (que no importa
+  `auth.fitz`, lo cablea `main.fitz` — patrón B12) daría un falso positivo. El
+  módulo propio gana; lo que no declara cae al contexto del proyecto.
+- **`.fitzv` se saltean** en el walk (cubiertos por el sweep a2 + el pipeline de
+  view). **Deps externas** de `fitz.toml` se saltean (`build` las valida).
+- **Ciclos + dedup** por `visited` set de paths canónicos.
+- **Errores agregados** (no aborta al primero); el entry sigue siendo dueño de
+  su propio reporte. `check_file` (wrapper viejo) se eliminó — todo pasa por
+  `check_file_with_deps`.
+
+7 tests cli_e2e (`deuda_a_check_*`). Smoke verde sobre `api-orm-full` /
+`api-orm-full-fullstack` / `api-fullstack-postgres` (multi-módulo con B12 +
+subcarpetas). Actualiza el comment de `Commands::Check` (que decía "does NOT
+recurse into imported modules").
+
+**Deudas residuales derivadas** (NO bloquean, refinables si aparece demanda):
+- **Un nivel de profundidad del project context**: el provider/bg/live heredado
+  se pre-escanea de los imports DIRECTOS del entry (paralelo al loader). Si el
+  provider viviera en un módulo importado transitivamente (no directo del entry),
+  un módulo hermano podría dar falso positivo. El patrón canónico (main importa
+  todos los módulos) lo cubre.
+- **Un `.fitz` importado desde un `.fitzv`** no lo alcanza el walker (skipeamos
+  el `.fitzv`); lo cubre el pipeline de view del `.fitzv`.
+- **`import_root` fallback parcial**: el walker resuelve contra el dir del módulo
+  importador, con fallback al dir del entry — no replica el `import_root` exacto
+  del loader del codegen para todos los layouts anidados raros (el loader tiene
+  su propia lógica). Los layouts probados (subcarpetas `src/types/`, `src/data/`)
+  resuelven bien.
+
 ## 🟢 Paso 0 SSR isomórfico — `to_json` en `fitz build` sin HTTP (CERRADO 2026-08-07)
 
 **Fix aplicado (2026-08-07)**: se extrajo el core de serialización JSON
@@ -6844,20 +6896,20 @@ con relations virtuales declarados en módulos.
 
 ### Deuda derivada de la sesión W17
 
-- ⚠️ **Inferencia del checker post-match Result con early-return Err
-  → Option<String>**. Caso: `let x = match Result { Ok(v) => v,
-  Err(_) => return Err("..."), }`. El checker infiere `x` como
-  `Option<String>` cuando debería ser `String` (el `Err` branch
-  termina en `return`, no produce valor). El codegen emite
-  `let mut x: Option<String> = (match ...)` que rustc rompe con
-  "expected Option<String>, found String". **Workaround**:
-  anotar el tipo explícitamente — `let x: Str = match ...`.
-  Detectado al implementar `auth.fitz` del boilerplate
-  `api-orm-full`. **No bloquea** ningún ejemplo de la guía (los
-  patterns con Result + match exhaustivo NO usan bindings de la
-  fork de Err en el caller). Refinement del checker queda como
-  deuda menor abierta — no es urgente porque el workaround es
-  trivial y descubrible.
+- 🟢 **CERRADO (por B16, v0.39.1) — Inferencia del checker post-match
+  Result con early-return Err → Option<String>**. Caso: `let x = match
+  Result { Ok(v) => v, Err(_) => return Err("..."), }`. El checker
+  infería `x` como `Option<String>` cuando debía ser `String` (el `Err`
+  branch termina en `return`, no produce valor), y el codegen rompía con
+  "expected Option<String>, found String". **Ya no pasa**: B16 (v0.39.1,
+  LUB de match arms) lo cerró como efecto colateral — los arms
+  divergentes (`return`/`break`/`continue`/`ReturnStatus`) se tipan `Any`
+  y el LUB del match cede al concreto, así que `x` tipa `Str`. Verificado
+  contra el binario v0.42.2 con `fn parse(s) -> Result<Int> { let n =
+  match s.to_int() { Ok(v) => v, Err(_) => return Err("bad") }; ... }` →
+  `fitz check` limpio, `fitz run` → 42, `fitz build` → binario OK; la
+  variante bare `Err(_) => { return }` también. Entrada marcada CERRADA en
+  la limpieza de docs de v0.43.0 (esta doc tenía la nota stale).
 
 - ⚠️ **Cross-module ORM 3 archivos — patrón
   `<table types en módulo + handlers en otro módulo + main solo

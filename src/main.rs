@@ -758,22 +758,24 @@ fn main() {
             // Check the entry. A `.fitzv` entry routes through the view
             // pipeline (Phase 11, gotcha #7) resolving cross-file
             // `<Child />` imports dep-aware; a classic `.fitz` entry runs
-            // the static checker (which does NOT recurse into imported
-            // modules — real cross-module validation happens in
-            // `fitz run`/`build`).
+            // the static checker AND (Deuda A, v0.42.x) walks its import
+            // graph to type-check every transitively-imported classic
+            // module cross-module — so a syntax/type error in an imported
+            // module now fails `fitz check` instead of only `fitz run`.
             if view::is_fitzv_extension(&resolved.entry) {
                 clean &= check_view_file(&resolved.entry, &dep_registry);
             } else {
-                clean &= check_file(&resolved.entry);
+                clean &= check_file_with_deps(&resolved.entry, &dep_registry);
             }
             // a2 (v0.40.0) — with NO file arg in a manifest project, ALSO
             // view-check every OTHER `.fitzv` under `src/`, so a component
             // that isn't the `[bin].main` entry still gets checked (useful
             // for CI + view-component libraries). Classic `.fitz` files
-            // are NOT swept: the checker doesn't resolve cross-module
-            // imports, so a non-entry `.fitz` would report spurious
-            // "unknown import" noise; `.fitzv` files are self-contained
-            // (their imports resolve dep-aware in `check_view_source`).
+            // are NOT swept here: the ones reachable from the entry are
+            // already checked by the import-graph walk above; an orphan
+            // `.fitz` (imported by nobody) would report spurious "unknown
+            // import" noise. `.fitzv` files are self-contained (their
+            // imports resolve dep-aware in `check_view_source`).
             if no_file_arg {
                 if let Some(ctx) = resolved.manifest_ctx.as_ref() {
                     let src_dir = ctx.manifest_dir.join("src");
@@ -2188,11 +2190,19 @@ fn openapi_file(path: &PathBuf) {
     }
 }
 
-/// `fitz check <file>` — runs lexer + parser + static checker and
-/// reports errors. Returns `true` when the file is clean, `false` when
-/// it has errors of any kind (read/lex/parse/type). The caller owns the
-/// exit code so `fitz check` (no arg) can aggregate several files (a2).
-fn check_file(path: &PathBuf) -> bool {
+/// Deuda A (v0.42.x) — `fitz check` for a classic `.fitz` entry, now
+/// dep-aware AND cross-module. Checks the entry, then walks its import
+/// graph and type-checks every transitively-imported LOCAL classic
+/// `.fitz` module.
+///
+/// Closes the gap where a syntax (or type) error in an imported module
+/// passed `fitz check` clean and only blew up at `fitz run` — `check`
+/// now predicts `build`. `.fitzv` components are covered elsewhere (the
+/// a2 sweep + the view pipeline); external `fitz.toml` deps are skipped
+/// (`build` validates them and their own CI does too).
+///
+/// Returns `true` when the entry AND every imported module are clean.
+fn check_file_with_deps(path: &std::path::Path, dep_registry: &manifest::DepRegistry) -> bool {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -2214,9 +2224,10 @@ fn check_file(path: &PathBuf) -> bool {
             return false;
         }
     };
-    // 8-pyi.B: loads adjacent .pyi stubs before the check.
-    let (_env, _types, _defs, errors) = check_program_with_pyi_stubs(&program, path);
-    if errors.is_empty() {
+    // Entry check (dep-aware; 8-pyi.B loads adjacent .pyi stubs).
+    let (_env, _types, _defs, errors) =
+        check_program_with_pyi_stubs_and_deps(&program, path, dep_registry);
+    let mut clean = if errors.is_empty() {
         println!("✓ {} — no type errors", path.display());
         true
     } else {
@@ -2225,6 +2236,224 @@ fn check_file(path: &PathBuf) -> bool {
             eprintln!("  {}", e);
         }
         false
+    };
+    // Deuda A — recurse into imported classic modules.
+    clean &= check_imported_fitz_modules(&program, path, dep_registry);
+    clean
+}
+
+/// Deuda A — project-wide symbols pre-scanned from the entry's DIRECT
+/// imports (one level, matching the codegen loader's `main_imported_*`).
+/// Inherited as a fallback when type-checking each imported module so a
+/// cross-module `@authenticated` / `spawn(<bg>)` / `@live_component`
+/// (declared in one module, wired by the entry) doesn't false-positive
+/// when that module is checked on its own.
+struct ProjectCheckContext {
+    provider: Option<types::ImportedAuthProvider>,
+    background_fns: Vec<String>,
+    live_components: Vec<types::ImportedLiveComponent>,
+}
+
+fn project_check_context(
+    entry_program: &ast::Program,
+    entry_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> ProjectCheckContext {
+    ProjectCheckContext {
+        provider: pre_scan_imported_auth_provider(entry_program, entry_dir, dep_registry),
+        background_fns: pre_scan_imported_background_fns(entry_program, entry_dir, dep_registry),
+        live_components: pre_scan_imported_live_components(entry_program, entry_dir, dep_registry),
+    }
+}
+
+/// Deuda A — type-check an imported module with the project context
+/// inherited as a fallback. The module's own imports win; anything it
+/// doesn't declare/import falls back to `inherited`. Parallel to the
+/// codegen loader's `main_imported_*` fallbacks (W12 auth / B10
+/// background / §9.bb live components). Returns only the checker errors —
+/// the walker owns reporting.
+fn check_program_with_context(
+    program: &ast::Program,
+    path: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+    inherited: &ProjectCheckContext,
+) -> Vec<error::FitzError> {
+    let base_dir = base_dir_for_stub_lookup(path);
+    let mut env = types::TypeEnv::new();
+    let stubs = pyi_loader::load_stubs(program, &base_dir, &mut env);
+    let (mut env, errors) = types::resolve_program_with_env(program, env, Vec::new());
+    pyi_loader::load_callables(&stubs, &mut env);
+    // Provider: the module's own import wins, else the project's.
+    if let Some(provider) = pre_scan_imported_auth_provider(program, &base_dir, dep_registry)
+        .or_else(|| inherited.provider.clone())
+    {
+        env.set_imported_auth_provider(provider);
+    }
+    // Background fns + live components: union of module-local + project.
+    let mut bg = pre_scan_imported_background_fns(program, &base_dir, dep_registry);
+    bg.extend(inherited.background_fns.iter().cloned());
+    if !bg.is_empty() {
+        env.add_imported_background_fns(bg);
+    }
+    let mut live = pre_scan_imported_live_components(program, &base_dir, dep_registry);
+    live.extend(inherited.live_components.iter().cloned());
+    if !live.is_empty() {
+        env.add_imported_live_components(live);
+    }
+    let (_env, _types, _defs, errs) = types::check_with_env(program, env, errors);
+    errs
+}
+
+/// Deuda A — walk the entry's import graph and type-check every
+/// transitively-imported LOCAL classic `.fitz` module with the project
+/// context inherited. Returns `true` when all modules are clean.
+///
+/// - `.fitzv` components are skipped (covered by the a2 sweep + the view
+///   pipeline, which does expand + view-specific checks a plain classic
+///   check would miss).
+/// - External `fitz.toml` deps are skipped (first segment is a registry
+///   key): `build` validates them and their own CI does too.
+/// - A `visited` set keyed by canonical path dedups repeated imports and
+///   terminates on cycles.
+fn check_imported_fitz_modules(
+    entry_program: &ast::Program,
+    entry_path: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> bool {
+    let entry_dir = entry_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let ctx = project_check_context(entry_program, &entry_dir, dep_registry);
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    if let Ok(c) = fs::canonicalize(entry_path) {
+        visited.insert(c);
+    }
+    let mut clean = true;
+    check_imported_modules_walk(
+        entry_program,
+        &entry_dir,
+        &entry_dir,
+        dep_registry,
+        &ctx,
+        &mut visited,
+        &mut clean,
+    );
+    clean
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_imported_modules_walk(
+    program: &ast::Program,
+    base_dir: &std::path::Path,
+    import_root: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+    ctx: &ProjectCheckContext,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    clean: &mut bool,
+) {
+    for stmt in program {
+        let path_segments = match stmt {
+            ast::Stmt::Import { path, .. } | ast::Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                // Skip external deps — `build` validates them; `check`
+                // focuses on the user's own code (no noise from a dep's
+                // internals).
+                if !path.is_empty() && dep_registry.get(&path[0]).is_some() {
+                    continue;
+                }
+                path.clone()
+            }
+            _ => continue,
+        };
+        // Resolve against the importing module's dir, falling back to the
+        // entry dir (a nested module importing a sibling relative to the
+        // project root — parallel to the codegen loader's `import_root`).
+        let file_path =
+            resolve_import_file_path(&path_segments, base_dir, dep_registry).or_else(|| {
+                if base_dir != import_root {
+                    resolve_import_file_path(&path_segments, import_root, dep_registry)
+                } else {
+                    None
+                }
+            });
+        let Some(file_path) = file_path else {
+            // Unresolved import — `run`/`build` will report it; `check`
+            // stays quiet (same silencing policy as the pre-scans).
+            continue;
+        };
+        // `.fitzv` components are covered elsewhere (a2 sweep + view
+        // pipeline). Skip to avoid double-reporting and keep the walk
+        // focused on classic modules (Deuda A).
+        if fitz::view::is_fitzv_extension(&file_path) {
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(&file_path) else {
+            continue;
+        };
+        if !visited.insert(canonical) {
+            // Already checked (dedup) or an import cycle (termination).
+            continue;
+        }
+        let source = match fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error leyendo {}: {}", file_path.display(), e);
+                *clean = false;
+                continue;
+            }
+        };
+        let tokens = match lexer::tokenize(&source) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("✗ {}:", file_path.display());
+                eprintln!("  {}", e);
+                *clean = false;
+                continue;
+            }
+        };
+        let module_program = match parser::parse(tokens) {
+            Ok(p) => p,
+            Err(e) => {
+                // THE repro — a syntax error in an imported module now
+                // fails `fitz check` instead of only `fitz run`.
+                eprintln!("✗ {}:", file_path.display());
+                eprintln!("  {}", e);
+                *clean = false;
+                continue; // no AST to walk further
+            }
+        };
+        // Tier 2 — type-check with the project context inherited.
+        let errors = check_program_with_context(&module_program, &file_path, dep_registry, ctx);
+        if errors.is_empty() {
+            println!("✓ {} — no type errors", file_path.display());
+        } else {
+            eprintln!(
+                "✗ {} — {} type error(s):",
+                file_path.display(),
+                errors.len()
+            );
+            for e in &errors {
+                eprintln!("  {}", e);
+            }
+            *clean = false;
+        }
+        // Recurse into the module's own imports (transitive).
+        let module_dir = file_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        check_imported_modules_walk(
+            &module_program,
+            &module_dir,
+            import_root,
+            dep_registry,
+            ctx,
+            visited,
+            clean,
+        );
     }
 }
 

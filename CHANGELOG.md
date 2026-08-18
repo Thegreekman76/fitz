@@ -9,6 +9,48 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.43.0] — 2026-08-18 — `fitz check` valida los módulos `.fitz` importados (cross-module)
+
+Cierra la **Deuda A**: `fitz check` sobre un proyecto multi-módulo ahora recorre
+el grafo de imports y type-checkea **cada módulo `.fitz` clásico importado** — no
+solo el entry. Antes un error de sintaxis (o de tipos) en un módulo importado
+pasaba `fitz check` limpio y solo explotaba en `fitz run`. Ahora `check` predice
+`build`.
+
+### Arreglado
+
+- **`fitz check` cross-module** — el entry `.fitz` ahora walkea sus imports
+  (transitivo, dep-aware) y corre lexer + parser + checker sobre cada módulo
+  local importado. Un `Err(_) => return,` bare en un `empleados.fitz` importado
+  falla `fitz check` con exit 1 + span exacto (`empleados.fitz:4:21`), en vez de
+  pasar limpio y romper recién en `fitz run`.
+- **Contexto del proyecto heredado** — cada módulo se chequea con el
+  `@auth_provider` / `@background` / `@live_component` pre-escaneados del entry
+  como fallback (paralelo a los `main_imported_*` del loader del codegen: W12 /
+  B10 / §9.bb). Así un handler `@authenticated` en un módulo que no importa el
+  provider directamente (lo cablea el entry, patrón B12) no da un falso positivo
+  "no `@auth_provider` registered".
+
+### Detalles
+
+- **`.fitzv`** se saltean en el walk (los cubre el sweep a2 + el pipeline de
+  view, que hace expand + checks propios). **Deps externas** de `fitz.toml` se
+  saltean (`build` las valida y su propio CI también) — `check` se enfoca en el
+  código del usuario.
+- **Ciclos + dedup**: un `visited` set por path canónico dedupea imports
+  repetidos y termina en ciclos (`a → b → a` no cuelga).
+- **Single-file**: `fitz check foo.fitz` (sin manifest) también valida los
+  imports relativos de `foo.fitz` (registro de deps vacío → resolución
+  sibling-only).
+- **Limpieza de docs**: la entrada stale de `deudas-post-5b.md` sobre la
+  inferencia post-`match Result → Option<String>` queda marcada CERRADA — B16
+  (v0.39.1) la cerró como efecto colateral (los arms divergentes se tipan `Any`
+  y el LUB del match cede al concreto), verificado contra el binario actual.
+- 7 tests cli_e2e nuevos (`deuda_a_check_*`): repro de sintaxis, type error,
+  transitivo, ciclo, single-file, dep-skip, happy-path multi-módulo. Smoke verde
+  sobre `api-orm-full` / `api-orm-full-fullstack` / `api-fullstack-postgres`
+  (multi-módulo, incluye el patrón B12 y subcarpetas).
+
 ## [v0.42.2] — 2026-08-17 — `@every` en un módulo importado compila a binario (`fitz build`)
 
 Cierra la deuda D4 de `@every`: paridad `fitz run` ↔ `fitz build` para un

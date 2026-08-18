@@ -3303,3 +3303,195 @@ fn phase_11_6_e_bb_cross_module_missing_imports_errors_with_hint() {
         "error must include the actionable fix: stderr = {stderr}"
     );
 }
+
+// ===================================================================
+// Deuda A (v0.42.x) — `fitz check` walks the import graph and
+// type-checks every transitively-imported classic `.fitz` module.
+// Before this, a syntax/type error in an imported module passed
+// `fitz check` clean and only blew up at `fitz run`.
+// ===================================================================
+
+/// THE repro — a syntax error in an imported module must fail check.
+#[test]
+fn deuda_a_check_imported_module_syntax_error_exits_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from broken import thing\n\nprint(thing())\n",
+    );
+    // `Err(_) => return,` (a bare `return` as an arm value) is a parse
+    // error — the exact shape that motivated this debt.
+    write_file(
+        &project,
+        "src/broken.fitz",
+        "fn thing() -> Result<Int> {\n  let n = match ok() {\n    Ok(v) => v,\n    Err(_) => return,\n  }\n  return Ok(n)\n}\n\nfn ok() -> Result<Int> => Ok(1)\n",
+    );
+    let (_stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_ne!(
+        code, 0,
+        "a syntax error in an imported module must fail check: {stderr}"
+    );
+    assert!(
+        stderr.contains("broken"),
+        "the check must name the broken module: {stderr}"
+    );
+}
+
+/// Tier 2 — a type error in an imported module must fail check too.
+#[test]
+fn deuda_a_check_imported_module_type_error_exits_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from helpers import go\n\nprint(go())\n",
+    );
+    write_file(
+        &project,
+        "src/helpers.fitz",
+        "fn go() -> Int {\n  let x: Int = \"not an int\"\n  return x\n}\n",
+    );
+    let (_stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_ne!(
+        code, 0,
+        "a type error in an imported module must fail check: {stderr}"
+    );
+    assert!(
+        stderr.contains("helpers"),
+        "the check must name the module: {stderr}"
+    );
+}
+
+/// Transitive depth > 1 — `main -> a -> b`, error in `b`.
+#[test]
+fn deuda_a_check_transitive_imported_error_exits_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from a import fa\n\nprint(fa())\n",
+    );
+    write_file(
+        &project,
+        "src/a.fitz",
+        "from b import fb\n\nfn fa() -> Int => fb()\n",
+    );
+    write_file(
+        &project,
+        "src/b.fitz",
+        "fn fb() -> Int {\n  let x: Int = \"bad\"\n  return x\n}\n",
+    );
+    let (_stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_ne!(code, 0, "a transitive error must fail check: {stderr}");
+    assert!(
+        stderr.contains("b.fitz"),
+        "the check must name the deep module: {stderr}"
+    );
+}
+
+/// An import cycle (`a -> b -> a`) with valid bodies must TERMINATE
+/// (no infinite loop) and exit 0.
+#[test]
+fn deuda_a_check_import_cycle_terminates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from a import fa\n\nprint(fa())\n",
+    );
+    write_file(
+        &project,
+        "src/a.fitz",
+        "from b import fb\n\nfn fa() -> Int => 1\n",
+    );
+    write_file(
+        &project,
+        "src/b.fitz",
+        "from a import fa\n\nfn fb() -> Int => 2\n",
+    );
+    let (_stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(
+        code, 0,
+        "a cycle with valid bodies must terminate cleanly: {stderr}"
+    );
+}
+
+/// Explicit single-file `fitz check foo.fitz` (no manifest) also
+/// validates relative sibling imports (empty dep registry).
+#[test]
+fn deuda_a_check_single_file_checks_relative_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_file(
+        dir,
+        "main.fitz",
+        "from broken import thing\n\nprint(thing())\n",
+    );
+    write_file(dir, "broken.fitz", "fn thing( -> Int {\n  return 1\n}\n");
+    let (_stdout, stderr, code) = run_fitz(&["check", "main.fitz"], dir);
+    assert_ne!(
+        code, 0,
+        "explicit single-file check must validate relative imports: {stderr}"
+    );
+    assert!(
+        stderr.contains("broken"),
+        "the check must name the module: {stderr}"
+    );
+}
+
+/// External `fitz.toml` deps are NOT deep-checked — `build` validates
+/// them and their own CI does too, so a dep's internal error must not
+/// fail `fitz check` on the consuming app.
+#[test]
+fn deuda_a_check_ignores_errors_inside_external_dep() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "utilslib", "--no-git"], tmp.path());
+    let lib_dir = tmp.path().join("utilslib");
+    convert_to_lib(&lib_dir, "utilslib", "0.1.0");
+    // A type error INTERNAL to the dep (not in helper's signature).
+    write_file(
+        &lib_dir,
+        "src/lib.fitz",
+        "fn helper(x: Int) -> Int => x + 1\n\nlet bad: Int = \"type error inside the dep\"\n",
+    );
+    let _ = run_fitz(&["new", "app", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("app");
+    add_path_dep(&app_dir, "app", "utilslib", "../utilslib");
+    write_file(
+        &app_dir,
+        "src/main.fitz",
+        "from utilslib import helper\n\nprint(helper(1))\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["check"], &app_dir);
+    assert_eq!(
+        code, 0,
+        "external dep errors must NOT fail check: {stderr}\n{stdout}"
+    );
+}
+
+/// The happy path — a clean multi-module project reports every module
+/// as checked and exits 0 (regression guard: the walk must not
+/// false-positive on cross-module imports).
+#[test]
+fn deuda_a_check_clean_multi_module_reports_all_and_exits_0() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from a import fa\nfrom b import fb\n\nprint(fa() + fb())\n",
+    );
+    write_file(&project, "src/a.fitz", "fn fa() -> Int => 1\n");
+    write_file(&project, "src/b.fitz", "fn fb() -> Int => 2\n");
+    let (stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(code, 0, "clean project must pass: {stderr}");
+    assert!(
+        stdout.contains("a.fitz") && stdout.contains("b.fitz"),
+        "the walk must report every imported module as checked: {stdout}"
+    );
+}

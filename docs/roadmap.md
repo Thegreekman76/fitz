@@ -6051,11 +6051,15 @@ directorio actual o en padres (Cargo-style).
   `<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre
   del paquete (NO el stem del fuente). Con argumento explícito
   sigue copiando adyacente al `.fitz` (comportamiento pre-9.y.2).
-- **`fitz check`** sin argumentos: chequea el `[bin].main`. El
-  loader walks los `import`s transitivamente, así que la cobertura
-  del checker llega a todo el proyecto vía el grafo de módulos.
-  Auto-discovery de archivos sueltos (`*.fitz` no importados) es
-  deuda menor.
+- **`fitz check`** sin argumentos: chequea el `[bin].main`.
+  **(Corregido en v0.43.0 / Deuda A, 2026-08-18)**: originalmente
+  `fitz check` chequeaba SOLO el entry — el loader de `run`/`build`
+  sí walkea imports, pero el path de `check` NO lo hacía, así que un
+  error de sintaxis/tipos en un módulo importado pasaba limpio. Desde
+  v0.43.0 el check también recorre el grafo de imports transitivamente
+  y type-checkea cada módulo `.fitz` local (con el contexto del
+  proyecto heredado, sin false positives B12). Auto-discovery de
+  archivos sueltos (`*.fitz` no importados) sigue siendo deuda menor.
 
 #### Decisiones técnicas tomadas
 
