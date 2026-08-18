@@ -462,6 +462,109 @@ fn ssr_slot_shape(component: &ExpandedComponent) -> SsrSlotShape {
     shape
 }
 
+/// SSR-C (named slots) — fold `-` to `_` so a slot name is a legal Fitz
+/// identifier backing param. Mirrors the WASM `sanitize_slot_ident`.
+fn ssr_sanitize_slot_ident(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// SSR-C — the render-fn param that backs a named `<slot name="X" />`
+/// (`__slot_X`). The default slot uses the bare `__slot` (see
+/// [`ssr_slot_params`]). Mirrors the WASM `slot_field_name`.
+fn ssr_slot_field_name(name: &str) -> String {
+    format!("__slot_{}", ssr_sanitize_slot_ident(name))
+}
+
+/// SSR-C — the ordered slot params of a component's `_render` fn:
+/// `__slot` (when a default `<slot />` exists) first, then `__slot_<name>`
+/// per named slot in declaration order. BOTH the render-fn signature
+/// (child side, [`emit_render_fn`]) and the composition call (parent
+/// side, [`format_child_composition`]) derive their arg order from this,
+/// so positional args stay aligned. Each carries `Option<name>` (`None` =
+/// the default slot) so the parent can route its buckets.
+fn ssr_slot_params(shape: &SsrSlotShape) -> Vec<(String, Option<String>)> {
+    let mut v = Vec::new();
+    if shape.has_default {
+        v.push(("__slot".to_string(), None));
+    }
+    for n in &shape.named {
+        v.push((ssr_slot_field_name(n), Some(n.clone())));
+    }
+    v
+}
+
+/// SSR-C — validate a component's named slots: each must be a legal Fitz
+/// identifier after folding `-` to `_`, and two names must not collide on
+/// the same backing param (`side-bar` vs `side_bar`). Mirrors the WASM
+/// `validate_slot_set`.
+fn ssr_validate_slot_set(shape: &SsrSlotShape, component_name: &str) -> SsrEmitResult<()> {
+    let mut seen: Vec<String> = Vec::new();
+    for n in &shape.named {
+        let ident = ssr_sanitize_slot_ident(n);
+        let legal = !ident.is_empty()
+            && ident
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !legal {
+            return Err(SsrEmitError {
+                message: format!(
+                    "named slot `{n}` folds to `{ident}`, which is not a legal Fitz \
+                     identifier (a slot name must be alphanumeric + `_`/`-`, not \
+                     starting with a digit)."
+                ),
+                context: format!("component `{component_name}` template"),
+            });
+        }
+        if seen.contains(&ident) {
+            return Err(SsrEmitError {
+                message: format!(
+                    "two named slots fold to the same backing param `__slot_{ident}` \
+                     (e.g. `side-bar` and `side_bar`). Rename one so they don't collide."
+                ),
+                context: format!("component `{component_name}` template"),
+            });
+        }
+        seen.push(ident);
+    }
+    Ok(())
+}
+
+/// SSR-C — read the `slot="X"` routing attribute off a parent's slot-fill
+/// element (`<div slot="header">...</div>`). `None` when the element has
+/// no `slot` attr (routes to the default slot). Mirrors the WASM
+/// `element_slot_attr`.
+fn ssr_element_slot_attr(node: &ExpandedTemplateNode) -> Option<&str> {
+    if let ExpandedTemplateNode::Element { attrs, .. } = node {
+        for a in attrs {
+            if let ExpandedAttr::Static { name, value, .. } = a {
+                if name == "slot" {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// SSR-C — clone `node` without its `slot="X"` attribute (a routing
+/// directive, not real DOM content). Mirrors the WASM `strip_slot_attr`.
+fn ssr_strip_slot_attr(node: &ExpandedTemplateNode) -> ExpandedTemplateNode {
+    let mut cloned = node.clone();
+    if let ExpandedTemplateNode::Element { attrs, .. } = &mut cloned {
+        attrs.retain(|a| !matches!(a, ExpandedAttr::Static { name, .. } if name == "slot"));
+    }
+    cloned
+}
+
+/// SSR-C — whitespace-only text node (incidental formatting between tags).
+/// Used so incidental whitespace in slot content doesn't force a default
+/// `<slot />`. Mirrors the WASM `is_whitespace_text`.
+fn ssr_is_whitespace_text(node: &ExpandedTemplateNode) -> bool {
+    matches!(node, ExpandedTemplateNode::Text(t) if t.trim().is_empty())
+}
+
 /// Emit one component's classic Fitz source. Rarely useful in
 /// isolation — [`emit_module_ssr`] is the entry point. Kept
 /// pub so tests can exercise single-component fixtures without
@@ -641,38 +744,27 @@ fn emit_render_fn(
 ) -> SsrEmitResult<()> {
     let state_field_names: Vec<&str> = component.state.iter().map(|f| f.name.as_str()).collect();
 
-    // Phase 11.12 SSR-4 — a component that declares a default `<slot />` renders
-    // parent-provided slot content, threaded in as a `__slot: Str` parameter
-    // (the parent computes the slot HTML in its own scope and passes it at the
-    // composition site). Named slots need one `__slot_<name>` param each — a
-    // later slice; reject for now.
+    // Phase 11.12 SSR-4 + SSR-C — a component's default `<slot />` and each
+    // named `<slot name="X" />` are threaded into the render fn as positional
+    // `Str` params (`__slot`, then `__slot_<name>` per named slot in
+    // declaration order — see `ssr_slot_params`). The parent computes each
+    // slot's HTML in its own scope and passes it at the composition site. Named
+    // slots were client-WASM only until SSR-C ported the model here.
     let slots = ssr_slot_shape(component);
-    if !slots.named.is_empty() {
-        return Err(SsrEmitError {
-            message: "named `<slot name=\"...\" />` is a client-WASM (`target = \
-                      \"wasm-client\"`) capability; SSR support is a later slice. Use a \
-                      single default `<slot />`."
-                .to_string(),
-            context: format!("component `{}` template", component.name),
-        });
-    }
+    ssr_validate_slot_set(&slots, &component.name)?;
+    let slot_params = ssr_slot_params(&slots);
 
     writeln!(out, "@render_for(\"{}\")", component.name).unwrap();
-    if slots.has_default {
-        writeln!(
-            out,
-            "fn {}_render(state: {}, __slot: Str) -> Html {{",
-            component.name, component.name
-        )
-        .unwrap();
-    } else {
-        writeln!(
-            out,
-            "fn {}_render(state: {}) -> Html {{",
-            component.name, component.name
-        )
-        .unwrap();
+    write!(
+        out,
+        "fn {}_render(state: {}",
+        component.name, component.name
+    )
+    .unwrap();
+    for (field, _) in &slot_params {
+        write!(out, ", {field}: Str").unwrap();
     }
+    writeln!(out, ") -> Html {{").unwrap();
 
     let mut pieces: Vec<TemplatePiece> = Vec::new();
 
@@ -1693,24 +1785,23 @@ fn emit_template_node_to_pieces(
             );
             Ok(())
         }
-        // Phase 11.12 SSR-4 — a default `<slot />` renders the parent-provided
-        // slot content, threaded in as the `__slot: Str` render-fn parameter.
-        // With a fallback, `if (__slot == "") { <fallback> } else { __slot }`
-        // paints the child's own fallback only when the parent passed nothing
-        // (a self-closing `<Child />` passes `""`), mirroring the WASM
-        // `emit_slot` (`__slot None` → fallback). Named slots are rejected in
-        // `emit_render_fn` before we get here.
+        // Phase 11.12 SSR-4 + SSR-C — a `<slot />` (default) or `<slot
+        // name="X" />` (named) renders parent-provided content, threaded in as
+        // the `__slot` / `__slot_X` render-fn param. With a fallback,
+        // `if (<param> == "") { <fallback> } else { <param> }` paints the
+        // child's own fallback only when the parent passed nothing (a
+        // self-closing `<Child />` passes `""`), mirroring the WASM `emit_slot`.
         ExpandedTemplateNode::Slot { name, fallback, .. } => {
-            if name.is_some() {
-                return Err(SsrEmitError {
-                    message: "named `<slot name=\"...\" />` is a client-WASM (`target = \
-                              \"wasm-client\"`) capability; SSR support is a later slice."
-                        .to_string(),
-                    context: format!("component `{}` template", component.name),
-                });
-            }
+            // SSR-C — the default `<slot />` reads the `__slot` param; a named
+            // `<slot name="X" />` reads its own `__slot_X` param. The parent
+            // passes `""` for a slot it doesn't fill, so the child falls back to
+            // its own `<slot>` fallback (or an empty string when self-closing).
+            let field = match name {
+                None => "__slot".to_string(),
+                Some(n) => ssr_slot_field_name(n),
+            };
             if fallback.is_empty() {
-                pieces.push(TemplatePiece::Expr("__slot".to_string()));
+                pieces.push(TemplatePiece::Expr(field));
             } else {
                 // The fallback belongs to the CHILD, so it renders in the child's
                 // scope (the same `state_field_names` / `local_scope` /
@@ -1728,7 +1819,7 @@ fn emit_template_node_to_pieces(
                 )?;
                 let fb_src = serialize_pieces_as_html_arg(&fb);
                 pieces.push(TemplatePiece::Expr(format!(
-                    "if (__slot == \"\") {{ {fb_src} }} else {{ __slot }}"
+                    "if ({field} == \"\") {{ {fb_src} }} else {{ {field} }}"
                 )));
             }
             Ok(())
@@ -1785,15 +1876,66 @@ fn emit_template_node_to_pieces(
                     context: format!("component `{}` template", component.name),
                 })?;
 
-            // Phase 11.12 SSR-4 — slot fill (`<Child>content</Child>`) inlines
-            // the parent-provided content at the child's default `<slot />`. The
-            // content is rendered in the PARENT's scope (its state fields + event
-            // handlers → `data-flv-*`) and passed to the child render fn as the
-            // `__slot: Str` argument. A child with no default `<slot />` can't
-            // receive content — reject (the checker already guards this, but keep
-            // a targeted emit-time message).
+            // Phase 11.12 SSR-4 + SSR-C — slot fill (`<Child>content</Child>`)
+            // inlines the parent-provided content at the child's slots. Content
+            // is rendered in the PARENT's scope (its state fields + event
+            // handlers → `data-flv-*`) and passed to the child render fn as
+            // positional `Str` args (`__slot` for the default, `__slot_<name>`
+            // for each named `<slot name="X" />` the parent fills via
+            // `<... slot="X">`).
             let child_slots = ssr_slot_shape(child);
-            if !slot_content.is_empty() && !child_slots.has_default {
+            // SSR-C — partition the parent-provided slot content by the
+            // `slot="X"` routing attribute: elements with `slot="X"` fill the
+            // child's named `<slot name="X" />`, the rest fills the default
+            // `<slot />`. With NO `slot="X"` anywhere, everything goes to the
+            // default (byte-identical to the pre-SSR-C 11.7.d path).
+            let has_named_routing = slot_content
+                .iter()
+                .any(|n| ssr_element_slot_attr(n).is_some());
+            let mut default_bucket: Vec<ExpandedTemplateNode> = Vec::new();
+            let mut named_buckets: Vec<(String, Vec<ExpandedTemplateNode>)> = Vec::new();
+            if has_named_routing {
+                for node in slot_content {
+                    if let Some(slot_name) = ssr_element_slot_attr(node) {
+                        if !child_slots.named.iter().any(|n| n == slot_name) {
+                            return Err(SsrEmitError {
+                                message: format!(
+                                    "`slot=\"{slot_name}\"` on content for `<{name} />` — \
+                                     component `{name}` declares no `<slot \
+                                     name=\"{slot_name}\" />`. Declared named slots: {}.",
+                                    if child_slots.named.is_empty() {
+                                        "(none)".to_string()
+                                    } else {
+                                        child_slots.named.join(", ")
+                                    }
+                                ),
+                                context: format!("component `{}` template", component.name),
+                            });
+                        }
+                        let stripped = ssr_strip_slot_attr(node);
+                        if let Some(entry) = named_buckets.iter_mut().find(|(n, _)| n == slot_name)
+                        {
+                            entry.1.push(stripped);
+                        } else {
+                            named_buckets.push((slot_name.to_string(), vec![stripped]));
+                        }
+                    } else {
+                        default_bucket.push(node.clone());
+                    }
+                }
+            } else {
+                default_bucket = slot_content.to_vec();
+            }
+            // Default content (non-whitespace) needs the child to declare a
+            // default `<slot />`; incidental whitespace between named-routed
+            // elements doesn't. Without named routing this reduces to the
+            // pre-SSR-C guard (`slot_content` non-empty → needs default slot).
+            let default_has_content = if has_named_routing {
+                default_bucket.iter().any(|n| !ssr_is_whitespace_text(n))
+            } else {
+                !default_bucket.is_empty()
+            };
+            if default_has_content && !child_slots.has_default {
                 return Err(SsrEmitError {
                     message: format!(
                         "slot content `<{name}>...</{name}>` — component `{name}` declares \
@@ -1804,13 +1946,24 @@ fn emit_template_node_to_pieces(
                     context: format!("component `{}` template", component.name),
                 });
             }
-            // When the child declares a default `<slot />`, always pass a slot
-            // argument (possibly `""` for a self-closing `<Child />`, so the
-            // child falls back to its own `<slot>` fallback).
-            let slot_arg: Option<String> = if child_slots.has_default {
+            // Render each of the child's slots (default + named, in
+            // `ssr_slot_params` order) in the PARENT's scope, serialize to a
+            // `Str`, or `""` when the parent doesn't fill it (the child then
+            // renders its own `<slot>` fallback).
+            let slot_params = ssr_slot_params(&child_slots);
+            let mut slot_args: Vec<String> = Vec::new();
+            for (_, name_opt) in &slot_params {
+                let bucket: &[ExpandedTemplateNode] = match name_opt {
+                    None => &default_bucket,
+                    Some(n) => named_buckets
+                        .iter()
+                        .find(|(bn, _)| bn == n)
+                        .map(|(_, c)| c.as_slice())
+                        .unwrap_or(&[]),
+                };
                 let mut sp: Vec<TemplatePiece> = Vec::new();
                 emit_children_to_pieces(
-                    slot_content,
+                    bucket,
                     state_field_names,
                     local_scope,
                     imported_names,
@@ -1819,10 +1972,8 @@ fn emit_template_node_to_pieces(
                     in_region,
                     &mut sp,
                 )?;
-                Some(serialize_pieces_as_html_arg(&sp))
-            } else {
-                None
-            };
+                slot_args.push(serialize_pieces_as_html_arg(&sp));
+            }
 
             let expr_src = format_child_composition(
                 child,
@@ -1831,7 +1982,7 @@ fn emit_template_node_to_pieces(
                 state_field_names,
                 local_scope,
                 imported_names,
-                slot_arg.as_deref(),
+                &slot_args,
             )?;
 
             // Phase 11.12 SSR-4 — a hydratable parent wraps the child render in
@@ -2025,11 +2176,13 @@ fn format_child_composition(
     parent_state_field_names: &[&str],
     parent_local_scope: &[&str],
     parent_imported_names: &[&str],
-    // Phase 11.12 SSR-4 — the parent-rendered slot content, as a serialized
-    // classic-Fitz `Str` expression, when the child declares a default
-    // `<slot />` (passed as the second `__slot` render-fn argument). `None`
-    // when the child has no slot (byte-identical to the pre-SSR-4 call shape).
-    slot_arg: Option<&str>,
+    // Phase 11.12 SSR-4 + SSR-C — the parent-rendered slot content: one
+    // serialized classic-Fitz `Str` expression per slot the child declares,
+    // in `ssr_slot_params` order (default `__slot` first, then each
+    // `__slot_<name>`). Appended as positional args after the state struct.
+    // Empty when the child has no slots (byte-identical to the pre-SSR-4 call
+    // shape).
+    slot_args: &[String],
 ) -> SsrEmitResult<String> {
     let child_name = &child.name;
     let mut out = format!("{child_name}_render({child_name} {{");
@@ -2088,9 +2241,9 @@ fn format_child_composition(
     // declared defaults) and `Child { count: 42, msg: "hi" }`
     // (some props supplied).
     out.push_str(" }");
-    // SSR-4: append the `__slot` argument for a child that declares a
-    // default `<slot />`.
-    if let Some(sa) = slot_arg {
+    // SSR-4 + SSR-C: append one positional arg per declared slot (default +
+    // named), in `ssr_slot_params` order — aligned with the render fn's params.
+    for sa in slot_args {
         out.push_str(", ");
         out.push_str(sa);
     }
@@ -3852,16 +4005,133 @@ component Card {
         );
     }
 
-    // Phase 11.12 SSR-4 — named slots are still deferred on the SSR target.
+    // SSR-C — a component declaring a named `<slot name="X" />` gets a
+    // positional `__slot_X: Str` render-fn param (after the default `__slot`
+    // if present), and its `<slot name="X" />` reads that param.
     #[test]
-    fn ssr4_named_slot_rejected() {
-        let src = r#"component X {
+    fn ssrc_named_slot_emits_param_and_reads_it() {
+        let src = r#"component Card {
   state {}
-  <template><div><slot name="header" /></div></template>
+  <template>
+    <section>
+      <h2><slot name="header" /></h2>
+      <div><slot /></div>
+      <footer><slot name="actions" /></footer>
+    </section>
+  </template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("emit");
+        // Signature: default `__slot` first, then named in declaration order.
+        assert!(
+            out.contains(
+                "fn Card_render(state: Card, __slot: Str, __slot_header: Str, __slot_actions: Str) -> Html"
+            ),
+            "render fn signature must thread all slot params in order:\n{out}"
+        );
+        // Each named slot reads its own param.
+        assert!(
+            out.contains("__slot_header") && out.contains("__slot_actions"),
+            "named slot bodies must read their params:\n{out}"
+        );
+    }
+
+    // SSR-C — a named `<slot name="X">fallback</slot>` emits the
+    // `if (__slot_X == "") { <fallback> } else { __slot_X }` shape.
+    #[test]
+    fn ssrc_named_slot_with_fallback() {
+        let src = r#"component Card {
+  state {}
+  <template><section><slot name="title">Untitled</slot></section></template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("emit");
+        assert!(
+            out.contains("if (__slot_title == \"\")"),
+            "named slot fallback must guard on the named param:\n{out}"
+        );
+    }
+
+    // SSR-C — a parent routes `<X slot="name">` content to the child's named
+    // slot and un-routed content to the default, passing all as positional
+    // args in `ssr_slot_params` order.
+    #[test]
+    fn ssrc_parent_routes_named_and_default_slots() {
+        let src = r#"component Card {
+  state {}
+  <template>
+    <section>
+      <h2><slot name="header" /></h2>
+      <div><slot /></div>
+    </section>
+  </template>
+}
+component App {
+  state {}
+  <template>
+    <div>
+      <Card>
+        <span slot="header">Hello</span>
+        <p>body</p>
+      </Card>
+    </div>
+  </template>
+}"#;
+        let file = parse_expand(src);
+        let out = emit_module_ssr(&file).expect("emit");
+        // The composition call passes the default arg then the header arg.
+        assert!(
+            out.contains("Card_render(Card { }, "),
+            "composition must call Card_render with slot args:\n{out}"
+        );
+        // Header content routed to the named slot, body to the default —
+        // both rendered in the parent's scope.
+        assert!(
+            out.contains("Hello") && out.contains("body"),
+            "both routed contents must appear:\n{out}"
+        );
+        // The header content is NOT dropped into the default (the `slot=`
+        // attr is stripped, so no `slot="header"` leaks into the output).
+        assert!(
+            !out.contains("slot=\"header\""),
+            "the routing attr must be stripped from the emitted DOM:\n{out}"
+        );
+    }
+
+    // SSR-C — `slot="X"` for a slot the child doesn't declare is rejected.
+    #[test]
+    fn ssrc_unknown_named_slot_rejected() {
+        let src = r#"component Card {
+  state {}
+  <template><section><slot name="header" /></section></template>
+}
+component App {
+  state {}
+  <template><div><Card><span slot="footer">x</span></Card></div></template>
 }"#;
         let file = parse_expand(src);
         let err = emit_module_ssr(&file).unwrap_err();
-        assert!(err.message.contains("named"), "msg: {}", err.message);
+        assert!(
+            err.message.contains("footer") && err.message.contains("header"),
+            "error must name the unknown slot and list the declared ones: {}",
+            err.message
+        );
+    }
+
+    // SSR-C — two named slots that fold to the same backing param collide.
+    #[test]
+    fn ssrc_named_slot_ident_collision_rejected() {
+        let src = r#"component Card {
+  state {}
+  <template><section><slot name="side-bar" /><slot name="side_bar" /></section></template>
+}"#;
+        let file = parse_expand(src);
+        let err = emit_module_ssr(&file).unwrap_err();
+        assert!(
+            err.message.contains("__slot_side_bar"),
+            "error must name the colliding backing param: {}",
+            err.message
+        );
     }
 
     // Phase 11.12 SSR-4 — the full composition shape: a hydratable root `App`

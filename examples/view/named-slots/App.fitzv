@@ -19,9 +19,12 @@
 //   - Slot names fold hyphens to `_` for the backing field; two names
 //     that collide (`side-bar` vs `side_bar`) are rejected at compile.
 //
+// Since v0.43.0 (SSR-C) named slots also work on the SSR target — the
+// `<slot name="X" />` model was ported to the SSR emitter, so this same
+// source compiles to both `wasm-client` and SSR.
+//
 // MVP LIMIT (unchanged from 11.7.d): slot content can't itself contain a
-// `<Child />`, and the SSR target still rejects slots entirely (this is a
-// client-WASM capability).
+// `<Child />`.
 
 component App {
   state {

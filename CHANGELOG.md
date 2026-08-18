@@ -9,6 +9,38 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.44.0] — 2026-08-18 — Named slots en el emitter SSR (`.fitzv` paridad WASM↔SSR)
+
+Cierra la **Deuda C**: el emitter SSR de `.fitzv` ahora soporta **named slots**
+(`<slot name="X" />` + `slot="X"` del padre), que el target client-WASM tenía
+desde v0.24.0 pero el SSR **detectaba y rechazaba** ("named slot is client-WASM
+only"). El mismo `.fitzv` con named slots ahora compila a los dos targets.
+
+### Agregado
+
+- **`<slot name="X" />` en SSR** — un componente con named slots emite un param
+  posicional `__slot_<name>: Str` por cada uno (tras el `__slot` del default, en
+  orden de declaración — `ssr_slot_params` fija el orden y lo comparten la firma
+  del render fn y la llamada del padre). El padre rutea contenido con
+  `<... slot="X">` al named slot correspondiente y el resto al default; el
+  atributo `slot="X"` se strippea del DOM emitido. Un slot que el padre no llena
+  pasa `""` → el hijo pinta su propio fallback (`<slot name="X">fallback</slot>`).
+- Modelo portado 1:1 del WASM (`slot_field_name` / `element_slot_attr` /
+  `strip_slot_attr` / `validate_slot_set`), mantenido local en `codegen_ssr.rs`
+  con prefijo `ssr_` (misma política que `ssr_slot_shape`).
+
+### Detalles
+
+- **Validación**: `slot="X"` para un slot que el hijo no declara → error que
+  nombra el slot desconocido + lista los declarados. Dos named slots que foldean
+  al mismo backing param (`side-bar` vs `side_bar`) → error de colisión.
+- **Byte-compat**: el path **sin** `slot="X"` (default slot solo, o composición
+  sin slots) queda **byte-idéntico** al 11.7.d/SSR-4 — con named routing ausente,
+  todo el contenido va al default como antes. Los 6 tests `ssr4_*` siguen verdes;
+  el `examples/view/` no regenera (el cambio es SSR, no toca el emitter WASM).
+- 5 tests SSR-C nuevos (`ssrc_*`): emisión del param + lectura, fallback,
+  ruteo padre named+default, slot desconocido rechazado, colisión de identificador.
+
 ## [v0.43.0] — 2026-08-18 — `fitz check` valida los módulos `.fitz` importados (cross-module)
 
 Cierra la **Deuda A**: `fitz check` sobre un proyecto multi-módulo ahora recorre

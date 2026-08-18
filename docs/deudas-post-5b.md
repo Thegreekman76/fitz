@@ -211,8 +211,14 @@ para próximas iteraciones.
    (hidratación universal vs opt-in). El `index.html` de los demos sigue como
    referencia clean/tight; el smoke Chrome sirve el HTML generado real. **Cierra
    Fase 11.12 entera.** Deudas residuales NUEVAS de SSR-4 (ninguna bloquea):
-   (a) **named slots en SSR** (`<slot name="X">`) diferidos con puntero claro —
-   requieren un `__slot_<name>` param por slot; el demo usa solo el slot default;
+   (a) **named slots en SSR** (`<slot name="X">`) — 🟢 **CERRADO (v0.44.0, Deuda C,
+   2026-08-18)**: el modelo `__slot_<name>` del WASM se portó al emitter SSR —
+   helpers locales `ssr_slot_field_name`/`ssr_element_slot_attr`/
+   `ssr_strip_slot_attr`/`ssr_validate_slot_set`, un param posicional `Str` por
+   slot en `ssr_slot_params` order (default `__slot` primero), partición del
+   contenido del padre por `slot="X"` (resto → default), `slot="X"` desconocido /
+   colisión de identificador rechazados. El path sin named routing queda
+   byte-idéntico (los 6 `ssr4_*` verdes). 5 tests `ssrc_*`;
    (b) **`<Child />` anidado dentro de slot content** — recurre por el mismo path
    pero sin test/ejemplo dedicado; (c) **caveat naive** — un cambio de state
    re-renderiza el árbol wholesale, así que el nodo del hijo adoptado se
