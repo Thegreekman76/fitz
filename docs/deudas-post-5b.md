@@ -6923,15 +6923,19 @@ con relations virtuales declarados en módulos.
   del trait bound `__ToFitzJson`, hay deudas residuales menores
   derivadas de esa exploración:
   - **Forward refs en `@has_many("Target")` con Target declarado
-    después en el mismo módulo**: rompen el codegen ORM cuando
-    el codegen emite navigation method al procesar el type.
-    El ejemplo `31-orm.fitz` evita el caso porque no invoca
-    navigation directamente — solo declara las relations. Caso
-    confirmado en mi exploración: `type User { ... @has_many
-    Post ... } type Post { ... }` falla con "type Post no
-    registrado en TypeEnv" si el codegen intenta resolver el
-    target. **Workaround**: declarar Target ANTES de User, y
-    los companion fields (`user: User?`) backward-ref a User.
+    después en el mismo módulo** — 🟢 **CERRADO (stale, verificado
+    2026-08-18 contra v0.46.0)**: la nota (de la exploración W17,
+    2026-05-28) decía que `type User { @has_many Post } type Post
+    {}` rompía el codegen ("type Post no registrado en TypeEnv") al
+    emitir el navigation method. **Ya no pasa**: repro-confirmado
+    stale en 3 variantes — single-file con `.preload("posts")`,
+    single-file con navigation `u.posts(db)`, y 3-archivos (forward
+    ref + navigation dentro de un módulo importado) — TODAS compilan
+    a binario. Algún fix intermedio del ORM lo cerró (el
+    `pre_register_types` del codegen + `resolve_program` del checker
+    registran todos los types antes de emitir, así que un forward
+    ref same-module resuelve). Entrada marcada CERRADA en la
+    limpieza de docs junto con #1/#2 del lote ORM de v0.46.0.
   - **Importar TODOS los `@table` types al módulo que usa
     cualquier uno** — 🟢 **CERRADO (v0.45.0, 2026-08-18)**: el
     codegen validaba ALL los targets de relations al procesar un
@@ -6967,6 +6971,16 @@ con relations virtuales declarados en módulos.
     `.preload` en el intérprete (no existe — feature grande, no un fix
     chico). Residual menor: colisión de `@table` homónimos cross-módulo
     (first-writer-wins).
+
+- ⚠️ **`Type.first(db)` estático no existe en el intérprete** (deuda menor,
+  descubierta 2026-08-18 al repro-confirmar v0.46.0). `fitz run` acepta
+  `User.all(db)` y `User.where(...).first(db)` pero NO `User.first(db)`
+  directo (error: "type `User` has no static method named `first`"),
+  mientras el codegen (`fitz build`) sí lo soporta. Discrepancia
+  intérprete↔codegen chica. Workaround: `User.where(fn(x) => true).first(db)`
+  o `User.all(db)` + index. Fix: agregar el dispatch de `.first` (y quizás
+  `.count`/`.sum`/etc. si faltan) como método estático sobre `@table` types
+  en el evaluator, paralelo a `.all`.
 
 - ⚠️ **`Map<Str, Any>` en HTTP response de handlers cross-module**.
   El handler que retorna `Map<Str, Any>` (caso típico GROUP BY +
