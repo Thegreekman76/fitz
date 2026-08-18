@@ -9,6 +9,45 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.46.0] — 2026-08-18 — ORM cross-module: navigation methods en `fitz run` (paridad con el codegen)
+
+Cierra la deuda paralela documentada en v0.45.0: un navigation method
+(`user.posts(db)`) de un `@has_many`/`@has_one`/`@belongs_to` sobre un `@table`
+type importado ya funciona en `fitz run` sin exigir importar el target type
+explícitamente. Antes `from models import User` + `user.posts(db)` (con
+`@has_many("Post")`) fallaba con `navigation: type 'Post' referenced by the
+relation is not defined`; el workaround era `from models import User, Post`.
+El codegen (`fitz build`) ya lo resolvía desde v0.45.0 — esto trae la paridad
+al intérprete.
+
+### Arreglado
+
+- **Navigation ORM cross-module en `fitz run`** — cuando el target de una
+  relation no está en el env del módulo llamador (import parcial), el intérprete
+  ahora lo resuelve desde un **registro global de `@table` types** (nombre →
+  fields + `TableMetadata`) poblado en `Stmt::TypeDef` durante el eval. No-op
+  cuando el target SÍ está importado.
+
+### Detalles
+
+- **Por qué global y no el LOADER thread-local**: los handlers HTTP corren en
+  **worker threads** de tokio, que NO heredan thread-locals — el `LOADER` es
+  `None` ahí. El registro global (`OnceLock<Mutex<...>>`, poblado en el main
+  thread durante el eval, visible desde todos los threads) es el mismo patrón
+  que el codebase ya usa para `@background` (`install_background_registry`) y
+  `ws_broadcast`. Validado a mano: navigation en un handler HTTP (worker thread)
+  con import parcial devuelve 200 correcto.
+- **Alcance**: navigation methods (`user.posts(db)`, `post.author(db)`). `.preload`
+  NO existe en el intérprete (feature grande, sigue fuera de scope). Runtime
+  analogue del `auto_register_relation_targets` del codegen (resuelve on-demand
+  por navegación en vez de pre-registrar; suficiente porque cada navigation es
+  un solo hop).
+- **Deuda residual**: el registro es por nombre — dos `@table` types homónimos
+  en módulos distintos colisionan (first-writer-wins; raro, los model names
+  suelen ser únicos). Paralelo a la limitación del registro del codegen.
+- Test E2E real Postgres `orm_navigation_cross_module_v046` (`#[ignore]`,
+  opt-in con `FITZ_TEST_PG_URL`): import solo `User`, `u.posts(db)` cross-module.
+
 ## [v0.45.0] — 2026-08-18 — ORM cross-module: auto-resolución de relation targets en `fitz build`
 
 Cierra la deuda residual de W17 (v0.10.7): un `.preload("relation")` (o navigation

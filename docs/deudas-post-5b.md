@@ -6949,12 +6949,24 @@ con relations virtuales declarados en módulos.
     a main + módulos. El loader ya tenía `Post` completo (fields
     + metadata); solo faltaba el `TypeId`. `TypeEnv` gana `Clone`.
     2 E2E (`cross_module_orm_preload_auto_registers_target_in_{main,module}_v045`).
-    **Deuda paralela abierta (NO cerrada por este fix)**: `fitz run`
-    (intérprete) tiene un gap análogo por otra vía — resuelve el
-    relation target desde el value-env en runtime (`orm_instance_navigate`,
-    `env.get(target_type)` con solo User en scope) y NO implementa
-    `.preload`. Fix futuro sugerido: fallback al env del módulo
-    definidor (el `Value::Type` de User sabe su módulo).
+    **Deuda paralela — 🟢 CERRADA (v0.46.0, 2026-08-18)** para navigation
+    methods: `fitz run` resolvía el relation target desde el value-env
+    (`orm_instance_navigate`, `env.get(target_type)`) y con solo `User`
+    importado fallaba con "type Post referenced by the relation is not
+    defined". **Fix**: un **registro global de `@table` types**
+    (`OnceLock<Mutex<HashMap<name, (fields, TableMetadata)>>>`) poblado en
+    `Stmt::TypeDef` durante el eval, consultado en la rama env-miss de
+    `orm_instance_navigate` (`lookup_orm_type`). Clave — NO se usó el
+    `LOADER` thread-local porque los handlers HTTP corren en worker threads
+    que no lo heredan (paralelo a `install_background_registry`/
+    `ws_broadcast`); un fix vía LOADER pasaría en script plano pero fallaría
+    en un handler. La sugerencia vieja ("`Value::Type` sabe su módulo") era
+    imprecisa — `Value::Type` no tiene campo de módulo; se resuelve por
+    nombre globalmente. Validado a mano (script + handler HTTP) + E2E real
+    Postgres `orm_navigation_cross_module_v046`. **Sigue ABIERTO**:
+    `.preload` en el intérprete (no existe — feature grande, no un fix
+    chico). Residual menor: colisión de `@table` homónimos cross-módulo
+    (first-writer-wins).
 
 - ⚠️ **`Map<Str, Any>` en HTTP response de handlers cross-module**.
   El handler que retorna `Map<Str, Any>` (caso típico GROUP BY +

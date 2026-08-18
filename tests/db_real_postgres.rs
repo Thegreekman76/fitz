@@ -1302,6 +1302,104 @@ async fn orm_belongs_to_and_has_many_e2e() {
     seed.close().await.unwrap();
 }
 
+/// Deuda ORM cross-module intérprete (v0.46.0) — navigation method
+/// (`user.posts(db)`) CROSS-MODULE: `main` importa SÓLO `User` (no `Post`),
+/// pero `u.posts(db)` resuelve `Post` vía el registro global ORM (poblado
+/// en `Stmt::TypeDef` al cargar `models.fitz`). Reproduce el bug (sin el fix
+/// falla con "navigation: type `Post` referenced by the relation is not
+/// defined") y pasa con él. Paridad runtime con el fix de codegen (v0.45.0).
+/// Usa un tempdir para que `from models import User` resuelva un módulo
+/// hermano real — el env-miss sólo dispara con un import parcial real.
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_navigation_cross_module_v046() {
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed.exec("DROP TABLE IF EXISTS fitz_navx_posts", &[]).await;
+    let _ = seed.exec("DROP TABLE IF EXISTS fitz_navx_users", &[]).await;
+    seed.exec(
+        "CREATE TABLE fitz_navx_users (id bigint PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "CREATE TABLE fitz_navx_posts (id bigint PRIMARY KEY, user_id bigint, title text)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec("INSERT INTO fitz_navx_users VALUES (1, 'ada')", &[])
+        .await
+        .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_navx_posts VALUES (10, 1, 'a'), (11, 1, 'b')",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // `models.fitz` sibling module defines BOTH User and Post.
+    let dir = std::env::temp_dir().join("fitz-navx-v046");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Unique type names (NavxUser/NavxPost) so this test's global ORM
+    // registry entries don't collide with another db_real_postgres test's
+    // `User`/`Post` when the CI runs them serially (`--test-threads=1`) in
+    // the same process (the registry is process-global, first-writer-wins).
+    std::fs::write(
+        dir.join("models.fitz"),
+        "@table(\"fitz_navx_users\") type NavxUser {\n  \
+             @primary\n  id: Int = 0\n  name: Str\n  \
+             @has_many(\"NavxPost\", via=\"user_id\")\n  posts: List<NavxPost>\n\
+         }\n\
+         @table(\"fitz_navx_posts\") type NavxPost {\n  \
+             @primary\n  id: Int = 0\n  \
+             @belongs_to(\"NavxUser\")\n  user_id: Int\n  title: Str\n\
+         }\n",
+    )
+    .unwrap();
+
+    // Main imports ONLY NavxUser; `u.posts(db)` must resolve NavxPost cross-module.
+    let src = format!(
+        "from models import NavxUser\n\
+         async fn run() -> Result<Int> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let u = NavxUser.where(fn(x) => x.id == 1).first(db).await?\n  \
+             let posts = u.posts(db).await?\n  \
+             return Ok(len(posts))\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(program, dir.clone(), env.clone(), Default::default())
+        .await
+        .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let count = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::Int(n) => n,
+            other => panic!("esperaba Int, fue {:?}", other),
+        },
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    assert_eq!(
+        count, 2,
+        "ada (id=1) tiene 2 posts vía navigation cross-module (import solo User)"
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_navx_posts", &[]).await;
+    let _ = seed.exec("DROP TABLE fitz_navx_users", &[]).await;
+    seed.close().await.unwrap();
+}
+
 // =============================================================
 // Fase 10.b.7 — Paridad fitz build ↔ fitz run sobre navigation
 //

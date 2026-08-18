@@ -3614,6 +3614,14 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     .flatten()
                     .map(Box::new)
             };
+            // Deuda ORM cross-module intérprete (v0.46.0) — register the
+            // `@table` type globally so a navigation method can resolve it as
+            // a relation target even when the caller's module didn't import
+            // it (parallel to the codegen's auto-register, v0.45.0). Done
+            // BEFORE `table_metadata` is moved into `t`. No `env` lock held.
+            if let Some(meta) = &table_metadata {
+                register_orm_type(name, fields, meta);
+            }
             let t = Value::Type {
                 name: name.clone(),
                 fields: fields.clone(),
@@ -16807,6 +16815,49 @@ fn orm_qb_delete(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
 ///
 /// MVP args: `[DbConn]` only. The where is IMPLICIT from the
 /// relation (not from the user). Any extra arg → error.
+/// Deuda ORM cross-module intérprete (v0.46.0) — a global registry of
+/// `@table` types by name (fields + `TableMetadata`), so a navigation
+/// method (`user.posts(db)`) can resolve a relation target type that the
+/// caller's module didn't import. Runtime analogue of the codegen's
+/// `auto_register_relation_targets` (v0.45.0).
+///
+/// Why global (not the thread-local `LOADER`): HTTP request handlers run
+/// on tokio **worker threads** where thread-locals aren't inherited, so
+/// `LOADER.with(...)` is `None` there. This mirrors how the codebase
+/// already solves the same worker-thread problem for `@background`
+/// (`install_background_registry`) and `ws_broadcast`. Populated in
+/// `Stmt::TypeDef` during eval (main thread), consulted from
+/// `orm_instance_navigate` (any thread).
+type OrmTypeRegistry =
+    std::collections::HashMap<String, (Vec<crate::ast::Field>, Box<crate::types::TableMetadata>)>;
+
+static ORM_TYPE_REGISTRY: std::sync::OnceLock<parking_lot::Mutex<OrmTypeRegistry>> =
+    std::sync::OnceLock::new();
+
+fn orm_type_registry_slot() -> &'static parking_lot::Mutex<OrmTypeRegistry> {
+    ORM_TYPE_REGISTRY.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Registers a `@table` type's fields + metadata by name. First writer
+/// wins (`or_insert_with`) — a same-named `@table` type in two modules
+/// keeps the first registered (rare; documented as a residual limitation,
+/// parallel to the codegen registry keying by name).
+fn register_orm_type(name: &str, fields: &[crate::ast::Field], meta: &crate::types::TableMetadata) {
+    orm_type_registry_slot()
+        .lock()
+        .entry(name.to_string())
+        .or_insert_with(|| (fields.to_vec(), Box::new(meta.clone())));
+}
+
+/// Looks up a registered `@table` type's fields + metadata by name.
+/// Clones out so the lock is released immediately (no nesting with the
+/// caller's `env` lock).
+fn lookup_orm_type(
+    name: &str,
+) -> Option<(Vec<crate::ast::Field>, Box<crate::types::TableMetadata>)> {
+    orm_type_registry_slot().lock().get(name).cloned()
+}
+
 async fn orm_instance_navigate(
     receiver: Value,
     rel: crate::types::RelationMetadata,
@@ -16887,15 +16938,37 @@ async fn orm_instance_navigate(
                 )));
             }
             _ => {
-                return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::InvalidSyntax,
-                    span.line,
-                    span.column,
-                    format!(
-                        "navigation: type `{}` referenced by the relation is not defined",
-                        rel.target_type
-                    ),
-                )));
+                // Deuda ORM cross-module intérprete (v0.46.0) — the target
+                // type isn't in the caller's env (partial import: `from models
+                // import User` without Post). Fall back to the global ORM
+                // registry (populated in `Stmt::TypeDef` during eval), visible
+                // from worker threads unlike the thread-local LOADER. Parallel
+                // to the codegen auto-register (v0.45.0). No-op when the target
+                // IS imported (that hits the `Some(...)` arm above).
+                match lookup_orm_type(&rel.target_type) {
+                    Some((fields, meta)) => QueryBuilderState {
+                        type_name: rel.target_type.clone(),
+                        fields,
+                        meta: *meta,
+                        where_sql: None,
+                        where_args: Vec::new(),
+                        order_by_clauses: Vec::new(),
+                        limit: None,
+                        offset: None,
+                        group_by_clauses: Vec::new(),
+                    },
+                    None => {
+                        return Err(EvalSignal::Error(FitzError::new(
+                            ErrorKind::InvalidSyntax,
+                            span.line,
+                            span.column,
+                            format!(
+                                "navigation: type `{}` referenced by the relation is not defined",
+                                rel.target_type
+                            ),
+                        )));
+                    }
+                }
             }
         };
         (this_meta, target_state)
