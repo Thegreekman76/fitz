@@ -14661,6 +14661,38 @@ fn orm_dispatch_type_method(
         "bulk_insert" => orm_type_bulk_insert(type_value.clone(), args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        // v0.47.0 — read/chain methods also work directly on a `@table` type
+        // (`User.first(db)`, `User.order_by(...).all(db)`, `User.count(db)`),
+        // for parity with `fitz build` (the codegen exposes these on the Type;
+        // the interpreter only had `.all`/`.where`, so `User.first(db)` failed
+        // with "has no static method named `first`"). Build the base
+        // QueryBuilder state and delegate to the QB dispatch. Mutating methods
+        // (`update`/`delete`) and `preload` are intentionally NOT exposed here
+        // (they fall through to `_ => Ok(None)`): `update`/`delete` need a
+        // prior `.where(...)`, and `preload` isn't implemented in the
+        // interpreter (parallel to the v0.46.0 scope note).
+        "first" | "count" | "order_by" | "limit" | "offset" | "group_by" | "sum" | "avg"
+        | "min" | "max" => {
+            let state = match type_value_to_state(type_value.clone(), span) {
+                Ok(s) => s,
+                Err(e) => return Err(EvalSignal::Error(e)),
+            };
+            match method {
+                "first" => orm_qb_first(state, args, span),
+                "count" => orm_qb_count(state, args, span),
+                "order_by" => orm_qb_order_by(state, args, span, None),
+                "limit" => orm_qb_limit(state, args, span),
+                "offset" => orm_qb_offset(state, args, span),
+                "group_by" => orm_qb_group_by(state, args, span),
+                "sum" => orm_qb_aggregate(state, args, span, "SUM"),
+                "avg" => orm_qb_avg(state, args, span),
+                "min" => orm_qb_aggregate(state, args, span, "MIN"),
+                "max" => orm_qb_aggregate(state, args, span, "MAX"),
+                _ => unreachable!(),
+            }
+            .map(Some)
+            .map_err(EvalSignal::Error)
+        }
         _ => Ok(None),
     }
 }

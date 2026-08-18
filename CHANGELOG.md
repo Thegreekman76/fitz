@@ -9,6 +9,34 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.47.0] — 2026-08-18 — ORM read/chain methods directos sobre el `@table` type en `fitz run` (paridad con el codegen)
+
+Cierra una discrepancia intérprete↔codegen descubierta al repro-confirmar
+v0.46.0: `User.first(db)` (y `User.count/order_by/limit/offset/group_by/sum/avg/
+min/max`) fallaban en `fitz run` con `type 'User' has no static method named
+'first'`, mientras el codegen (`fitz build`) sí los soporta directo sobre el
+type. Antes el intérprete solo aceptaba `User.all(db)` / `User.where(...).first(db)`.
+
+### Arreglado
+
+- **Read/chain methods directos sobre el `@table` type** en el intérprete —
+  `orm_dispatch_type_method` ahora expone `first`, `count`, `order_by`, `limit`,
+  `offset`, `group_by`, `sum`, `avg`, `min`, `max` (además de los previos `all`/
+  `where`/`insert`/`bulk_insert`), construyendo el `QueryBuilderState` base y
+  delegando al dispatch del QueryBuilder. `User.first(db)`, `User.order_by(-u.id).all(db)`,
+  `User.count(db)`, etc. funcionan directo, paridad con `fitz build`.
+
+### Detalles
+
+- **No toca los mutating**: `update`/`delete` directos sobre el type siguen sin
+  exponerse (necesitan un `.where(...)` previo — igual que el codegen los rechaza).
+  `preload` sigue sin implementarse en el intérprete (feature grande, paralelo al
+  scope de v0.46.0).
+- **No shadowea custom methods**: el dispatch de custom methods del `type` corre
+  ANTES del ORM (un `fn first(...)` custom gana sobre el `.first` del ORM).
+- Test E2E real Postgres `orm_type_static_read_methods_v047` (`#[ignore]`,
+  opt-in): `NavxUser.first(db)` / `.count(db)` / `.order_by(...).all(db)` directos.
+
 ## [v0.46.0] — 2026-08-18 — ORM cross-module: navigation methods en `fitz run` (paridad con el codegen)
 
 Cierra la deuda paralela documentada en v0.45.0: un navigation method

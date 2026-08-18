@@ -1400,6 +1400,105 @@ async fn orm_navigation_cross_module_v046() {
     seed.close().await.unwrap();
 }
 
+/// v0.47.0 — read/chain methods directos sobre un `@table` type en `fitz run`:
+/// `User.first(db)`, `User.count(db)`, `User.order_by(...).first(db)` — paridad
+/// con el codegen. Antes fallaban con "type `User` has no static method named
+/// `first`" (el intérprete solo tenía `.all`/`.where`).
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_type_static_read_methods_v047() {
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed.exec("DROP TABLE IF EXISTS fitz_srm_users", &[]).await;
+    seed.exec(
+        "CREATE TABLE fitz_srm_users (id bigint PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_srm_users VALUES (1, 'ada'), (2, 'alan'), (3, 'grace')",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_srm_users\") type SrmUser {{\n  \
+             @primary\n  id: Int = 0\n  name: Str\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // `.first(db)` DIRECTO (el reporte) — valor indefinido sin order,\n  \
+             // solo verificamos que devuelve un row válido.\n  \
+             let any = SrmUser.first(db).await?\n  \
+             // `.count(db)` DIRECTO.\n  \
+             let c = SrmUser.count(db).await?\n  \
+             // `.order_by(...).first(db)` — order_by DIRECTO sobre el type + first.\n  \
+             let ada = SrmUser.order_by(fn(u) => u.id).first(db).await?\n  \
+             return Ok({{ \"any_name\": any.name, \"total\": c, \"first_by_id\": ada.name }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(b)) => *b,
+        Value::Result(fitz::value::ResultVariant::Err(b)) => {
+            panic!("esperaba Ok, fue Err({:?})", b)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let map = match outer {
+        Value::Map(s) => s,
+        other => panic!("esperaba Map, fue {:?}", other),
+    };
+    let get_str = |key: &str| -> String {
+        map.lock()
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+            .and_then(|(_, v)| match v {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let total = map
+        .lock()
+        .iter()
+        .find(|(k, _)| matches!(k, Value::Str(s) if s == "total"))
+        .and_then(|(_, v)| match v {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        !get_str("any_name").is_empty(),
+        "`.first(db)` devuelve un row"
+    );
+    assert_eq!(total, 3, "`.count(db)` directo cuenta 3 rows");
+    assert_eq!(
+        get_str("first_by_id"),
+        "ada",
+        "`.order_by(id).first(db)` directo devuelve ada (id=1)"
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_srm_users", &[]).await;
+    seed.close().await.unwrap();
+}
+
 // =============================================================
 // Fase 10.b.7 — Paridad fitz build ↔ fitz run sobre navigation
 //

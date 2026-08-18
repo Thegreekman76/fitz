@@ -6972,15 +6972,17 @@ con relations virtuales declarados en módulos.
     chico). Residual menor: colisión de `@table` homónimos cross-módulo
     (first-writer-wins).
 
-- ⚠️ **`Type.first(db)` estático no existe en el intérprete** (deuda menor,
-  descubierta 2026-08-18 al repro-confirmar v0.46.0). `fitz run` acepta
-  `User.all(db)` y `User.where(...).first(db)` pero NO `User.first(db)`
-  directo (error: "type `User` has no static method named `first`"),
-  mientras el codegen (`fitz build`) sí lo soporta. Discrepancia
-  intérprete↔codegen chica. Workaround: `User.where(fn(x) => true).first(db)`
-  o `User.all(db)` + index. Fix: agregar el dispatch de `.first` (y quizás
-  `.count`/`.sum`/etc. si faltan) como método estático sobre `@table` types
-  en el evaluator, paralelo a `.all`.
+- **`Type.first(db)` estático no existe en el intérprete** — 🟢 **CERRADO
+  (v0.47.0, 2026-08-18)**. `fitz run` aceptaba `User.all(db)` y
+  `User.where(...).first(db)` pero NO `User.first(db)` directo (error: "type
+  `User` has no static method named `first`"), mientras el codegen sí. **Fix**:
+  `orm_dispatch_type_method` (evaluator) expone `first`/`count`/`order_by`/
+  `limit`/`offset`/`group_by`/`sum`/`avg`/`min`/`max` sobre el `@table` type
+  (construye el `QueryBuilderState` base con `type_value_to_state` y delega al
+  dispatch del QueryBuilder), paridad con el codegen. Mutating (`update`/
+  `delete`) y `preload` no se exponen (necesitan `.where` / no implementado).
+  Custom methods siguen ganando (se resuelven antes del ORM). E2E real
+  Postgres `orm_type_static_read_methods_v047`.
 
 - ⚠️ **`Map<Str, Any>` en HTTP response de handlers cross-module**.
   El handler que retorna `Map<Str, Any>` (caso típico GROUP BY +
