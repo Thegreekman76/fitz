@@ -111,6 +111,7 @@ impl Badge {
             if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
         }
         let mut __cur_root = root.first_child();
+        while let Some(__n) = __cur_root.clone() { if __n.dyn_ref::<web_sys::Element>().map(|__e| __e.tag_name() == "STYLE").unwrap_or(false) { __cur_root = __n.next_sibling(); } else { break; } }
         *self.root.borrow_mut() = Some(root);
         if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
         let mut __hcur1 = __hel0.first_child();
@@ -237,6 +238,7 @@ impl Row {
             if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
         }
         let mut __cur_root = root.first_child();
+        while let Some(__n) = __cur_root.clone() { if __n.dyn_ref::<web_sys::Element>().map(|__e| __e.tag_name() == "STYLE").unwrap_or(false) { __cur_root = __n.next_sibling(); } else { break; } }
         *self.root.borrow_mut() = Some(root);
         if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
         let mut __hcur1 = __hel0.first_child();
@@ -402,6 +404,7 @@ impl App {
             if let Some(__txt) = __sel.text_content() { self.__apply_state_json(&__txt); }
         }
         let mut __cur_root = root.first_child();
+        while let Some(__n) = __cur_root.clone() { if __n.dyn_ref::<web_sys::Element>().map(|__e| __e.tag_name() == "STYLE").unwrap_or(false) { __cur_root = __n.next_sibling(); } else { break; } }
         *self.root.borrow_mut() = Some(root);
         if let Some(__hel0) = __flv_next_element(&mut __cur_root) {
         let mut __hcur1 = __hel0.first_child();
