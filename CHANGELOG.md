@@ -9,6 +9,90 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.49.0] — 2026-08-20 — Hito 1 + Hito 2 del norte MatHelp: `rand`/`fs`/`num`, cookies, y paridad `run`↔`build`
+
+Release combinado que cierra los dos primeros hitos del backlog surgido
+de la auditoría para **MatHelp** (`docs/norte-mathelp.md`): el arranque
+del juego (aleatoriedad), la red de confianza (paridad interpretado ↔
+compilado) y el desbloqueo de deployment + login zero-JS + i18n. Detalle
+por-tarea en `docs/norte-mathelp.md` (fichas `FITZ-*`).
+
+### Added
+
+- **Módulo `rand` (FITZ-01)** — aleatoriedad ciudadana de primera clase.
+  CSPRNG global (`rand.int`/`float`/`bool`/`choice`/`shuffle`/`sample`/
+  `bytes`, vía `getrandom`) + PRNG **sembrado determinístico**
+  (`rand.seeded(N) -> RandGen`, algoritmo SplitMix64 fijo, NO el crate
+  `rand`). Criterio de aceptación: `rand.seeded(N)` produce la MISMA
+  secuencia en `fitz run` y `fitz build`, para siempre (habilita guardar
+  `seed + índice` y reconstruir una partida desde dos enteros). Módulo
+  nuevo `src/rand.rs`, `Value::RandGen`/`Type::RandGen`, paridad bit-a-bit
+  codegen, checker + LSP, ejemplo `examples/guide/13w-random.fitz`, cap
+  "Aleatoriedad" en la guía.
+- **Módulo `fs` (FITZ-03)** — filesystem en runtime: `fs.read`/`read_bytes`/
+  `write`/`append`/`exists`/`list`/`remove`/`mkdir_all`. `Result<T>` con el
+  path citado en el error, nunca panic; paths relativos al working dir.
+  Módulo nuevo `src/fs.rs` sobre `std::fs` (sin deps extra), paridad
+  bit-a-bit codegen (`FS_PRELUDE`), checker + LSP, sección "Filesystem" en
+  la guía. Habilita catálogos i18n desde JSON leídos al boot (T1).
+- **Módulo `num` — formateo locale-aware (FITZ-04)** — `num.format`/
+  `num.percent`/`num.currency` con `es-AR` (`1.234.567,00` / `42,0 %` /
+  `$ 1.250,00`) y `en-US`. Tabla de locales embebida (sin ICU), paridad
+  bit-a-bit codegen, ejemplo `examples/guide/13x-num-locale.fitz`. (Los
+  format specs `{n:,}`/`{r:.1%}` ya compilaban — solo faltaba locale.)
+- **API de cookies (FITZ-05)** — **leer** con `@cookie(name="X")`
+  (decorator apilable como `@header`, inyecta el valor parseado en un
+  param `Str`/`Str?`, opcional `into="alias"`, sobre `@get`/`@post`/`@ws`;
+  `parse_cookie_header`; OpenAPI `in: cookie`) y **escribir** con el campo
+  `cookies` de un `Response`. Nominal built-in nuevo `Cookie` (8 campos con
+  defaults: `name`/`value` requeridos, `path="/"`, `http_only=false`,
+  `secure=false`, `same_site="Lax"`, `max_age: Int?=null`,
+  `domain: Str?=null`); cada `Cookie` → un header `Set-Cookie`. Helper de
+  serialización compartido (`serialize_set_cookie` intérprete /
+  `__fitz_serialize_set_cookie` codegen) con paridad bit-a-bit; LSP + cap
+  17 "Cookies y sesiones". Con esto + form-urlencoded (ya soportado en
+  `fitz build`), el login de familia es HTML puro, cero JS.
+- **`git` + `ca-certificates` en la imagen oficial de Docker (FITZ-11)** —
+  la imagen estándar (build-capable) ahora resuelve `{ git = ... }` deps
+  (hoy la única forma de dep externa). Fix de una línea en el
+  `apt-get install` del `release.yml`.
+
+### Fixed
+
+- **Codegen: `-> T?` con `return` (FITZ-09)** — una fn con return type
+  `Nullable` que hace `return null` / `return <valor>` generaba Rust roto
+  (`return ()` donde va `return None`; valor sin envolver en `Some(...)`) →
+  `E0308` en `fitz build`, aunque pasara `fitz check` y corriera en
+  `fitz run`. La coerción nullable ahora se aplica también en **posición de
+  return**. Destraba el binario nativo de **todo lo que use
+  fitz-liveviews** (`flv_cookie` tiene el patrón exacto), incluidas
+  `examples/admin` y las apps que dependen del framework.
+- **Codegen: `Str + Any` (FITZ-10)** — `let chars = []` (infiere
+  `List<Any>`) + `chars.push(<Str>)` + `out + chars[0]` pasaba `fitz check`
+  y fallaba `fitz build`. Ahora el codegen coacciona `Str + Any` como el
+  intérprete + detecta `List<Any>`/`Map<_, Any>` para emitir el preludio
+  `__FitzValue` en CLI.
+- **`Set-Cookie` múltiple (FITZ-05 FASE B)** — `outcome_to_response`
+  emitía los headers extra con `.insert` (sobrescribe: solo sobrevivía la
+  última cookie); ahora usa `.append` para `Set-Cookie` (todas las cookies
+  sobreviven), preservando la semántica de sobrescritura para los demás
+  headers.
+
+### Testing
+
+- **Differ de paridad `fitz run` ↔ `fitz build` (FITZ-14)** — harness
+  nuevo `run_build_parity_corpus_fitz14` que corre un corpus de ejemplos
+  CLI-puros por las dos vías y assertea stdout idéntico bit-a-bit. Es la
+  red que hubiera cazado FITZ-09/FITZ-10/FITZ-06 solos; protege el criterio
+  de reproducibilidad de `rand`. Corpus curado (extensible).
+
+### Notas
+
+- **Deuda residual descubierta (clase FITZ-14, NO FITZ-05):** en
+  `fitz run` un body `form-urlencoded` llega al handler como `Map` en vez
+  de deserializar al `type` declarado (en `fitz build` sí tipa). El login
+  zero-JS funciona compilado; con `fitz run` usar body JSON mientras tanto.
+
 ## [v0.48.0] — 2026-08-18 — Hidratación de composición dinámica keyed (`<Child key>` dentro de `{#for}`) en el target client-WASM de `.fitzv`
 
 Cierra la última deuda de composición del `.fitzv` en hidratación: un

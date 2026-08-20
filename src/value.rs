@@ -666,6 +666,13 @@ pub enum Value {
     /// URL redacted (no password).
     DbConn(Arc<crate::db::DbConnHandle>),
 
+    /// FITZ-01 (2026-08) — a seeded, reproducible random generator, produced by
+    /// `rand.seeded(N)`. Holds a `SplitMix64` state (a single `u64`) behind a
+    /// shared lock. Methods (`int`/`float`/`bool`/`choice`/`shuffle`/`sample`)
+    /// are dispatched via `dispatch_method` (see `src/rand.rs`). Equality by
+    /// `Arc` identity (like DbConn/WsConn); not JSON-serialisable.
+    RandGen(Shared<u64>),
+
     /// Phase 10.3.b2 — ORM query builder accumulating state.
     /// Produced by `User.where(closure)` and consumed by
     /// `.all(db)`/`.first(db)`/`.count(db)`. Immutable: every chain
@@ -780,6 +787,7 @@ impl Value {
             Value::Secret(_) => "Secret",
             Value::WsConn(_) => "WsConn",
             Value::DbConn(_) => "DbConn",
+            Value::RandGen(_) => "RandGen",
             Value::QueryBuilder(_) => "QueryBuilder",
             Value::Date(_) => "Date",
             Value::DateTime(_) => "DateTime",
@@ -925,6 +933,7 @@ impl std::fmt::Display for Value {
             Value::Secret(_) => write!(f, "<redacted Secret>"),
             Value::WsConn(_) => write!(f, "<ws-conn>"),
             Value::DbConn(h) => write!(f, "<db-conn {}>", h.url_redacted),
+            Value::RandGen(_) => write!(f, "<rand generator>"),
             Value::QueryBuilder(_) => write!(f, "<query-builder>"),
             // v0.10.24 — canonical ISO 8601 / UUID Display. No
             // wrapper like `<date 2026-05-30>` because these values
@@ -1038,6 +1047,7 @@ impl PartialEq for Value {
             (Value::Secret(a), Value::Secret(b)) => a == b,
             // Equality by `Arc` identity — parallel to WsConn.
             (Value::DbConn(a), Value::DbConn(b)) => Arc::ptr_eq(a, b),
+            (Value::RandGen(a), Value::RandGen(b)) => Arc::ptr_eq(a, b),
             // Same criterion for QueryBuilder.
             (Value::QueryBuilder(a), Value::QueryBuilder(b)) => Arc::ptr_eq(a, b),
             // O1 — SqlExpr: structural equality on the fragment.

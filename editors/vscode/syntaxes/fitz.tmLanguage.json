@@ -166,7 +166,7 @@
       "patterns": [
         {
           "name": "support.type.builtin.fitz",
-          "match": "\\b(Int|Float|Str|Bool|Null|Bytes|Range|Any|List|Map|Result|Future|Request|Response|File|PyAny|WsConn|DbConn|DbRow|Date|DateTime|Uuid)\\b"
+          "match": "\\b(Int|Float|Str|Bool|Null|Bytes|Range|Any|List|Map|Result|Future|Request|Response|Cookie|File|PyAny|WsConn|DbConn|DbRow|Date|DateTime|Uuid)\\b"
         },
         {
           "name": "entity.name.type.fitz",

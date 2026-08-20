@@ -298,8 +298,13 @@ jobs:
           ARG TARGETARCH
           RUN apt-get update && \
               apt-get install -y --no-install-recommends \
-                ca-certificates curl build-essential pkg-config libssl-dev && \
+                ca-certificates curl git build-essential pkg-config libssl-dev && \
               rm -rf /var/lib/apt/lists/*
+          # `git` (FITZ-11): `fitz build` resuelve las deps `{ git = ... }`
+          # invocando `git` — hoy la única forma de declarar una dep externa
+          # (el registry público todavía no existe, y `{ path = ... }` no sirve
+          # dentro de un container). Sin `git` la imagen oficial no puede
+          # construir ningún proyecto con dependencias — justo su razón de ser.
           # Rust toolchain — los `fitz build` que el user haga adentro
           # del container invocan cargo internamente.
           RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \

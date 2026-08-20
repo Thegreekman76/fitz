@@ -1,0 +1,62 @@
+// 13w-random.fitz — Aleatoriedad con el módulo `rand` (FITZ-01).
+//
+// Fitz separa deliberadamente dos familias que la mayoría de los lenguajes
+// confunden:
+//
+//   * GLOBAL `rand.*` — NO reproducible. Sembrado desde la entropía del SO.
+//     `rand.bytes(n)` sale directo del CSPRNG (para tokens).
+//   * SEEDED `rand.seeded(N)` — reproducible. Misma secuencia en `fitz run` y
+//     en `fitz build`. Guardá `seed + índice` y reconstruís una corrida entera
+//     desde dos enteros.
+
+// --- Global (no reproducible) -----------------------------------------------
+
+let tirada = rand.int(1, 6)          // Int en [1, 6] inclusive
+print("dado: {tirada}")
+
+let moneda = rand.bool()
+print("cara: {moneda}")
+
+let p = rand.float()                 // Float en [0, 1)
+print("probabilidad < 1: {p < 1.0}")
+
+// choice / shuffle / sample devuelven Result o List
+match rand.choice(["norte", "sur", "este", "oeste"]) {
+    Ok(dir) => print("rumbo: {dir}"),
+    Err(e) => print("error: {e}"),
+}
+
+let barajado = rand.shuffle([1, 2, 3, 4, 5])
+print("barajado tiene 5 elementos: {len(barajado) == 5}")
+
+// rand.bytes(n) — CSPRNG, ideal para tokens de sesión
+let token = rand.bytes(16)
+print("token de {len(token)} bytes")
+
+// --- Seeded (reproducible) --------------------------------------------------
+
+// Misma semilla ⇒ misma secuencia, siempre, en `fitz run` y `fitz build`.
+let r = rand.seeded(2026)
+print("secuencia sembrada:")
+print(r.int(1, 100))
+print(r.int(1, 100))
+print(r.int(1, 100))
+
+// Un ejercicio de matemática reproducible: guardás la semilla y el índice, y
+// reconstruís exactamente el mismo ejercicio más tarde.
+fn ejercicio(semilla: Int, indice: Int) -> Str {
+    let gen = rand.seeded(semilla)
+    let a = 0
+    let b = 0
+    // Avanzamos el generador `indice` veces para llegar al ejercicio N.
+    for _ in 0..(indice + 1) {
+        a = gen.int(2, 12)
+        b = gen.int(2, 12)
+    }
+    return "{a} x {b} = ?"
+}
+
+// La partida (semilla 777) es 100% reconstruible desde estos dos enteros.
+print(ejercicio(777, 0))
+print(ejercicio(777, 1))
+print(ejercicio(777, 0))   // idéntico al primero: mismo seed + índice

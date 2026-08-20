@@ -122,6 +122,13 @@ pub enum Type {
     /// `@table type User { ... }`) come in 10.3.
     DbConn,
 
+    /// FITZ-01 (2026-08) — a seeded reproducible random generator, produced by
+    /// `rand.seeded(N)`. The `rand` module itself is `Type::Any` in the checker
+    /// (gradual), but codegen re-derives this dedicated type from a
+    /// `rand.seeded(...)` call so `<gen>.int(...)`/`.float()`/... dispatch to
+    /// the `__FitzRng` methods and produce output identical to `fitz run`.
+    RandGen,
+
     /// Phase 10.1.c — one row of the resultset of a Postgres query.
     /// Produced by `conn.query(...).await?` (as `List<DbRow>`)
     /// and consumed with `row.get("col")` / `row.get_at(idx)` which
@@ -337,6 +344,7 @@ impl Type {
                 }
             }
             Type::DbConn => "DbConn".into(),
+            Type::RandGen => "RandGen".into(),
             Type::DbRow => "DbRow".into(),
             Type::Date => "Date".into(),
             Type::DateTime => "DateTime".into(),
@@ -1582,38 +1590,13 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
     // in `evaluator::register_builtins` (Response section) — the
     // evaluator's struct literal validation reorders to declaration
     // order, but having both in sync avoids confusion.
+    // FITZ-05 FASE B — `Response`'s fields are set AT THE END of this
+    // function (see below), once the `Cookie` nominal exists: the new
+    // `cookies: List<Cookie>` field references its `TypeId`. Cookie is
+    // declared last so the ids of Request/Response/File don't shift.
     let resp_id = env
         .declare_nominal("Response".to_string())
         .expect("Response is the second nominal — cannot collide");
-    env.set_fields(
-        resp_id,
-        vec![
-            ResolvedField {
-                name: "status".into(),
-                type_: Type::Int,
-            },
-            ResolvedField {
-                name: "content_type".into(),
-                type_: Type::Str,
-            },
-            ResolvedField {
-                name: "headers".into(),
-                type_: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
-            },
-            ResolvedField {
-                name: "body".into(),
-                type_: Type::Str,
-            },
-            // v0.19.0 Block 2 — opt-in binary body. When set (non-null),
-            // it wins over `body`. Setting BOTH at runtime triggers a
-            // 500 with a clear message (programming error). Used for
-            // PDF, ZIP, images, anything that is not UTF-8 text.
-            ResolvedField {
-                name: "body_bytes".into(),
-                type_: Type::Nullable(Box::new(Type::Bytes)),
-            },
-        ],
-    );
 
     // Mini-batch MP2 + File.content Bytes — `File`: built-in nominal
     // to represent files from multipart/form-data bodies. The
@@ -1700,6 +1683,100 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
             ResolvedField {
                 name: "duration_ms".into(),
                 type_: Type::Int,
+            },
+        ],
+    );
+
+    // FITZ-05 FASE B — `Cookie`: built-in nominal for the WRITE path
+    // (`Response.cookies`). The READ path is `@cookie(name="X")` (FASE
+    // A). Each `Cookie` in a `Response { cookies: [...] }` is serialised
+    // to a `Set-Cookie` header at dispatch time. Declared LAST so the
+    // TypeIds of Request/Response/File stay stable. The field order MUST
+    // mirror `evaluator::register_builtins` (Cookie section).
+    //
+    // Fields (with defaults registered in the evaluator's `Value::Type`):
+    //   - name: Str          (required)
+    //   - value: Str         (required)
+    //   - path: Str = "/"
+    //   - http_only: Bool = false
+    //   - secure: Bool = false
+    //   - same_site: Str = "Lax"   ("Strict" | "Lax" | "None")
+    //   - max_age: Int? = null      (seconds; null = session cookie)
+    //   - domain: Str? = null
+    let cookie_id = env
+        .declare_nominal("Cookie".to_string())
+        .expect("Cookie is a built-in nominal — cannot collide");
+    env.set_fields(
+        cookie_id,
+        vec![
+            ResolvedField {
+                name: "name".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "value".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "path".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "http_only".into(),
+                type_: Type::Bool,
+            },
+            ResolvedField {
+                name: "secure".into(),
+                type_: Type::Bool,
+            },
+            ResolvedField {
+                name: "same_site".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "max_age".into(),
+                type_: Type::Nullable(Box::new(Type::Int)),
+            },
+            ResolvedField {
+                name: "domain".into(),
+                type_: Type::Nullable(Box::new(Type::Str)),
+            },
+        ],
+    );
+
+    // `Response` fields, deferred to here so `cookies: List<Cookie>` can
+    // reference the Cookie nominal declared above. Field order MUST
+    // mirror `evaluator::register_builtins` (Response section). The
+    // `body_bytes` field (v0.19.0 Block 2) is opt-in binary body: when
+    // set (non-null) it wins over `body`; setting BOTH triggers a 500.
+    env.set_fields(
+        resp_id,
+        vec![
+            ResolvedField {
+                name: "status".into(),
+                type_: Type::Int,
+            },
+            ResolvedField {
+                name: "content_type".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "headers".into(),
+                type_: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
+            },
+            ResolvedField {
+                name: "body".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "body_bytes".into(),
+                type_: Type::Nullable(Box::new(Type::Bytes)),
+            },
+            // FITZ-05 FASE B — Set-Cookie write path. Each Cookie
+            // serialises to one Set-Cookie response header.
+            ResolvedField {
+                name: "cookies".into(),
+                type_: Type::List(Box::new(Type::Nominal(cookie_id))),
             },
         ],
     );
@@ -4504,6 +4581,45 @@ impl<'a> CheckCtx<'a> {
         // type-checks statically once the user annotates the binding.
         self.scopes[0].insert(
             "smtp".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // FITZ-01 (2026-08) — `rand` module as Type::Any (parallel to
+        // http/smtp). `rand.int(...)`, `rand.seeded(N)`, and the RandGen
+        // methods fall to gradual; the runtime builtins validate arity/types
+        // with clear messages. A precise `RandGen` nominal + typed method
+        // signatures is a post-MVP refinement.
+        self.scopes[0].insert(
+            "rand".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // FITZ-03 (2026-08) — `fs` module as Type::Any (parallel to http/smtp).
+        // `fs.read(...)` etc. fall to gradual; the runtime builtins validate.
+        self.scopes[0].insert(
+            "fs".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // FITZ-04 (2026-08) — `num` module as Type::Any. `num.format(...)` etc.
+        // return Str; the runtime builtins validate arg types.
+        self.scopes[0].insert(
+            "num".into(),
             VarBinding {
                 ty: Type::Any,
                 annotated: false,
@@ -14708,13 +14824,16 @@ mod tests {
         // Mini-tanda SMTP builtin (2026-06-19) added `SmtpResult` for
         // outbound `smtp.send(...)` returns (type of `r` in
         // `let r = smtp.send(opts).await?`).
+        // FITZ-05 FASE B (2026-08-20) added `Cookie` for the Set-Cookie
+        // write path (`Response { cookies: [...] }`).
         // The user can reference them without declaring them.
-        assert_eq!(env.nominal_count(), 5);
+        assert_eq!(env.nominal_count(), 6);
         assert!(env.lookup("Request").is_some());
         assert!(env.lookup("Response").is_some());
         assert!(env.lookup("File").is_some());
         assert!(env.lookup("HttpClientResponse").is_some());
         assert!(env.lookup("SmtpResult").is_some());
+        assert!(env.lookup("Cookie").is_some());
     }
 
     #[test]

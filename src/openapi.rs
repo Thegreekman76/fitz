@@ -496,6 +496,41 @@ pub(crate) fn headers_from_decorators(
     out
 }
 
+/// FITZ-05 — build-time replica of `collect_cookies`. Returns
+/// `(cookie_name, param_name, is_nullable)` per `@cookie(name="X")`. Default
+/// param name is the cookie name AS-IS (cookie names are case-sensitive), or the
+/// `into="alias"` override.
+pub(crate) fn cookies_from_decorators(
+    decorators: &[crate::ast::Decorator],
+    params: &[crate::ast::Param],
+) -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    for deco in decorators {
+        if deco.name != "cookie" {
+            continue;
+        }
+        let Some(name_kw) = deco.kwargs.iter().find(|(k, _)| k == "name") else {
+            continue;
+        };
+        let crate::ast::Expr::Str(cookie_name, _) = &name_kw.1 else {
+            continue;
+        };
+        if cookie_name.is_empty() {
+            continue;
+        }
+        let param_name = match deco.kwargs.iter().find(|(k, _)| k == "into") {
+            Some((_, crate::ast::Expr::Str(alias, _))) if !alias.is_empty() => alias.clone(),
+            _ => cookie_name.clone(),
+        };
+        let Some(p) = params.iter().find(|p| p.name == param_name) else {
+            continue;
+        };
+        let is_nullable = matches!(&p.type_, Some(t) if t.is_nullable());
+        out.push((cookie_name.clone(), param_name, is_nullable));
+    }
+    out
+}
+
 /// Builds `OpenApiRouteInfo` from the AST at build-time, without
 /// evaluating the program (Phase 7.5). Used from `codegen.rs` so
 /// that `fitz build` can emit the OpenAPI schema without going

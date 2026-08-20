@@ -326,7 +326,8 @@ pub fn generate_project(
     // `type PublicOverview { monitors: List<MonitorStatus>, ... }`.
     let uses_fitz_value = program_uses_fitz_value(program)
         || loader.modules.iter().any(|m| m.uses_fitz_value)
-        || cross_module_compound_degrades_to_fitz_value(program, &loader);
+        || cross_module_compound_degrades_to_fitz_value(program, &loader)
+        || type_info_uses_fitz_value(type_info);
 
     // v0.10.26 — Date/DateTime/Uuid in the program or any loaded
     // module. Triggers chrono+uuid deps + emission of prelude helpers.
@@ -393,24 +394,34 @@ pub fn generate_project(
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
         output_basename: raw_stem,
-        cargo_toml: cargo_toml_for(
-            &stem,
-            has_http,
-            uses_async,
-            uses_python,
-            uses_auth,
-            uses_ws,
-            uses_jobs,
-            uses_logging,
-            uses_trace_metric,
-            uses_db,
-            uses_fitz_value,
-            uses_date_or_uuid,
-            uses_prometheus_export,
-            uses_http_client,
-            uses_smtp,
-            uses_to_json,
-        ),
+        cargo_toml: {
+            let __ct = cargo_toml_for(
+                &stem,
+                has_http,
+                uses_async,
+                uses_python,
+                uses_auth,
+                uses_ws,
+                uses_jobs,
+                uses_logging,
+                uses_trace_metric,
+                uses_db,
+                uses_fitz_value,
+                uses_date_or_uuid,
+                uses_prometheus_export,
+                uses_http_client,
+                uses_smtp,
+                uses_to_json,
+            );
+            // FITZ-01 — global `rand.*` (non-`seeded`) needs OS entropy via
+            // `getrandom`. Injected post-hoc to avoid threading a positional
+            // arg through `cargo_toml_for` + all its test call sites.
+            if rand_usage(program).1 {
+                inject_getrandom_dep(__ct)
+            } else {
+                __ct
+            }
+        },
         main_rs,
         mod_files: {
             let mut files = loader.into_mod_files();
@@ -2081,6 +2092,575 @@ fn program_uses_to_json(program: &Program) -> bool {
 /// `Expr::Field { object: Ident("smtp"), field: "send", .. }`. The
 /// walk loses user-defined `smtp` shadowing — the callsite's codegen
 /// handles that case at dispatch time (parallel to `http`/`db`).
+/// FITZ-01 (2026-08) — detects `rand.X(...)` calls in the program. Returns
+/// `(uses_rand, uses_rand_global)`: `uses_rand` is true for ANY `rand.*` call
+/// (gates the `__FitzRng` + SplitMix64 prelude); `uses_rand_global` is true for
+/// any non-`seeded` call (`rand.int`/`float`/`bool`/`choice`/`shuffle`/`sample`/
+/// `bytes`), which gate the OS-entropy global RNG + `getrandom` dep. A program
+/// that only uses `rand.seeded(N)` + generator methods stays pure (no getrandom).
+/// MVP: main-program only (cross-module `rand` in codegen is a follow-up; the
+/// interpreter already handles it).
+fn rand_usage(program: &Program) -> (bool, bool) {
+    use crate::ast::StrPart;
+    fn walk_expr(e: &Expr, acc: &mut (bool, bool)) {
+        if let Expr::Call { callee, args, .. } = e {
+            if let Expr::Field { object, field, .. } = callee.as_ref() {
+                if let Expr::Ident(recv, _) = object.as_ref() {
+                    if recv == "rand" {
+                        acc.0 = true;
+                        if field != "seeded" {
+                            acc.1 = true;
+                        }
+                    }
+                }
+            }
+            walk_expr(callee, acc);
+            for a in args {
+                walk_expr(a, acc);
+            }
+            return;
+        }
+        match e {
+            Expr::BinOp { left, right, .. } => {
+                walk_expr(left, acc);
+                walk_expr(right, acc);
+            }
+            Expr::UnaryOp { operand, .. } => walk_expr(operand, acc),
+            Expr::Field { object, .. } => walk_expr(object, acc),
+            Expr::Index { object, index, .. } => {
+                walk_expr(object, acc);
+                walk_expr(index, acc);
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                walk_expr(object, acc);
+                if let Some(s) = start {
+                    walk_expr(s, acc);
+                }
+                if let Some(x) = end {
+                    walk_expr(x, acc);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                walk_expr(start, acc);
+                walk_expr(end, acc);
+            }
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
+                for it in items {
+                    walk_expr(it, acc);
+                }
+            }
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                walk_expr(expr, acc);
+                walk_expr(iter, acc);
+                for (_, it) in extra_clauses {
+                    walk_expr(it, acc);
+                }
+                if let Some(f) = filter {
+                    walk_expr(f, acc);
+                }
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                walk_expr(key, acc);
+                walk_expr(value, acc);
+                walk_expr(iter, acc);
+                for (_, it) in extra_clauses {
+                    walk_expr(it, acc);
+                }
+                if let Some(f) = filter {
+                    walk_expr(f, acc);
+                }
+            }
+            Expr::Map(pairs, _) => {
+                for (k, v) in pairs {
+                    walk_expr(k, acc);
+                    walk_expr(v, acc);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    walk_expr(v, acc);
+                }
+            }
+            Expr::TupleField { tuple, .. } => walk_expr(tuple, acc),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                walk_expr(condition, acc);
+                for s in then {
+                    walk_stmt(s, acc);
+                }
+                if let Some(b) = else_ {
+                    for s in b {
+                        walk_stmt(s, acc);
+                    }
+                }
+            }
+            Expr::Match { value, arms, .. } => {
+                walk_expr(value, acc);
+                for a in arms {
+                    for s in &a.body {
+                        walk_stmt(s, acc);
+                    }
+                }
+            }
+            Expr::FnExpr { body, .. } | Expr::Loop { body, .. } => {
+                for s in body {
+                    walk_stmt(s, acc);
+                }
+            }
+            Expr::StrInterp(parts, _) => {
+                for p in parts {
+                    if let StrPart::Expr(inner, _) = p {
+                        walk_expr(inner, acc);
+                    }
+                }
+            }
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => walk_expr(inner, acc),
+            Expr::NamedArg { value, .. } => walk_expr(value, acc),
+            _ => {}
+        }
+    }
+    fn walk_stmt(s: &Stmt, acc: &mut (bool, bool)) {
+        match s {
+            Stmt::FnDef { body, .. } => {
+                for s in body {
+                    walk_stmt(s, acc);
+                }
+            }
+            Stmt::Assign { value, .. } => walk_expr(value, acc),
+            Stmt::Expr(e, _) => walk_expr(e, acc),
+            Stmt::Return(e, _) => walk_expr(e, acc),
+            Stmt::ReturnStatus { status, body, .. } => {
+                walk_expr(status, acc);
+                if let Some(b) = body {
+                    walk_expr(b, acc);
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                walk_expr(condition, acc);
+                for s in body {
+                    walk_stmt(s, acc);
+                }
+            }
+            Stmt::Loop { body, .. } => {
+                for s in body {
+                    walk_stmt(s, acc);
+                }
+            }
+            Stmt::For { iter, body, .. } => {
+                walk_expr(iter, acc);
+                for s in body {
+                    walk_stmt(s, acc);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut acc = (false, false);
+    for s in program {
+        walk_stmt(s, &mut acc);
+    }
+    acc
+}
+
+/// Injects `getrandom = "0.2"` into a generated Cargo.toml (for the global RNG
+/// seed + `rand.bytes`). Idempotent; ensures a `[dependencies]` section exists.
+fn inject_getrandom_dep(toml: String) -> String {
+    if toml.contains("getrandom") {
+        return toml;
+    }
+    let dep_line = "getrandom = \"0.2\"\n";
+    if let Some(idx) = toml.find("[dependencies]") {
+        let after_header = idx + "[dependencies]".len();
+        let nl = toml[after_header..]
+            .find('\n')
+            .map(|n| after_header + n + 1)
+            .unwrap_or(toml.len());
+        let mut out = String::with_capacity(toml.len() + dep_line.len());
+        out.push_str(&toml[..nl]);
+        out.push_str(dep_line);
+        out.push_str(&toml[nl..]);
+        out
+    } else {
+        format!("{}\n[dependencies]\n{}", toml.trim_end(), dep_line)
+    }
+}
+
+/// FITZ-03 — detects any `<module>.<field>(...)` call in the main program (used
+/// to gate module preludes like `fs`). Generic; walks the full AST.
+fn program_calls_module(program: &Program, module: &str) -> bool {
+    use crate::ast::StrPart;
+    fn walk_expr(e: &Expr, module: &str, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let Expr::Call { callee, args, .. } = e {
+            if let Expr::Field { object, .. } = callee.as_ref() {
+                if let Expr::Ident(recv, _) = object.as_ref() {
+                    if recv == module {
+                        *found = true;
+                        return;
+                    }
+                }
+            }
+            walk_expr(callee, module, found);
+            for a in args {
+                walk_expr(a, module, found);
+            }
+            return;
+        }
+        match e {
+            Expr::BinOp { left, right, .. } => {
+                walk_expr(left, module, found);
+                walk_expr(right, module, found);
+            }
+            Expr::UnaryOp { operand, .. } => walk_expr(operand, module, found),
+            Expr::Field { object, .. } => walk_expr(object, module, found),
+            Expr::Index { object, index, .. } => {
+                walk_expr(object, module, found);
+                walk_expr(index, module, found);
+            }
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                walk_expr(object, module, found);
+                if let Some(s) = start {
+                    walk_expr(s, module, found);
+                }
+                if let Some(x) = end {
+                    walk_expr(x, module, found);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                walk_expr(start, module, found);
+                walk_expr(end, module, found);
+            }
+            Expr::List(items, _) | Expr::Tuple(items, _) => {
+                for it in items {
+                    walk_expr(it, module, found);
+                }
+            }
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                walk_expr(expr, module, found);
+                walk_expr(iter, module, found);
+                for (_, it) in extra_clauses {
+                    walk_expr(it, module, found);
+                }
+                if let Some(f) = filter {
+                    walk_expr(f, module, found);
+                }
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                walk_expr(key, module, found);
+                walk_expr(value, module, found);
+                walk_expr(iter, module, found);
+                for (_, it) in extra_clauses {
+                    walk_expr(it, module, found);
+                }
+                if let Some(f) = filter {
+                    walk_expr(f, module, found);
+                }
+            }
+            Expr::Map(pairs, _) => {
+                for (k, v) in pairs {
+                    walk_expr(k, module, found);
+                    walk_expr(v, module, found);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    walk_expr(v, module, found);
+                }
+            }
+            Expr::TupleField { tuple, .. } => walk_expr(tuple, module, found),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                walk_expr(condition, module, found);
+                for s in then {
+                    walk_stmt(s, module, found);
+                }
+                if let Some(b) = else_ {
+                    for s in b {
+                        walk_stmt(s, module, found);
+                    }
+                }
+            }
+            Expr::Match { value, arms, .. } => {
+                walk_expr(value, module, found);
+                for a in arms {
+                    for s in &a.body {
+                        walk_stmt(s, module, found);
+                    }
+                }
+            }
+            Expr::FnExpr { body, .. } | Expr::Loop { body, .. } => {
+                for s in body {
+                    walk_stmt(s, module, found);
+                }
+            }
+            Expr::StrInterp(parts, _) => {
+                for p in parts {
+                    if let StrPart::Expr(inner, _) = p {
+                        walk_expr(inner, module, found);
+                    }
+                }
+            }
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => walk_expr(inner, module, found),
+            Expr::NamedArg { value, .. } => walk_expr(value, module, found),
+            _ => {}
+        }
+    }
+    fn walk_stmt(s: &Stmt, module: &str, found: &mut bool) {
+        if *found {
+            return;
+        }
+        match s {
+            Stmt::FnDef { body, .. } => {
+                for s in body {
+                    walk_stmt(s, module, found);
+                }
+            }
+            Stmt::Assign { value, .. } => walk_expr(value, module, found),
+            Stmt::Expr(e, _) => walk_expr(e, module, found),
+            Stmt::Return(e, _) => walk_expr(e, module, found),
+            Stmt::ReturnStatus { status, body, .. } => {
+                walk_expr(status, module, found);
+                if let Some(b) = body {
+                    walk_expr(b, module, found);
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                walk_expr(condition, module, found);
+                for s in body {
+                    walk_stmt(s, module, found);
+                }
+            }
+            Stmt::Loop { body, .. } => {
+                for s in body {
+                    walk_stmt(s, module, found);
+                }
+            }
+            Stmt::For { iter, body, .. } => {
+                walk_expr(iter, module, found);
+                for s in body {
+                    walk_stmt(s, module, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = false;
+    for s in program {
+        walk_stmt(s, module, &mut found);
+        if found {
+            break;
+        }
+    }
+    found
+}
+
+/// FITZ-03 — filesystem helpers, emitted when the program uses `fs.*`. Pure
+/// `std::fs`; no extra deps. Error strings match `src/fs.rs` (paridad run↔build).
+const FS_PRELUDE: &str = r#"
+fn __fitz_fs_read(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("fs.read: `{}`: {}", path, e))
+}
+fn __fitz_fs_read_bytes(path: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("fs.read_bytes: `{}`: {}", path, e))
+}
+fn __fitz_fs_write(path: &str, content: &[u8]) -> Result<(), String> {
+    std::fs::write(path, content).map_err(|e| format!("fs.write: `{}`: {}", path, e))
+}
+fn __fitz_fs_append(path: &str, content: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    std::fs::OpenOptions::new().create(true).append(true).open(path)
+        .and_then(|mut f| f.write_all(content))
+        .map_err(|e| format!("fs.append: `{}`: {}", path, e))
+}
+fn __fitz_fs_exists(path: &str) -> bool { std::path::Path::new(path).exists() }
+fn __fitz_fs_list(path: &str) -> Result<std::sync::Arc<std::sync::Mutex<Vec<String>>>, String> {
+    let mut __names: Vec<String> = Vec::new();
+    for __e in std::fs::read_dir(path).map_err(|e| format!("fs.list: `{}`: {}", path, e))? {
+        let __entry = __e.map_err(|e| format!("fs.list: `{}`: {}", path, e))?;
+        __names.push(__entry.file_name().to_string_lossy().into_owned());
+    }
+    Ok(std::sync::Arc::new(std::sync::Mutex::new(__names)))
+}
+fn __fitz_fs_remove(path: &str) -> Result<(), String> {
+    let __p = std::path::Path::new(path);
+    (if __p.is_dir() { std::fs::remove_dir(__p) } else { std::fs::remove_file(__p) })
+        .map_err(|e| format!("fs.remove: `{}`: {}", path, e))
+}
+fn __fitz_fs_mkdir_all(path: &str) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|e| format!("fs.mkdir_all: `{}`: {}", path, e))
+}
+"#;
+
+/// FITZ-04 — locale-aware number formatting helpers, emitted when the program
+/// uses `num.*`. Byte-identical to `src/num.rs` (paridad run↔build).
+const NUM_PRELUDE: &str = r#"
+fn __fitz_num_locale(locale: &str) -> (char, char, bool, bool, bool) {
+    match locale {
+        "es-AR" | "es-ar" => (',', '.', true, true, true),
+        _ => ('.', ',', true, false, false),
+    }
+}
+fn __fitz_num_currency_symbol(code: &str) -> String {
+    match code {
+        "ARS" | "USD" | "MXN" | "CAD" | "AUD" | "CLP" | "COP" => "$".to_string(),
+        "EUR" => "€".to_string(),
+        "GBP" => "£".to_string(),
+        "JPY" => "¥".to_string(),
+        "BRL" => "R$".to_string(),
+        other => other.to_string(),
+    }
+}
+fn __fitz_num_group_int(int_digits: &str, sep: char) -> String {
+    let (neg, digits) = match int_digits.strip_prefix('-') { Some(rest) => (true, rest), None => (false, int_digits) };
+    let bytes = digits.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n + n / 3 + 1);
+    if neg { out.push('-'); }
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (n - i) % 3 == 0 { out.push(sep); }
+        out.push(*b as char);
+    }
+    out
+}
+fn __fitz_num_apply_locale(number_str: &str, decimal: char, thousands: char) -> String {
+    match number_str.split_once('.') {
+        Some((int_part, frac_part)) => format!("{}{}{}", __fitz_num_group_int(int_part, thousands), decimal, frac_part),
+        None => __fitz_num_group_int(number_str, thousands),
+    }
+}
+fn __fitz_num_format(x: f64, is_int: bool, locale: &str) -> String {
+    let (dec, th, _, _, _) = __fitz_num_locale(locale);
+    let s = if is_int { format!("{}", x as i64) } else { format!("{}", x) };
+    __fitz_num_apply_locale(&s, dec, th)
+}
+fn __fitz_num_percent(x: f64, locale: &str, digits: i64) -> String {
+    let (dec, th, _, _, psp) = __fitz_num_locale(locale);
+    let d = if digits < 0 { 0usize } else { digits as usize };
+    let s = format!("{:.*}", d, x * 100.0);
+    let body = __fitz_num_apply_locale(&s, dec, th);
+    if psp { format!("{} %", body) } else { format!("{}%", body) }
+}
+fn __fitz_num_currency(x: f64, locale: &str, code: &str) -> String {
+    let (dec, th, sb, ssp, _) = __fitz_num_locale(locale);
+    let sym = __fitz_num_currency_symbol(code);
+    let s = format!("{:.2}", x);
+    let body = __fitz_num_apply_locale(&s, dec, th);
+    match (sb, ssp) {
+        (true, true) => format!("{} {}", sym, body),
+        (true, false) => format!("{}{}", sym, body),
+        (false, true) => format!("{} {}", body, sym),
+        (false, false) => format!("{}{}", body, sym),
+    }
+}
+"#;
+
+/// FITZ-01 — core reproducible RNG prelude (emitted when the program uses any
+/// `rand.*`). The SplitMix64 + derivations are byte-identical to `src/rand.rs`
+/// so `rand.seeded(N)` produces the SAME sequence under `fitz run` and
+/// `fitz build`. `int` PANICS on `min > max` to match the interpreter's abort.
+const RAND_PRELUDE_CORE: &str = r#"
+#[inline]
+fn __fitz_splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+fn __fitz_rand_int(state: &mut u64, min: i64, max: i64) -> i64 {
+    if min > max { panic!("rand.int: min ({}) must be <= max ({})", min, max); }
+    let lo = min as i128; let hi = max as i128;
+    let span = (hi - lo + 1) as u128;
+    let v = (__fitz_splitmix64(state) as u128) % span;
+    (lo + v as i128) as i64
+}
+fn __fitz_rand_float(state: &mut u64) -> f64 {
+    (__fitz_splitmix64(state) >> 11) as f64 * (1.0 / ((1u64 << 53) as f64))
+}
+fn __fitz_rand_bool(state: &mut u64) -> bool { __fitz_splitmix64(state) & 1 == 1 }
+#[derive(Clone)]
+struct __FitzRng(std::sync::Arc<std::sync::Mutex<u64>>);
+impl __FitzRng {
+    fn new(seed: u64) -> Self { __FitzRng(std::sync::Arc::new(std::sync::Mutex::new(seed))) }
+    fn next_int(&self, min: i64, max: i64) -> i64 { let mut s = self.0.lock().unwrap(); __fitz_rand_int(&mut s, min, max) }
+    fn next_float(&self) -> f64 { let mut s = self.0.lock().unwrap(); __fitz_rand_float(&mut s) }
+    fn next_bool(&self) -> bool { let mut s = self.0.lock().unwrap(); __fitz_rand_bool(&mut s) }
+}
+"#;
+
+/// FITZ-01 — global (non-reproducible) RNG prelude (emitted when the program
+/// uses a non-`seeded` `rand.*` call). Seeded once from OS entropy; `bytes`
+/// pulls straight from the CSPRNG. Requires the `getrandom` dep (injected into
+/// Cargo.toml by `inject_getrandom_dep`).
+const RAND_PRELUDE_GLOBAL: &str = r#"
+static __FITZ_RAND_GLOBAL: std::sync::LazyLock<std::sync::Mutex<u64>> = std::sync::LazyLock::new(|| {
+    let mut __b = [0u8; 8];
+    getrandom::getrandom(&mut __b).expect("OS entropy for rand");
+    let mut __seed = u64::from_le_bytes(__b);
+    if __seed == 0 { __seed = 0x9E3779B97F4A7C15; }
+    std::sync::Mutex::new(__seed)
+});
+fn __fitz_rand_g_int(min: i64, max: i64) -> i64 { let mut s = __FITZ_RAND_GLOBAL.lock().unwrap(); __fitz_rand_int(&mut s, min, max) }
+fn __fitz_rand_g_float() -> f64 { let mut s = __FITZ_RAND_GLOBAL.lock().unwrap(); __fitz_rand_float(&mut s) }
+fn __fitz_rand_g_bool() -> bool { let mut s = __FITZ_RAND_GLOBAL.lock().unwrap(); __fitz_rand_bool(&mut s) }
+fn __fitz_rand_bytes(n: i64) -> Vec<u8> {
+    if n < 0 { panic!("rand.bytes(n): n must be >= 0"); }
+    let mut __b = vec![0u8; n as usize];
+    getrandom::getrandom(&mut __b).expect("OS entropy for rand.bytes");
+    __b
+}
+"#;
+
 fn program_uses_smtp(program: &Program) -> bool {
     use crate::ast::StrPart;
     fn expr_uses_smtp(e: &Expr) -> bool {
@@ -2452,6 +3032,42 @@ fn program_has_handler_with_middleware(program: &Program) -> bool {
 /// (`[f(), g()]`) where the type is
 /// only resolved in the checker may not trigger the FitzValue
 /// prelude — accepted limitation of the SPIKE.
+/// FITZ-10 (2026-08): a `List<Any>` / `Map<_, Any>` type — e.g. from an empty
+/// `[]`/`{}` literal that the checker types as `List<Any>` and never refines
+/// from a later `.push()` — makes codegen emit `Vec<__FitzValue>` referencing
+/// the `__FitzValue` enum. The literal-heterogeneity walker
+/// `program_uses_fitz_value` does NOT see this: at the AST level the `[]` is a
+/// homogeneous (empty) list; only the checker knows it resolved to `List<Any>`.
+/// We scan the checker's `TypeInfo` for any container (List/Map, possibly under
+/// Nullable/Result/Future/Tuple) whose element/key/value type contains `Any`,
+/// so the `__FitzValue` prelude (enum + `__fv_*` helpers + serde_json) is
+/// emitted for these programs too. Without this, a program the checker accepts
+/// (`out + chars[0]` with `chars: List<Any>`) failed `fitz build` (E0425/E0433:
+/// `__FitzValue` not in scope).
+fn type_info_uses_fitz_value(type_info: &crate::types::TypeInfo) -> bool {
+    fn has_any(t: &Type) -> bool {
+        match t {
+            Type::Any => true,
+            Type::List(inner) | Type::Nullable(inner) | Type::Future(inner) => has_any(inner),
+            Type::Map(k, v) => has_any(k) || has_any(v),
+            Type::Result { ok, err } => has_any(ok) || has_any(err),
+            Type::Tuple(items) => items.iter().any(has_any),
+            _ => false,
+        }
+    }
+    fn container_has_any(t: &Type) -> bool {
+        match t {
+            Type::List(inner) => has_any(inner),
+            Type::Map(k, v) => has_any(k) || has_any(v),
+            Type::Nullable(inner) | Type::Future(inner) => container_has_any(inner),
+            Type::Result { ok, err } => container_has_any(ok) || container_has_any(err),
+            Type::Tuple(items) => items.iter().any(container_has_any),
+            _ => false,
+        }
+    }
+    type_info.iter().any(|(_, t)| container_has_any(t))
+}
+
 fn program_uses_fitz_value(program: &Program) -> bool {
     use crate::ast::StrPart;
     fn item_class(e: &Expr) -> Option<u8> {
@@ -6422,7 +7038,7 @@ fn generate_module_rs_with_bindings(
              #[allow(unused_imports)]\n\
              use crate::__panic_payload_msg;\n\
              #[allow(unused_imports)]\n\
-             use crate::{__parse_urlencoded, __extract_multipart_boundary, __parse_multipart};\n\n",
+             use crate::{__parse_urlencoded, __extract_multipart_boundary, __parse_multipart, __fitz_parse_cookie};\n\n",
         );
     }
     // B3 (cosecha post-fitzwatch, 2026-06-19) — `__ToFitzJson` /
@@ -7170,17 +7786,30 @@ pub(crate) fn detect_response_builtin_kind(ret: &Type, env: &TypeEnv) -> Respons
 /// the AST defaults from `register_builtins`).
 fn builtin_default_for(builtin: &str, field_name: &str) -> Option<Expr> {
     use crate::ast::Span;
-    if builtin == "Response" {
-        match field_name {
+    match builtin {
+        "Response" => match field_name {
             "status" => Some(Expr::Int(200, Span::ZERO)),
             "content_type" => Some(Expr::Str("application/json".into(), Span::ZERO)),
             "headers" => Some(Expr::Map(vec![], Span::ZERO)),
             "body" => Some(Expr::Str(String::new(), Span::ZERO)),
             "body_bytes" => Some(Expr::Null(Span::ZERO)),
+            // FITZ-05 FASE B — cookies to write (Set-Cookie). Default [].
+            "cookies" => Some(Expr::List(vec![], Span::ZERO)),
             _ => None,
-        }
-    } else {
-        None
+        },
+        // FITZ-05 FASE B — `Cookie` built-in defaults, mirroring the AST
+        // defaults set by `evaluator::register_builtins` (Cookie). `name`
+        // and `value` are required (no default).
+        "Cookie" => match field_name {
+            "path" => Some(Expr::Str("/".into(), Span::ZERO)),
+            "http_only" => Some(Expr::Bool(false, Span::ZERO)),
+            "secure" => Some(Expr::Bool(false, Span::ZERO)),
+            "same_site" => Some(Expr::Str("Lax".into(), Span::ZERO)),
+            "max_age" => Some(Expr::Null(Span::ZERO)),
+            "domain" => Some(Expr::Null(Span::ZERO)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -7410,7 +8039,8 @@ fn generate_main_rs(
     // on `cross_module_compound_degrades_to_fitz_value` for detail.
     let uses_fitz_value = program_uses_fitz_value(program)
         || loader.modules.iter().any(|m| m.uses_fitz_value)
-        || cross_module_compound_degrades_to_fitz_value(program, loader);
+        || cross_module_compound_degrades_to_fitz_value(program, loader)
+        || type_info_uses_fitz_value(type_info);
     // W10 (v0.10.7) — transitive auth/ws/jobs. Parallel to transitive
     // uses_db (W8): if ANY loaded module declares those kinds of
     // handlers, main emits the corresponding preludes so that the
@@ -7509,6 +8139,16 @@ fn generate_main_rs(
     ctx.uses_date_or_uuid = uses_date_or_uuid;
     ctx.uses_http_client = uses_http_client;
     ctx.uses_smtp = uses_smtp;
+    // FITZ-01 — rand usage (main program; cross-module rand in codegen is a
+    // follow-up). `uses_rand` gates the core prelude, `uses_rand_global` the
+    // OS-entropy global RNG + getrandom.
+    let (uses_rand, uses_rand_global) = rand_usage(program);
+    ctx.uses_rand = uses_rand;
+    ctx.uses_rand_global = uses_rand_global;
+    // FITZ-03 — fs usage (main program; cross-module fs is a follow-up).
+    ctx.uses_fs = program_calls_module(program, "fs");
+    // FITZ-04 — num usage (locale-aware formatting).
+    ctx.uses_num = program_calls_module(program, "num");
     ctx.uses_to_json = uses_to_json;
     // 10.8.7 (v0.10.8) — pre-scan of the `ws_broadcast(endpoint, msg)`
     // builtin in main. Set BEFORE emit_prelude so that
@@ -7707,6 +8347,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             d.name.as_str(),
                             "server"
                                 | "header"
+                                | "cookie"
                                 | "command"
                                 | "cron"
                                 | "background"
@@ -7747,6 +8388,10 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // separately via `headers_from_decorators`.
                             // Here we only accept it as a valid decorator.
                             "header" => {}
+                            // FITZ-05 — `@cookie(name="X")`: like `@header`, the
+                            // HTTP wrapper processes it separately (via
+                            // `cookies_from_decorators`). Accept it here.
+                            "cookie" => {}
                             // `@middleware(...)` (MW.3): does not
                             // contribute to codegen categorization here;
                             // the HTTP wrapper processes it separately
@@ -8166,6 +8811,9 @@ fn emit_main_rs_body(
     // `__fitz_smtp_send` paralelos bit-a-bit al intérprete. Only when
     // the program (or any loaded module) calls `smtp.send(...)`.
     ctx.emit_smtp_prelude();
+    ctx.emit_rand_prelude();
+    ctx.emit_fs_prelude();
+    ctx.emit_num_prelude();
     // Phase 10.1.c — `db` module prelude: opaque types
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + async helpers for connect/query/exec/close.
@@ -9765,6 +10413,16 @@ struct CodegenCtx<'a> {
     /// without `smtp.send` calls pay nothing (no lettre in deps, no
     /// prelude in main).
     uses_smtp: bool,
+    /// FITZ-01 — `true` if the program uses any `rand.*` (gates the core
+    /// SplitMix64 + `__FitzRng` prelude).
+    uses_rand: bool,
+    /// FITZ-01 — `true` if the program uses a non-`seeded` `rand.*` call (gates
+    /// the OS-entropy global RNG prelude + `getrandom`).
+    uses_rand_global: bool,
+    /// FITZ-03 — `true` if the program uses any `fs.*` (gates the `fs` prelude).
+    uses_fs: bool,
+    /// FITZ-04 — `true` if the program uses any `num.*` (gates the `num` prelude).
+    uses_num: bool,
     /// `true` if the program calls the `to_json(x) -> Str` builtin.
     /// Enables emission of `JSON_SERIALIZE_PRELUDE` (the axum-free
     /// serialization core) + per-type `impl __ToFitzJson` even without
@@ -9925,6 +10583,9 @@ struct HandlerSig {
     query_params: Vec<(String, Type)>,
     /// Headers: `(http_name, fitz_param_name, is_nullable)`.
     header_params: Vec<(String, String, bool)>,
+    /// FITZ-05 — cookies: `(cookie_name, param_name, is_nullable)` per
+    /// `@cookie(name="X")`. Bound from the incoming `Cookie` header.
+    cookie_params: Vec<(String, String, bool)>,
     /// Body: `Some(name, type)` if the handler declares a body.
     body_param: Option<(String, Type)>,
     /// All resolved params in original order (for the final
@@ -10050,6 +10711,10 @@ impl<'a> CodegenCtx<'a> {
             uses_date_or_uuid: false,
             uses_http_client: false,
             uses_smtp: false,
+            uses_rand: false,
+            uses_rand_global: false,
+            uses_fs: false,
+            uses_num: false,
             uses_to_json: false,
             cron_jobs_info: Vec::new(),
             every_jobs_info: Vec::new(),
@@ -12056,6 +12721,37 @@ impl __FitzRetryConfig {
         self.emit("\n");
         if self.has_http {
             self.emit(SMTP_HTTP_INTEGRATION_PRELUDE);
+            self.emit("\n");
+        }
+    }
+
+    /// FITZ-01 — emits the `rand` prelude: the reproducible core always when the
+    /// program uses `rand.*`, plus the OS-entropy global RNG when a non-`seeded`
+    /// call is present.
+    fn emit_rand_prelude(&mut self) {
+        if !self.uses_rand {
+            return;
+        }
+        self.emit(RAND_PRELUDE_CORE);
+        self.emit("\n");
+        if self.uses_rand_global {
+            self.emit(RAND_PRELUDE_GLOBAL);
+            self.emit("\n");
+        }
+    }
+
+    /// FITZ-03 — emits the `fs` prelude when the program uses `fs.*`.
+    fn emit_fs_prelude(&mut self) {
+        if self.uses_fs {
+            self.emit(FS_PRELUDE);
+            self.emit("\n");
+        }
+    }
+
+    /// FITZ-04 — emits the `num` prelude when the program uses `num.*`.
+    fn emit_num_prelude(&mut self) {
+        if self.uses_num {
+            self.emit(NUM_PRELUDE);
             self.emit("\n");
         }
     }
@@ -14457,10 +15153,13 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // `r.status` would fail with "type HttpClientResponse without
         // resolved fields in fields_by_id" because the field access
         // codegen looks up the fields by TypeId from there.
+        // FITZ-05 FASE B — `Cookie` is always pre-registered alongside
+        // `Response` (its `cookies: List<Cookie>` field references it,
+        // and `Cookie { ... }` literals need the type_sig).
         let builtin_types: &[&str] = if self.uses_http_client {
-            &["Request", "Response", "HttpClientResponse"]
+            &["Request", "Response", "Cookie", "HttpClientResponse"]
         } else {
-            &["Request", "Response"]
+            &["Request", "Response", "Cookie"]
         };
         for builtin in builtin_types {
             if let Some(id) = self.env.lookup(builtin) {
@@ -17242,10 +17941,22 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // target from `ret_stack` (which carries the correct frame per fn +
         // closure) ONLY when it is `Any` — leaving WS/Result/Null frames
         // and normal fns untouched.
-        let resolved_ret: Type = if matches!(ret_expected, Type::Null)
-            && matches!(self.ret_stack.last(), Some(Type::Any))
-        {
-            Type::Any
+        //
+        // FITZ-09 (2026-08): the same leak breaks `-> T?` (Nullable) fns. A
+        // `return null` inside a nested `match`/`if`/loop re-enters with the
+        // `Type::Null` placeholder, so `coerce(Null → Null)` emits a bare `()`
+        // instead of `None`; and `return <value>` emits the value unwrapped
+        // instead of `Some(...)` — rustc rejects both against the `Option<T>`
+        // return type. `flv_cookie` in fitz-liveviews (and any `-> T?` with a
+        // nested return) hit this, blocking every native build that depends on
+        // the framework. We extend the recovery to `Nullable(_)` frames too, so
+        // the nested return coerces against the real `Option<T>` target. Result
+        // and WS frames stay untouched (Ok/Err propagation above handles those).
+        let resolved_ret: Type = if matches!(ret_expected, Type::Null) {
+            match self.ret_stack.last() {
+                Some(t @ (Type::Any | Type::Nullable(_))) => t.clone(),
+                _ => ret_expected.clone(),
+            }
         } else {
             ret_expected.clone()
         };
@@ -18468,6 +19179,22 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 if matches!(lt, Type::Str) && matches!(rt, Type::Str) {
                     return Ok((format!("format!(\"{{}}{{}}\", {}, {})", lc, rc), Type::Str));
                 }
+                // FITZ-10 (2026-08): `Str + Any` / `Any + Str` — parity with the
+                // interpreter, where at runtime the `Any` operand is concretely a
+                // `Value::Str` and `eval_add` concatenates. The static `Any` (from
+                // a `List<Any>` element, a gradual binding, etc.) is coerced to
+                // `Str` via `__fv_to_string` (panics if it is not actually a Str at
+                // runtime, mirroring the interpreter's TypeMismatch). Without this,
+                // a program the checker accepts (`out + chars[0]` with `chars:
+                // List<Any>`) passed `fitz check` but failed `fitz build`.
+                if matches!(lt, Type::Str) && matches!(rt, Type::Any) {
+                    let r_str = coerce(&rc, &Type::Any, &Type::Str, self.env);
+                    return Ok((format!("format!(\"{{}}{{}}\", {}, {})", lc, r_str), Type::Str));
+                }
+                if matches!(lt, Type::Any) && matches!(rt, Type::Str) {
+                    let l_str = coerce(&lc, &Type::Any, &Type::Str, self.env);
+                    return Ok((format!("format!(\"{{}}{{}}\", {}, {})", l_str, rc), Type::Str));
+                }
                 let (l, r, t) = numeric_coerce(&lc, &lt, &rc, &rt)
                     .ok_or_else(|| self.err_at(span, format!(
                         "operador `+` no aplicable a `{}` y `{}` en codegen",
@@ -18818,6 +19545,32 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 // `Future<Result<SmtpResult>>`.
                 if recv == "smtp" && self.lookup_var(recv).is_none() {
                     return self.gen_smtp_call(field, args, *field_span);
+                }
+                // FITZ-01 — `rand.X(...)` module dispatch (global CSPRNG +
+                // `rand.seeded(N)`). Same shadowing semantics.
+                if recv == "rand" && self.lookup_var(recv).is_none() {
+                    return self.gen_rand_module_call(field, args, *field_span);
+                }
+                // FITZ-03 — `fs.X(...)` filesystem dispatch.
+                if recv == "fs" && self.lookup_var(recv).is_none() {
+                    return self.gen_fs_call(field, args, *field_span);
+                }
+                // FITZ-04 — `num.X(...)` locale-aware formatting dispatch.
+                if recv == "num" && self.lookup_var(recv).is_none() {
+                    return self.gen_num_call(field, args, *field_span);
+                }
+            }
+
+            // FITZ-01 — method over a seeded `RandGen` (`<gen>.int(...)` etc.).
+            // Only when the receiver is a local var typed `RandGen` (the common
+            // `let r = rand.seeded(...)`). Restricting to a var lookup avoids
+            // gen_expr'ing module Idents like `log`/`jwt` (which are not codegen
+            // vars and would error). A RandGen from a non-Ident receiver is a
+            // rare case deferred to a follow-up.
+            if let Expr::Ident(name, _) = object.as_ref() {
+                if matches!(self.lookup_var(name), Some(Type::RandGen)) {
+                    let (obj_code, _) = self.gen_expr(object)?;
+                    return self.gen_rand_gen_method(&obj_code, field, args, *field_span);
                 }
             }
 
@@ -21844,6 +22597,354 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
     /// Optional keys: `from` (Str — overrides SMTP_FROM env var).
     /// Other keys (e.g. `attachments`) emit a clear error citing
     /// MVP scope.
+    /// FITZ-04 — `num.X(...)` locale-aware formatting dispatch. All return Str.
+    fn gen_num_call(
+        &mut self,
+        field: &str,
+        args: &[Expr],
+        span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        match field {
+            "format" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(span, "`num.format(x, locale)` expects 2 arguments"));
+                }
+                let (xc, xt) = self.gen_expr(&args[0])?;
+                let is_int = matches!(xt, Type::Int);
+                let x = coerce(&xc, &xt, &Type::Float, self.env);
+                let (lc, lt) = self.gen_expr(&args[1])?;
+                let locale = coerce(&lc, &lt, &Type::Str, self.env);
+                Ok((
+                    format!("__fitz_num_format({}, {}, &({}))", x, is_int, locale),
+                    Type::Str,
+                ))
+            }
+            "percent" => {
+                if args.len() != 3 {
+                    return Err(
+                        self.err_at(span, "`num.percent(x, locale, digits)` expects 3 arguments")
+                    );
+                }
+                let (xc, xt) = self.gen_expr(&args[0])?;
+                let x = coerce(&xc, &xt, &Type::Float, self.env);
+                let (lc, lt) = self.gen_expr(&args[1])?;
+                let locale = coerce(&lc, &lt, &Type::Str, self.env);
+                let (dc, dt) = self.gen_expr(&args[2])?;
+                let digits = coerce(&dc, &dt, &Type::Int, self.env);
+                Ok((
+                    format!("__fitz_num_percent({}, &({}), ({}))", x, locale, digits),
+                    Type::Str,
+                ))
+            }
+            "currency" => {
+                if args.len() != 3 {
+                    return Err(
+                        self.err_at(span, "`num.currency(x, locale, code)` expects 3 arguments")
+                    );
+                }
+                let (xc, xt) = self.gen_expr(&args[0])?;
+                let x = coerce(&xc, &xt, &Type::Float, self.env);
+                let (lc, lt) = self.gen_expr(&args[1])?;
+                let locale = coerce(&lc, &lt, &Type::Str, self.env);
+                let (cc, ct) = self.gen_expr(&args[2])?;
+                let code = coerce(&cc, &ct, &Type::Str, self.env);
+                Ok((
+                    format!("__fitz_num_currency({}, &({}), &({}))", x, locale, code),
+                    Type::Str,
+                ))
+            }
+            other => Err(self.err_at(
+                span,
+                format!(
+                    "`num` has no method `{}` (supported: format, percent, currency)",
+                    other
+                ),
+            )),
+        }
+    }
+
+    /// FITZ-03 — `fs.X(...)` filesystem dispatch. Emits the `__fitz_fs_*`
+    /// helpers; return types mirror the interpreter builtins.
+    fn gen_fs_call(
+        &mut self,
+        field: &str,
+        args: &[Expr],
+        span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let res_null = || Type::Result {
+            ok: Box::new(Type::Null),
+            err: Box::new(Type::Str),
+        };
+        match field {
+            "read" | "read_bytes" | "exists" | "list" | "remove" | "mkdir_all" => {
+                if args.len() != 1 {
+                    return Err(
+                        self.err_at(span, format!("`fs.{}(path)` expects 1 argument", field))
+                    );
+                }
+                let (p, pt) = self.gen_expr(&args[0])?;
+                let p = coerce(&p, &pt, &Type::Str, self.env);
+                let (helper, ret) = match field {
+                    "read" => (
+                        "__fitz_fs_read",
+                        Type::Result {
+                            ok: Box::new(Type::Str),
+                            err: Box::new(Type::Str),
+                        },
+                    ),
+                    "read_bytes" => (
+                        "__fitz_fs_read_bytes",
+                        Type::Result {
+                            ok: Box::new(Type::Bytes),
+                            err: Box::new(Type::Str),
+                        },
+                    ),
+                    "exists" => ("__fitz_fs_exists", Type::Bool),
+                    "list" => (
+                        "__fitz_fs_list",
+                        Type::Result {
+                            ok: Box::new(Type::List(Box::new(Type::Str))),
+                            err: Box::new(Type::Str),
+                        },
+                    ),
+                    "remove" => ("__fitz_fs_remove", res_null()),
+                    "mkdir_all" => ("__fitz_fs_mkdir_all", res_null()),
+                    _ => unreachable!(),
+                };
+                Ok((format!("{}(&({}))", helper, p), ret))
+            }
+            "write" | "append" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(
+                        span,
+                        format!("`fs.{}(path, content)` expects 2 arguments", field),
+                    ));
+                }
+                let (p, pt) = self.gen_expr(&args[0])?;
+                let p = coerce(&p, &pt, &Type::Str, self.env);
+                let (c, cty) = self.gen_expr(&args[1])?;
+                let content = match &cty {
+                    Type::Str => format!("({}).as_bytes()", c),
+                    Type::Bytes => format!("&({})", c),
+                    other => {
+                        return Err(self.err_at(
+                            span,
+                            format!(
+                                "`fs.{}`: content must be Str or Bytes, received `{}`",
+                                field,
+                                type_name(other)
+                            ),
+                        ));
+                    }
+                };
+                let helper = if field == "write" {
+                    "__fitz_fs_write"
+                } else {
+                    "__fitz_fs_append"
+                };
+                Ok((format!("{}(&({}), {})", helper, p, content), res_null()))
+            }
+            other => Err(self.err_at(
+                span,
+                format!(
+                    "`fs` has no method `{}` (supported: read, read_bytes, write, append, exists, list, remove, mkdir_all)",
+                    other
+                ),
+            )),
+        }
+    }
+
+    /// FITZ-01 — `rand.X(...)` (global). `seeded` returns a `RandGen`; the rest
+    /// use the OS-entropy global RNG helpers.
+    fn gen_rand_module_call(
+        &mut self,
+        field: &str,
+        args: &[Expr],
+        span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        match field {
+            "seeded" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(span, "`rand.seeded(seed)` expects 1 argument (Int)"));
+                }
+                let (a, aty) = self.gen_expr(&args[0])?;
+                let a = coerce(&a, &aty, &Type::Int, self.env);
+                Ok((format!("__FitzRng::new(({}) as u64)", a), Type::RandGen))
+            }
+            "int" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(span, "`rand.int(min, max)` expects 2 arguments"));
+                }
+                let (lo, lt) = self.gen_expr(&args[0])?;
+                let (hi, ht) = self.gen_expr(&args[1])?;
+                let lo = coerce(&lo, &lt, &Type::Int, self.env);
+                let hi = coerce(&hi, &ht, &Type::Int, self.env);
+                Ok((format!("__fitz_rand_g_int({}, {})", lo, hi), Type::Int))
+            }
+            "float" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(span, "`rand.float()` expects 0 arguments"));
+                }
+                Ok(("__fitz_rand_g_float()".to_string(), Type::Float))
+            }
+            "bool" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(span, "`rand.bool()` expects 0 arguments"));
+                }
+                Ok(("__fitz_rand_g_bool()".to_string(), Type::Bool))
+            }
+            "bytes" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(span, "`rand.bytes(n)` expects 1 argument"));
+                }
+                let (n, nt) = self.gen_expr(&args[0])?;
+                let n = coerce(&n, &nt, &Type::Int, self.env);
+                Ok((format!("__fitz_rand_bytes({})", n), Type::Bytes))
+            }
+            "choice" | "shuffle" | "sample" => {
+                self.gen_rand_list_method(field, args, span, "__fitz_rand_g_int(__LO__, __HI__)")
+            }
+            other => Err(self.err_at(
+                span,
+                format!(
+                    "`rand` has no method `{}` (supported: int, float, bool, choice, shuffle, sample, bytes, seeded)",
+                    other
+                ),
+            )),
+        }
+    }
+
+    /// FITZ-01 — `<RandGen>.method(...)`. Reproducible; uses the generator's own
+    /// SplitMix64 state via the `__FitzRng` methods.
+    fn gen_rand_gen_method(
+        &mut self,
+        recv_code: &str,
+        field: &str,
+        args: &[Expr],
+        span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        match field {
+            "int" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(span, "`<RandGen>.int(min, max)` expects 2 arguments"));
+                }
+                let (lo, lt) = self.gen_expr(&args[0])?;
+                let (hi, ht) = self.gen_expr(&args[1])?;
+                let lo = coerce(&lo, &lt, &Type::Int, self.env);
+                let hi = coerce(&hi, &ht, &Type::Int, self.env);
+                Ok((
+                    format!("({}).next_int({}, {})", recv_code, lo, hi),
+                    Type::Int,
+                ))
+            }
+            "float" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(span, "`<RandGen>.float()` expects 0 arguments"));
+                }
+                Ok((format!("({}).next_float()", recv_code), Type::Float))
+            }
+            "bool" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(span, "`<RandGen>.bool()` expects 0 arguments"));
+                }
+                Ok((format!("({}).next_bool()", recv_code), Type::Bool))
+            }
+            "choice" | "shuffle" | "sample" => {
+                let tmpl = format!("({}).next_int(__LO__, __HI__)", recv_code);
+                self.gen_rand_list_method(field, args, span, &tmpl)
+            }
+            other => Err(self.err_at(
+                span,
+                format!(
+                    "`RandGen` has no method `{}` (supported: int, float, bool, choice, shuffle, sample)",
+                    other
+                ),
+            )),
+        }
+    }
+
+    /// FITZ-01 — shared codegen for `choice`/`shuffle`/`sample` (global +
+    /// seeded). `int_tmpl` is the "next int in [__LO__, __HI__]" expression. The
+    /// Fisher-Yates order + error messages are byte-identical to `src/rand.rs`.
+    fn gen_rand_list_method(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        span: crate::ast::Span,
+        int_tmpl: &str,
+    ) -> Result<(String, Type), FitzError> {
+        let want = if method == "sample" { 2 } else { 1 };
+        if args.len() != want {
+            return Err(self.err_at(
+                span,
+                format!("`rand.{}` expects {} argument(s)", method, want),
+            ));
+        }
+        let (xs_code, xs_ty) = self.gen_expr(&args[0])?;
+        let elem = match &xs_ty {
+            Type::List(inner) => (**inner).clone(),
+            other => {
+                return Err(self.err_at(
+                    span,
+                    format!(
+                        "`rand.{}` expects a List, received `{}`",
+                        method,
+                        type_name(other)
+                    ),
+                ));
+            }
+        };
+        let elem_rust = rust_type_for(&elem, self.env)?;
+        match method {
+            "choice" => {
+                let call = int_tmpl
+                    .replace("__LO__", "0")
+                    .replace("__HI__", "__len - 1");
+                let code = format!(
+                    "{{ let __arc = ({xs}); let __xs = __arc.lock().unwrap(); let __len = __xs.len() as i64; if __len == 0 {{ Err::<{er}, String>(\"rand.choice: empty list\".to_string()) }} else {{ let __i = {call} as usize; Ok(__xs[__i].clone()) }} }}",
+                    xs = xs_code, er = elem_rust, call = call
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new(elem),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
+            "shuffle" => {
+                let call = int_tmpl
+                    .replace("__LO__", "0")
+                    .replace("__HI__", "__i as i64");
+                let code = format!(
+                    "{{ let mut __v = ({xs}).lock().unwrap().clone(); let __n = __v.len(); for __i in (1..__n).rev() {{ let __j = {call} as usize; __v.swap(__i, __j); }} std::sync::Arc::new(std::sync::Mutex::new(__v)) }}",
+                    xs = xs_code, call = call
+                );
+                Ok((code, Type::List(Box::new(elem))))
+            }
+            "sample" => {
+                let (n_code, n_ty) = self.gen_expr(&args[1])?;
+                let n_code = coerce(&n_code, &n_ty, &Type::Int, self.env);
+                let list_rust = rust_type_for(&Type::List(Box::new(elem.clone())), self.env)?;
+                let call = int_tmpl
+                    .replace("__LO__", "__i as i64")
+                    .replace("__HI__", "__len - 1");
+                let code = format!(
+                    "{{ let mut __v = ({xs}).lock().unwrap().clone(); let __len = __v.len() as i64; let __n_req = ({n}) as i64; if __n_req < 0 {{ Err::<{lr}, String>(\"rand.sample: n must be >= 0\".to_string()) }} else if __n_req > __len {{ Err(format!(\"rand.sample: n ({{}}) is larger than the list ({{}})\", __n_req, __len)) }} else {{ let __k = __n_req as usize; for __i in 0..__k {{ let __j = {call} as usize; __v.swap(__i, __j); }} __v.truncate(__k); Ok(std::sync::Arc::new(std::sync::Mutex::new(__v))) }} }}",
+                    xs = xs_code, n = n_code, lr = list_rust, call = call
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new(Type::List(Box::new(elem))),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn gen_smtp_call(
         &mut self,
         field: &str,
@@ -32637,6 +33738,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 path_params: Vec::new(),
                 query_params: Vec::new(),
                 header_params: Vec::new(),
+                cookie_params: Vec::new(),
                 body_param: None,
                 resolved_params,
                 returns_result,
@@ -32745,6 +33847,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // that each header param is Str or Str?; other types →
         // codegen error.
         let header_specs = crate::openapi::headers_from_decorators(decorators, params);
+        let cookie_specs = crate::openapi::cookies_from_decorators(decorators, params);
         for (http_name, fitz_param, _is_nullable) in &header_specs {
             let p = resolved_params
                 .iter()
@@ -32914,6 +34017,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         let mut path_params: Vec<(String, Type)> = Vec::new();
         let mut query_params: Vec<(String, Type)> = Vec::new();
         let mut header_params: Vec<(String, String, bool)> = Vec::new();
+        let mut cookie_params: Vec<(String, String, bool)> = Vec::new();
         let mut body_param: Option<(String, Type)> = None;
         for (n, t) in &resolved_params {
             if template_params.iter().any(|tp| tp == n) {
@@ -32924,6 +34028,11 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 header_specs.iter().find(|(_, fp, _)| fp == n)
             {
                 header_params.push((http_name.clone(), n.clone(), *is_nullable));
+            } else if let Some((ck_name, _, is_nullable)) =
+                cookie_specs.iter().find(|(_, fp, _)| fp == n)
+            {
+                // FITZ-05 — @cookie param, bound from the incoming Cookie header.
+                cookie_params.push((ck_name.clone(), n.clone(), *is_nullable));
             } else if auth_user_param_name.as_deref() == Some(n.as_str()) {
                 // Auth-injected user — NOT body, handled by
                 // the auth wrapper.
@@ -32990,6 +34099,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             path_params,
             query_params,
             header_params,
+            cookie_params,
             body_param,
             resolved_params,
             returns_result,
@@ -33071,6 +34181,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // does NOT extract the HeaderMap (zero-overhead in
         // simple handlers).
         if !sig.header_params.is_empty()
+            || !sig.cookie_params.is_empty()
             || sig.has_middleware
             || sig.has_cors
             || sig.body_param.is_some()
@@ -33309,6 +34420,38 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     &mut self.output,
                     "            axum::Json(serde_json::json!({{\"error\": \"header '{}': missing — is required\"}})),",
                     http_name,
+                )
+                .unwrap();
+                self.emit("        ).into_response(),\n");
+                self.emit("    };\n");
+            }
+        }
+
+        // FITZ-05 — @cookie params: parse the incoming `Cookie` header for the
+        // named cookie via `__fitz_parse_cookie`. Nullable → Option; required →
+        // String with an early 400.
+        for (ck_name, fitz_name, is_nullable) in &sig.cookie_params {
+            if *is_nullable {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: Option<String> = __hmap.get(\"cookie\").and_then(|v| v.to_str().ok()).and_then(|__raw| __fitz_parse_cookie(__raw, \"{}\"));",
+                    fitz_name, ck_name,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: String = match __hmap.get(\"cookie\").and_then(|v| v.to_str().ok()).and_then(|__raw| __fitz_parse_cookie(__raw, \"{}\")) {{",
+                    fitz_name, ck_name,
+                )
+                .unwrap();
+                self.emit("        Some(v) => v,\n");
+                self.emit("        None => return (\n");
+                self.emit("            axum::http::StatusCode::BAD_REQUEST,\n");
+                writeln!(
+                    &mut self.output,
+                    "            axum::Json(serde_json::json!({{\"error\": \"cookie '{}': missing — is required\"}})),",
+                    ck_name,
                 )
                 .unwrap();
                 self.emit("        ).into_response(),\n");
@@ -33771,8 +34914,8 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
     /// `Response` built-in. Parallel bit-by-bit to
     /// `response_instance_to_outcome` + `outcome_to_response` in
     /// `http.rs`:
-    ///   1. Lock the `Arc<Mutex<ResponseData>>` and extract the 5
-    ///      fields.
+    ///   1. Lock the `Arc<Mutex<ResponseData>>` and extract the 6
+    ///      fields (status/content_type/headers/body/body_bytes/cookies).
     ///   2. Validate XOR `body` / `body_bytes` (both set → 500 with
     ///      clear msg).
     ///   3. Validate status in [100, 1000) (out of range → 500).
@@ -33856,13 +34999,14 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
     /// The `__resp_arc` variable must be bound by the caller
     /// (`let __resp_arc = __result;`).
     fn emit_response_builtin_axum_build(&mut self, cors_arg: &str) {
-        // Lock the Arc<Mutex<ResponseData>> and extract the 5
-        // fields into local vars so the lock guard drops before
-        // we await/return (paralelo a la convención del codegen
-        // post-F17: lock scope mínimo + clone-out).
-        self.emit("    let (__status, __ct, __headers, __body, __bbytes) = {\n");
+        // Lock the Arc<Mutex<ResponseData>> and extract the 6
+        // fields (incl. FITZ-05 cookies) into local vars so the
+        // lock guard drops before we await/return (paralelo a la
+        // convención del codegen post-F17: lock scope mínimo +
+        // clone-out).
+        self.emit("    let (__status, __ct, __headers, __body, __bbytes, __cookies) = {\n");
         self.emit("        let __g = __resp_arc.lock().unwrap();\n");
-        self.emit("        (__g.status, __g.content_type.clone(), __g.headers.clone(), __g.body.clone(), __g.body_bytes.clone())\n");
+        self.emit("        (__g.status, __g.content_type.clone(), __g.headers.clone(), __g.body.clone(), __g.body_bytes.clone(), __g.cookies.clone())\n");
         self.emit("    };\n");
         // XOR body/body_bytes + status validation + axum build.
         self.emit_response_builtin_axum_build_core();
@@ -33886,7 +35030,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         let p = " ".repeat(pad);
         writeln!(
             &mut self.output,
-            "{p}let (__status, __ct, __headers, __body, __bbytes) = {{",
+            "{p}let (__status, __ct, __headers, __body, __bbytes, __cookies) = {{",
         )
         .unwrap();
         writeln!(
@@ -33896,7 +35040,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         .unwrap();
         writeln!(
             &mut self.output,
-            "{p}    (__g.status, __g.content_type.clone(), __g.headers.clone(), __g.body.clone(), __g.body_bytes.clone())",
+            "{p}    (__g.status, __g.content_type.clone(), __g.headers.clone(), __g.body.clone(), __g.body_bytes.clone(), __g.cookies.clone())",
         )
         .unwrap();
         writeln!(&mut self.output, "{p}}};").unwrap();
@@ -33989,6 +35133,33 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         writeln!(&mut self.output, "{p}            }}").unwrap();
         writeln!(&mut self.output, "{p}        }}").unwrap();
         writeln!(&mut self.output, "{p}    }}").unwrap();
+        // FITZ-05 FASE B — one Set-Cookie header per cookie (axum's
+        // builder `.header()` appends, so multiple cookies survive).
+        writeln!(&mut self.output, "{p}    {{").unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}        let __clock = __cookies.lock().unwrap();",
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{p}        for __c in __clock.iter() {{").unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}            let __scv = __fitz_serialize_set_cookie(&__c.lock().unwrap());",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}            if let Ok(__scval) = axum::http::HeaderValue::try_from(__scv.as_str()) {{",
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "{p}                __builder = __builder.header(axum::http::header::SET_COOKIE, __scval);",
+        )
+        .unwrap();
+        writeln!(&mut self.output, "{p}            }}").unwrap();
+        writeln!(&mut self.output, "{p}        }}").unwrap();
+        writeln!(&mut self.output, "{p}    }}").unwrap();
         writeln!(
             &mut self.output,
             "{p}    __builder.body(__body_axum).unwrap_or_else(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({{\"error\": \"failed to build response\"}}))).into_response())",
@@ -34026,6 +35197,20 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         self.emit("                    if let Ok(__hv) = axum::http::HeaderValue::try_from(__v.as_str()) {\n");
         self.emit("                        __builder = __builder.header(__hn, __hv);\n");
         self.emit("                    }\n");
+        self.emit("                }\n");
+        self.emit("            }\n");
+        self.emit("        }\n");
+        // FITZ-05 FASE B — one Set-Cookie header per cookie. axum's
+        // builder `.header()` appends (not overwrites), so multiple
+        // cookies survive.
+        self.emit("        {\n");
+        self.emit("            let __clock = __cookies.lock().unwrap();\n");
+        self.emit("            for __c in __clock.iter() {\n");
+        self.emit(
+            "                let __scv = __fitz_serialize_set_cookie(&__c.lock().unwrap());\n",
+        );
+        self.emit("                if let Ok(__scval) = axum::http::HeaderValue::try_from(__scv.as_str()) {\n");
+        self.emit("                    __builder = __builder.header(axum::http::header::SET_COOKIE, __scval);\n");
         self.emit("                }\n");
         self.emit("            }\n");
         self.emit("        }\n");
@@ -35842,14 +37027,16 @@ struct ResponseData {
     headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     body: String,
     body_bytes: Option<Vec<u8>>,
+    // FITZ-05 FASE B — cookies to write (Set-Cookie). Default [].
+    cookies: std::sync::Arc<std::sync::Mutex<Vec<Cookie>>>,
 }
 #[allow(dead_code)]
 type Response = std::sync::Arc<std::sync::Mutex<ResponseData>>;
 
 impl PartialEq for ResponseData {
     fn eq(&self, other: &Self) -> bool {
-        // The `headers` field carries Arc<Mutex<...>>; compare by
-        // content (ptr_eq shortcut + lock+deref) parallel to
+        // The `headers`/`cookies` fields carry Arc<Mutex<...>>; compare
+        // by content (ptr_eq shortcut + lock+deref) parallel to
         // nominal types emitted by `gen_type_def` (post-F17).
         self.status == other.status
             && self.content_type == other.content_type
@@ -35857,6 +37044,15 @@ impl PartialEq for ResponseData {
             && self.body_bytes == other.body_bytes
             && (std::sync::Arc::ptr_eq(&self.headers, &other.headers)
                 || *self.headers.lock().unwrap() == *other.headers.lock().unwrap())
+            && (std::sync::Arc::ptr_eq(&self.cookies, &other.cookies) || {
+                let __xc = self.cookies.lock().unwrap();
+                let __yc = other.cookies.lock().unwrap();
+                __xc.len() == __yc.len()
+                    && __xc.iter().zip(__yc.iter()).all(|(__a, __b)| {
+                        std::sync::Arc::ptr_eq(__a, __b)
+                            || *__a.lock().unwrap() == *__b.lock().unwrap()
+                    })
+            })
     }
 }
 
@@ -35865,8 +37061,8 @@ impl std::fmt::Display for ResponseData {
         // Canonical format parallel to `Value::Instance` in the
         // interpreter (`value.rs`): `Response { status: 200,
         // content_type: "application/json", headers: {...},
-        // body: "x", body_bytes: null }`. body_bytes shown as
-        // `<bytes:N>` when present (parallel to FileData.content).
+        // body: "x", body_bytes: null, cookies: [...] }`. body_bytes
+        // shown as `<bytes:N>` when present (parallel to FileData.content).
         let body_bytes_str = match &self.body_bytes {
             Some(bs) => __fitz_fmt_bytes(bs),
             None => "null".to_string(),
@@ -35880,10 +37076,19 @@ impl std::fmt::Display for ResponseData {
             headers_str.push_str(&format!("\"{}\": \"{}\"", k, v));
         }
         headers_str.push('}');
+        let cookies_lock = self.cookies.lock().unwrap();
+        let mut cookies_str = String::from("[");
+        for (i, c) in cookies_lock.iter().enumerate() {
+            if i > 0 {
+                cookies_str.push_str(", ");
+            }
+            cookies_str.push_str(&format!("{}", c.lock().unwrap()));
+        }
+        cookies_str.push(']');
         write!(
             f,
-            "Response {{ status: {}, content_type: \"{}\", headers: {}, body: \"{}\", body_bytes: {} }}",
-            self.status, self.content_type, headers_str, self.body, body_bytes_str,
+            "Response {{ status: {}, content_type: \"{}\", headers: {}, body: \"{}\", body_bytes: {}, cookies: {} }}",
+            self.status, self.content_type, headers_str, self.body, body_bytes_str, cookies_str,
         )
     }
 }
@@ -35893,7 +37098,7 @@ impl __ToFitzJson for ResponseData {
         // Fallback path: when a `Response` value reaches a JSON
         // serialization site that is NOT the dedicated wrapper
         // branch (rare — eg. nested in another Instance), emit
-        // an object with the 5 fields. The wrapper of an HTTP
+        // an object with the fields. The wrapper of an HTTP
         // handler that returns `Response` goes through a
         // dedicated branch and never hits this impl.
         let mut obj = serde_json::Map::new();
@@ -35919,8 +37124,101 @@ impl __ToFitzJson for ResponseData {
                 obj.insert("body_bytes".to_string(), serde_json::Value::Null);
             }
         }
+        let cookies_lock = self.cookies.lock().unwrap();
+        let arr: Vec<serde_json::Value> =
+            cookies_lock.iter().map(|c| c.lock().unwrap().__to_fitz_json()).collect();
+        obj.insert("cookies".to_string(), serde_json::Value::Array(arr));
         serde_json::Value::Object(obj)
     }
+}
+
+/// FITZ-05 FASE B — `Cookie` built-in (write path). Each `Cookie` in a
+/// `Response { cookies: [...] }` serialises to one `Set-Cookie` header
+/// via `__fitz_serialize_set_cookie`. Fields + defaults mirror
+/// `evaluator::register_builtins` / `types::register_http_builtin_types`.
+#[derive(Clone, PartialEq)]
+#[allow(dead_code)]
+struct CookieData {
+    name: String,
+    value: String,
+    path: String,
+    http_only: bool,
+    secure: bool,
+    same_site: String,
+    max_age: Option<i64>,
+    domain: Option<String>,
+}
+#[allow(dead_code)]
+type Cookie = std::sync::Arc<std::sync::Mutex<CookieData>>;
+
+impl std::fmt::Display for CookieData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Canonical format parallel to `Value::Instance` of a Cookie in
+        // the interpreter (`value.rs`).
+        let max_age_str = match &self.max_age {
+            Some(n) => n.to_string(),
+            None => "null".to_string(),
+        };
+        let domain_str = match &self.domain {
+            Some(d) => format!("\"{}\"", d),
+            None => "null".to_string(),
+        };
+        write!(
+            f,
+            "Cookie {{ name: \"{}\", value: \"{}\", path: \"{}\", http_only: {}, secure: {}, same_site: \"{}\", max_age: {}, domain: {} }}",
+            self.name, self.value, self.path, self.http_only, self.secure, self.same_site, max_age_str, domain_str,
+        )
+    }
+}
+
+impl __ToFitzJson for CookieData {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("name".to_string(), serde_json::Value::String(self.name.clone()));
+        obj.insert("value".to_string(), serde_json::Value::String(self.value.clone()));
+        obj.insert("path".to_string(), serde_json::Value::String(self.path.clone()));
+        obj.insert("http_only".to_string(), serde_json::Value::Bool(self.http_only));
+        obj.insert("secure".to_string(), serde_json::Value::Bool(self.secure));
+        obj.insert(
+            "same_site".to_string(),
+            serde_json::Value::String(self.same_site.clone()),
+        );
+        obj.insert("max_age".to_string(), self.max_age.__to_fitz_json());
+        obj.insert("domain".to_string(), self.domain.__to_fitz_json());
+        serde_json::Value::Object(obj)
+    }
+}
+
+/// FITZ-05 FASE B — canonical Set-Cookie serialisation, mirrored
+/// bit-for-bit from `http::serialize_set_cookie` (parity `fitz run`
+/// ↔ `fitz build`). Attribute order: name=value; Path; Domain;
+/// Max-Age; HttpOnly; Secure; SameSite.
+#[allow(dead_code)]
+fn __fitz_serialize_set_cookie(c: &CookieData) -> String {
+    let mut s = format!("{}={}", c.name, c.value);
+    if !c.path.is_empty() {
+        s.push_str("; Path=");
+        s.push_str(&c.path);
+    }
+    if let Some(d) = &c.domain {
+        s.push_str("; Domain=");
+        s.push_str(d);
+    }
+    if let Some(ma) = c.max_age {
+        s.push_str("; Max-Age=");
+        s.push_str(&ma.to_string());
+    }
+    if c.http_only {
+        s.push_str("; HttpOnly");
+    }
+    if c.secure {
+        s.push_str("; Secure");
+    }
+    if !c.same_site.is_empty() {
+        s.push_str("; SameSite=");
+        s.push_str(&c.same_site);
+    }
+    s
 }
 
 /// Mini-batch MP2 + File.content Bytes — built-in `File`
@@ -36099,6 +37397,21 @@ pub(crate) fn __apply_cors_and_respond(
         }
     }
     resp
+}
+
+// FITZ-05 — parses a raw `Cookie` header value for `name`. Splits on `;`, then
+// on the FIRST `=` (a value with `=`, e.g. padded base64, survives). Trims.
+// `pub(crate)` so cookie handlers in transitive modules can import it.
+pub(crate) fn __fitz_parse_cookie(raw: &str, name: &str) -> Option<String> {
+    for part in raw.split(';') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == name {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Mini-batch UC — parses `application/x-www-form-urlencoded`
@@ -38376,6 +39689,7 @@ fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<Stri
         | Type::Future(_)
         | Type::WsConn { .. }
         | Type::DbConn
+        | Type::RandGen
         | Type::DbRow
         | Type::QueryBuilder(_)
         | Type::Aggregated(_)
@@ -38854,6 +40168,7 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         // `Arc<__fitz_db_runtime::DbConnHandle>`) emitted in
         // the prelude when `uses_db = true`.
         Type::DbConn => Ok("__FitzDbConn".to_string()),
+        Type::RandGen => Ok("__FitzRng".to_string()),
         // Phase 10.1.c — `DbRow` maps to the `__FitzDbRow`
         // alias (= `__fitz_db_runtime::Row`) emitted in the
         // prelude. The user accesses fields with
@@ -39628,6 +40943,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::Secret(_) => "Secret<...>",
         Type::WsConn { .. } => "WsConn<...>",
         Type::DbConn => "DbConn",
+        Type::RandGen => "RandGen",
         Type::DbRow => "DbRow",
         Type::Date => "Date",
         Type::DateTime => "DateTime",
@@ -39671,6 +40987,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
                 )
             }
         }
+        Type::RandGen => "RandGen".into(),
         Type::DbConn => "DbConn".into(),
         Type::DbRow => "DbRow".into(),
         Type::Date => "Date".into(),
@@ -53704,6 +55021,24 @@ async fn get_u(id: Int) -> Result<U> {
             code.contains("type Response = std::sync::Arc<std::sync::Mutex<ResponseData>>;"),
             "missing `type Response = Arc<Mutex<ResponseData>>;` alias"
         );
+        // FITZ-05 FASE B — the `cookies` field + `CookieData` struct +
+        // the serialisation helper are emitted alongside Response.
+        assert!(
+            code.contains("cookies: std::sync::Arc<std::sync::Mutex<Vec<Cookie>>>,"),
+            "missing field `cookies: Arc<Mutex<Vec<Cookie>>>`"
+        );
+        assert!(
+            code.contains("struct CookieData {"),
+            "missing `struct CookieData {{` in HTTP prelude"
+        );
+        assert!(
+            code.contains("type Cookie = std::sync::Arc<std::sync::Mutex<CookieData>>;"),
+            "missing `type Cookie = Arc<Mutex<CookieData>>;` alias"
+        );
+        assert!(
+            code.contains("fn __fitz_serialize_set_cookie(c: &CookieData) -> String {"),
+            "missing `__fitz_serialize_set_cookie` helper"
+        );
     }
 
     #[test]
@@ -53720,10 +55055,11 @@ async fn get_u(id: Int) -> Result<U> {
             code.contains("impl std::fmt::Display for ResponseData"),
             "missing Display impl for ResponseData"
         );
-        // The format string declares the 5 fields in order with the
-        // canonical labels (parallel to Instance Display).
+        // The format string declares the fields in order with the
+        // canonical labels (parallel to Instance Display). FITZ-05
+        // FASE B added the `cookies` field at the end.
         assert!(
-            code.contains("Response {{ status: {}, content_type: \\\"{}\\\", headers: {}, body: \\\"{}\\\", body_bytes: {} }}"),
+            code.contains("Response {{ status: {}, content_type: \\\"{}\\\", headers: {}, body: \\\"{}\\\", body_bytes: {}, cookies: {} }}"),
             "missing canonical format string (parity with Value::Instance Display)"
         );
         // body_bytes uses `__fitz_fmt_bytes` when Some, "null"
@@ -53807,7 +55143,7 @@ async fn get_u(id: Int) -> Result<U> {
         );
         // Lock + extract the 5 fields.
         assert!(
-            code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            code.contains("let (__status, __ct, __headers, __body, __bbytes, __cookies)"),
             "missing 5-field destructure under lock guard"
         );
         // Body branch text/binary (binary wins when body_bytes Some).
@@ -53866,7 +55202,7 @@ async fn get_u(id: Int) -> Result<U> {
         );
         // Inline Ok arm extracts the 5 fields under a lock.
         assert!(
-            code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            code.contains("let (__status, __ct, __headers, __body, __bbytes, __cookies)"),
             "missing 5-field destructure in Ok arm"
         );
         // Err arm without `status` field: historical 500 path.
@@ -53896,7 +55232,7 @@ async fn get_u(id: Int) -> Result<U> {
             "inference without annotation must still emit Direct dispatch"
         );
         assert!(
-            code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            code.contains("let (__status, __ct, __headers, __body, __bbytes, __cookies)"),
             "inferred dispatch must extract the 5 fields"
         );
     }
@@ -53941,7 +55277,7 @@ async fn get_u(id: Int) -> Result<U> {
         .expect("expected build OK");
         // Sanity: the wrapper still emits the Response built-in
         // dispatch branch (extracts the 5 fields).
-        assert!(code.contains("let (__status, __ct, __headers, __body, __bbytes)"));
+        assert!(code.contains("let (__status, __ct, __headers, __body, __bbytes, __cookies)"));
     }
 
     #[test]
@@ -53951,7 +55287,7 @@ async fn get_u(id: Int) -> Result<U> {
              fn h() => Response { body: \"hi\", body_bytes: null }\n\
              @server(3000) fn main() => 0")
         .expect("expected build OK with body_bytes null");
-        assert!(code.contains("let (__status, __ct, __headers, __body, __bbytes)"));
+        assert!(code.contains("let (__status, __ct, __headers, __body, __bbytes, __cookies)"));
     }
 
     #[test]
@@ -53969,7 +55305,7 @@ async fn get_u(id: Int) -> Result<U> {
             "non-Response handler must NOT bind __resp_arc"
         );
         assert!(
-            !code.contains("let (__status, __ct, __headers, __body, __bbytes)"),
+            !code.contains("let (__status, __ct, __headers, __body, __bbytes, __cookies)"),
             "non-Response handler must NOT extract the 5 fields"
         );
         // Sanity: the default JSON dispatch path emits __to_fitz_json.

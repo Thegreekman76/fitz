@@ -1,0 +1,25 @@
+// 13x-num-locale.fitz — Formateo de números locale-aware (FITZ-04).
+//
+// Los format specs (`{n:,}`, `{r:.1%}`) compilan a binario, pero NO conocen
+// locale: el decimal es siempre `.`. Para un juego de matemática argentino,
+// `1.234,5` y `$ 1.250` tienen que salir bien. El módulo `num` lo resuelve, con
+// paridad bit-a-bit entre `fitz run` y `fitz build`.
+
+// num.format(x, locale) — agrupa miles y ajusta el separador decimal
+print(num.format(1234.5, "es-AR"))       // 1.234,5
+print(num.format(1234567, "es-AR"))      // 1.234.567
+print(num.format(1234.5, "en-US"))       // 1,234.5
+print(num.format(-9876.5, "es-AR"))      // -9.876,5
+
+// num.percent(x, locale, digits) — x*100 con `digits` decimales + %
+print(num.percent(0.42, "es-AR", 1))     // 42,0 %
+print(num.percent(0.4237, "es-AR", 2))   // 42,37 %
+print(num.percent(0.42, "en-US", 1))     // 42.0%
+
+// num.currency(x, locale, code) — símbolo + monto con 2 decimales
+print(num.currency(1250, "es-AR", "ARS"))    // $ 1.250,00
+print(num.currency(1250, "en-US", "USD"))    // $1,250.00
+print(num.currency(1234.5, "es-AR", "EUR"))  // € 1.234,50
+
+// Locale desconocido cae a en-US
+print(num.format(1234.5, "xx-YY"))       // 1,234.5

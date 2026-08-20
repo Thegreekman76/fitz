@@ -66,6 +66,8 @@ $ ./server
 | **SMTP built-in** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Response built-in** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Cross-module middleware** | ✅ | ⚠️ | ⚠️ | ✅ |
+| **Cookies nativas (`@cookie` + `Response.cookies`)** | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **Aleatoriedad sembrada reproducible** | ⚠️ | ⚠️ | ✅ | ✅ |
 | Interop Python | ✅ | ❌ | ❌ | ✅ |
 
 **Multiplataforma**: cada [release](https://github.com/Thegreekman76/fitz/releases/latest)
@@ -239,6 +241,18 @@ Extensions. Detalle en
   feature flags built-in `@flag("name")` + `flag(name) -> Bool`
   + módulo `flags` con manifest `[flags]` y override por env
   var `FITZ_FLAG_<UPPERCASE>` (12.8).
+- **Hito MatHelp — Hito 1 + Hito 2** (v0.49.0, 2026-08-20) —
+  arranque + confianza + deployment/i18n del backlog de la
+  primera app real de terceros (`docs/norte-mathelp.md`):
+  módulos `rand` (CSPRNG + PRNG sembrado determinístico con
+  secuencia idéntica `run`↔`build`), `fs` (filesystem en
+  runtime) y `num` (formateo locale-aware `es-AR`/`en-US`);
+  API de cookies (leer `@cookie(name="X")` + escribir
+  `Response { cookies: [Cookie {...}] }`); fixes de paridad
+  `-> T?` con `return` (destraba el binario nativo de
+  fitz-liveviews) y `Str + Any`; **differ de paridad**
+  `fitz run` ↔ `fitz build` sobre un corpus CLI-puro; `git`
+  en la imagen Docker oficial.
 - **Fase 11.7 R3.5 + Frente 2** (v0.22.0, 2026-07-19) — **el
   kanban como WASM SPA + composición `<Child />` completa**.
   Cierra Phase 11.7 entera para el target client-WASM: el Board

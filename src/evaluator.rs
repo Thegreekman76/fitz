@@ -292,6 +292,12 @@ pub fn builtin_names() -> &'static [&'static str] {
         // Mini-fase HTTP client (2026-06-18) — outbound HTTP requests.
         // Module with `get`/`head`/`post`/`put`/`delete`/`request`.
         "http",
+        // FITZ-01 (2026-08) — `rand.*` + `rand.seeded(N)`.
+        "rand",
+        // FITZ-03 (2026-08) — `fs.*` filesystem builtins.
+        "fs",
+        // FITZ-04 (2026-08) — `num.*` locale-aware formatting.
+        "num",
         // 10.8.7 (v0.10.8) — broadcast HTTP → WS cross-handler.
         "ws_broadcast",
         // v0.10.24 — built-in types with static constructors as
@@ -358,6 +364,7 @@ fn process_decorator(
     params: &[Param],
     return_type: &Option<TypeExpr>,
     headers: &[HeaderSpec],
+    cookies: &[HeaderSpec],
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
@@ -376,6 +383,7 @@ fn process_decorator(
             params,
             return_type,
             headers,
+            cookies,
             middlewares,
             cors_config,
             auth_spec,
@@ -397,6 +405,7 @@ fn process_decorator(
             params,
             return_type,
             headers,
+            cookies,
             middlewares,
             cors_config,
             auth_spec,
@@ -1477,6 +1486,125 @@ fn collect_headers(
     Ok(headers)
 }
 
+/// FITZ-05 — collects `@cookie(name="X")` decorators into `HeaderSpec`s (reused;
+/// `http_name` = cookie name). Mirrors `collect_headers` but (a) filters
+/// `"cookie"`, and (b) the default param name is the cookie name AS-IS (cookie
+/// names are case-sensitive and usually valid idents; use `into="alias"` for
+/// names that aren't). The value is parsed from the incoming `Cookie` header at
+/// dispatch time. A `Str` param 400s if the cookie is missing; a `Str?` → Null.
+fn collect_cookies(
+    decorators: &[Decorator],
+    fn_name: &str,
+    params: &[Param],
+) -> Result<Vec<HeaderSpec>, EvalSignal> {
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
+    let mut cookies: Vec<HeaderSpec> = Vec::new();
+    for deco in decorators {
+        if deco.name != "cookie" {
+            continue;
+        }
+        if !deco.args.is_empty() {
+            return Err(err(format!(
+                "@cookie on fn '{}': does not accept positional args. Use `@cookie(name=\"X\")`.",
+                fn_name,
+            )));
+        }
+        let name_kw = deco.kwargs.iter().find(|(k, _)| k == "name").ok_or_else(|| {
+            err(format!(
+                "@cookie on fn '{}': missing kwarg 'name' (cookie name). E.g.: `@cookie(name=\"session\")`.",
+                fn_name,
+            ))
+        })?;
+        let cookie_name = match &name_kw.1 {
+            Expr::Str(s, _) if !s.is_empty() => s.clone(),
+            Expr::Str(_, _) => {
+                return Err(err(format!(
+                    "@cookie on fn '{}': kwarg 'name' cannot be an empty string",
+                    fn_name,
+                )));
+            }
+            other => {
+                return Err(err(format!(
+                    "@cookie on fn '{}': kwarg 'name' must be a Str literal, received {:?}",
+                    fn_name, other,
+                )));
+            }
+        };
+        let into_kw = deco.kwargs.iter().find(|(k, _)| k == "into");
+        let into_alias: Option<String> = match into_kw {
+            Some((_, Expr::Str(s, _))) if !s.is_empty() => Some(s.clone()),
+            Some((_, Expr::Str(_, _))) => {
+                return Err(err(format!(
+                    "@cookie(name=\"{}\") on fn '{}': kwarg 'into' cannot be an empty string",
+                    cookie_name, fn_name,
+                )));
+            }
+            Some((_, other)) => {
+                return Err(err(format!(
+                    "@cookie(name=\"{}\") on fn '{}': kwarg 'into' must be a Str literal, received {:?}",
+                    cookie_name, fn_name, other,
+                )));
+            }
+            None => None,
+        };
+        if let Some((k, _)) = deco.kwargs.iter().find(|(k, _)| k != "name" && k != "into") {
+            return Err(err(format!(
+                "@cookie on fn '{}': kwarg '{}' not recognized. Supported: name, into.",
+                fn_name, k,
+            )));
+        }
+        let param_name = into_alias.clone().unwrap_or_else(|| cookie_name.clone());
+        let Some(p) = params.iter().find(|p| p.name == param_name) else {
+            return Err(err(format!(
+                "@cookie(name=\"{}\"{}) on fn '{}': the handler has no param named '{}'",
+                cookie_name,
+                into_alias
+                    .as_ref()
+                    .map(|a| format!(", into=\"{}\"", a))
+                    .unwrap_or_default(),
+                fn_name,
+                param_name,
+            )));
+        };
+        let is_nullable = match &p.type_ {
+            Some(TypeExpr::Named(n)) if n == "Str" => false,
+            Some(TypeExpr::Nullable(inner)) => match inner.as_ref() {
+                TypeExpr::Named(n) if n == "Str" => true,
+                other => {
+                    return Err(err(format!(
+                        "@cookie(name=\"{}\") on fn '{}': param '{}' must be `Str` or `Str?`, but is `{}`",
+                        cookie_name, fn_name, param_name, other.display_name(),
+                    )));
+                }
+            },
+            Some(other) => {
+                return Err(err(format!(
+                    "@cookie(name=\"{}\") on fn '{}': param '{}' must be `Str` or `Str?`, but is `{}`",
+                    cookie_name, fn_name, param_name, other.display_name(),
+                )));
+            }
+            None => {
+                return Err(err(format!(
+                    "@cookie(name=\"{}\") on fn '{}': param '{}' needs a type annotation (`Str` or `Str?`)",
+                    cookie_name, fn_name, param_name,
+                )));
+            }
+        };
+        if cookies.iter().any(|c| c.http_name == cookie_name) {
+            return Err(err(format!(
+                "@cookie(name=\"{}\") on fn '{}': declared twice",
+                cookie_name, fn_name,
+            )));
+        }
+        cookies.push(HeaderSpec {
+            http_name: cookie_name,
+            param_name,
+            is_nullable,
+        });
+    }
+    Ok(cookies)
+}
+
 /// Processes `@server(port?, host?)`. Positional args; either one can
 /// be omitted and the corresponding default applies. Uniqueness
 /// validation (only one `@server` per program) is handled by
@@ -1935,6 +2063,7 @@ fn register_http_route(
     params: &[Param],
     return_type: &Option<TypeExpr>,
     headers: &[HeaderSpec],
+    cookies: &[HeaderSpec],
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
@@ -2052,6 +2181,7 @@ fn register_http_route(
                 !template.params.contains(&p.name)
                     && !template.query_params.contains(&p.name)
                     && !headers.iter().any(|h| h.param_name == p.name)
+                    && !cookies.iter().any(|c| c.param_name == p.name)
             })
             .collect();
         if candidates.is_empty() {
@@ -2135,6 +2265,9 @@ fn register_http_route(
         if headers.iter().any(|h| h.param_name == p.name) {
             continue; // it's a header (Phase 7.6)
         }
+        if cookies.iter().any(|c| c.param_name == p.name) {
+            continue; // it's a cookie (FITZ-05)
+        }
         if auth_user_param_name.as_deref() == Some(p.name.as_str()) {
             continue; // it's the user injected by auth (9.w.1.c)
         }
@@ -2207,6 +2340,7 @@ fn register_http_route(
         param_types,
         body_param,
         headers: headers.to_vec(),
+        cookies: cookies.to_vec(),
         param_type_exprs,
         return_type_expr: return_type.clone(),
         middlewares: middlewares.to_vec(),
@@ -2245,6 +2379,7 @@ fn register_ws_route(
     params: &[Param],
     return_type: &Option<TypeExpr>,
     headers: &[HeaderSpec],
+    cookies: &[HeaderSpec],
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
@@ -2347,6 +2482,7 @@ fn register_ws_route(
             .filter(|p| {
                 Some(&p.name) != ws_conn_param_name.as_ref()
                     && !headers.iter().any(|h| h.param_name == p.name)
+                    && !cookies.iter().any(|c| c.param_name == p.name)
             })
             .collect();
         if candidates.is_empty() {
@@ -2392,6 +2528,7 @@ fn register_ws_route(
         param_types,
         body_param: None,
         headers: headers.to_vec(),
+        cookies: cookies.to_vec(),
         param_type_exprs,
         return_type_expr: return_type.clone(),
         middlewares: middlewares.to_vec(),
@@ -3491,6 +3628,25 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ),
                 )));
             }
+            // FITZ-05 — collect `@cookie(name="X")`. Same HTTP-only rule as
+            // `@header`.
+            let collected_cookies = collect_cookies(decorators, name, params)?;
+            if !collected_cookies.is_empty()
+                && !decorators.iter().any(|d| {
+                    HttpMethod::from_decorator_name(&d.name).is_some() || d.name == "ws"
+                })
+            {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!(
+                        "@cookie on fn '{}': only applies to HTTP handlers \
+                         (stack with `@get`/`@post`/`@put`/`@delete`/`@ws`).",
+                        name,
+                    ),
+                )));
+            }
             // Mini-phase MW.1/MW.2: collect `@middleware(...)`. A
             // single pass distinguishes user-fns (gate-only chain,
             // MW.1) from `cors(...)` (dedicated slot, MW.2). Like
@@ -3547,6 +3703,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             }
             for deco in decorators {
                 if deco.name == "header"
+                    || deco.name == "cookie"
                     || deco.name == "middleware"
                     || deco.name == "authenticated"
                     || deco.name == "admin"
@@ -3561,6 +3718,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     params,
                     return_type,
                     &collected_headers,
+                    &collected_cookies,
                     &collected_middlewares,
                     &collected_cors,
                     auth_spec,
@@ -6709,6 +6867,12 @@ async fn dispatch_method(
                 other,
             ),
         ))),
+        // FITZ-01 — seeded RandGen methods (int/float/bool/choice/shuffle/
+        // sample). Sync; mutate the generator's SplitMix64 state. See
+        // `src/rand.rs`. Unknown method → clear error from `rand_gen_method`.
+        (Value::RandGen(state), _) => {
+            crate::rand::rand_gen_method(state, method, &args).map_err(EvalSignal::Error)
+        }
         // Phase 10.1.b — DbConn methods. Each returns a `Value::Future`
         // that the caller `.await?`s to unpack into `Result<T>`
         // (parallel to `WsConn.recv()`).
@@ -12337,6 +12501,82 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
+    // FITZ-01 (2026-08) — `rand` module. Global CSPRNG-seeded helpers
+    // (`int`/`float`/`bool`/`choice`/`shuffle`/`sample`/`bytes`) plus
+    // `seeded(N)` which returns a reproducible `RandGen` (its methods are
+    // dispatched via `dispatch_method` on `Value::RandGen`, parallel to
+    // DbConn/WsConn). See `src/rand.rs`.
+    let rand_env = Environment::new();
+    for (name, func) in [
+        (
+            "int",
+            crate::rand::builtin_rand_int as fn(&[Value]) -> FitzResult<Value>,
+        ),
+        ("float", crate::rand::builtin_rand_float),
+        ("bool", crate::rand::builtin_rand_bool),
+        ("choice", crate::rand::builtin_rand_choice),
+        ("shuffle", crate::rand::builtin_rand_shuffle),
+        ("sample", crate::rand::builtin_rand_sample),
+        ("bytes", crate::rand::builtin_rand_bytes),
+        ("seeded", crate::rand::builtin_rand_seeded),
+    ] {
+        rand_env.lock().define(name, Value::Builtin { name, func });
+    }
+    env.lock().define(
+        "rand",
+        Value::Module {
+            name: "rand".into(),
+            env: rand_env,
+        },
+    );
+
+    // FITZ-03 (2026-08) — `fs` module: filesystem access. All ops at runtime;
+    // everything returns Result (except `exists`). See `src/fs.rs`.
+    let fs_env = Environment::new();
+    for (name, func) in [
+        (
+            "read",
+            crate::fs::builtin_fs_read as fn(&[Value]) -> FitzResult<Value>,
+        ),
+        ("read_bytes", crate::fs::builtin_fs_read_bytes),
+        ("write", crate::fs::builtin_fs_write),
+        ("append", crate::fs::builtin_fs_append),
+        ("exists", crate::fs::builtin_fs_exists),
+        ("list", crate::fs::builtin_fs_list),
+        ("remove", crate::fs::builtin_fs_remove),
+        ("mkdir_all", crate::fs::builtin_fs_mkdir_all),
+    ] {
+        fs_env.lock().define(name, Value::Builtin { name, func });
+    }
+    env.lock().define(
+        "fs",
+        Value::Module {
+            name: "fs".into(),
+            env: fs_env,
+        },
+    );
+
+    // FITZ-04 (2026-08) — `num` module: locale-aware number formatting
+    // (es-AR / en-US). Positional args. See `src/num.rs`.
+    let num_env = Environment::new();
+    for (name, func) in [
+        (
+            "format",
+            crate::num::builtin_num_format as fn(&[Value]) -> FitzResult<Value>,
+        ),
+        ("percent", crate::num::builtin_num_percent),
+        ("currency", crate::num::builtin_num_currency),
+    ] {
+        num_env.lock().define(name, Value::Builtin { name, func });
+    }
+    env.lock().define(
+        "num",
+        Value::Module {
+            name: "num".into(),
+            env: num_env,
+        },
+    );
+
     // Phase 10.1.b — `db` module: native Postgres driver. Only
     // exposes `connect(url)` which returns `Future<Result<DbConn>>`.
     // Methods on the connection (`query`/`exec`/`close`) are
@@ -12581,12 +12821,92 @@ fn register_builtins(env: &EnvRef) {
             default: Some(Expr::Null(Span::ZERO)),
             decorators: vec![],
         },
+        // FITZ-05 FASE B — cookies to write (Set-Cookie). Default `[]`.
+        // Each Cookie serialises to one `Set-Cookie` response header at
+        // dispatch time (see `http::response_instance_to_outcome`).
+        Field {
+            name: "cookies".into(),
+            type_: TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![TypeExpr::Named("Cookie".into())],
+            },
+            default: Some(Expr::List(vec![], Span::ZERO)),
+            decorators: vec![],
+        },
     ];
     env.lock().define(
         "Response",
         Value::Type {
             name: "Response".into(),
             fields: response_fields,
+            resolved_defaults: Vec::new(),
+            methods: Vec::new(),
+            table_metadata: None,
+        },
+    );
+
+    // FITZ-05 FASE B — `Cookie`: built-in type for the Set-Cookie write
+    // path. The handler builds `Response { cookies: [ Cookie { name:
+    // "session", value: token, http_only: true, max_age: 86400 } ] }`
+    // and each Cookie is serialised to a `Set-Cookie` header. The field
+    // order MUST mirror `types::register_http_builtin_types` (Cookie).
+    // `name` and `value` are required (no default); the rest carry the
+    // canonical defaults documented in the ficha FITZ-05.
+    let cookie_fields = vec![
+        Field {
+            name: "name".into(),
+            type_: TypeExpr::Named("Str".into()),
+            default: None,
+            decorators: vec![],
+        },
+        Field {
+            name: "value".into(),
+            type_: TypeExpr::Named("Str".into()),
+            default: None,
+            decorators: vec![],
+        },
+        Field {
+            name: "path".into(),
+            type_: TypeExpr::Named("Str".into()),
+            default: Some(Expr::Str("/".into(), Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "http_only".into(),
+            type_: TypeExpr::Named("Bool".into()),
+            default: Some(Expr::Bool(false, Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "secure".into(),
+            type_: TypeExpr::Named("Bool".into()),
+            default: Some(Expr::Bool(false, Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "same_site".into(),
+            type_: TypeExpr::Named("Str".into()),
+            default: Some(Expr::Str("Lax".into(), Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "max_age".into(),
+            type_: TypeExpr::Nullable(Box::new(TypeExpr::Named("Int".into()))),
+            default: Some(Expr::Null(Span::ZERO)),
+            decorators: vec![],
+        },
+        Field {
+            name: "domain".into(),
+            type_: TypeExpr::Nullable(Box::new(TypeExpr::Named("Str".into()))),
+            default: Some(Expr::Null(Span::ZERO)),
+            decorators: vec![],
+        },
+    ];
+    env.lock().define(
+        "Cookie",
+        Value::Type {
+            name: "Cookie".into(),
+            fields: cookie_fields,
             resolved_defaults: Vec::new(),
             methods: Vec::new(),
             table_metadata: None,

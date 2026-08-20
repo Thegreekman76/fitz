@@ -2793,6 +2793,74 @@ fn after_dot_completions(
                     .into(),
             )]);
         }
+        // FITZ-01 — `rand.<method>`. Global (CSPRNG) + `seeded(N)` (reproducible).
+        "rand" => {
+            return method_items(&[
+                (
+                    "int",
+                    "fn(min: Int, max: Int) -> Int  // inclusivo ambos extremos".into(),
+                ),
+                ("float", "fn() -> Float  // [0, 1)".into()),
+                ("bool", "fn() -> Bool".into()),
+                (
+                    "choice",
+                    "fn(xs: List<T>) -> Result<T>  // Err si está vacía".into(),
+                ),
+                (
+                    "shuffle",
+                    "fn(xs: List<T>) -> List<T>  // copia barajada".into(),
+                ),
+                (
+                    "sample",
+                    "fn(xs: List<T>, n: Int) -> Result<List<T>>  // n sin repetir".into(),
+                ),
+                (
+                    "bytes",
+                    "fn(n: Int) -> Bytes  // CSPRNG, para tokens".into(),
+                ),
+                (
+                    "seeded",
+                    "fn(seed: Int) -> RandGen  // generador reproducible".into(),
+                ),
+            ]);
+        }
+        // FITZ-03 — `fs.<method>`. Todo Result salvo `exists`.
+        "fs" => {
+            return method_items(&[
+                ("read", "fn(path: Str) -> Result<Str>".into()),
+                ("read_bytes", "fn(path: Str) -> Result<Bytes>".into()),
+                (
+                    "write",
+                    "fn(path: Str, content: Str | Bytes) -> Result<Null>".into(),
+                ),
+                (
+                    "append",
+                    "fn(path: Str, content: Str | Bytes) -> Result<Null>".into(),
+                ),
+                ("exists", "fn(path: Str) -> Bool".into()),
+                ("list", "fn(path: Str) -> Result<List<Str>>".into()),
+                ("remove", "fn(path: Str) -> Result<Null>".into()),
+                ("mkdir_all", "fn(path: Str) -> Result<Null>".into()),
+            ]);
+        }
+        // FITZ-04 — `num.<method>`. Formateo locale-aware, devuelven Str.
+        "num" => {
+            return method_items(&[
+                (
+                    "format",
+                    "fn(x: Int | Float, locale: Str) -> Str  // 1.234,5 (es-AR)".into(),
+                ),
+                (
+                    "percent",
+                    "fn(x: Float, locale: Str, digits: Int) -> Str  // 42,0 % (es-AR)".into(),
+                ),
+                (
+                    "currency",
+                    "fn(x: Int | Float, locale: Str, code: Str) -> Str  // $ 1.250,00 (es-AR)"
+                        .into(),
+                ),
+            ]);
+        }
         _ => {}
     }
 
@@ -4236,6 +4304,22 @@ fn scope_level_completions(
             "smtp",
             "module: send (SMTP outbound; env vars: SMTP_HOST/PORT/USER/PASSWORD/FROM/TLS)",
         ),
+        // FITZ-01 (2026-08) — random. Global CSPRNG helpers + `seeded(N)` for a
+        // reproducible generator (same sequence under `fitz run`/`fitz build`).
+        (
+            "rand",
+            "module: int, float, bool, choice, shuffle, sample, bytes (CSPRNG) + seeded(N) (reproducible)",
+        ),
+        // FITZ-03 (2026-08) — filesystem.
+        (
+            "fs",
+            "module: read, read_bytes, write, append, exists, list, remove, mkdir_all (filesystem)",
+        ),
+        // FITZ-04 (2026-08) — locale-aware number formatting.
+        (
+            "num",
+            "module: format, percent, currency (locale-aware: es-AR / en-US)",
+        ),
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -4275,6 +4359,9 @@ fn scope_level_completions(
         "Request",
         "Response",
         "File",
+        // FITZ-05 FASE B — Set-Cookie write path (after-dot lists its
+        // 8 fields via the generic Nominal path).
+        "Cookie",
         "PyAny",
         "WsConn",
         "DbConn",
@@ -4999,6 +5086,8 @@ fn make_resp() -> Response {
             ("File", "name"),
             ("HttpClientResponse", "status"),
             ("SmtpResult", "delivered"),
+            // FITZ-05 FASE B — Cookie built-in (Set-Cookie write path).
+            ("Cookie", "name"),
         ];
         for (ty, field) in cases {
             // Smoke: function annotated with the built-in, accesses the

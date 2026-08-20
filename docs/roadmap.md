@@ -2,6 +2,19 @@
 
 ---
 
+## v0.49.0 — Hito 1 + Hito 2 del norte MatHelp ✅ CERRADO (2026-08-20)
+
+**Hito**: release combinado que cierra los dos primeros hitos del backlog surgido de la auditoría para la primera app real de terceros (**MatHelp**). El detalle por-tarea (con evidencia, criterio de aceptación, archivos y tests) vive en [`docs/norte-mathelp.md`](norte-mathelp.md) — fichas `FITZ-*`.
+
+- **Hito 1 — Arranque + confianza**: `rand` (FITZ-01, CSPRNG global + PRNG sembrado determinístico SplitMix64 con secuencia idéntica `run`↔`build`), fix codegen `-> T?` con `return` (FITZ-09, destraba el binario nativo de fitz-liveviews), fix `Str + Any` check✓/build✗ (FITZ-10), y el **differ de paridad** `fitz run` ↔ `fitz build` sobre un corpus CLI-puro (FITZ-14).
+- **Hito 2 — Deployment + login zero-JS + i18n**: `git` en la imagen Docker oficial (FITZ-11), API de cookies (FITZ-05 — leer `@cookie(name="X")` + escribir `Response { cookies: [Cookie {...}] }` con nominal built-in `Cookie` de 8 campos; cada cookie → un `Set-Cookie`; fix `.insert`→`.append` para múltiples Set-Cookie; paridad bit-a-bit), `fs` (FITZ-03, filesystem en runtime) y `num` (FITZ-04, formateo locale-aware `es-AR`/`en-US`).
+
+**Deuda residual descubierta** (clase FITZ-14, NO FITZ-05): body `form-urlencoded` → `Map` en `fitz run` (en `fitz build` sí deserializa al `type`) — ver `docs/deudas-post-5b.md`.
+
+Verificación pre-bump: fmt + clippy (default + lsp) limpios, lib 4162 (default) / 4327 (lsp), cli_e2e 136, openapi_e2e 3, smoke `GUIDE_EXAMPLES_COMPILE` (~360 ejemplos) verde, compile_e2e de paridad (FITZ-01/03/05/14). Bump Cargo.toml `0.48.0` → `0.49.0` + extensión VSCode + `.vsix`.
+
+---
+
 ## v0.19.6 — Bugfix codegen: sub-caso v0.19.5 — wrapper HTTP en módulo importer del middleware ✅ CERRADO (2026-06-27)
 
 **Hito**: bugfix release patch que cierra el sub-caso 🔴 URGENTE del bug original de v0.19.5, descubierto la misma noche del cierre de v0.19.5 al aplicar el patrón canónico real "módulo dedicado a rate limiting + handlers en módulos separados". El fix de v0.19.5 cubrió correctamente el **módulo del middleware** (emite `use crate::{Request, RequestData}` en `rate_limit.rs`), pero NO cubría el **módulo IMPORTER del middleware** (donde vive el handler con `@middleware(<imported_fn>)` aplicado). El wrapper HTTP emitido en módulos como `auth.rs`/`subscriptions.rs` (de un proyecto multi-archivo) construía `__req: Request = Arc::new(... RequestData { ... })` para pasarlo al middleware cross-module, pero el detector `program_uses_request_type` NO disparaba para esos módulos porque ninguna fn local del módulo declaraba `Request` en su firma — solo lo aplicaban como decorator. **14 errores rustc** al hacer `fitz build` sobre un proyecto con 7 endpoints aplicando `@middleware(<imported>)` cross-module (2 errores cada uno: `E0425 cannot find type Request` + `E0422 cannot find struct, variant or union type RequestData`).

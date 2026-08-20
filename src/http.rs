@@ -118,6 +118,11 @@ pub struct RouteSpec {
     /// (Phase 7.6). Empty if the handler declares none. Each entry
     /// maps an HTTP name to a Fitz param of the handler.
     pub headers: Vec<HeaderSpec>,
+    /// FITZ-05 (2026-08) — cookies declared with `@cookie(name="X")`.
+    /// Reuses `HeaderSpec` (`http_name` = cookie name, `param_name` =
+    /// destination Str? param). The value is parsed from the incoming
+    /// `Cookie` header. Empty if none.
+    pub cookies: Vec<HeaderSpec>,
     /// Full TypeExpr of the handler parameters, in order. Additive
     /// to `param_types` (which carries only the `head_name` without
     /// generics or nullables, sufficient for dispatch). Here we
@@ -1510,6 +1515,25 @@ fn response_instance_to_outcome(
                     other.type_name()
                 ));
             }
+            // FITZ-05 FASE B — write path. Each `Cookie` in the list
+            // serialises to one `Set-Cookie` header pushed into
+            // `headers` (which `outcome_to_response` `.append`s so
+            // multiple cookies survive; `.insert` would drop all but
+            // the last).
+            ("cookies", Value::List(items)) => {
+                for item in items.lock().iter() {
+                    match cookie_instance_to_set_cookie(item) {
+                        Ok(sc) => headers.push(("Set-Cookie".to_string(), sc)),
+                        Err(msg) => return HandlerOutcome::internal_error(msg),
+                    }
+                }
+            }
+            ("cookies", other) => {
+                return HandlerOutcome::internal_error(format!(
+                    "Response.cookies must be List<Cookie>, found {}",
+                    other.type_name()
+                ));
+            }
             _ => {
                 // Field not part of the built-in shape — silently
                 // ignored. Future field additions will use this
@@ -1752,6 +1776,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         | Value::Builtin { .. }
         | Value::Type { .. }
         | Value::Module { .. }
+        | Value::RandGen(_)
         | Value::Range { .. } => {
             return Err(format!(
                 "value not serializable to JSON: {}",
@@ -2664,6 +2689,126 @@ fn map_health_value_to_response(value: Value) -> axum::response::Response {
 /// case-insensitive lookup against this map. Non-UTF-8 headers are
 /// dropped (HTTP theoretically allows weird bytes; in practice all
 /// usual headers are ASCII).
+/// FITZ-05 — parses a raw `Cookie` header value (`"a=1; b=2"`) and returns the
+/// value of `name`, or `None`. Splits on `;`, then on the FIRST `=` so a value
+/// containing `=` (e.g. padded base64) survives. Trims whitespace.
+pub fn parse_cookie_header(raw: &str, name: &str) -> Option<String> {
+    for part in raw.split(';') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == name {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// FITZ-05 FASE B — canonical `Set-Cookie` serialisation shared by the
+/// interpreter path (below) and mirrored bit-for-bit by the codegen
+/// prelude helper `__fitz_serialize_set_cookie` (parity `fitz run` ↔
+/// `fitz build`). Attribute order: `name=value; Path; Domain; Max-Age;
+/// HttpOnly; Secure; SameSite`. `Path` is emitted whenever non-empty
+/// (default `/`); `SameSite` whenever non-empty (default `Lax`).
+#[allow(clippy::too_many_arguments)]
+pub fn serialize_set_cookie(
+    name: &str,
+    value: &str,
+    path: &str,
+    http_only: bool,
+    secure: bool,
+    same_site: &str,
+    max_age: Option<i64>,
+    domain: Option<&str>,
+) -> String {
+    let mut s = format!("{}={}", name, value);
+    if !path.is_empty() {
+        s.push_str("; Path=");
+        s.push_str(path);
+    }
+    if let Some(d) = domain {
+        s.push_str("; Domain=");
+        s.push_str(d);
+    }
+    if let Some(ma) = max_age {
+        s.push_str("; Max-Age=");
+        s.push_str(&ma.to_string());
+    }
+    if http_only {
+        s.push_str("; HttpOnly");
+    }
+    if secure {
+        s.push_str("; Secure");
+    }
+    if !same_site.is_empty() {
+        s.push_str("; SameSite=");
+        s.push_str(same_site);
+    }
+    s
+}
+
+/// FITZ-05 FASE B — serialises a built-in `Cookie` instance (from a
+/// `Response { cookies: [...] }`) to a `Set-Cookie` header value.
+/// Returns `Err(message)` if the shape is wrong (only reachable via
+/// `--no-typecheck`; the checker validates the field types statically).
+/// The evaluator's struct-lit pass fills the missing fields with the
+/// canonical defaults, so `name`/`value` are the only ones that can be
+/// genuinely absent (both required, no default).
+fn cookie_instance_to_set_cookie(item: &Value) -> Result<String, String> {
+    let fields = match item {
+        Value::Instance { type_name, fields } if type_name == "Cookie" => fields,
+        other => {
+            return Err(format!(
+                "Response.cookies must be a List<Cookie>, found {} in the list",
+                other.type_name()
+            ));
+        }
+    };
+    let g = fields.lock();
+    let mut name: Option<String> = None;
+    let mut value: Option<String> = None;
+    let mut path = String::from("/");
+    let mut http_only = false;
+    let mut secure = false;
+    let mut same_site = String::from("Lax");
+    let mut max_age: Option<i64> = None;
+    let mut domain: Option<String> = None;
+    for (k, v) in g.iter() {
+        match (k.as_str(), v) {
+            ("name", Value::Str(s)) => name = Some(s.clone()),
+            ("value", Value::Str(s)) => value = Some(s.clone()),
+            ("path", Value::Str(s)) => path = s.clone(),
+            ("http_only", Value::Bool(b)) => http_only = *b,
+            ("secure", Value::Bool(b)) => secure = *b,
+            ("same_site", Value::Str(s)) => same_site = s.clone(),
+            ("max_age", Value::Int(n)) => max_age = Some(*n),
+            ("max_age", Value::Null) => max_age = None,
+            ("domain", Value::Str(s)) => domain = Some(s.clone()),
+            ("domain", Value::Null) => domain = None,
+            (fname, other) => {
+                return Err(format!(
+                    "Cookie.{} has an unexpected value ({})",
+                    fname,
+                    other.type_name()
+                ));
+            }
+        }
+    }
+    drop(g);
+    let name = name.ok_or_else(|| "Cookie.name is required".to_string())?;
+    let value = value.ok_or_else(|| "Cookie.value is required".to_string())?;
+    Ok(serialize_set_cookie(
+        &name,
+        &value,
+        &path,
+        http_only,
+        secure,
+        &same_site,
+        max_age,
+        domain.as_deref(),
+    ))
+}
+
 fn headers_to_map(hm: &axum::http::HeaderMap) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = HashMap::new();
     for (name, value) in hm.iter() {
@@ -3523,7 +3668,16 @@ fn outcome_to_response(outcome: HandlerOutcome) -> Response {
         let parsed_name = axum::http::HeaderName::try_from(name);
         let parsed_value = HeaderValue::try_from(value);
         if let (Ok(n), Ok(v)) = (parsed_name, parsed_value) {
-            resp.headers_mut().insert(n, v);
+            // FITZ-05 FASE B — `Set-Cookie` is the one header where
+            // multiple values are the norm (one per cookie). `.insert`
+            // overwrites, keeping only the last; `.append` preserves
+            // every cookie. All other headers keep the single-value
+            // overwrite semantics of `.insert`.
+            if n == axum::http::header::SET_COOKIE {
+                resp.headers_mut().append(n, v);
+            } else {
+                resp.headers_mut().insert(n, v);
+            }
         }
     }
     resp
@@ -4209,6 +4363,27 @@ async fn handle_task(
                             "error": format!(
                                 "header '{}': missing — it is required",
                                 hdr.http_name
+                            ),
+                        }),
+                    );
+                }
+            }
+        } else if let Some(ck) = route.cookies.iter().find(|c| &c.param_name == name) {
+            // FITZ-05 — @cookie: parse the incoming `Cookie` header for the
+            // named cookie. Missing + nullable → Null; missing + required → 400.
+            let val = raw_headers
+                .get("cookie")
+                .and_then(|raw| parse_cookie_header(raw, &ck.http_name));
+            match (val, ck.is_nullable) {
+                (Some(v), _) => args.push(Value::Str(v)),
+                (None, true) => args.push(Value::Null),
+                (None, false) => {
+                    return HandlerOutcome::json(
+                        400,
+                        serde_json::json!({
+                            "error": format!(
+                                "cookie '{}': missing — it is required",
+                                ck.http_name
                             ),
                         }),
                     );
@@ -5180,6 +5355,72 @@ mod tests {
     use super::*;
     use crate::ast::StrPart;
     use crate::value::shared;
+
+    // ---- FITZ-05 FASE B — Set-Cookie serialisation ----
+
+    #[test]
+    fn fitz05_serialize_set_cookie_canonical_order_and_flags() {
+        // Full cookie: all attributes present, canonical order
+        // name=value; Path; Domain; Max-Age; HttpOnly; Secure; SameSite.
+        let s = serialize_set_cookie(
+            "session",
+            "tok123",
+            "/app",
+            true,
+            true,
+            "Strict",
+            Some(3600),
+            Some("example.com"),
+        );
+        assert_eq!(
+            s,
+            "session=tok123; Path=/app; Domain=example.com; Max-Age=3600; HttpOnly; Secure; SameSite=Strict"
+        );
+    }
+
+    #[test]
+    fn fitz05_serialize_set_cookie_defaults_omit_optional_attrs() {
+        // Session cookie (no Max-Age/Domain), default Path/SameSite,
+        // flags off — Domain/Max-Age/HttpOnly/Secure absent.
+        let s = serialize_set_cookie("lang", "es-AR", "/", false, false, "Lax", None, None);
+        assert_eq!(s, "lang=es-AR; Path=/; SameSite=Lax");
+    }
+
+    #[test]
+    fn fitz05_serialize_set_cookie_empty_path_and_same_site_omitted() {
+        // Empty Path/SameSite → those attributes are dropped entirely.
+        let s = serialize_set_cookie("k", "v", "", false, false, "", None, None);
+        assert_eq!(s, "k=v");
+    }
+
+    #[test]
+    fn fitz05_cookie_instance_to_set_cookie_reads_fields() {
+        let cookie = Value::Instance {
+            type_name: "Cookie".to_string(),
+            fields: shared(vec![
+                ("name".to_string(), Value::Str("session".to_string())),
+                ("value".to_string(), Value::Str("tok".to_string())),
+                ("path".to_string(), Value::Str("/".to_string())),
+                ("http_only".to_string(), Value::Bool(true)),
+                ("secure".to_string(), Value::Bool(false)),
+                ("same_site".to_string(), Value::Str("Lax".to_string())),
+                ("max_age".to_string(), Value::Int(86400)),
+                ("domain".to_string(), Value::Null),
+            ]),
+        };
+        let s = cookie_instance_to_set_cookie(&cookie).expect("serialise ok");
+        assert_eq!(
+            s,
+            "session=tok; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax"
+        );
+    }
+
+    #[test]
+    fn fitz05_cookie_instance_rejects_non_cookie() {
+        let not_cookie = Value::Str("nope".to_string());
+        let err = cookie_instance_to_set_cookie(&not_cookie).unwrap_err();
+        assert!(err.contains("List<Cookie>"), "err: {err}");
+    }
 
     // ---- HttpMethod ----
 
@@ -6833,6 +7074,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_fitz05_response_cookies_emit_multiple_set_cookie_headers() {
+        // FITZ-05 FASE B — a handler returning `Response { cookies:
+        // [Cookie {...}, Cookie {...}] }` emits TWO separate
+        // `Set-Cookie` headers. This exercises the `.append` fix in
+        // `outcome_to_response` (`.insert` would drop all but the last),
+        // which the codegen path does not cover (axum's builder already
+        // appends). Parity with `fitz build`.
+        let src = "\
+            @get(\"/login\")\n\
+            fn login() => Response {\n\
+                status: 303,\n\
+                headers: {\"Location\": \"/\"},\n\
+                cookies: [\n\
+                    Cookie { name: \"session\", value: \"tok123\", http_only: true, max_age: 86400 },\n\
+                    Cookie { name: \"lang\", value: \"es-AR\", path: \"/app\", same_site: \"Strict\" },\n\
+                ],\n\
+            }\n\
+        ";
+        let (status, headers, _body) =
+            run_oneshot_full(src, axum::http::Method::GET, "/login").await;
+        assert_eq!(status, 303);
+        let set_cookies: Vec<&String> = headers
+            .iter()
+            .filter(|(n, _)| n == "set-cookie")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            set_cookies.len(),
+            2,
+            "expected 2 Set-Cookie headers (the .append fix), got {:?}",
+            headers
+        );
+        assert!(
+            set_cookies.iter().any(|v| v.contains("session=tok123")
+                && v.contains("; Path=/")
+                && v.contains("; Max-Age=86400")
+                && v.contains("; HttpOnly")
+                && v.contains("; SameSite=Lax")),
+            "session cookie malformed: {set_cookies:?}"
+        );
+        assert!(
+            set_cookies.iter().any(|v| v.contains("lang=es-AR")
+                && v.contains("; Path=/app")
+                && v.contains("; SameSite=Strict")
+                && !v.contains("HttpOnly")),
+            "lang cookie malformed: {set_cookies:?}"
+        );
+        // The single-value `Location` header survives via the `.insert`
+        // path (not `.append`).
+        assert!(
+            headers.iter().any(|(n, v)| n == "location" && v == "/"),
+            "Location header missing: {headers:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn e2e_preflight_options_responds_204_with_cors_headers() {
         // OPTIONS on a route with @middleware(cors(...)) returns
         // 204 and the Access-Control-Allow-* headers. The real
@@ -7756,6 +8053,7 @@ mod tests {
                 param_types: vec![],
                 body_param: None,
                 headers: vec![],
+                cookies: vec![],
                 param_type_exprs: vec![],
                 return_type_expr: None,
                 middlewares: vec![],
@@ -8071,6 +8369,7 @@ mod tests {
                 declared_type_name: None,
             }),
             headers: vec![],
+            cookies: vec![],
             param_type_exprs: vec![("body".into(), None)],
             return_type_expr: None,
             middlewares: vec![],

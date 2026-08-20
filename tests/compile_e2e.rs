@@ -93,6 +93,31 @@ fn build_and_run(test_name: &str, src: &str) -> (String, i32) {
     )
 }
 
+/// FITZ-14 — corre el programa por el INTÉRPRETE (`fitz run`) y devuelve su
+/// stdout. Se usa junto a `build_and_run` para diffear la salida interpretada
+/// contra la del binario nativo (paridad `run`↔`build`).
+fn run_interpreter(test_name: &str, src: &str) -> String {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-run-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir run");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+    let output = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invoke fitz run");
+    assert!(
+        output.status.success(),
+        "fitz run failed for {}:\nstdout: {}\nstderr: {}",
+        test_name,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// Como `build_and_run` pero asume que el build va a fallar.
 /// Devuelve el stderr del fitz build.
 fn build_expect_fail(test_name: &str, src: &str) -> String {
@@ -2951,6 +2976,11 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13t-mb8-bits-y-fmt-g.fitz",
     "13u-math-mb9-y-int-float.fitz",
     "13v-return-en-match.fitz",
+    // FITZ-01 (2026-08) — módulo `rand` (global CSPRNG + `rand.seeded(N)`
+    // reproducible). Compila con `fitz build` (global usa getrandom).
+    "13w-random.fitz",
+    // FITZ-04 (2026-08) — módulo `num` (formateo locale-aware es-AR/en-US).
+    "13x-num-locale.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -14426,6 +14456,63 @@ fn cached() => Response {
 }
 
 #[test]
+fn fitz05_fase_b_response_cookies_emit_multiple_set_cookie_headers() {
+    // FITZ-05 FASE B — a compiled handler returning `Response { cookies:
+    // [Cookie {...}, Cookie {...}] }` emits TWO separate `Set-Cookie`
+    // response headers (axum's builder `.header()` appends). Flags are
+    // serialised in canonical order. Parity bit-a-bit con `fitz run`.
+    let src = "\
+@get(\"/login\")
+fn login() => Response {
+    status: 303,
+    headers: {\"Location\": \"/\"},
+    cookies: [
+        Cookie { name: \"session\", value: \"tok123\", http_only: true, max_age: 86400 },
+        Cookie { name: \"lang\", value: \"es-AR\", path: \"/app\", same_site: \"Strict\" },
+    ],
+}
+
+@server(43929) fn main() => 0
+";
+    let (status, headers, _body) =
+        build_spawn_request_raw_full("fitz05-fase-b-cookies", src, 43929, "GET", "/login");
+    assert_eq!(status, 303);
+    let headers_lower = headers.to_lowercase();
+    let count = headers_lower.matches("set-cookie:").count();
+    assert_eq!(
+        count, 2,
+        "expected 2 Set-Cookie headers, got {}: {}",
+        count, headers
+    );
+    // session cookie: HttpOnly + Max-Age + default Path/SameSite.
+    assert!(
+        headers_lower.contains("session=tok123"),
+        "headers: {}",
+        headers
+    );
+    assert!(
+        headers_lower.contains("max-age=86400"),
+        "headers: {}",
+        headers
+    );
+    assert!(headers_lower.contains("httponly"), "headers: {}", headers);
+    // lang cookie: custom Path + SameSite=Strict.
+    assert!(headers_lower.contains("lang=es-ar"), "headers: {}", headers);
+    assert!(
+        headers_lower.contains("samesite=strict"),
+        "headers: {}",
+        headers
+    );
+    assert!(headers_lower.contains("path=/app"), "headers: {}", headers);
+    // Location header still emitted (from the `headers` field).
+    assert!(
+        headers_lower.contains("location: /"),
+        "headers: {}",
+        headers
+    );
+}
+
+#[test]
 fn v019_block3d_response_binary_path_emits_bytes_and_content_disposition() {
     // Smoke binary path: el handler retorna `Response { body_bytes:
     // bytes("..."), content_type: "application/pdf" }` y el binario
@@ -15364,5 +15451,223 @@ fn ws_handler_with_header_builds() {
          }\n\
          @server(3902)\n\
          fn main() => 0\n",
+    );
+}
+
+/// FITZ-05 (2026-08) — a `@cookie(name="X")` handler compiles to a native binary
+/// (the HTTP wrapper parses the named cookie from the incoming `Cookie` header
+/// via `__fitz_parse_cookie`). Nullable → Option; required → 400 if missing.
+/// Runtime parity with `fitz run` validated manually (anon / session / base64
+/// value with `=` / required-missing → 400).
+#[test]
+fn cookie_decorator_handler_builds_fitz05() {
+    build_expect_ok(
+        "cookie-handler-fitz05",
+        "@cookie(name=\"session\")\n\
+         @get(\"/whoami\")\n\
+         fn whoami(session: Str?) -> Str {\n\
+         \x20   return match session {\n\
+         \x20       null => \"anon\",\n\
+         \x20       s => \"session:{s}\",\n\
+         \x20   }\n\
+         }\n\
+         @cookie(name=\"lang\")\n\
+         @get(\"/lang\")\n\
+         fn get_lang(lang: Str) -> Str => \"lang:{lang}\"\n\
+         @server(3941)\n\
+         fn main() => 0\n",
+    );
+}
+
+/// FITZ-09 (2026-08) — a fn declared `-> T?` (Nullable) with a `return`
+/// inside a nested `match`/`if`/loop used to emit broken Rust: `return ()`
+/// where `return None` was needed, and the value unwrapped instead of
+/// `Some(...)`. `fitz check` ✓ / `fitz run` ✓ / `fitz build` ✗ (E0308).
+/// This is the exact pattern of `flv_cookie` in fitz-liveviews, which
+/// blocked every native build that depends on the framework. The fix
+/// recovers the real `Nullable(T)` return frame from `ret_stack` when the
+/// nested return re-enters with the `Type::Null` placeholder, so `coerce`
+/// wraps in `Some(...)`/`None`. Validates build success AND run↔build
+/// parity (the CLI repro is deterministic).
+#[test]
+fn nullable_return_in_nested_match_wraps_some_none_fitz09() {
+    let src = "fn primera_parte(s: Str?) -> Str? {\n\
+        \x20   let raw: Str = match s {\n\
+        \x20       null => return null,\n\
+        \x20       v => v,\n\
+        \x20   }\n\
+        \x20   for parte in raw.split(\",\") {\n\
+        \x20       return parte\n\
+        \x20   }\n\
+        \x20   return null\n\
+        }\n\
+        fn describe(s: Str?) -> Str {\n\
+        \x20   return match primera_parte(s) {\n\
+        \x20       null => \"nada\",\n\
+        \x20       v => v,\n\
+        \x20   }\n\
+        }\n\
+        print(describe(\"a,b\"))\n\
+        print(describe(null))\n\
+        print(describe(\"x\"))\n";
+    let (out, code) = build_and_run("nullable-return-nested-match-fitz09", src);
+    assert_eq!(code, 0, "el binario debe exitear 0");
+    assert_eq!(
+        out, "a\nnada\nx\n",
+        "salida del binario debe ser idéntica a `fitz run` (paridad FITZ-09)"
+    );
+}
+
+/// FITZ-10 (2026-08) — an empty `[]` literal that the checker types `List<Any>`
+/// (never refined from `.push()`) made codegen emit `Vec<__FitzValue>` + a
+/// `Str + Any` concat, but (a) `gen_binop` rejected `Str + Any` with a codegen
+/// error, and (b) the `__FitzValue` enum/helpers were not emitted for the CLI
+/// path (they were only pre-detected from heterogeneous literals). `fitz check`
+/// ✓ / `fitz run` ✓ / `fitz build` ✗. The fix handles `Str + Any` / `Any + Str`
+/// in `gen_binop` (coerce Any→Str, parity with the interpreter) AND detects
+/// `List<Any>`/`Map<_, Any>` via the checker's TypeInfo so the `__FitzValue`
+/// prelude is emitted. Validates build success AND run↔build parity.
+#[test]
+fn str_plus_any_from_list_any_compiles_fitz10() {
+    let src = "fn primero(csv: Str) -> Str {\n\
+        \x20   let chars = []\n\
+        \x20   for c in csv.split(\",\") {\n\
+        \x20       chars.push(c)\n\
+        \x20   }\n\
+        \x20   let out = \"[\"\n\
+        \x20   out = out + chars[0]\n\
+        \x20   out = out + \"-\"\n\
+        \x20   out = out + chars[1]\n\
+        \x20   return out\n\
+        }\n\
+        print(primero(\"a,b,c\"))\n";
+    let (out, code) = build_and_run("str-plus-any-list-any-fitz10", src);
+    assert_eq!(code, 0, "el binario debe exitear 0");
+    assert_eq!(
+        out, "[a-b\n",
+        "salida del binario debe ser idéntica a `fitz run` (paridad FITZ-10)"
+    );
+}
+
+/// FITZ-01 (2026-08) — `rand.seeded(N)` is a reproducible generator: the SAME
+/// SplitMix64 algorithm runs in the interpreter (`src/rand.rs`) and in the
+/// codegen-emitted Rust (`RAND_PRELUDE_CORE`), so a seeded-only, deterministic
+/// program produces byte-identical output under `fitz run` and `fitz build`.
+/// This is the core contract that lets MatHelp store `seed + index` and
+/// reconstruct a run from two integers. Covers seeded int/float/bool/choice/
+/// shuffle/sample.
+#[test]
+fn rand_seeded_reproducible_parity_fitz01() {
+    let src = "let r = rand.seeded(12345)\n\
+        print(r.int(1, 6))\n\
+        print(r.int(1, 6))\n\
+        print(r.float())\n\
+        print(r.bool())\n\
+        match r.choice([\"a\", \"b\", \"c\", \"d\"]) {\n\
+        \x20   Ok(v) => print(v),\n\
+        \x20   Err(e) => print(e),\n\
+        }\n\
+        print(r.shuffle([1, 2, 3, 4, 5]))\n\
+        match r.sample([10, 20, 30, 40, 50], 3) {\n\
+        \x20   Ok(v) => print(v),\n\
+        \x20   Err(e) => print(e),\n\
+        }\n";
+    let run_out = run_interpreter("rand-seeded-parity-fitz01", src);
+    let (build_out, code) = build_and_run("rand-seeded-parity-fitz01", src);
+    assert_eq!(code, 0, "el binario debe exitear 0");
+    assert_eq!(
+        run_out, build_out,
+        "`rand.seeded(N)` debe ser reproducible bit-a-bit run↔build (FITZ-01)"
+    );
+    assert_eq!(
+        run_out, "3\n4\n0.11954258300911547\nfalse\nd\n[1, 5, 4, 3, 2]\n[40, 30, 20]\n",
+        "la secuencia SplitMix64 sembrada con 12345 debe ser estable"
+    );
+}
+
+/// FITZ-03 (2026-08) — módulo `fs`: filesystem builtins con paridad `run`↔`build`
+/// (los helpers `__fitz_fs_*` del codegen usan `std::fs` con los mismos mensajes
+/// que `src/fs.rs`). Escribe/lee/lista/borra en un dir bajo `target/`
+/// (gitignored) y verifica que la salida es idéntica interpretado y compilado.
+#[test]
+fn fs_builtins_roundtrip_parity_fitz03() {
+    let src = "let dir = \"target/fitz_fs_e2e_fitz03\"\n\
+        let file = \"target/fitz_fs_e2e_fitz03/data.txt\"\n\
+        let _m = fs.mkdir_all(dir)\n\
+        let _w = fs.write(file, \"linea1\\nlinea2\\n\")\n\
+        let _a = fs.append(file, \"linea3\")\n\
+        match fs.read(file) { Ok(c) => print(c), Err(e) => print(e) }\n\
+        print(fs.exists(file))\n\
+        match fs.list(dir) { Ok(xs) => print(xs), Err(e) => print(e) }\n\
+        let _r = fs.remove(file)\n\
+        let _rd = fs.remove(dir)\n";
+    let run_out = run_interpreter("fs-roundtrip-fitz03", src);
+    let (build_out, code) = build_and_run("fs-roundtrip-fitz03", src);
+    assert_eq!(code, 0, "el binario debe exitear 0");
+    assert_eq!(
+        run_out, build_out,
+        "`fs.*` debe producir salida idéntica run↔build (FITZ-03)"
+    );
+    assert_eq!(
+        run_out, "linea1\nlinea2\nlinea3\ntrue\n[\"data.txt\"]\n",
+        "roundtrip write→append→read→exists→list esperado"
+    );
+}
+
+/// FITZ-14 — corpus de paridad `fitz run` ↔ `fitz build`. Cada ejemplo CLI-puro
+/// y determinista debe producir stdout **idéntico bit-a-bit** por el intérprete
+/// y por el binario nativo. Es la red sistemática que hubiera cazado FITZ-09,
+/// FITZ-10 y la divergencia histórica de los format specs ANTES de que la
+/// encuentre un usuario dockerizando a las once de la noche.
+///
+/// Criterio de inclusión: single-file (sin imports — `build_and_run` copia el
+/// fuente a un tempdir, así que los módulos hermanos no resuelven), determinista
+/// (sin reloj, sin aleatoriedad no-sembrada, sin red) y termina (sin `@server`).
+/// Cuando una feature nueva pueda diverger entre intérprete y binario, sumá su
+/// caso acá.
+const PARITY_CLI_EXAMPLES: &[&str] = &[
+    "03c-bases-numericas.fitz",
+    "04b-operadores-bit.fitz",
+    "05b-format-specs.fitz",
+    "09d-comprehensions.fitz",
+    "10-match.fitz",
+    "13-metodos.fitz",
+    "13o-higher-order-y-consts-globales.fitz",
+    "13s-mb7-y-fmt-build.fitz",
+    "13t-mb8-bits-y-fmt-g.fitz",
+    "13v-return-en-match.fitz",
+    // FITZ-04 (2026-08) — `num.*` es determinista → paridad run↔build.
+    "13x-num-locale.fitz",
+    "14-result.fitz",
+    "14c-result-tipado.fitz",
+    "14d-err-compuestos.fitz",
+];
+
+#[test]
+fn run_build_parity_corpus_fitz14() {
+    let project_root = std::env::current_dir().expect("cwd");
+    let guide_dir = project_root.join("examples").join("guide");
+    let mut mismatches: Vec<String> = Vec::new();
+    for name in PARITY_CLI_EXAMPLES {
+        let src = std::fs::read_to_string(guide_dir.join(name))
+            .unwrap_or_else(|e| panic!("no se pudo leer {}: {}", name, e));
+        let stem = format!("parity-{}", name.trim_end_matches(".fitz"));
+        let run_out = run_interpreter(&stem, &src);
+        let (build_out, code) = build_and_run(&stem, &src);
+        if code != 0 {
+            mismatches.push(format!("{}: el binario exitó con código {}", name, code));
+            continue;
+        }
+        if run_out != build_out {
+            mismatches.push(format!(
+                "{}: DIVERGENCIA run↔build\n  run:   {:?}\n  build: {:?}",
+                name, run_out, build_out
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "divergencias de paridad `fitz run` ↔ `fitz build` (FITZ-14):\n{}",
+        mismatches.join("\n\n")
     );
 }

@@ -4,6 +4,28 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 Body `form-urlencoded` → `Map` en `fitz run` (ABIERTO — descubierto en FITZ-05, v0.49.0, 2026-08-20)
+
+**El gap (clase FITZ-14, paridad `run`↔`build`):** un handler `@post fn login(creds:
+Credentials)` que recibe un body `application/x-www-form-urlencoded` deserializa al
+`type` declarado en `fitz build` (confirmado por el autor sobre el binario, A5 refutado),
+pero en `fitz run` el body llega como un `Value::Map` en vez de una `Instance` del type
+→ un `creds.user` explota con *"field access `.user` on a value of type `Map` — only
+allowed on custom type instances or modules"* (500). El path JSON sí coerce a la
+instancia en el intérprete; el path form-urlencoded no.
+
+**Impacto:** el login **zero-JS** (`<form method=POST>` nativo, el caso canónico de
+FITZ-05 + MatHelp) funciona compilado pero no interpretado. Workaround: usar body JSON en
+`fitz run`, o `fitz build` para ese flujo.
+
+**No es FITZ-05:** la escritura de cookies (`Response.cookies`) y la lectura (`@cookie`)
+tienen paridad bit-a-bit run↔build. El gap es del path de deserialización del body
+form-urlencoded en el intérprete (`src/http.rs`, la rama que arma el body Map en vez de
+coercer al `declared_type` como hace el path JSON). Fix probable: aplicar la misma
+coerción `Map → Instance` (paralelo a `json_to_instance`) cuando el content-type es
+`application/x-www-form-urlencoded` y el handler declara un body tipado. Lo cazaría el
+differ FITZ-14 si el corpus incluyera un caso HTTP form (hoy es CLI-puro).
+
 ## 🟢 Deuda A — `fitz check` valida los módulos `.fitz` importados (CERRADO v0.43.0, 2026-08-18)
 
 **El gap**: `fitz check` sobre un `.fitz` clásico chequeaba **solo el entry**.

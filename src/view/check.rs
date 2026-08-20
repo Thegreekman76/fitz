@@ -1251,6 +1251,7 @@ fn is_str_friendly(ty: &Type) -> bool {
         | Type::Future(_)
         | Type::WsConn { .. }
         | Type::DbConn
+        | Type::RandGen
         | Type::DbRow
         | Type::QueryBuilder(_)
         | Type::Aggregated(_)

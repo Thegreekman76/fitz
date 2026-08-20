@@ -1263,12 +1263,17 @@ Gramática del spec: `[[fill]align][sign][#][0][width][grouping][.precision][typ
 El checker valida la compatibilidad: `{x:.2f}` con `x: Str` da error
 de tipo antes de runtime.
 
-**Subset compilable con `fitz build`** (subset que mapea directo a
-`format!` de Rust): precisión Float, width/zero-pad de Int, alineación,
-fill custom, sign, alternate (`#`), hex/binario/octal. **Solo `fitz
-run`** (Rust no tiene equivalente nativo): grouping (`,`/`_`),
-percent (`%`), exponente (`e`/`E`), general (`g`/`G`), char (`c`).
-El codegen emite error claro citando `fitz run` como workaround.
+**Format specs y `fitz build`** — **todos** los format specs compilan a
+binario nativo con paridad bit-a-bit ante `fitz run`: precisión Float,
+width/zero-pad de Int, alineación, fill custom, sign, alternate (`#`),
+hex/binario/octal, y también grouping (`,`/`_`), percent (`%`),
+exponente (`e`/`E`), general (`g`/`G`) y char (`c`) — estos últimos vía
+los helpers `__fitz_fmt_grouping`/`__fitz_fmt_percent`/`__fitz_fmt_char`/
+`__fitz_fmt_general` que el codegen emite (cierre de la deuda "Fm", ver
+más abajo). Lo que **no** cubren es formateo *locale-aware*: el separador
+decimal es siempre `.` y el de miles es el char que elegís (`,`/`_`); no
+hay formato es-AR `1.234.567,00` ni `42,0 %`. Para eso está el módulo
+`num` (ver la sección "Formateo locale-aware — el módulo `num`" del cap 13).
 
 Ver [examples/guide/05b-format-specs.fitz](../examples/guide/05b-format-specs.fitz)
 (subset compilable, validado bit-a-bit `fitz run` ↔ `fitz build`) y
@@ -5295,6 +5300,96 @@ print((1.0).is_finite())                          // true
 Ver [examples/guide/13u-math-mb9-y-int-float.fitz](../examples/guide/13u-math-mb9-y-int-float.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### Aleatoriedad — el módulo `rand`
+
+En Python la aleatoriedad está partida entre `random` (rápido pero inseguro) y
+`secrets` (seguro pero sin sembrar); en JS `Math.random()` no se puede sembrar y
+para tokens hay que ir a `crypto`; en Go se separan `math/rand` y `crypto/rand`.
+Casi todos terminan usando el generador equivocado para la tarea. **Fitz trae
+`rand` en el core y separa las dos familias explícitamente, con paridad
+bit-a-bit entre `fitz run` y `fitz build`.**
+
+**Global — CSPRNG (no reproducible).** Sembrado desde la entropía del sistema
+operativo. `rand.bytes(n)` sale directo del CSPRNG (para tokens de sesión):
+
+```fitz
+rand.int(min, max)   // Int en [min, max], inclusivo ambos extremos
+rand.float()         // Float en [0, 1)
+rand.bool()          // Bool
+rand.choice(xs)      // Result<T> — Err si la lista está vacía
+rand.shuffle(xs)     // List<T> — copia barajada (Fisher-Yates)
+rand.sample(xs, n)   // Result<List<T>> — n elementos sin repetir
+rand.bytes(n)        // Bytes — CSPRNG, para tokens
+```
+
+**Sembrado — reproducible.** `rand.seeded(N)` devuelve un generador con la misma
+superficie (menos `bytes`) que produce **exactamente la misma secuencia** en
+`fitz run` y en `fitz build`, siempre:
+
+```fitz
+let r = rand.seeded(12345)
+r.int(1, 6)      // misma tirada en interpretado y compilado
+r.float()  r.bool()  r.choice(xs)  r.shuffle(xs)  r.sample(xs, n)
+```
+
+Esa garantía habilita un patrón potente: guardás `semilla + índice` y
+reconstruís una corrida entera desde dos enteros — sin persistir el resultado.
+
+```fitz
+fn ejercicio(semilla: Int, indice: Int) -> Str {
+    let gen = rand.seeded(semilla)
+    let a = 0
+    let b = 0
+    for _ in 0..(indice + 1) {
+        a = gen.int(2, 12)
+        b = gen.int(2, 12)
+    }
+    return "{a} x {b} = ?"
+}
+
+print(ejercicio(777, 0))   // reconstruible: mismo seed + índice ⇒ mismo ejercicio
+```
+
+**Por qué el algoritmo importa:** el generador sembrado usa **SplitMix64** fijo,
+implementado idéntico en el intérprete y en el binario. No delega en el algoritmo
+de una librería externa (que puede cambiar entre versiones y romper un replay
+guardado en disco). Un `Err` de `choice`/`sample` (lista vacía, `n` mayor que la
+lista) vuelve como `Result`; un `rand.int(min, max)` con `min > max` aborta
+(error de programación, no un evento esperable).
+
+Ver [examples/guide/13w-random.fitz](../examples/guide/13w-random.fitz) para el
+ejemplo completo (seeded + global).
+
+### Formateo locale-aware — el módulo `num`
+
+Los format specs (`{n:,}`) compilan a binario pero no conocen locale: el decimal
+es siempre `.`. Para mostrar `1.234,5` (Argentina) en vez de `1,234.5` (inglés)
+—que en un juego de matemática es corrección pedagógica, no cosmética— está el
+módulo `num`, con paridad bit-a-bit `fitz run` ↔ `fitz build`:
+
+```fitz
+num.format(x, locale)              // agrupa miles + separador decimal del locale
+num.percent(x, locale, digits)     // x*100 con `digits` decimales + %
+num.currency(x, locale, code)      // símbolo de moneda + monto con 2 decimales
+```
+
+```fitz
+print(num.format(1234.5, "es-AR"))            // 1.234,5
+print(num.format(1234.5, "en-US"))            // 1,234.5
+print(num.percent(0.42, "es-AR", 1))          // 42,0 %
+print(num.currency(1250, "es-AR", "ARS"))     // $ 1.250,00
+```
+
+Locales: `es-AR` (decimal `,`, miles `.`, `$ ` antes con espacio, `42,0 %` con
+espacio) y `en-US` (decimal `.`, miles `,`, `$` pegado, `42.0%`); cualquier otro
+cae a `en-US`. Códigos de moneda con símbolo: ARS/USD/MXN/CAD/AUD/CLP/COP → `$`,
+EUR → `€`, GBP → `£`, JPY → `¥`, BRL → `R$` (otros usan el código tal cual).
+
+**MVP:** args posicionales (`num.format(x, "es-AR")`); los kwargs (`locale:`) son
+un refinamiento futuro. Tabla de locales embebida (sin ICU) — se extiende
+sumando entradas. Ver
+[examples/guide/13x-num-locale.fitz](../examples/guide/13x-num-locale.fitz).
+
 ### `return`/`break`/`continue` en match arm
 
 Cada arm de `match` ahora puede contener `return`/`break`/`continue`
@@ -7459,6 +7554,108 @@ manejo de Result<T> normal del cap 14).
 
 Ejemplo runnable end-to-end (RSS + robots.txt + SVG + PDF
 binario): [`examples/guide/17l-response-custom.fitz`](../examples/guide/17l-response-custom.fitz).
+
+### Cookies y sesiones
+
+La cookie es el único mecanismo viable para el login de una app
+navegable: el browser **no manda** `Authorization` en la navegación
+normal ni en el handshake de un WebSocket, pero **sí manda** la cookie
+que le seteaste. Fitz cubre las dos mitades con API nativa: **leer**
+por decorador (`@cookie`) y **escribir** por el campo `cookies` de un
+`Response`.
+
+**Leer — `@cookie(name="X")`.** Se apila antes del decorator de ruta
+(igual que `@header`) e inyecta el valor parseado de la cookie `X` en
+un parámetro del handler. El tipo del parámetro debe ser `Str` (400 si
+la cookie falta) o `Str?` (`null` si falta). Funciona sobre
+`@get`/`@post`/`@delete`/… y también sobre `@ws` (el upgrade es una
+request HTTP). El nombre del parámetro es el de la cookie; con
+`into="alias"` lo renombrás.
+
+```fitz
+@cookie(name="session")
+@get("/me")
+fn me(session: Str?) -> Response {
+    let body = match session {
+        null => "no session",
+        s => "logged in: {s}",
+    }
+    return Response { body: body, content_type: "text/plain" }
+}
+```
+
+**Escribir — `Response { cookies: [...] }`.** Cada `Cookie` de la lista
+se serializa a un header `Set-Cookie` (uno por cookie). `Cookie` es un
+tipo built-in — no hace falta declararlo ni importarlo:
+
+```fitz
+type Cookie {
+    name: Str
+    value: Str
+    path: Str = "/"
+    http_only: Bool = false
+    secure: Bool = false
+    same_site: Str = "Lax"    // "Strict" | "Lax" | "None"
+    max_age: Int? = null       // segundos; null = cookie de sesión
+    domain: Str? = null
+}
+```
+
+Solo `name` y `value` son obligatorios; el resto tiene defaults
+sensatos. Un login que setea la sesión y redirige:
+
+```fitz
+type Credentials { user: Str, pass: Str }
+
+@post("/login")
+fn login(creds: Credentials) -> Response {
+    // ... validar creds, generar token ...
+    return Response {
+        status: 303,
+        headers: { "Location": "/me" },
+        cookies: [
+            Cookie {
+                name: "session",
+                value: token,
+                http_only: true,      // no accesible desde JS
+                secure: true,         // solo por HTTPS
+                same_site: "Strict",
+                max_age: 86400,        // 1 día
+            },
+            Cookie { name: "lang", value: "es-AR" },
+        ],
+    }
+}
+```
+
+Produce dos headers separados:
+
+```
+Set-Cookie: session=<token>; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Strict
+Set-Cookie: lang=es-AR; Path=/; SameSite=Lax
+```
+
+**Login sin JavaScript.** Un `<form method="POST" action="/login">`
+del browser manda el body como `application/x-www-form-urlencoded`, que
+Fitz deserializa al `type` del handler igual que un body JSON. Con eso +
+la cookie de sesión, el flujo de login es HTML puro, cero JS:
+
+```html
+<form method="POST" action="/login">
+  <input name="user"><input name="pass" type="password">
+  <button>Entrar</button>
+</form>
+```
+
+(Nota de paridad: hoy la deserialización de un body form-urlencoded al
+`type` del handler funciona en `fitz build`; en `fitz run` el body
+llega como `Map` — usá `fitz build` para ese flujo, o un body JSON
+mientras tanto.)
+
+**Paridad `fitz run` ↔ `fitz build`.** La lectura (`@cookie`) y la
+escritura (`Response.cookies`, incluidos los flags y el orden de
+atributos) producen exactamente los mismos headers en el intérprete y
+en el binario nativo.
 
 ### Query params
 
@@ -13391,6 +13588,62 @@ Override del pool size del driver Postgres. Clamp `[1, 200]`,
 fallback default 10 ante valores inválidos. Aplica global al
 proceso. Se fija al primer acceso (LazyLock); reiniciá para
 cambiar.
+
+### Filesystem — el módulo `fs`
+
+Un lenguaje de backend que compila a binario nativo necesita leer y escribir
+archivos: catálogos de i18n, templates de mail, seeds, import/export CSV, logs.
+El módulo `fs` está en el core, todo devuelve `Result` (salvo `exists`), y las
+operaciones corren en **runtime** (no en compile-time): `fs.read("locales/es.json")`
+al boot lee del working dir del binario.
+
+```fitz
+fs.read(path) -> Result<Str>           fs.read_bytes(path) -> Result<Bytes>
+fs.write(path, content) -> Result<Null>   fs.append(path, content) -> Result<Null>
+fs.exists(path) -> Bool                fs.list(path) -> Result<List<Str>>
+fs.remove(path) -> Result<Null>        fs.mkdir_all(path) -> Result<Null>
+```
+
+`content` (en `write`/`append`) acepta `Str` (bytes UTF-8) o `Bytes`. Paridad
+bit-a-bit `fitz run` ↔ `fitz build` (el codegen emite helpers sobre `std::fs`
+con los mismos mensajes de error).
+
+```fitz
+let _ = fs.mkdir_all("data")
+match fs.write("data/nota.txt", "hola\n") {
+    Ok(_) => print("escrito"),
+    Err(e) => print("error: {e}"),
+}
+match fs.read("data/nota.txt") {
+    Ok(c) => print(c),
+    Err(e) => print(e),
+}
+```
+
+Caso típico i18n — un catálogo por idioma leído al boot, que un traductor edita
+sin recompilar. Fitz serializa con `to_json(x)` pero **no** parsea JSON de forma
+nativa; para volver un `.json` a un `Map` se usa interop Python
+(`from python import json`), o un formato línea-a-línea propio con `.split`:
+
+```fitz
+// Formato `clave=valor` por línea, parseado con string methods (sin deps):
+fn cargar_locale(code: Str) -> Result<Map<Str, Str>> {
+    let raw = fs.read("locales/{code}.txt")?
+    let tabla = {}
+    for linea in raw.split("\n") {
+        let par = linea.split("=")
+        if (par.len() >= 2) {
+            tabla[par[0]] = par[1]
+        }
+    }
+    return Ok(tabla)
+}
+```
+
+**Alcance del MVP:** sin sandbox (es un backend nativo; `fs` es esperable). Un
+modelo de permisos estilo Deno (`--allow-read=locales/`) queda como opt-in
+futuro. El streaming de archivos grandes (`open()` con seek) es un sub-paso
+posterior; los 8 builtins cubren el 95% de los casos.
 
 ---
 

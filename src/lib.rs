@@ -35,6 +35,7 @@ pub mod error; // compiler error handling
 pub mod evaluator; // Phase 2.4 — execution
 pub mod fmt; // Phase 9.z.1 — `fitz fmt` formatter (AST pretty-printer)
 pub mod format; // Mini-batch Fm — runtime FormatSpec application
+pub mod fs; // FITZ-03 (2026-08) — `fs.*` filesystem builtins
 pub mod git_dep; // Phase 9.y.3.c — git deps + local cache
 pub mod http; // Phase 4 — native HTTP (registry + runtime)
 pub mod http_client; // Mini-fase HTTP client (2026-06-18) — outbound `http.get/...` builtin
@@ -45,12 +46,14 @@ pub mod lockfile; // Phase 9.y.3.a — `fitz.lock` lockfile (path deps)
 pub mod logging; // Phase 12.3.a.2 — built-in structured logging (JSON + pretty + tracing)
 pub mod manifest; // Phase 9.y.1 — `fitz.toml` package-manager manifest
 pub mod migrations; // Phase 10.6 — automatic ORM migrations (introspect + diff + emit)
+pub mod num; // FITZ-04 (2026-08) — `num.*` locale-aware number formatting
 pub mod observability; // Phase 12.3.c.1 — OTLP exporter for HTTP spans
 pub mod openapi; // Phase 7.1 — OpenAPI 3.1 generator
 pub mod parser; // Phase 2.3 — AST construction
 pub mod pbs; // Phase 8.b.1 — python-build-standalone download + cache for `--bundle-python`
 pub mod pyi_loader; // 8-pyi.B (v0.9.57) — auto pickup of adjacent .pyi stubs
 pub mod pyi_stub; // pyi-stubs (v0.9.39) — .pyi parser (PEP 484/561 subset)
+pub mod rand; // FITZ-01 (2026-08) — `rand.*` (CSPRNG) + `rand.seeded(N)` (reproducible)
 pub mod smtp; // Mini-tanda SMTP builtin (2026-06-19) — outbound `smtp.send(opts)`
 pub mod templates; // Phase 4 Y-B, Session 1.c — `fitz new --template <name>` scaffolding
 pub mod testing; // Phase 9.z.2 — built-in testing (registry + @test + asserts)
