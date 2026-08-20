@@ -9,6 +9,62 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.50.0] — 2026-08-20 — Hito 3/4 del norte MatHelp: `Map.remove`, `is_in(<var>)`, paridad form-urlencoded, y limpieza de codegen
+
+Continuación del backlog de MatHelp (`docs/norte-mathelp.md`) sobre
+v0.49.0: cierra los quick wins de Hito 3/4 y el gap de paridad
+descubierto al cerrar FITZ-05. Todo con paridad bit-a-bit `fitz run` ↔
+`fitz build` (validado contra Postgres local para el ORM).
+
+### Added
+
+- **`Map.remove(key) -> Bool` (FITZ-13)** — borra la entrada `key` y
+  devuelve `true` si existía. **Muta el Map in place** (semántica de
+  referencia compartida, visible por cualquier alias — a diferencia de
+  `with`/`merge` que devuelven un Map nuevo). Evaluator (`map_remove`,
+  búsqueda lineal + `Vec::remove` preservando orden) + codegen con
+  paridad + checker (`Map<K,V>.remove(K) -> Bool`) + LSP + guía.
+  Desbloquea la eviction del store de componentes de fitz-liveviews
+  (FLV-03).
+- **`is_in(<var>)` con variable `List<T>` en el ORM (FITZ-07)** — un
+  `.where(fn(u) => u.col.is_in(pendientes))` con `pendientes` una
+  variable `List<T>` del scope externo emite `"col" = ANY($N::<oid>[])`,
+  bindeando la lista entera como UN solo parámetro array (el OID sale
+  del tipo escalar de la columna). La lista literal sigue emitiendo
+  `IN ($1, $2, ...)`. Ideal para listas calculadas en runtime (ej. el
+  motor adaptativo de MatHelp con skills pendientes). Paridad bit-a-bit
+  validada contra Postgres real. Doc-comment corregido (ya no promete
+  soporte sin cumplirlo).
+
+### Fixed
+
+- **Body `form-urlencoded` → tipo declarado en `fitz run`** — un handler
+  `@post fn login(creds: Credentials)` que recibe un body
+  `application/x-www-form-urlencoded` ahora deserializa al `type`
+  declarado en `fitz run` igual que en `fitz build` (antes llegaba como
+  `Map` crudo → `creds.user` explotaba con 500). `parse_urlencoded_body`
+  construye un `serde_json::Object` all-string y reusa el mismo path que
+  el body JSON (`json_to_instance`), paralelo al
+  `__parse_urlencoded`→`__from_fitz_json` del codegen. **Cierra el gap de
+  paridad** que bloqueaba el login zero-JS (`<form method=POST>`) en el
+  intérprete. Descubierto al cerrar FITZ-05 en v0.49.0.
+- **`.preload()` en el intérprete: error dedicado (FITZ-06)** — el eager
+  loading está implementado en `fitz build` pero no en `fitz run`; ahora
+  `.preload(...)` en el intérprete da un mensaje **dedicado** (apunta a
+  `fitz build` + workarounds con navigation methods) en vez del genérico
+  "QueryBuilder has no method `preload`". (La premisa original del norte
+  de un "no-op silencioso" quedó stale — desde v0.47.0 ya erraba.)
+
+### Changed
+
+- **Codegen: sin paréntesis redundantes en el `match` (FITZ-12)** — un
+  `let x = match …` / `return match …` deja de emitir `(match …)` (rustc
+  avisaba `unnecessary parentheses`). Helper `strip_stmt_match_parens`
+  (scanner balanceado fail-safe que skipea strings) aplicado en
+  `gen_return`/`gen_assign`; las posiciones de operando/receptor
+  (`(match …).foo()`, `1 + (match …)`) conservan los paréntesis. Reduce
+  el ruido de warnings en el `cargo build` de los binarios generados.
+
 ## [v0.49.0] — 2026-08-20 — Hito 1 + Hito 2 del norte MatHelp: `rand`/`fs`/`num`, cookies, y paridad `run`↔`build`
 
 Release combinado que cierra los dos primeros hitos del backlog surgido

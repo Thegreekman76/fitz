@@ -253,6 +253,15 @@ Extensions. Detalle en
   fitz-liveviews) y `Str + Any`; **differ de paridad**
   `fitz run` ↔ `fitz build` sobre un corpus CLI-puro; `git`
   en la imagen Docker oficial.
+- **Hito MatHelp — Hito 3/4** (v0.50.0, 2026-08-20) —
+  `Map.remove(key) -> Bool` (muta in place, desbloquea la
+  eviction de fitz-liveviews); `is_in(<var>)` en el ORM con
+  una variable `List<T>` → `= ANY($N)` (paridad bit-a-bit
+  validada contra Postgres real); paridad `form-urlencoded`
+  → `type` del handler en `fitz run` (login zero-JS idéntico
+  run↔build); `.preload()` en el intérprete da error dedicado
+  (apunta a `fitz build`); y limpieza de codegen (sin
+  paréntesis redundantes en el `match` generado).
 - **Fase 11.7 R3.5 + Frente 2** (v0.22.0, 2026-07-19) — **el
   kanban como WASM SPA + composición `<Child />` completa**.
   Cierra Phase 11.7 entera para el target client-WASM: el Board

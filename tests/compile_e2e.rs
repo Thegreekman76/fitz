@@ -15614,6 +15614,32 @@ fn fs_builtins_roundtrip_parity_fitz03() {
     );
 }
 
+/// FITZ-13 (2026-08) — `Map.remove(key) -> Bool` con paridad `run`↔`build`.
+/// Borra una clave existente (true), una ausente (false), preserva el orden
+/// del resto y muta el Map en su lugar. El intérprete (`map_remove`) y el
+/// codegen (`gen_map_remove`, `.remove` sobre el `Vec<(K, V)>`) deben producir
+/// salida idéntica.
+#[test]
+fn map_remove_parity_fitz13() {
+    let src = "let m = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+        print(m.remove(\"b\"))\n\
+        print(m.remove(\"x\"))\n\
+        print(m.len())\n\
+        print(m)\n\
+        print(m.has(\"b\"))\n";
+    let run_out = run_interpreter("map-remove-parity-fitz13", src);
+    let (build_out, code) = build_and_run("map-remove-parity-fitz13", src);
+    assert_eq!(code, 0, "el binario debe exitear 0");
+    assert_eq!(
+        run_out, build_out,
+        "`Map.remove` debe producir salida idéntica run↔build (FITZ-13)"
+    );
+    assert_eq!(
+        run_out, "true\nfalse\n2\n{\"a\": 1, \"c\": 3}\nfalse\n",
+        "remove(existente)=true, remove(ausente)=false, orden preservado"
+    );
+}
+
 /// FITZ-14 — corpus de paridad `fitz run` ↔ `fitz build`. Cada ejemplo CLI-puro
 /// y determinista debe producir stdout **idéntico bit-a-bit** por el intérprete
 /// y por el binario nativo. Es la red sistemática que hubiera cazado FITZ-09,

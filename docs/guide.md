@@ -3924,6 +3924,7 @@ print(xs)                          // [1, 2, 3]
 |---------------------|---------------------------------------------------------|
 | `get(k)`            | Devuelve `Ok(valor)` si la clave existe, o `Err(...)`.  |
 | `has(k)`            | `true` si la clave existe, `false` si no.               |
+| `remove(k)`         | Borra la entrada `k` **in place** y devuelve `true` si existía. |
 | `keys()`            | Lista con las claves, en orden de inserción.            |
 | `values()`          | Lista con los valores, en orden de inserción.           |
 | `len()`             | Cantidad de pares.                                      |
@@ -3946,7 +3947,14 @@ print(m.get("a"))                  // Ok(1)
 print(m.get("x"))                  // Err("clave no encontrada: x")
 print(m.keys())                    // ["a", "b"]
 print(m.values())                  // [1, 2]
+print(m.remove("a"))               // true — borra "a" del Map
+print(m.remove("z"))               // false — no existía
+print(m)                           // {"b": 2}
 ```
+
+A diferencia de `filter`/`with`/`merge` (que devuelven un Map nuevo),
+`remove` **muta el Map en su lugar** — el cambio se ve a través de
+cualquier alias, igual que `push` sobre una lista.
 
 La diferencia entre `m["a"]` y `m.get("a")` está en cómo modelan la
 falta: `m["a"]` corta con error si no hay clave, `m.get("a")` te
@@ -7637,8 +7645,9 @@ Set-Cookie: lang=es-AR; Path=/; SameSite=Lax
 
 **Login sin JavaScript.** Un `<form method="POST" action="/login">`
 del browser manda el body como `application/x-www-form-urlencoded`, que
-Fitz deserializa al `type` del handler igual que un body JSON. Con eso +
-la cookie de sesión, el flujo de login es HTML puro, cero JS:
+Fitz deserializa al `type` del handler igual que un body JSON (mismos
+defaults, nullables y validación de campos extra). Con eso + la cookie
+de sesión, el flujo de login es HTML puro, cero JS:
 
 ```html
 <form method="POST" action="/login">
@@ -7646,11 +7655,6 @@ la cookie de sesión, el flujo de login es HTML puro, cero JS:
   <button>Entrar</button>
 </form>
 ```
-
-(Nota de paridad: hoy la deserialización de un body form-urlencoded al
-`type` del handler funciona en `fitz build`; en `fitz run` el body
-llega como `Map` — usá `fitz build` para ese flujo, o un body JSON
-mientras tanto.)
 
 **Paridad `fitz run` ↔ `fitz build`.** La lectura (`@cookie`) y la
 escritura (`Response.cookies`, incluidos los flags y el orden de

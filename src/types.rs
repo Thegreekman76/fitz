@@ -8230,6 +8230,25 @@ fn infer_map_method(
             }
             Type::Bool
         }
+        // FITZ-13 — `remove(key) -> Bool` (true if the key existed).
+        "remove" => {
+            check_method_arity(ctx, "remove", args_ty, 1, span);
+            if let Some(arg) = args_ty.first() {
+                if !is_compatible(arg, k) {
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`remove` over `Map<{}, {}>` expects a key `{}`, received `{}`",
+                            k.display(ctx.types),
+                            v.display(ctx.types),
+                            k.display(ctx.types),
+                            arg.display(ctx.types)
+                        ),
+                    );
+                }
+            }
+            Type::Bool
+        }
         "keys" => {
             check_method_arity(ctx, "keys", args_ty, 0, span);
             Type::List(Box::new(k.clone()))

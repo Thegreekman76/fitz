@@ -3326,6 +3326,8 @@ fn after_dot_completions(
                 ),
             ),
             ("has", format!("fn({}) -> Bool", k.display(type_env))),
+            // FITZ-13 — remove(key) -> Bool (true if the key existed).
+            ("remove", format!("fn({}) -> Bool", k.display(type_env))),
             ("keys", format!("fn() -> List<{}>", k.display(type_env))),
             ("values", format!("fn() -> List<{}>", v.display(type_env))),
             ("len", "fn() -> Int".into()),
@@ -4612,6 +4614,7 @@ const LIST_METHOD_SIGS: &[(&str, &str, &[&str])] = &[
 const MAP_METHOD_SIGS: &[(&str, &str, &[&str])] = &[
     ("get", "fn get(key: K) -> Result<V>", &["key: K"]),
     ("has", "fn has(key: K) -> Bool", &["key: K"]),
+    ("remove", "fn remove(key: K) -> Bool", &["key: K"]),
     ("keys", "fn keys() -> List<K>", &[]),
     ("values", "fn values() -> List<V>", &[]),
     ("len", "fn len() -> Int", &[]),

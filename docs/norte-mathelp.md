@@ -68,10 +68,10 @@ Filas `FLV-*` viven en `fitz-liveviews/docs/norte-mathelp.md`.
 | 7  | FITZ-03  | Módulo `fs`                             | Confirmado          | Alto        | M     | Bajo   | habilita **T1**      |
 | 8  | FITZ-04  | Formateo de números con locale          | Parcial (paridad OK)| Alto        | M     | Bajo   | **T1**               |
 | 11 | FITZ-02  | Servido de estáticos (`@server(static_dir=)`) | Confirmado    | Medio       | M     | Bajo   | habilita **T3**      |
-| 13 | FITZ-13  | `Map.remove` `[antes FITZ-09]`          | Confirmado          | Medio       | S     | Bajo   | **desbloquea FLV-03**|
-| 19 | FITZ-06  | `.preload()` en el intérprete           | Confirmado          | Medio       | M     | Bajo   | **T2**               |
-| 20 | FITZ-07  | `.is_in(<var>)` → `= ANY($n)`           | Confirmado          | Bajo        | S     | Bajo   | —                    |
-| 21 | FITZ-12  | Paréntesis redundantes en el `match` generado | Confirmado    | Bajo        | S     | Ninguno| —                    |
+| 13 | FITZ-13  | `Map.remove` `[antes FITZ-09]`          | Ya resuelto         | Medio       | S     | Bajo   | **desbloquea FLV-03**|
+| 19 | FITZ-06  | `.preload()` en el intérprete (error claro) | Ya resuelto (MVP)| Medio       | M     | Bajo   | **T2**               |
+| 20 | FITZ-07  | `.is_in(<var>)` → `= ANY($n)`           | Ya resuelto         | Bajo        | S     | Bajo   | —                    |
+| 21 | FITZ-12  | Paréntesis redundantes en el `match` generado | Ya resuelto   | Bajo        | S     | Ninguno| —                    |
 | 22 | FITZ-08  | ENUM nativo de Postgres                 | Confirmado          | Bajo        | L     | Medio  | —                    |
 
 Estado ∈ `Confirmado` · `Parcial` · `Refutado` · `Ya resuelto`
@@ -268,11 +268,13 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
   `.append` en `outcome_to_response`** para que múltiples Set-Cookie sobrevivan; LSP + guía cap 17
   "Cookies y sesiones"). Tests: 5 unit http (serialización) + 1 E2E oneshot intérprete (valida el
   `.append`) + 1 E2E codegen raw-TCP (2 Set-Cookie, paridad) + 3 unit codegen del prelude + 1 LSP.
-  **Deuda residual descubierta (NO FITZ-05, clase FITZ-14):** en `fitz run` un body
-  `form-urlencoded` llega como `Map` en vez de deserializar al `type` del handler (en `fitz build`
-  sí tipa) — el login zero-JS funciona compilado; con `fitz run` usar body JSON mientras tanto.
-- **Estado:** Ya resuelto (FASE A + FASE B). Form-urlencoded (mitad del A5 original):
-  **REFUTADO — ya soportado en `fitz build`** (en `fitz run`, deuda residual arriba).
+  **Bonus (post-v0.49.0, 2026-08-20):** cerrado el gap de paridad descubierto acá —
+  `parse_urlencoded_body` ahora coerce el body `form-urlencoded` al `type` del handler
+  (paralelo a `parse_body`/JSON y al `__parse_urlencoded`→`__from_fitz_json` del codegen), así el
+  login zero-JS funciona igual en `fitz run` y `fitz build` (2 tests nuevos + smoke bit-a-bit).
+- **Estado:** Ya resuelto (FASE A + FASE B + paridad form-urlencoded en el intérprete).
+  Form-urlencoded (mitad del A5 original): **REFUTADO — soportado en `fitz build` y ahora
+  también en `fitz run` con coerción al `type`.**
 - **Evidencia (cookies sin API):** `src/http.rs:1310-1341` (`HandlerOutcome` sin campo `cookies`);
   sin `@cookie`/`Cookie` en `src/parser.rs`/`src/value.rs`. `docs/guide.md:11436` lista sessions
   cookie-based como futuro.
@@ -416,7 +418,14 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-13 · `Map.remove(key)` `[antes FITZ-09]`
 
-- [ ] Implementado
+- [x] Implementado (2026-08-20, post-v0.49.0) — `m.remove(key) -> Bool` (true si existía),
+  muta el Map in place (semántica de referencia compartida, visible por cualquier alias).
+  Evaluator (`map_remove`, búsqueda lineal + `Vec::remove` preservando orden) + codegen con
+  **paridad bit-a-bit** (`gen_map_remove`, `.remove` sobre el `Vec<(K, V)>`; Arc ligado a un
+  local para no dropear el `MutexGuard` temporal) + checker (`Map<K,V>.remove(K) -> Bool`) +
+  LSP (after-dot + signature catalog) + guía (sección métodos de Map). Tests: 1 unit evaluator
+  (mutación vía alias) + 1 E2E de paridad `run`↔`build` (`map_remove_parity_fitz13`).
+  **Desbloquea FLV-03** (eviction del store de componentes en fitz-liveviews).
 - **Estado:** Confirmado (hallazgo derivado de FLV-03).
 - **Evidencia:** `fitz-liveviews/src/lib.fitz:2206-2210` (el store no puede evictar: "`Map` has no `remove`
   yet"); `fitz-liveviews/docs/components.md:398`. Métodos de `Map` en el core: `get`/`has`/`keys`/`values`/`len`,
@@ -440,8 +449,16 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-06 · `.preload()` en el intérprete
 
-- [ ] Implementado
-- **Estado:** Confirmado.
+- [x] Implementado — MVP "error-claro-primero" (2026-08-20, post-v0.49.0). **La premisa
+  original del norte ("no-op silencioso") quedó STALE**: desde v0.47.0 el dispatch cambió y
+  `.preload()` en `fitz run` ya daba un error genérico ("QueryBuilder has no method `preload`"),
+  no un no-op silencioso. Ahora da un **error DEDICADO** en ambos dispatches (QueryBuilder + Type
+  directo) que apunta a `fitz build` + workarounds (navigation method `user.posts(db)` o `.where`
+  separado). Helper `preload_not_in_interpreter_error`. 1 unit test (`fitz06_preload_in_interpreter_gives_dedicated_error`).
+  **El criterio de aceptación se cumple** ("aborta con mensaje claro, nunca no-op silencioso").
+  **Follow-up (Costo M, NO bloquea):** implementar el eager loading real en el intérprete para
+  paridad con el codegen (cargar las relaciones en `fitz run`).
+- **Estado:** Ya resuelto (MVP error-claro; paridad real = follow-up).
 - **Evidencia:** `CHANGELOG.md:71-72`; `src/evaluator.rs:14670-14673` (cae al `_ => Ok(None)`, **no-op
   silencioso**, ni error dedicado); implementado en codegen (`src/codegen.rs:23814`, `:24933`).
 - **Impacto en un usuario real:** el panel del padre lista perfiles con progreso (`Family → Profile → Mastery`).
@@ -463,7 +480,16 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-07 · `.is_in(<var>)` → `= ANY($n)`
 
-- [ ] Implementado
+- [x] Implementado (2026-08-20, post-v0.49.0) — `is_in(<var>)` con una variable `List<T>`
+  del scope externo del closure emite `"col" = ANY($N::<oid>[])`, bindeando la lista entera
+  como UN solo parámetro array (el OID sale del tipo escalar de la columna). La lista literal
+  sigue emitiendo `IN ($1, $2, ...)`. Evaluator (`scalar_pg_oid` + resolución del var vía `env`
+  + `fitz_list_to_pg_array`) + codegen con **paridad bit-a-bit** (`orm_scalar_pg_info_from_type_expr`
+  + binding array inline que lockea el Arc del var y mapea cada elem con `__IntoPgValue::into_pg`).
+  Doc-comment corregido (ya no miente). Tests: 2 unit del translator (var Int → `= ANY($1::int8[])`,
+  var Str → `text[]`) + 2 existentes (literal `IN` + empty `false`) intactos + 1 E2E real Postgres
+  (`orm_where_is_in_variable_fitz07`). Validado run↔build bit-a-bit contra Postgres local.
+  Doc `db-orm.md` sec is_in reescrita + tabla de var-support actualizada.
 - **Estado:** Confirmado.
 - **Evidencia:** `src/evaluator.rs:17280-17307` y `src/codegen.rs:20877-20911` — `is_in` solo matchea
   `Expr::List` literal; emite `IN ($1,$2,...)`, no `ANY($n)`. Doc-comment stale en `src/evaluator.rs:17207-17209`
@@ -485,7 +511,13 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-12 · Paréntesis redundantes en el `match` generado
 
-- [ ] Implementado
+- [x] Implementado (2026-08-20, post-v0.49.0) — helper `strip_stmt_match_parens` (scanner
+  balanceado que skipea strings, fail-safe: solo strippea un `(match … )` completamente
+  parentizado) aplicado en `gen_return` y `gen_assign` (las 3 ramas: reasignación, `let _`,
+  `let mut`). Un `let x = match …` / `return match …` deja de emitir los paréntesis externos;
+  las posiciones de operando/receptor (`(match …).foo()`, `1 + (match …)`) los conservan
+  (el helper solo se llama desde los emisores de statement). 2 tests (helper + output sin
+  `(match n`) + smoke real (`main.rs` generado con 0 `(match `, binario corre OK).
 - **Estado:** Confirmado (cosmético).
 - **Evidencia:** `rustc` avisa `unnecessary parentheses around ... match` (ej. `let mut volver: String =
   (match referer.clone() { ... });`). Un build de MatHelp emite **194 warnings**, buena parte de este patrón.

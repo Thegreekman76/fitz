@@ -4,27 +4,28 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🟡 Body `form-urlencoded` → `Map` en `fitz run` (ABIERTO — descubierto en FITZ-05, v0.49.0, 2026-08-20)
+## 🟢 Body `form-urlencoded` → tipo declarado en `fitz run` (CERRADO v0.50.0, 2026-08-20)
 
 **El gap (clase FITZ-14, paridad `run`↔`build`):** un handler `@post fn login(creds:
-Credentials)` que recibe un body `application/x-www-form-urlencoded` deserializa al
-`type` declarado en `fitz build` (confirmado por el autor sobre el binario, A5 refutado),
-pero en `fitz run` el body llega como un `Value::Map` en vez de una `Instance` del type
-→ un `creds.user` explota con *"field access `.user` on a value of type `Map` — only
-allowed on custom type instances or modules"* (500). El path JSON sí coerce a la
-instancia en el intérprete; el path form-urlencoded no.
+Credentials)` que recibía un body `application/x-www-form-urlencoded` deserializaba al
+`type` declarado en `fitz build` (confirmado sobre el binario, A5 refutado), pero en
+`fitz run` el body llegaba como un `Value::Map` crudo en vez de una `Instance` → un
+`creds.user` explotaba con *"field access `.user` on a value of type `Map`"* (500). El
+path JSON sí coercía; el form-urlencoded no. Bloqueaba el login **zero-JS**
+(`<form method=POST>`, el caso canónico de FITZ-05 + MatHelp) en el intérprete.
 
-**Impacto:** el login **zero-JS** (`<form method=POST>` nativo, el caso canónico de
-FITZ-05 + MatHelp) funciona compilado pero no interpretado. Workaround: usar body JSON en
-`fitz run`, o `fitz build` para ese flujo.
-
-**No es FITZ-05:** la escritura de cookies (`Response.cookies`) y la lectura (`@cookie`)
-tienen paridad bit-a-bit run↔build. El gap es del path de deserialización del body
-form-urlencoded en el intérprete (`src/http.rs`, la rama que arma el body Map en vez de
-coercer al `declared_type` como hace el path JSON). Fix probable: aplicar la misma
-coerción `Map → Instance` (paralelo a `json_to_instance`) cuando el content-type es
-`application/x-www-form-urlencoded` y el handler declara un body tipado. Lo cazaría el
-differ FITZ-14 si el corpus incluyera un caso HTTP form (hoy es CLI-puro).
+**El fix** (`src/http.rs`, `parse_urlencoded_body`): en vez de armar un `Value::Map`
+directo, ahora construye un `serde_json::Value::Object` all-string (paralelo bit-a-bit al
+`__parse_urlencoded` del codegen) y reusa el MISMO path de coerción que el body JSON
+(`parse_body`): `json_to_instance(&obj, t)` cuando hay tipo declarado, `json_to_value`
+(free `Map<Str, Str>`) cuando no. El codegen ya hacía esto (`__parse_urlencoded` →
+`__from_fitz_json`), así que el fix es puro alineamiento del intérprete → paridad
+bit-a-bit. Defaults/nullables aplicados igual que en JSON; body vacío con tipo declarado
+→ defaults o "missing field" claro. Los 3 tests urlencoded existentes (body libre,
+`declared_type: None`) quedan idénticos (`json_to_value` da el mismo Map, `preserve_order`
+mantiene el orden). 2 tests nuevos en `http::tests` (`e2e_fitz05_form_urlencoded_*`:
+typed body + defaults/nullables). Smoke real: login POST form-urlencoded → 2 Set-Cookie
+idénticos en `fitz run` y en el binario.
 
 ## 🟢 Deuda A — `fitz check` valida los módulos `.fitz` importados (CERRADO v0.43.0, 2026-08-18)
 

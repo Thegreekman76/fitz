@@ -1016,22 +1016,31 @@ User.where(fn(u) => u.age % 2 == 0)        // "age" % $1 = $2  (pares)
 User.where(fn(u) => u.age.between(18, 65))   // "age" BETWEEN $1 AND $2
 ```
 
-### `is_in([a, b, c])` sobre cualquier field
+### `is_in(...)` sobre cualquier field — literal o variable
 
 ```fitz
-User.where(fn(u) => u.id.is_in([1, 2, 3]))   // "id" = ANY($1::int8[])
+// List literal → "col" IN ($1, $2, $3)
+User.where(fn(u) => u.id.is_in([1, 2, 3]))
 User.where(fn(u) => u.role.is_in(["admin", "moderator"]))
+
+// Variable List<T> (FITZ-07) → "col" = ANY($1::int8[])
+let pendientes = ["algebra", "geometria"]
+Mastery.where(fn(m) => m.skill_code.is_in(pendientes))
 ```
 
-Lista vacía → predicado `false` literal (no rompe el query, el
-SELECT simplemente no matchea nada). `IN ()` no es SQL válido,
-así que el translator emite `false` como predicado equivalente.
+Dos formas, según el argumento:
 
-⚠️ **Caveat MVP**: el arg de `.is_in(...)` debe ser un **List
-literal directo** (`.is_in([1, 2, 3])` o `.is_in([x, y])`). Una
-**variable** del scope externo NO funciona como arg directo
-(`.is_in(some_var)` → error). Los items adentro de la lista
-sí pueden ser variables (`.is_in([min_id, max_id])` OK).
+- **List literal** (`[1, 2, 3]` / `[x, y]`) → `"col" IN ($1, $2, ...)`.
+  Los items pueden ser literales o variables.
+- **Variable `List<T>`** (`is_in(pendientes)`) → `"col" = ANY($N::<oid>[])`,
+  bindeando la lista entera como UN solo parámetro array. El OID sale del
+  tipo escalar de la columna (`Int`→`int8[]`, `Str`→`text[]`, etc.). Ideal
+  para listas calculadas en runtime (ej. skills pendientes de un motor
+  adaptativo). Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+Lista **literal** vacía → predicado `false` (`IN ()` no es SQL válido).
+Lista **variable** vacía → `= ANY('{}')`, que no matchea nada (mismo
+efecto). En ambos casos el query no rompe.
 
 ### Métodos sobre columns Str
 
@@ -1087,7 +1096,7 @@ Post.where(fn(p) => p.tags.contained_in(["rust", "postgres", "go"]))  // tags <@
 | Lógicos (`and`/`or`/`not`) | n/a |
 | Aritméticos (`+`/`-`/`*`/`/`/`%`) | ✅ ambos lados |
 | `.between(low, high)` | ✅ low/high vars OK |
-| `.is_in(literal_list)` | ⚠️ List arg literal; items adentro OK |
+| `.is_in([...])` / `.is_in(var)` | ✅ List literal (`IN`) o `List<T>` variable (`= ANY`, FITZ-07) |
 | `.like(pat)` / `.ilike(pat)` | ✅ pat var OK |
 | `.starts_with(s)` / `.ends_with(s)` / `.contains(s)` | ❌ Str literal REQUERIDO |
 | `.is_null()` / `.is_not_null()` | n/a (sin args) |

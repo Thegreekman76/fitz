@@ -2,6 +2,20 @@
 
 ---
 
+## v0.50.0 — Hito 3/4 del norte MatHelp ✅ CERRADO (2026-08-20)
+
+**Hito**: continuación del backlog MatHelp sobre v0.49.0 — quick wins de Hito 3/4 + el gap de paridad descubierto al cerrar FITZ-05. Todo con paridad bit-a-bit `fitz run` ↔ `fitz build` (validado contra Postgres local). Detalle por-tarea en [`docs/norte-mathelp.md`](norte-mathelp.md).
+
+- **FITZ-13** — `Map.remove(key) -> Bool` (muta in place, referencia compartida; desbloquea FLV-03). Evaluator + codegen paridad + checker + LSP + guía.
+- **FITZ-07** — `is_in(<var>)` con variable `List<T>` en `.where(...)` → `"col" = ANY($N::<oid>[])` (lista entera como un array param; el literal sigue `IN (...)`). Doc-comment corregido. Validado contra Postgres real.
+- **Fix paridad form-urlencoded** — body `application/x-www-form-urlencoded` deserializa al `type` del handler en `fitz run` (antes llegaba como `Map`, rompía el login zero-JS). `parse_urlencoded_body` reusa `json_to_instance` como el path JSON.
+- **FITZ-12** — codegen sin paréntesis redundantes en el `match` (`let x = match…` / `return match…`).
+- **FITZ-06** — `.preload()` en el intérprete da error dedicado (apunta a `fitz build` + workarounds); la premisa "no-op silencioso" del norte era stale (ya erraba). Full eager loading en el intérprete = follow-up.
+
+**Épico T2 (paridad `run`↔`build`) cerrado en lo concreto**: FITZ-09/10/14 (v0.49.0) + form-urlencoded + FITZ-06. Verificación: fmt + clippy (default+lsp) limpios, lib 4170, smoke ~360 verde, E2E real Postgres. Bump Cargo.toml `0.49.0` → `0.50.0` + extensión VSCode. **Único ítem restante de Hito 3/4**: FITZ-02 (estáticos `@server(static_dir=)`, Costo M).
+
+---
+
 ## v0.49.0 — Hito 1 + Hito 2 del norte MatHelp ✅ CERRADO (2026-08-20)
 
 **Hito**: release combinado que cierra los dos primeros hitos del backlog surgido de la auditoría para la primera app real de terceros (**MatHelp**). El detalle por-tarea (con evidencia, criterio de aceptación, archivos y tests) vive en [`docs/norte-mathelp.md`](norte-mathelp.md) — fichas `FITZ-*`.

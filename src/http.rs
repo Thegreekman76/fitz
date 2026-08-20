@@ -4272,7 +4272,7 @@ async fn handle_task(
                 },
             }
         } else if is_urlencoded {
-            match parse_urlencoded_body(&body_bytes) {
+            match parse_urlencoded_body(&body_bytes, bp) {
                 Ok(v) => Some(v),
                 Err(msg) => {
                     return HandlerOutcome::json(400, serde_json::json!({ "error": msg }));
@@ -4506,31 +4506,44 @@ async fn handle_task(
 ///   - Otherwise, deserialize into a free `Value` (Map/List/
 ///     primitives).
 ///
-/// Mini-batch MP — parses `application/x-www-form-urlencoded` body
-/// (format `key1=value1&key2=value2`) into a `Value::Map<Str, Str>`.
-/// URL-decoding applied to keys and values. Empty body → empty
-/// Map. Duplicates: last-wins (parallel to the `serde_urlencoded`
-/// convention).
-fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
-    use crate::value::shared;
+/// Mini-batch MP — parses an `application/x-www-form-urlencoded` body
+/// (format `key1=value1&key2=value2`). URL-decoding applied to keys and
+/// values (`+` → space, `%XX` → hex). Duplicates: last-wins.
+///
+/// **Parity fix (form-urlencoded → typed body, 2026-08-20)**: builds an
+/// all-string `serde_json::Value::Object` from the pairs and then reuses
+/// the SAME coercion path as the JSON body (`parse_body`):
+/// `json_to_instance` when the handler declares a typed body,
+/// `json_to_value` (a free `Map<Str, Str>`) otherwise. This gives
+/// bit-for-bit parity with `fitz build`, whose `__parse_urlencoded` →
+/// `__from_fitz_json` does exactly this. Before the fix, this returned a
+/// raw `Map` even when the handler declared `body: Credentials`, so
+/// `body.user` exploded in `fitz run` (*field access on a value of type
+/// `Map`*) while `fitz build` worked — the login zero-JS discrepancy.
+/// Empty body: with a declared type it applies defaults/nullables (or a
+/// clear "missing field" error, parallel to JSON); without one → empty
+/// Map.
+fn parse_urlencoded_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
     let s = std::str::from_utf8(bytes)
         .map_err(|e| format!("invalid urlencoded body (UTF-8): {}", e))?;
-    let mut pairs: Vec<(Value, Value)> = Vec::new();
-    if s.is_empty() {
-        return Ok(Value::Map(shared(pairs)));
-    }
+    let mut obj = serde_json::Map::new();
     for kv in s.split('&') {
+        if kv.is_empty() {
+            continue;
+        }
         let mut parts = kv.splitn(2, '=');
         let raw_k = parts.next().unwrap_or("");
         let raw_v = parts.next().unwrap_or("");
         let k = url_decode(raw_k)?;
         let v = url_decode(raw_v)?;
-        // Duplicates: last-wins. Remove the previous entry with
-        // the same key.
-        pairs.retain(|(existing_k, _)| !matches!(existing_k, Value::Str(s) if s == &k));
-        pairs.push((Value::Str(k), Value::Str(v)));
+        // Duplicates: last-wins (serde_json Map insert overwrites).
+        obj.insert(k, serde_json::Value::String(v));
     }
-    Ok(Value::Map(shared(pairs)))
+    let json = serde_json::Value::Object(obj);
+    match &bp.declared_type {
+        Some(t) => json_to_instance(&json, t),
+        None => Ok(json_to_value(&json)),
+    }
 }
 
 /// Mini-batch MP2 — extracts the `boundary` from the
@@ -8640,6 +8653,67 @@ mod tests {
         .await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "{}");
+    }
+
+    #[tokio::test]
+    async fn e2e_fitz05_form_urlencoded_deserializes_to_typed_body() {
+        // Parity fix (2026-08-20) — a `form-urlencoded` body deserialises
+        // to the handler's declared `type` (not a raw Map), matching
+        // `fitz build`. Before the fix, `creds.user` exploded in
+        // `fitz run` with *field access on a value of type `Map`*. This
+        // is the login zero-JS case (`<form method=POST>`).
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let src = "\
+            type Credentials { user: Str, pass: Str }\n\
+            @post(\"/login\")\n\
+            fn login(creds: Credentials) -> Str => \"hi \" + creds.user\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let router = build_router(&metas, std::sync::Arc::new(registry), None);
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("user=ada&pass=secret"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(status, 200, "body: {body}");
+        assert_eq!(body, "\"hi ada\"");
+    }
+
+    #[tokio::test]
+    async fn e2e_fitz05_form_urlencoded_applies_defaults_and_nullables() {
+        // The typed coercion of a form-urlencoded body mirrors the JSON
+        // path: missing fields with a default use it, nullable fields
+        // become Null. Here `role` (default "user") and `nick` (Str?)
+        // are absent from the form.
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let src = "\
+            type Signup { user: Str, role: Str = \"user\", nick: Str? }\n\
+            @post(\"/signup\")\n\
+            fn signup(s: Signup) -> Str => s.user + \":\" + s.role\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let router = build_router(&metas, std::sync::Arc::new(registry), None);
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/signup")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("user=grace"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(status, 200, "body: {body}");
+        assert_eq!(body, "\"grace:user\"");
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -660,6 +660,90 @@ async fn orm_where_filters_by_age() {
     seed.close().await.unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_where_is_in_variable_fitz07() {
+    // FITZ-07 — `.where(fn(u) => u.age.is_in(ages))` with a `List<Int>`
+    // variable emits `age = ANY($1::int8[])` and filters correctly.
+    // The list-literal path (`is_in([...])`) keeps emitting `IN (...)`.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz07_isin_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz07_isin_test (id bigint, name text, age int)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz07_isin_test VALUES (1, 'ada', 20), (2, 'grace', 30), (3, 'margaret', 45)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz07_isin_test\") type User {{\n  \
+             id: Int\n  name: Str\n  age: Int\n\
+         }}\n\
+         async fn run() -> Result<List<User>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let ages = [20, 45]\n  \
+             let found = User.where(fn(u) => u.age.is_in(ages)).all(db).await?\n  \
+             return Ok(found)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let users_list = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        other => panic!("esperaba Ok, fue {:?}", other),
+    };
+    let names: Vec<String> = match users_list {
+        Value::List(s) => s
+            .lock()
+            .iter()
+            .filter_map(|u| match u {
+                Value::Instance { fields, .. } => fields
+                    .lock()
+                    .iter()
+                    .find(|(n, _)| n == "name")
+                    .and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .collect(),
+        other => panic!("esperaba List, fue {:?}", other),
+    };
+    assert_eq!(names.len(), 2, "ages [20, 45] → ada + margaret");
+    assert!(names.contains(&"ada".to_string()));
+    assert!(names.contains(&"margaret".to_string()));
+    assert!(
+        !names.contains(&"grace".to_string()),
+        "grace (age=30) fuera"
+    );
+
+    let _ = seed.exec("DROP TABLE fitz07_isin_test", &[]).await;
+    seed.close().await.unwrap();
+}
+
 // ---- O1/O3 (v0.32.0) — SQL expressions + date arithmetic ----
 
 #[tokio::test(flavor = "current_thread")]

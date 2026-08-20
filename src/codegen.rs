@@ -17366,7 +17366,12 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         let has_user_annotation = declared_ty_opt.is_some();
         let declared_ty = declared_ty_opt.unwrap_or_else(|| rhs_ty.clone());
 
-        let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
+        let final_rhs_raw = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
+        // FITZ-12 — a bare `(match ...)` as the RHS of a let/reassignment
+        // doesn't need the outer parens (rustc warns `unnecessary
+        // parentheses`). Only fires on a fully-parenthesized match; any
+        // coerce wrapper (`Some(...)`, `(x as f64)`) leaves it untouched.
+        let final_rhs = strip_stmt_match_parens(&final_rhs_raw).to_string();
         self.emit_indent();
         // If the var already exists in some visible scope
         // (outer or current), it is reassignment: we emit
@@ -18178,7 +18183,9 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         }
         let coerced = coerce(&code, &ty, ret_expected, self.env);
         self.emit("return ");
-        self.emit(&coerced);
+        // FITZ-12 — drop the redundant parens of a bare `(match ...)`
+        // in return position (rustc warns `unnecessary parentheses`).
+        self.emit(strip_stmt_match_parens(&coerced));
         self.emit(";\n");
         Ok(())
     }
@@ -21632,36 +21639,65 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.is_in([...])` expects 1 arg (List literal)",
+                            "`{}.{}.is_in(...)` expects 1 arg (a List literal or a `List<T>` variable)",
                             param_name, col_name
                         ),
                     ));
                 }
-                let items = match &args[0] {
-                    Expr::List(items, _) => items,
-                    _ => {
-                        return Err(self.err_at(
-                            args[0].span(),
-                            "`is_in` MVP: arg must be a List literal `[a, b, c]`",
-                        ));
+                match &args[0] {
+                    // List literal: `col IN ($1, $2, ...)`.
+                    Expr::List(items, _) => {
+                        if items.is_empty() {
+                            // `IN ()` is not valid SQL — always-false predicate.
+                            return Ok("false".to_string());
+                        }
+                        let mut placeholders = Vec::with_capacity(items.len());
+                        for it in items {
+                            let frag = self.translate_closure_to_sql(
+                                it, param_name, fields, table_meta, bindings,
+                            )?;
+                            placeholders.push(frag);
+                        }
+                        Ok(format!("\"{}\" IN ({})", sql_col, placeholders.join(", ")))
                     }
-                };
-                if items.is_empty() {
-                    // `IN ()` is not valid SQL — always-false predicate.
-                    return Ok("false".to_string());
+                    // FITZ-07 — variable `List<T>`: `col = ANY($N::<oid>[])`.
+                    // Binds the whole list as ONE array parameter built at
+                    // runtime from the var (parity with the interpreter,
+                    // which pushes a `PgValue::Array`). Empty list → matches
+                    // nothing. The elem OID + cast come from the SCALAR
+                    // column type being filtered.
+                    Expr::Ident(_var, _) => {
+                        let field = fields.iter().find(|f| f.name == col_name).ok_or_else(|| {
+                            self.err_at(
+                                callee_span,
+                                format!("field `{}` does not exist in the type", col_name),
+                            )
+                        })?;
+                        let (oid_const, sql_cast, _variant) =
+                            orm_scalar_pg_info_from_type_expr(&field.type_).ok_or_else(|| {
+                                self.err_at(
+                                    callee_span,
+                                    format!(
+                                        "`is_in(<var>)` requires `{}` to be a scalar `Int`/`Float`/`Str`/`Bool` column",
+                                        col_name
+                                    ),
+                                )
+                            })?;
+                        let (var_code, _ty) = self.gen_expr(&args[0])?;
+                        bindings.push(format!(
+                            "{{ let __arr = {var}; let __g = __arr.lock().unwrap(); \
+                               __FitzPgValue::Array {{ elem_oid: {oid}, \
+                               values: __g.iter().cloned().map(|__x| <_ as __IntoPgValue>::into_pg(__x)).collect::<Vec<_>>() }} }}",
+                            var = var_code,
+                            oid = oid_const,
+                        ));
+                        Ok(format!("\"{}\" = ANY(${}{})", sql_col, bindings.len(), sql_cast))
+                    }
+                    _ => Err(self.err_at(
+                        args[0].span(),
+                        "`is_in` accepts a List literal `[a, b, c]` or a `List<T>` variable",
+                    )),
                 }
-                let mut placeholders = Vec::with_capacity(items.len());
-                for it in items {
-                    let frag = self.translate_closure_to_sql(
-                        it, param_name, fields, table_meta, bindings,
-                    )?;
-                    placeholders.push(frag);
-                }
-                Ok(format!(
-                    "\"{}\" IN ({})",
-                    sql_col,
-                    placeholders.join(", ")
-                ))
             }
             "like" | "ilike" => {
                 if args.len() != 1 {
@@ -28881,6 +28917,8 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
 
             // ---- Map ----
             (Type::Map(k, v), "has") => self.gen_map_has(&obj_code, k, v, args),
+            // FITZ-13 — `remove(key) -> Bool` (true if the key existed).
+            (Type::Map(k, v), "remove") => self.gen_map_remove(&obj_code, k, v, args),
             (Type::Map(k, _), "keys") => {
                 check_method_arity(method, args, 0)?;
                 let code = format!(
@@ -29117,7 +29155,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 Ok((code, Type::Map(k.clone(), v.clone())))
             }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map has no method `{}` in the compiled subset (today: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with/with/has_value)",
+                "Map has no method `{}` in the compiled subset (today: has/remove/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with/with/has_value)",
                 other
             ))),
 
@@ -29842,6 +29880,41 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         };
         let code = format!(
             "{{ let __k = {}; ({}).lock().unwrap().iter().any(|(__k2, _)| __k2 == &__k) }}",
+            key_expr, obj_code
+        );
+        Ok((code, Type::Bool))
+    }
+
+    /// FITZ-13 — `Map.remove(key) -> Bool`: removes the entry with the
+    /// given key (in place, mutating the shared `Vec<(K, V)>`) and returns
+    /// `true` if it existed. Linear `position` + `Vec::remove`, preserving
+    /// insertion order of the rest. Parity with the interpreter `map_remove`.
+    fn gen_map_remove(
+        &mut self,
+        obj_code: &str,
+        key_ty: &Type,
+        value_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("remove", args, 1)?;
+        let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+        // Same heterogeneous-Map handling as `gen_map_has`: with
+        // `Any` key/value the storage is `Vec<(__FitzValue, __FitzValue)>`.
+        let storage_is_heterogeneous = matches!(key_ty, Type::Any) || matches!(value_ty, Type::Any);
+        let key_expr = if storage_is_heterogeneous {
+            self.uses_fitz_value = true;
+            wrap_as_fitz_value_with_env(&arg_code, &arg_ty, self.env)?
+        } else {
+            coerce(&arg_code, &arg_ty, key_ty, self.env)
+        };
+        // Bind the Arc to a local first (`__m`) so the `MutexGuard`
+        // (`__g`) doesn't outlive a temporary — `(m.clone()).lock()`
+        // would free the Arc at the end of the `let` statement (E0716).
+        let code = format!(
+            "{{ let __k = {}; let __m = {}; let mut __g = __m.lock().unwrap(); \
+               if let Some(__pos) = __g.iter().position(|(__k2, _)| __k2 == &__k) {{ \
+                   __g.remove(__pos); true \
+               }} else {{ false }} }}",
             key_expr, obj_code
         );
         Ok((code, Type::Bool))
@@ -40699,6 +40772,27 @@ fn type_to_type_expr_for_translator(t: &Type) -> crate::ast::TypeExpr {
 /// The 3 pieces of data are needed by the emitters of `has`/`contains_all`/
 /// `contained_in` to generate the appropriate SQL cast and the
 /// PgValue wrapping of the scalar value (for `has`).
+/// FITZ-07 — maps a SCALAR column TypeExpr (`Int`/`Float`/`Str`/`Bool`,
+/// possibly `Nullable`) to `(oid_const, array_cast, pg_variant)`, for
+/// `is_in(<var>)` → `col = ANY($N::<oid>[])`. Parallel to
+/// `orm_list_scalar_info_from_type_expr` but for the scalar column being
+/// filtered (not a `List<scalar>` field).
+fn orm_scalar_pg_info_from_type_expr(
+    t: &crate::ast::TypeExpr,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match t {
+        crate::ast::TypeExpr::Named(n) => match n.as_str() {
+            "Int" => Some(("__fitz_db_runtime::oid::INT8", "::int8[]", "Int")),
+            "Float" => Some(("__fitz_db_runtime::oid::FLOAT8", "::float8[]", "Float")),
+            "Str" => Some(("__fitz_db_runtime::oid::TEXT", "::text[]", "Text")),
+            "Bool" => Some(("__fitz_db_runtime::oid::BOOL", "::bool[]", "Bool")),
+            _ => None,
+        },
+        crate::ast::TypeExpr::Nullable(inner) => orm_scalar_pg_info_from_type_expr(inner),
+        _ => None,
+    }
+}
+
 fn orm_list_scalar_info_from_type_expr(
     t: &crate::ast::TypeExpr,
 ) -> Option<(&'static str, &'static str, &'static str)> {
@@ -41042,6 +41136,60 @@ fn needs_clone(t: &Type) -> bool {
         // Conservative fallback: clone.
         _ => true,
     }
+}
+
+/// FITZ-12 — strips the redundant outer parentheses of a fully
+/// parenthesized `(match ...)` expression when it is emitted in
+/// statement/RHS position (`let x = ...;`, `return ...;`, `x = ...;`),
+/// where a bare `match` is a valid Rust expression. `gen_match` wraps
+/// every match in parens as a safe default for operand/receiver
+/// positions (`(match ...).foo()`, `1 + (match ...)`); this helper is
+/// called ONLY from the statement emitters, so those positions keep
+/// their parens.
+///
+/// **Fail-safe**: returns `code` unchanged unless it is *exactly*
+/// `(match … )` with the opening `(` matching the final `)` (balanced
+/// scan skipping double-quoted string literals — the only place
+/// generated match code can carry stray parens). Any doubt → no strip.
+fn strip_stmt_match_parens(code: &str) -> &str {
+    let bytes = code.as_bytes();
+    if !code.starts_with("(match ") || bytes.last() != Some(&b')') {
+        return code;
+    }
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, c) in code.char_indices() {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    // Matching close of the first `(`. Strip only if it
+                    // is the very last byte (the parens wrap the whole
+                    // expression).
+                    return if i + 1 == code.len() {
+                        &code[1..i]
+                    } else {
+                        code
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    code
 }
 
 /// Coerces a Rust expression (`code`) of Fitz type `from` to the Fitz
@@ -47041,6 +47189,64 @@ async fn get_u(id: Int) -> Result<U> {
             init_text.contains("__cb (__it . clone ())"),
             "expected application `__cb(__it.clone())` inside the for, was: {}",
             init_text
+        );
+    }
+
+    #[test]
+    fn fitz12_strip_stmt_match_parens_only_strips_bare_match() {
+        // Fully-parenthesized match → stripped.
+        assert_eq!(
+            strip_stmt_match_parens("(match x { _ => 1 })"),
+            "match x { _ => 1 }"
+        );
+        // String literal with stray parens in an arm doesn't fool the scanner.
+        assert_eq!(
+            strip_stmt_match_parens("(match x { _ => \"a)b(c\" })"),
+            "match x { _ => \"a)b(c\" }"
+        );
+        // NOT fully parenthesized (method receiver / inside a wrapper) → unchanged.
+        assert_eq!(
+            strip_stmt_match_parens("(match x {}).foo()"),
+            "(match x {}).foo()"
+        );
+        assert_eq!(
+            strip_stmt_match_parens("Some((match x {}))"),
+            "Some((match x {}))"
+        );
+        // Not a match at all → unchanged.
+        assert_eq!(strip_stmt_match_parens("42"), "42");
+        assert_eq!(
+            strip_stmt_match_parens("(if a { 1 } else { 2 })"),
+            "(if a { 1 } else { 2 })"
+        );
+    }
+
+    #[test]
+    fn fitz12_let_and_return_match_have_no_redundant_parens() {
+        let code = gen("fn label(n: Int) -> Str {\n\
+             \x20   return match n { 0 => \"zero\", _ => \"other\" }\n\
+             }\n\
+             fn pick(n: Int) -> Str {\n\
+             \x20   let s = match n { 1 => \"one\", _ => \"x\" }\n\
+             \x20   return s\n\
+             }\n\
+             print(label(0))\n\
+             print(pick(1))\n")
+        .unwrap();
+        // No parenthesized match over the user scrutinee `n` anywhere
+        // (both are in statement position: `= match n` / `return match n`).
+        assert!(
+            !code.contains("(match n "),
+            "user match must not be parenthesized:\n{code}"
+        );
+        // The match is still emitted, just without the outer parens.
+        assert!(
+            code.contains("= match n "),
+            "expected bare `= match n` (let RHS):\n{code}"
+        );
+        assert!(
+            code.contains("return match n "),
+            "expected bare `return match n`:\n{code}"
         );
     }
 

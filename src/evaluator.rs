@@ -6618,6 +6618,9 @@ async fn dispatch_method(
         // Map
         (Value::Map(_), "get") => map_get(receiver, args, span),
         (Value::Map(_), "has") => map_has(receiver, args, span),
+        // FITZ-13 — `Map.remove(key) -> Bool` (true if the key existed).
+        // Mutates the Map in place (shared-reference semantics).
+        (Value::Map(_), "remove") => map_remove(receiver, args, span),
         (Value::Map(_), "keys") => map_keys(receiver, args, span),
         (Value::Map(_), "values") => map_values(receiver, args, span),
         (Value::Map(_), "len") => map_len(receiver, args, span),
@@ -9753,6 +9756,27 @@ fn map_has(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     let key = &args[0];
     let found = pairs.lock().iter().any(|(k, _)| k == key);
     Ok(Value::Bool(found))
+}
+
+/// FITZ-13 — `Map.remove(key) -> Bool`: removes the entry with the given
+/// key and returns `true` if it existed (parallel to the codegen `.remove`
+/// over the internal `Vec<(K, V)>`). Linear search (the Map keeps insertion
+/// order in a Vec) + `Vec::remove`, preserving the order of the rest.
+/// Mutates in place — the change is visible through any alias of the Map.
+fn map_remove(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("remove", &args, 1, span)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let key = &args[0];
+    let mut g = pairs.lock();
+    if let Some(pos) = g.iter().position(|(k, _)| k == key) {
+        g.remove(pos);
+        Ok(Value::Bool(true))
+    } else {
+        Ok(Value::Bool(false))
+    }
 }
 
 fn map_keys(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -15013,6 +15037,9 @@ fn orm_dispatch_type_method(
             .map(Some)
             .map_err(EvalSignal::Error)
         }
+        // FITZ-06 — dedicated error for `.preload(...)` on a `@table` type
+        // directly (parallel to the QueryBuilder dispatch).
+        "preload" => Err(EvalSignal::Error(preload_not_in_interpreter_error(span))),
         _ => Ok(None),
     }
 }
@@ -15098,8 +15125,30 @@ pub fn orm_dispatch_qb_method(
         "avg" => orm_qb_avg(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        // FITZ-06 — `.preload(...)` (eager loading) is implemented in the
+        // codegen (`fitz build`) but not yet in the interpreter. A
+        // dedicated error (instead of the generic "has no method") tells
+        // the user it's a `fitz run`-only limitation, not a typo.
+        "preload" => Err(EvalSignal::Error(preload_not_in_interpreter_error(span))),
         _ => Ok(None),
     }
+}
+
+/// FITZ-06 — clear error for `.preload(...)` in the interpreter
+/// (`fitz run`). Eager loading works in `fitz build`; here we point the
+/// user to the workaround instead of failing with a generic
+/// "has no method `preload`".
+fn preload_not_in_interpreter_error(span: Span) -> FitzError {
+    FitzError::new(
+        ErrorKind::InvalidSyntax,
+        span.line,
+        span.column,
+        "`.preload(...)` (eager loading) is not implemented in the interpreter (`fitz run`) yet — \
+         it does work in `fitz build`. Workaround: query the relation manually with a navigation \
+         method (`user.posts(db)`) or a separate `.where(...)`, or compile the program with \
+         `fitz build` for this part."
+            .to_string(),
+    )
 }
 
 /// Helper: extract the metadata from a `Value::Type` (assumes
@@ -15805,6 +15854,23 @@ fn field_type_uses_new_temporal_or_uuid(t: &crate::ast::TypeExpr) -> bool {
 ///
 /// Others (List<List<T>>, List<Map<...>>, List<Custom>) are not
 /// scalar arrays — the ORM rejects them with a clear error.
+/// FITZ-07 — maps a scalar column TypeExpr (`Int`/`Float`/`Str`/`Bool`,
+/// possibly `Nullable`) to its Postgres OID, for `is_in(<var>)` → `col =
+/// ANY($N::<oid>[])`. Returns `None` for non-scalar or unsupported types.
+fn scalar_pg_oid(t: &crate::ast::TypeExpr) -> Option<u32> {
+    match t {
+        crate::ast::TypeExpr::Named(n) => match n.as_str() {
+            "Int" => Some(crate::db::oid::INT8),
+            "Float" => Some(crate::db::oid::FLOAT8),
+            "Str" => Some(crate::db::oid::TEXT),
+            "Bool" => Some(crate::db::oid::BOOL),
+            _ => None,
+        },
+        crate::ast::TypeExpr::Nullable(inner) => scalar_pg_oid(inner),
+        _ => None,
+    }
+}
+
 fn list_elem_pg_oid(t: &crate::ast::TypeExpr) -> Option<u32> {
     match t {
         crate::ast::TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => {
@@ -17524,9 +17590,10 @@ pub(crate) fn interval_method_parts(method: &str) -> Option<(&'static str, &'sta
 /// Supported methods (on `u.col`):
 ///   - `is_null()`        → `"col" IS NULL`
 ///   - `is_not_null()`    → `"col" IS NOT NULL`
-///   - `is_in([a, b, c])` → `"col" IN ($1, $2, $3)` with
-///     parametrized args. Also accepts `is_in(<var>)` where var
-///     is a List.
+///   - `is_in([a, b, c])` → `"col" IN ($1, $2, $3)` (list literal,
+///     parametrized args). `is_in(<var>)` with a `List<T>` variable →
+///     `"col" = ANY($N::<oid>[])` (the whole list bound as ONE array
+///     param; the scalar column's type gives the OID). Empty → false.
 ///   - `like(pattern)`    → `"col" LIKE $1`
 ///   - `ilike(pattern)`   → `"col" ILIKE $1` (case-insensitive)
 ///   - `starts_with(s)`   → `"col" LIKE $1` with `$1 = "s%"`
@@ -17600,30 +17667,56 @@ fn translate_method_call_to_sql(
         "is_in" => {
             if args.len() != 1 {
                 return Err(format!(
-                    "`{param_name}.{col_name}.is_in([...])` expects 1 arg (List literal)"
+                    "`{param_name}.{col_name}.is_in(...)` expects 1 arg (a List literal or a `List<T>` variable)"
                 ));
             }
-            let items = match &args[0] {
-                Expr::List(items, _) => items,
-                _ => {
-                    return Err(
-                        "`is_in` MVP: the arg must be a List literal `[a, b, c]`".to_string(),
-                    );
+            match &args[0] {
+                // List literal: `col IN ($1, $2, ...)`.
+                Expr::List(items, _) => {
+                    if items.is_empty() {
+                        // `IN ()` is not valid SQL. Postgres would accept
+                        // a Vec<X>, but the `IN ()` syntax is not allowed.
+                        // We return an equivalent always-false predicate.
+                        return Ok("false".to_string());
+                    }
+                    let mut placeholders = Vec::with_capacity(items.len());
+                    for it in items {
+                        let frag = translate_expr_to_sql_with_env(
+                            it, param_name, fields, meta, args_acc, env,
+                        )?;
+                        placeholders.push(frag);
+                    }
+                    Ok(format!("\"{}\" IN ({})", sql_col, placeholders.join(", ")))
                 }
-            };
-            if items.is_empty() {
-                // `IN ()` is not valid SQL. Postgres would accept a
-                // Vec<X>, but the `IN ()` syntax is not allowed. We
-                // return an equivalent always-false predicate.
-                return Ok("false".to_string());
+                // FITZ-07 — variable `List<T>`: `col = ANY($N::<oid>[])`.
+                // Binds the whole list as ONE array parameter (canonical
+                // Postgres form, parity with the codegen). Empty list →
+                // `= ANY('{}')` which matches nothing (correct semantics).
+                Expr::Ident(var_name, _) => {
+                    let e = env.ok_or_else(|| {
+                        format!("`is_in({var_name})` not supported in `.where(...)` without closure env")
+                    })?;
+                    let v = e.lock().get(var_name).ok_or_else(|| {
+                        format!("variable `{var_name}` is not in scope of the `.where(...)` closure")
+                    })?;
+                    let field = fields.iter().find(|f| f.name == col_name).ok_or_else(|| {
+                        format!("field `{col_name}` does not exist in the type")
+                    })?;
+                    let elem_oid = scalar_pg_oid(&field.type_).ok_or_else(|| {
+                        format!(
+                            "`is_in(<var>)` requires `{col_name}` to be a scalar `Int`/`Float`/`Str`/`Bool` column"
+                        )
+                    })?;
+                    let arr = fitz_list_to_pg_array(&v, elem_oid)
+                        .map_err(|msg| format!("`is_in({var_name})`: {msg}"))?;
+                    args_acc.push(arr);
+                    let cast = array_sql_cast_for(elem_oid).unwrap_or("");
+                    Ok(format!("\"{}\" = ANY(${}{})", sql_col, args_acc.len(), cast))
+                }
+                _ => Err(
+                    "`is_in` accepts a List literal `[a, b, c]` or a `List<T>` variable".to_string(),
+                ),
             }
-            let mut placeholders = Vec::with_capacity(items.len());
-            for it in items {
-                let frag =
-                    translate_expr_to_sql_with_env(it, param_name, fields, meta, args_acc, env)?;
-                placeholders.push(frag);
-            }
-            Ok(format!("\"{}\" IN ({})", sql_col, placeholders.join(", ")))
         }
         "like" | "ilike" => {
             if args.len() != 1 {
@@ -22954,6 +23047,36 @@ print(factorial(5))
             }
         }
         (env, result)
+    }
+
+    // ---- FITZ-13 — Map.remove ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fitz13_map_remove_mutates_via_alias() {
+        // `remove` returns true if the key existed, false otherwise, and
+        // mutates the Map in place — visible through an alias (shared
+        // reference), unlike `with`/`merge` which return a new Map.
+        let (env, res) = parse_eval_into_env(
+            "let m = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+             let m2 = m\n\
+             let r1 = m.remove(\"b\")\n\
+             let r2 = m.remove(\"x\")\n",
+        )
+        .await;
+        res.expect("el programa corre sin error");
+        assert_eq!(env.lock().get("r1"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("r2"), Some(Value::Bool(false)));
+        // The alias `m2` sees the removal (shared-reference semantics).
+        let m2 = env.lock().get("m2").expect("m2 existe");
+        let keys: Vec<Value> = match m2 {
+            Value::Map(pairs) => pairs.lock().iter().map(|(k, _)| k.clone()).collect(),
+            _ => panic!("m2 debe ser Map"),
+        };
+        assert_eq!(
+            keys,
+            vec![Value::Str("a".into()), Value::Str("c".into())],
+            "`b` removido, orden `a`/`c` preservado, visible por el alias"
+        );
     }
 
     // ---- List literal ----
@@ -33404,6 +33527,86 @@ f = to_json(true)
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
         assert_eq!(sql, "false");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn translate_is_in_variable_emits_any_array() {
+        // FITZ-07 — `is_in(<var>)` with a `List<Int>` variable → `col =
+        // ANY($N::int8[])`, binding the whole list as ONE array param.
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age.is_in(ages)");
+        let env = Environment::new();
+        env.lock().define(
+            "ages",
+            Value::new_list(vec![Value::Int(10), Value::Int(20), Value::Int(30)]),
+        );
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql_with_env(&expr, "u", &fields, &meta, &mut args, Some(&env))
+            .unwrap();
+        assert_eq!(sql, "\"age\" = ANY($1::int8[])");
+        assert_eq!(args.len(), 1);
+        match &args[0] {
+            crate::db::PgValue::Array { elem_oid, values } => {
+                assert_eq!(*elem_oid, crate::db::oid::INT8);
+                assert_eq!(
+                    values,
+                    &vec![
+                        crate::db::PgValue::Int(10),
+                        crate::db::PgValue::Int(20),
+                        crate::db::PgValue::Int(30),
+                    ]
+                );
+            }
+            other => panic!("expected PgValue::Array, got {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fitz06_preload_in_interpreter_gives_dedicated_error() {
+        // FITZ-06 — `.preload(...)` in the interpreter errors with a
+        // DEDICATED message (points to `fitz build` + workarounds), not
+        // the generic "QueryBuilder has no method `preload`". `.where(...)`
+        // builds the QB with no DB, so `.preload(...)` errors before any
+        // connection.
+        let src = "\
+            @table(\"fitz06_posts\") type Post {\n\
+            \x20   @primary\n\
+            \x20   id: Int = 0\n\
+            \x20   @belongs_to(\"User\") user_id: Int = 0\n\
+            }\n\
+            @table(\"fitz06_users\") type User {\n\
+            \x20   @primary\n\
+            \x20   id: Int = 0\n\
+            \x20   @has_many(\"Post\", via=\"user_id\") posts: List<Post> = []\n\
+            }\n\
+            let qb = User.where(fn(u) => u.id > 0).preload(\"posts\")\n";
+        let res = parse_and_eval(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("preload") && err.message.contains("fitz build"),
+            "expected a dedicated preload error mentioning `fitz build`, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn translate_is_in_variable_str_column() {
+        // `is_in(<var>)` over a `Str` column → `col = ANY($N::text[])`.
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.is_in(names)");
+        let env = Environment::new();
+        env.lock().define(
+            "names",
+            Value::new_list(vec![Value::Str("ada".into()), Value::Str("grace".into())]),
+        );
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql_with_env(&expr, "u", &fields, &meta, &mut args, Some(&env))
+            .unwrap();
+        assert_eq!(sql, "\"name\" = ANY($1::text[])");
+        assert!(matches!(
+            &args[0],
+            crate::db::PgValue::Array { elem_oid, .. } if *elem_oid == crate::db::oid::TEXT
+        ));
     }
 
     #[test]
