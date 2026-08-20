@@ -2,6 +2,17 @@
 
 ---
 
+## v0.52.0 — `.fitzv`: `{#elseif}` (FLV-07) + error claro `<style>`/`<script>` (FLV-02) ✅ CERRADO (2026-08-20)
+
+**Hito**: dos mejoras del pipeline de single-file components `.fitzv` (`src/view/`) pedidas por [fitz-liveviews](https://github.com/Thegreekman76/fitz-liveviews) (norte MatHelp). Ambas son cambios del **parser de templates** — cero cambios en AST, checker, ni los dos emisores (SSR + client-WASM).
+
+- **FLV-07 — `{#elseif cond}`**: `{#if a}...{#elseif b}...{#else}...{/if}` aplana las cadenas de condiciones. **Azúcar puro en el parser** (`src/view/parser.rs`): `{#elseif b}` desazucara a `{#else}{#if b}...{/if}` (un `{#if}` anidado en `else_children`). El AST ya soportaba esa forma y expand/check/SSR/WASM recorren `else_children` recursivamente → funciona igual en ambos targets sin tocar los emisores. Enum nuevo `BranchTerm { Close, Else, ElseIf }` + `parse_if_from_cond` recursivo. Verificado: 4 unit tests + render SSR (A/B/C/F por score) + `examples/view/control-flow` compila a WASM real con la rama nueva. LSP suma `#elseif`.
+- **FLV-02 — error claro por `<style>`/`<script>` en un `<template>` de `.fitzv`**: antes daban un error confuso ("template interpolation", por el `{` del CSS). Ahora `parse_element` los intercepta y erra con un mensaje dirigido al workaround (CSS en `<style scoped>` a nivel componente, o en `head_extra`). Los comentarios HTML ya se descartaban. 2 unit tests. El nivel "warning" original no aplica (el `.fitzv` nunca lo soportó — siempre erraba); la mitad "runtime diff engine" vive en fitz-liveviews (follow-up).
+
+**Verificación pre-bump**: fmt + clippy (default + lsp) limpios, lib **4192** verde, 911 view+lsp tests verde, cli_e2e + view smokes verde, ejemplo WASM real. Bump Cargo.toml `0.51.0` → `0.52.0` + extensión VSCode.
+
+---
+
 ## v0.51.0 — FITZ-02: servido de archivos estáticos ✅ CERRADO (2026-08-20)
 
 **Hito**: cierra **FITZ-02** — el único ítem restante del Hito 3/4 del norte MatHelp (`docs/norte-mathelp.md`) — y con él **el Hito 3/4 entero**. Habilita **T3** (PWA instalable). Paridad bit-a-bit `fitz run` ↔ `fitz build`.

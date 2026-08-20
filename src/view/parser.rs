@@ -807,8 +807,24 @@ pub fn parse_template_body(
     base_col: usize,
 ) -> ViewParseResult<Vec<TemplateNode>> {
     let mut p = HtmlParser::new(raw, base_line, base_col);
-    let (roots, _terminated_by_else) = p.parse_nodes(None, None, false)?;
+    let (roots, _term) = p.parse_nodes(None, None, false)?;
     Ok(roots)
+}
+
+/// How a `parse_nodes` branch ended. When `accept_else` is true (an
+/// `{#if}` then/elseif body), the branch can be terminated by `{#else}`
+/// or `{#elseif cond}` (FLV-07); otherwise it is always `Close` (reached
+/// the matching `{/if}` / `</tag>` / EOF). The `ElseIf` variant carries
+/// the captured cond so `parse_if_directive` can desugar the chain into
+/// nested `{#if}` nodes without any new AST variant.
+enum BranchTerm {
+    Close,
+    Else,
+    ElseIf {
+        cond_raw: String,
+        line: usize,
+        col: usize,
+    },
 }
 
 struct HtmlParser<'a> {
@@ -872,7 +888,7 @@ impl<'a> HtmlParser<'a> {
         parent: Option<&str>,
         directive_parent: Option<&str>,
         accept_else: bool,
-    ) -> ViewParseResult<(Vec<TemplateNode>, bool)> {
+    ) -> ViewParseResult<(Vec<TemplateNode>, BranchTerm)> {
         let mut nodes = Vec::new();
         loop {
             if self.peek().is_none() {
@@ -890,7 +906,7 @@ impl<'a> HtmlParser<'a> {
                         column: self.column,
                     });
                 }
-                return Ok((nodes, false));
+                return Ok((nodes, BranchTerm::Close));
             }
 
             // Closing tag for parent? `</tag>`
@@ -918,7 +934,7 @@ impl<'a> HtmlParser<'a> {
                             column: self.column,
                         });
                     }
-                    return Ok((nodes, false));
+                    return Ok((nodes, BranchTerm::Close));
                 }
             }
 
@@ -941,7 +957,7 @@ impl<'a> HtmlParser<'a> {
                 }
                 self.advance();
                 match directive_parent {
-                    Some(expected) if expected == name => return Ok((nodes, false)),
+                    Some(expected) if expected == name => return Ok((nodes, BranchTerm::Close)),
                     Some(expected) => {
                         return Err(ViewParseError {
                             message: format!(
@@ -971,14 +987,30 @@ impl<'a> HtmlParser<'a> {
                 Some('{') if self.peek_at(1) == Some('#') => {
                     // Directive opener: `{#if ...}`, `{#for ...}`, or
                     // — when we're inside an if body and accepting
-                    // `{#else}` — the `{#else}` terminator itself.
-                    // Peek the directive name without consuming so we
-                    // can distinguish the terminator case.
+                    // `{#else}` — the `{#else}`/`{#elseif}` terminator
+                    // itself. Peek the directive name without consuming
+                    // so we can distinguish the terminator case.
                     if accept_else {
                         if let Some(peeked) = self.peek_directive_name() {
                             if peeked == "else" {
                                 self.consume_else_marker()?;
-                                return Ok((nodes, true));
+                                return Ok((nodes, BranchTerm::Else));
+                            }
+                            // FLV-07 — `{#elseif cond}` terminates this
+                            // branch and hands the captured cond back so
+                            // `parse_if_directive` can desugar the chain
+                            // into a nested `{#if}` (no new AST variant).
+                            if peeked == "elseif" {
+                                let (line, col) = (self.line, self.column);
+                                let cond_raw = self.consume_elseif_marker(line, col)?;
+                                return Ok((
+                                    nodes,
+                                    BranchTerm::ElseIf {
+                                        cond_raw,
+                                        line,
+                                        col,
+                                    },
+                                ));
                             }
                         }
                     }
@@ -1045,6 +1077,25 @@ impl<'a> HtmlParser<'a> {
         Ok(())
     }
 
+    /// FLV-07 — consume the `{#elseif cond}` marker under the cursor and
+    /// return the captured raw cond text. Called only after
+    /// `peek_directive_name` confirmed the directive name is `"elseif"`.
+    /// Parallel to `consume_else_marker`, but captures the cond like
+    /// `parse_if_directive` does.
+    fn consume_elseif_marker(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+    ) -> ViewParseResult<String> {
+        self.advance(); // `{`
+        self.advance(); // `#`
+        let name = self.read_directive_name();
+        debug_assert_eq!(name, "elseif");
+        self.skip_ws_inline();
+        let cond_raw = self.capture_directive_arg_raw(start_line, start_col)?;
+        Ok(cond_raw.trim().to_string())
+    }
+
     /// Parse a directive opener like `{#if cond}` or `{#for x in
     /// xs}`. Recurses through `parse_nodes` with the matching
     /// `directive_parent` to collect children up to `{/if}` or
@@ -1076,9 +1127,14 @@ impl<'a> HtmlParser<'a> {
                 line: start_line,
                 column: start_col,
             }),
+            "elseif" => Err(ViewParseError {
+                message: "unexpected `{#elseif}` — must appear inside an `{#if}` body (after the then branch, before any `{#else}`)".into(),
+                line: start_line,
+                column: start_col,
+            }),
             other => Err(ViewParseError {
                 message: format!(
-                    "unknown template directive `{{#{other}}}` — the template supports `{{#if}}`, `{{#for}}` and `{{#else}}` (inside an `{{#if}}`)"
+                    "unknown template directive `{{#{other}}}` — the template supports `{{#if}}`, `{{#elseif}}`, `{{#else}}` and `{{#for}}`"
                 ),
                 line: start_line,
                 column: start_col,
@@ -1104,19 +1160,52 @@ impl<'a> HtmlParser<'a> {
         // don't stop at the wrong brace.
         self.skip_ws_inline();
         let cond_raw = self.capture_directive_arg_raw(start_line, start_col)?;
-        // Recurse for the then-body up to `{/if}` or `{#else}`.
-        let (children, saw_else) = self.parse_nodes(None, Some("if"), true)?;
-        let else_children = if saw_else {
-            // Parse the else branch, up to `{/if}`. `accept_else =
-            // false` here rejects a second `{#else}` cleanly at
-            // `parse_directive_open`'s "else" arm.
-            let (else_kids, _) = self.parse_nodes(None, Some("if"), false)?;
-            Some(else_kids)
-        } else {
-            None
+        self.parse_if_from_cond(cond_raw.trim().to_string(), start_line, start_col)
+    }
+
+    /// FLV-07 — parse an `{#if}`/`{#elseif}` branch given its already-
+    /// captured cond, then dispatch on how its then-body ended:
+    ///
+    /// - `{/if}` → no else branch;
+    /// - `{#else}` → a plain else branch (rejects a second `{#else}`);
+    /// - `{#elseif cond}` → recurse, desugaring the chain into a nested
+    ///   `{#if}` under `else_children` (no new AST variant).
+    ///
+    /// Every branch of a chain shares the single closing `{/if}`, which the
+    /// innermost branch (a plain else, or the last body reaching `{/if}`)
+    /// consumes.
+    fn parse_if_from_cond(
+        &mut self,
+        cond_raw: String,
+        start_line: usize,
+        start_col: usize,
+    ) -> ViewParseResult<TemplateNode> {
+        // Recurse for the then-body up to `{/if}`, `{#else}` or `{#elseif}`.
+        let (children, term) = self.parse_nodes(None, Some("if"), true)?;
+        let else_children = match term {
+            BranchTerm::Close => None,
+            BranchTerm::Else => {
+                // Parse the else branch, up to `{/if}`. `accept_else = false`
+                // here rejects a second `{#else}` (and a `{#elseif}` after
+                // `{#else}`) cleanly at `parse_directive_open`.
+                let (else_kids, _) = self.parse_nodes(None, Some("if"), false)?;
+                Some(else_kids)
+            }
+            BranchTerm::ElseIf {
+                cond_raw: next_cond,
+                line,
+                col,
+            } => {
+                // `{#elseif b} ...` desugars to `{#else}{#if b} ...{/if}` — a
+                // single nested `{#if}` as the whole else branch. The nested
+                // parse continues the chain (its own `{#elseif}`/`{#else}`)
+                // and shares this if's closing `{/if}`.
+                let nested = self.parse_if_from_cond(next_cond, line, col)?;
+                Some(vec![nested])
+            }
         };
         Ok(TemplateNode::If {
-            cond_raw: cond_raw.trim().to_string(),
+            cond_raw,
             children,
             else_children,
             loc: Loc::new(start_line, start_col),
@@ -1405,6 +1494,24 @@ impl<'a> HtmlParser<'a> {
         if tag.is_empty() {
             return Err(ViewParseError {
                 message: "expected tag name after `<`".into(),
+                line: start_line,
+                column: start_col,
+            });
+        }
+        // FLV-02 — `<style>`/`<script>` inside a component `<template>` can't be
+        // diffed incrementally by the LiveView runtime (their raw text breaks the
+        // DOM descent, forcing a silent full re-render). Reject them with a
+        // targeted message instead of the confusing "template interpolation"
+        // error their `{`-bearing content would otherwise trigger downstream.
+        if tag == "style" || tag == "script" {
+            return Err(ViewParseError {
+                message: format!(
+                    "`<{tag}>` is not allowed inside a component `<template>` — its content \
+                     can't be diffed incrementally. Put CSS in a `<style scoped>` block at \
+                     the component level (a sibling of `<template>`), or in the layout's \
+                     `head_extra`; drive state-dependent styles with interpolated class/style \
+                     attributes (e.g. `class=\"bar {{state.variant}}\"`)."
+                ),
                 line: start_line,
                 column: start_col,
             });
@@ -2803,6 +2910,148 @@ mod tests {
             }
             other => panic!("expected If, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn template_elseif_desugars_to_nested_if_in_else() {
+        // FLV-07 — `{#if a}A{#elseif b}B{#else}C{/if}` desugars to
+        // If(a, [A], else=[If(b, [B], else=[C])]). No new AST variant.
+        let src = r#"component X {
+  <template>{#if a}<div>A</div>{#elseif b}<span>B</span>{#else}<p>C</p>{/if}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::If {
+                cond_raw,
+                children,
+                else_children,
+                ..
+            } => {
+                assert_eq!(cond_raw, "a");
+                assert_eq!(children.len(), 1);
+                // The else branch is a single nested If (the elseif).
+                let else_kids = else_children.as_ref().expect("else branch present");
+                assert_eq!(else_kids.len(), 1);
+                match &else_kids[0] {
+                    TemplateNode::If {
+                        cond_raw: c2,
+                        children: ch2,
+                        else_children: e2,
+                        ..
+                    } => {
+                        assert_eq!(c2, "b");
+                        assert_eq!(ch2.len(), 1);
+                        // The nested If's else is the final `{#else}` (a <p>).
+                        let final_else = e2.as_ref().expect("final else present");
+                        assert_eq!(final_else.len(), 1);
+                        match &final_else[0] {
+                            TemplateNode::Element { tag, .. } => assert_eq!(tag, "p"),
+                            other => panic!("expected <p> in final else, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected nested If (elseif), got {other:?}"),
+                }
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_elseif_chain_desugars_recursively() {
+        // FLV-07 — a 3-long chain nests: a → (b → (c → else)).
+        let src = r#"component X {
+  <template>{#if a}A{#elseif b}B{#elseif c}C{#else}D{/if}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        // Walk the nested-If chain, collecting each cond.
+        let mut conds = Vec::new();
+        let mut node = &file.components[0].template.as_ref().unwrap().roots[0];
+        while let TemplateNode::If {
+            cond_raw,
+            else_children,
+            ..
+        } = node
+        {
+            conds.push(cond_raw.clone());
+            match else_children {
+                Some(kids)
+                    if kids.len() == 1 && matches!(&kids[0], TemplateNode::If { .. }) =>
+                {
+                    node = &kids[0];
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(conds, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn template_elseif_without_final_else_is_legal() {
+        // FLV-07 — `{#if a}A{#elseif b}B{/if}` — the elseif's If has no else.
+        let src = r#"component X {
+  <template>{#if a}<div/>{#elseif b}<span/>{/if}</template>
+}"#;
+        let file = parse(src).expect("parse should succeed");
+        match &file.components[0].template.as_ref().unwrap().roots[0] {
+            TemplateNode::If { else_children, .. } => {
+                let kids = else_children.as_ref().expect("elseif → nested If");
+                match &kids[0] {
+                    TemplateNode::If {
+                        cond_raw,
+                        else_children: e2,
+                        ..
+                    } => {
+                        assert_eq!(cond_raw, "b");
+                        assert!(e2.is_none(), "elseif with no trailing else → None");
+                    }
+                    other => panic!("expected nested If, got {other:?}"),
+                }
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_style_element_is_rejected_with_targeted_message() {
+        // FLV-02 — `<style>` inside a component `<template>` gets a clear error
+        // pointing to the workaround, not the confusing interpolation error its
+        // `{`-bearing CSS would otherwise trigger.
+        let src = r#"component X {
+  <template><div id="root"><style>.bar { width: 50%; }</style></div></template>
+}"#;
+        let err = parse(src).expect_err("`<style>` in template must error");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("<style>"), "error should name <style>: {msg}");
+        assert!(
+            msg.contains("style scoped") || msg.contains("head_extra"),
+            "error should point to the workaround: {msg}"
+        );
+    }
+
+    #[test]
+    fn template_script_element_is_rejected() {
+        // FLV-02 — same for `<script>`.
+        let src = r#"component X {
+  <template><div id="root"><script>alert(1)</script></div></template>
+}"#;
+        let err = parse(src).expect_err("`<script>` in template must error");
+        assert!(
+            format!("{err:?}").contains("<script>"),
+            "error should name <script>: {err:?}"
+        );
+    }
+
+    #[test]
+    fn template_stray_elseif_is_an_error() {
+        // FLV-07 — `{#elseif}` outside any `{#if}` body is rejected.
+        let src = r#"component X {
+  <template>{#elseif b}<div/>{/if}</template>
+}"#;
+        let err = parse(src).expect_err("stray {#elseif} must error");
+        assert!(
+            format!("{err:?}").contains("elseif"),
+            "error should mention elseif: {err:?}"
+        );
     }
 
     #[test]

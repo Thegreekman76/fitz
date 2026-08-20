@@ -137,9 +137,9 @@ fn view_check_error_to_fitz(e: crate::view::check::CheckError) -> FitzError {
 
 /// Session B — Phase 11.8.b (2026-07-18): completion inside a `.fitzv`
 /// source. Offers:
-/// - **Template directives** — `{#if}`, `{#for}`, `{#else}`, `{/if}`,
-///   `{/for}` when the cursor is preceded by `{` at the last non-blank
-///   char before the cursor (or `{#` when the user is mid-typing).
+/// - **Template directives** — `{#if}`, `{#elseif}`, `{#else}`,
+///   `{#for}`, `{/if}`, `{/for}` when the cursor is preceded by `{` at
+///   the last non-blank char before the cursor (or `{#` when mid-typing).
 /// - **Event decorators** — `@click`, `@submit` when the cursor is
 ///   preceded by `@` inside an HTML tag position (bare `@` at cursor —
 ///   we don't fully parse the tag, so we accept any `@` prefix).
@@ -350,9 +350,10 @@ fn extract_state_fields_from_line(line: &str, out: &mut Vec<String>) {
     }
 }
 
-/// The 5 SFC template directives Fitz recognises today (§9.b of the
-/// view plan). Emitted as CompletionItems with `SNIPPET` insertText
-/// where useful so tabstops land inside the placeholder.
+/// The 6 SFC template directives Fitz recognises today (§9.b of the
+/// view plan; `#elseif` added in FLV-07). Emitted as CompletionItems
+/// with `SNIPPET` insertText where useful so tabstops land inside the
+/// placeholder.
 fn view_directive_completions() -> Vec<CompletionItem> {
     fn snippet(label: &str, insert: &str, detail: &str) -> CompletionItem {
         CompletionItem {
@@ -374,6 +375,11 @@ fn view_directive_completions() -> Vec<CompletionItem> {
             "#for",
             "#for $1 in $2}\n  $0\n{/for",
             "template directive — iteration",
+        ),
+        snippet(
+            "#elseif",
+            "#elseif $1}\n  $0",
+            "template directive — elseif branch of `{#if}` (FLV-07)",
         ),
         snippet(
             "#else",

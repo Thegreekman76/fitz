@@ -149,11 +149,13 @@ pub struct Template {
 ///     the slot set against the child component's declared slots
 ///     land in Phase 11.5 when composition wires up).
 ///
+/// `{#elseif cond}` chains (FLV-07): supported as parser sugar —
+/// `{#elseif b}` desugars to `{#else}{#if b} ...{/if}`, i.e. a nested
+/// `{#if}` under `else_children`. No dedicated AST variant; the whole
+/// pipeline (expand/check/SSR/WASM) handles it as ordinary nested ifs.
+///
 /// Deferred to later mini-commits (not blocking 11.2.c):
 ///   - `<slot>...</slot>` with fallback children.
-///   - `{#elseif cond}` chains (Fitz stays at just `{#if}` /
-///     `{#else}` — the `elseif` shorthand is refinable if demand
-///     appears).
 ///
 /// Not planned for 11.2:
 ///   - HTML doctype, XML processing instructions, CDATA.

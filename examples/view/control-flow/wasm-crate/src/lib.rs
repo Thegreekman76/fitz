@@ -102,34 +102,42 @@ impl App {
         let __t7 = document.create_text_node(" times");
         __el3.append_child(&__t7).unwrap();
         __el0.append_child(&__el3).unwrap();
-        if ((*self.count.borrow()) > 0i64) {
+        if ((*self.count.borrow()) > 2i64) {
         let __el8 = document.create_element("p").unwrap();
         __el8.set_attribute("class", "active active-app-c-42df218b").unwrap();
-        let __t9 = document.create_text_node("You have clicked at least once.");
+        let __t9 = document.create_text_node("On a roll — clicked more than twice!");
         __el8.append_child(&__t9).unwrap();
         __el0.append_child(&__el8).unwrap();
         } else {
+        if ((*self.count.borrow()) > 0i64) {
         let __el10 = document.create_element("p").unwrap();
-        __el10.set_attribute("class", "idle idle-app-c-42df218b").unwrap();
-        let __t11 = document.create_text_node("Click the button to begin.");
+        __el10.set_attribute("class", "active active-app-c-42df218b").unwrap();
+        let __t11 = document.create_text_node("You have clicked at least once.");
         __el10.append_child(&__t11).unwrap();
         __el0.append_child(&__el10).unwrap();
-        }
-        let __el12 = document.create_element("h2").unwrap();
-        let __t13 = document.create_text_node("Steps");
+        } else {
+        let __el12 = document.create_element("p").unwrap();
+        __el12.set_attribute("class", "idle idle-app-c-42df218b").unwrap();
+        let __t13 = document.create_text_node("Click the button to begin.");
         __el12.append_child(&__t13).unwrap();
         __el0.append_child(&__el12).unwrap();
-        let __el14 = document.create_element("ul").unwrap();
-        __el14.set_attribute("class", "labels labels-app-c-42df218b").unwrap();
-        let __for15 = (*self.labels.borrow()).clone();
-        for label in __for15.iter().cloned() {
-        let __el16 = document.create_element("li").unwrap();
-        let __interp17 = format!("{}", label);
-        let __t18 = document.create_text_node(&__interp17);
-        __el16.append_child(&__t18).unwrap();
-        __el14.append_child(&__el16).unwrap();
         }
+        }
+        let __el14 = document.create_element("h2").unwrap();
+        let __t15 = document.create_text_node("Steps");
+        __el14.append_child(&__t15).unwrap();
         __el0.append_child(&__el14).unwrap();
+        let __el16 = document.create_element("ul").unwrap();
+        __el16.set_attribute("class", "labels labels-app-c-42df218b").unwrap();
+        let __for17 = (*self.labels.borrow()).clone();
+        for label in __for17.iter().cloned() {
+        let __el18 = document.create_element("li").unwrap();
+        let __interp19 = format!("{}", label);
+        let __t20 = document.create_text_node(&__interp19);
+        __el18.append_child(&__t20).unwrap();
+        __el16.append_child(&__el18).unwrap();
+        }
+        __el0.append_child(&__el16).unwrap();
         root.append_child(&__el0).unwrap();
     }
 }

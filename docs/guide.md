@@ -15208,8 +15208,11 @@ K-4 shipped 2026-07-17).
 - **Interpolación de expresiones** con `{expr}` — bare state
   field (`{count}`) rewrite a `state.count`; expressions más
   ricas (`{count + 1}`, `{user.name}`) también funcionan.
-- **Directivas** — `{#if <cond>} ... {#else} ... {/if}` y
-  `{#for <x> in <iter>} ... {/for}` para conditionals + loops.
+- **Directivas** — `{#if <cond>} ... {#elseif <cond>} ... {#else}
+  ... {/if}` y `{#for <x> in <iter>} ... {/for}` para conditionals
+  (con cadenas `{#elseif}`, FLV-07/v0.52.0) + loops. Un `{#elseif b}`
+  es azúcar: desazucara a un `{#if b}` anidado en la rama `else`, así
+  que funciona igual en SSR y en el target client-WASM.
 - **Attribute interpolation** — `data-flv-value-card_id="{c.id}"`
   con `"{expr}"` shape (K-3 shipped). También **mixed**: un valor
   con parte estática + `{expr}` (`class="toast toast-{kind}"`,

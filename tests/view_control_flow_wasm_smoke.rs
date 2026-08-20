@@ -76,8 +76,12 @@ fn regenerate_control_flow_lib_rs() {
     let checks: &[(&str, &str)] = &[
         ("pub struct App {", "App struct present"),
         (
-            "if ((*self.count.borrow()) > 0i64) {",
+            "if ((*self.count.borrow()) > 2i64) {",
             "{#if} lowers to a Rust comparison",
+        ),
+        (
+            "if ((*self.count.borrow()) > 0i64) {",
+            "{#elseif} (FLV-07) lowers to a nested Rust if inside the else",
         ),
         ("} else {", "{#else} lowers to a Rust else"),
         (

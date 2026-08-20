@@ -9,6 +9,42 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.52.0] — 2026-08-20 — `.fitzv`: cadenas `{#elseif}` (FLV-07) + error claro por `<style>`/`<script>` en el template (FLV-02)
+
+Dos mejoras del pipeline de single-file components `.fitzv` (`src/view/`),
+pedidas por el framework [fitz-liveviews](https://github.com/Thegreekman76/fitz-liveviews)
+(norte MatHelp). Ambas son cambios del **parser de templates** — sin tocar el
+AST, el checker, ni los dos emisores (SSR + client-WASM).
+
+### Added
+- **`{#elseif cond}` en templates `.fitzv`** (FLV-07) —
+  `{#if a}...{#elseif b}...{#else}...{/if}` aplana las cadenas de condiciones
+  (antes había que anidar `{#if}` dentro de `{#else}`). Implementado como
+  **azúcar puro en el parser**: `{#elseif b}` desazucara a `{#else}{#if b}...{/if}`,
+  un `{#if}` anidado en la rama else. Como el AST ya soporta esa forma y todo el
+  pipeline (expand/check/SSR/WASM) recorre `else_children` recursivamente,
+  funciona **igual en SSR y en el target client-WASM** sin cambios en los
+  emisores. Verificado end-to-end: render SSR (chain A/B/C/F por score) + el
+  ejemplo `examples/view/control-flow` compila a **WASM real** con la rama nueva.
+  Completion del LSP suma `#elseif`.
+
+### Changed
+- **Error claro por `<style>`/`<script>` dentro de un `<template>` de `.fitzv`**
+  (FLV-02) — antes daban un error confuso ("unexpected trailing tokens after
+  expression (template interpolation)", disparado por el `{` del CSS). Ahora el
+  parser los rechaza con un mensaje dirigido que apunta al workaround (CSS en un
+  `<style scoped>` a nivel componente, o en el `head_extra` del layout; estilos
+  state-dependent con class/style interpolados). Los comentarios HTML
+  (`<!-- -->`) ya se descartaban sin romper.
+
+### Notes
+- 6 unit tests nuevos del parser (`{#elseif}` desugar / chain / sin else /
+  stray error; `<style>`/`<script>` rechazados). `lib` **4192** verde.
+- El nivel "warning" original de FLV-02 no aplica al `.fitzv` (nunca funcionó —
+  siempre erraba); la mitad "runtime diff engine" (HTML renderizado con
+  `<style>` → full-replace silencioso) vive en fitz-liveviews y queda como
+  follow-up.
+
 ## [v0.51.0] — 2026-08-20 — FITZ-02: servido de archivos estáticos (`@server(static_dir=…)` + `--embed-static`) — cierra Hito 3/4 del norte MatHelp
 
 ### Added

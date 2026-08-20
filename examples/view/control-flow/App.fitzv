@@ -1,6 +1,7 @@
 // Phase 11.7.b — control-flow directives in the client-WASM target
-// (`.fitzv` → WASM). Demonstrates `{#if}` / `{#else}` and `{#for}`
-// over a `List<primitive>` state field, all compiled to WebAssembly.
+// (`.fitzv` → WASM). Demonstrates `{#if}` / `{#elseif}` (FLV-07) /
+// `{#else}` and `{#for}` over a `List<primitive>` state field, all
+// compiled to WebAssembly.
 //
 // Before 11.7.b the WASM emitter rejected `{#if}` and `{#for}`
 // (deferred at 11.4.c, never implemented) — the counter/showcase
@@ -34,7 +35,9 @@ component App {
     <div class="demo">
       <h1>Control flow on WASM</h1>
       <button class="bump" @click="bump">clicked {count} times</button>
-      {#if count > 0}
+      {#if count > 2}
+        <p class="active">On a roll — clicked more than twice!</p>
+      {#elseif count > 0}
         <p class="active">You have clicked at least once.</p>
       {#else}
         <p class="idle">Click the button to begin.</p>

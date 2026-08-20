@@ -272,6 +272,19 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
   `parse_urlencoded_body` ahora coerce el body `form-urlencoded` al `type` del handler
   (paralelo a `parse_body`/JSON y al `__parse_urlencoded`→`__from_fitz_json` del codegen), así el
   login zero-JS funciona igual en `fitz run` y `fitz build` (2 tests nuevos + smoke bit-a-bit).
+- **🟡 RESIDUAL DESCUBIERTO (2026-08-20, durante FLV-09 de fitz-liveviews): `@cookie` NO funciona sobre
+  `@ws`.** La ficha dice "sobre `@get`/`@post`/`@ws`" pero el `@ws` está **incompleto**: el checker de
+  aridad `check_ws_handler` (`src/types.rs:11532-33`) cuenta `WsConn<T>` + `@header`, pero **no incluye
+  `@cookie`** → un `@cookie(name="X") @ws(...)` falla con "expects 1 param (1 WsConn + 1 per @header),
+  received 2". Además el binding runtime de cookies (`src/http.rs:4547`, `parse_cookie_header`) vive en el
+  path HTTP `dispatch_request`, NO en el path WS del `on_upgrade` — el evaluator `register_ws_route` SÍ
+  guarda las cookies (`src/evaluator.rs:2424,2579`) y `collect_cookies` acepta `@ws` (`:3684`), pero el
+  handler WS no las lee del handshake. Fix completo (multi-archivo, con verificación end-to-end): (1)
+  checker suma `cookie_count` a `expected_params`; (2) runtime WS bindea la cookie del header del upgrade
+  (paralelo a cómo bindea `@header` en el WS path); (3) codegen del wrapper `@ws` idem. **Workaround
+  documentado en `fitz-liveviews/docs/i18n.md`**: leer el locale con `@header(name="cookie")` +
+  `locale_from_cookie` sobre `@ws` (funciona hoy, es lo que hace el admin). NO bloquea el i18n (el
+  workaround es completo), solo es menos ergonómico.
 - **Estado:** Ya resuelto (FASE A + FASE B + paridad form-urlencoded en el intérprete).
   Form-urlencoded (mitad del A5 original): **REFUTADO — soportado en `fitz build` y ahora
   también en `fitz run` con coerción al `type`.**
