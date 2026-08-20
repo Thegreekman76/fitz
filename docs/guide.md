@@ -7908,6 +7908,67 @@ pueden ser `async` (caso típico: rate limit que consulta DB con
 > siempre las awaiteó); ya no hace falta el workaround de validar con
 > `fitz build`.
 
+### Archivos estáticos
+
+Una app navegable necesita servir assets: el favicon, un
+`manifest.webmanifest` (que la vuelve **instalable** como PWA), CSS,
+JS, imágenes, sonidos. En vez de un nginx al lado — que duplica la
+infra de una app que si no es *un binario + Postgres* — Fitz sirve
+estáticos desde el mismo servidor con dos kwargs de `@server`:
+
+```fitz
+@server(3000, static_dir="./public", static_prefix="/static")
+fn main() => 0
+```
+
+`static_dir` es el directorio en disco (relativo al working dir del
+proceso); `static_prefix` es el prefijo de URL (default `/static`). Un
+`GET /static/css/app.css` sirve `./public/css/app.css` con:
+
+- **`Content-Type` por extensión** (html, css, js, json,
+  `webmanifest`, svg, png, wasm, woff2, mp3, pdf, …; el resto cae a
+  `application/octet-stream`).
+- **`ETag` basado en contenido** (hash del archivo) +
+  **`If-None-Match` → `304 Not Modified`**: el browser cachea y no
+  re-baja lo que no cambió.
+- **`Cache-Control`** y **`Last-Modified`**.
+- **Path-traversal bloqueado**: un `..` (o su forma encodeada
+  `%2e%2e`) devuelve `404`; además el archivo resuelto se canonicaliza
+  y se verifica que quede dentro del directorio (bloquea también
+  escapes por symlink). Nunca sirve un archivo de afuera de
+  `static_dir`.
+
+Las rutas exactas — tuyas (`@get("/health")`) y del sistema
+(`/healthz`, `/docs`, …) — ganan sobre el wildcard de estáticos, así
+que podés convivir sin colisiones. Para servir en la raíz (típico de
+un `favicon.ico` o `manifest.webmanifest` en `/`), usá
+`static_prefix="/"`.
+
+**Embebido en el binario — `fitz build --embed-static`.** Con este
+flag, los assets de `static_dir` se hornean **dentro del binario** con
+`include_bytes!` en build-time. El binario producido sirve su propio
+frontend **sin el directorio en disco** — un solo ejecutable
+self-contained, ideal para imágenes Docker `distroless` (sin shell, sin
+filesystem de assets):
+
+```dockerfile
+# build stage
+RUN fitz build --embed-static src/main.fitz
+# runtime stage (distroless, sin ./public)
+FROM gcr.io/distroless/cc-debian12
+COPY --from=build /app/main /main
+ENTRYPOINT ["/main"]
+```
+
+Sin `--embed-static`, el binario lee `static_dir` del disco en runtime
+(mismo comportamiento que `fitz run`). Con `--embed-static`, no hay
+lectura de disco: los `ETag` son idénticos (basados en contenido) pero
+no hay `Last-Modified` (no existe mtime en memoria).
+
+Paridad `fitz run` ↔ `fitz build`: el mismo request produce el mismo
+status, `Content-Type`, `ETag` y body en el intérprete y en el binario
+nativo.
+
 ### HTTP client outbound
 
 Hasta acá vimos el lado **server** del HTTP nativo: handlers que

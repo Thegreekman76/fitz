@@ -2,6 +2,20 @@
 
 ---
 
+## v0.51.0 — FITZ-02: servido de archivos estáticos ✅ CERRADO (2026-08-20)
+
+**Hito**: cierra **FITZ-02** — el único ítem restante del Hito 3/4 del norte MatHelp (`docs/norte-mathelp.md`) — y con él **el Hito 3/4 entero**. Habilita **T3** (PWA instalable). Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+- **`@server(port, static_dir="./public", static_prefix="/static")`** — sirve estáticos desde el mismo servidor HTTP, sin nginx al lado. `static_dir` relativo al working dir del proceso; `static_prefix` default `/static`. Un `GET <prefix>/<rel>` sirve `<static_dir>/<rel>` con: Content-Type por extensión (html/css/js/json/webmanifest/svg/png/wasm/woff2/mp3/pdf/… → resto `application/octet-stream`); **ETag basado en contenido** (FNV-1a) + **`If-None-Match` → 304**; `Cache-Control` + `Last-Modified`; **path-traversal bloqueado** (`..`/`%2e%2e` → 404, más canonicalize + containment que bloquea escapes por symlink). Rutas exactas (usuario + sistema) ganan sobre el wildcard; `static_prefix="/"` sirve en la raíz.
+- **`fitz build --embed-static`** — hornea los assets en el binario con `include_bytes!` en build-time. El binario sirve su propio frontend **sin el directorio en disco** (distroless). Sin el flag, lee del disco en runtime (paridad con `fitz run`). Embed: mismo ETag (contenido), sin `Last-Modified` (no hay mtime en memoria).
+- **Arquitectura**: módulo nuevo `src/static_files.rs` con la lógica pura compartida (Content-Type, ETag, HTTP-date sin chrono, `is_safe_relative`), mirroreada **literalmente** en el `STATIC_PRELUDE_*` del codegen → paridad garantizada. Runtime en `src/http.rs` (handler wildcard en `build_router_with_asyncapi` + `serve_static_from_disk`). Codegen: `emit_static_prelude` (disk XOR embed) + `.merge(__fitz_static_route())` en `gen_http_main` + `collect_static_assets` (walk build-time). CLI: flag `--embed-static` threadeado hasta `generate_project`. Checker sin cambios (`@server` es opaco). LSP: kwargs en la completion de `@server`. Sin deps nuevas (`std::fs` + `include_bytes!` + `axum`, ya en scope).
+- **Tests**: 8 unit `static_files` + 2 unit `http` (`resolved_static_prefix`/`if_none_match_matches`) + 6 unit `codegen` (prelude/route/embed/collect) + 2 E2E (`fitz02_static_disk_parity_content_type_etag_304_traversal` — paridad run↔build + 304 + traversal + missing + user route; `fitz02_embed_static_serves_without_dir_on_disk`). Ejemplo `examples/guide/17m-static.fitz` en el smoke `GUIDE_EXAMPLES_COMPILE`. Guía cap 17 "Archivos estáticos" + nota distroless.
+- **MVP**: sin directory index (un dir → 404); embed sin `Last-Modified`; assets relativos al working dir del proceso (runtime) / del build (embed).
+
+**Verificación pre-bump**: fmt + clippy (default + lsp) limpios, lib **4186**, 16 unit + 2 E2E FITZ-02 verdes, smoke `GUIDE_EXAMPLES_COMPILE` verde. Bump Cargo.toml `0.50.0` → `0.51.0` + extensión VSCode. **Cierra Hito 3/4 entero del norte MatHelp.**
+
+---
+
 ## v0.50.0 — Hito 3/4 del norte MatHelp ✅ CERRADO (2026-08-20)
 
 **Hito**: continuación del backlog MatHelp sobre v0.49.0 — quick wins de Hito 3/4 + el gap de paridad descubierto al cerrar FITZ-05. Todo con paridad bit-a-bit `fitz run` ↔ `fitz build` (validado contra Postgres local). Detalle por-tarea en [`docs/norte-mathelp.md`](norte-mathelp.md).

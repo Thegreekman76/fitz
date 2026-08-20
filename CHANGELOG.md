@@ -9,6 +9,51 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.51.0] — 2026-08-20 — FITZ-02: servido de archivos estáticos (`@server(static_dir=…)` + `--embed-static`) — cierra Hito 3/4 del norte MatHelp
+
+### Added
+- **`@server(port, static_dir="./public", static_prefix="/static")`** — sirve
+  archivos estáticos desde el mismo servidor HTTP, sin nginx al lado. `static_dir`
+  es el directorio en disco (relativo al working dir del proceso); `static_prefix`
+  es el prefijo de URL (default `/static`). Un `GET /static/css/app.css` sirve
+  `./public/css/app.css` con:
+  - **`Content-Type` por extensión** (html, css, js, json, `webmanifest`, svg,
+    png, wasm, woff2, mp3, pdf, … → resto `application/octet-stream`).
+  - **`ETag` basado en contenido** (FNV-1a del archivo) + **`If-None-Match` →
+    `304 Not Modified`**.
+  - **`Cache-Control`** + **`Last-Modified`**.
+  - **Path-traversal bloqueado**: `..` (y su forma encodeada `%2e%2e`) → `404`;
+    además canonicalize + containment (bloquea escapes por symlink). Nunca sirve
+    un archivo de afuera de `static_dir`. Las rutas exactas (tuyas + del sistema)
+    ganan sobre el wildcard. `static_prefix="/"` sirve en la raíz.
+- **`fitz build --embed-static`** — hornea los assets de `static_dir` **dentro
+  del binario** con `include_bytes!` en build-time. El binario producido sirve su
+  propio frontend **sin el directorio en disco** — un solo ejecutable
+  self-contained, ideal para imágenes Docker `distroless`. Sin el flag, el binario
+  lee del disco en runtime (mismo comportamiento que `fitz run`).
+- Paridad bit-a-bit `fitz run` ↔ `fitz build`: mismo status, `Content-Type`,
+  `ETag` y body en el intérprete y el binario (validado por E2E dedicado).
+- Módulo nuevo `src/static_files.rs` con la lógica pura compartida (Content-Type,
+  ETag, HTTP-date, `is_safe_relative`), mirroreada **literalmente** en el
+  `STATIC_PRELUDE_*` del codegen para garantizar la paridad. Sin deps nuevas
+  (`std::fs` + `include_bytes!` + `axum`, ya en scope).
+- Guía cap 17 sub-sección "Archivos estáticos" (+ nota de deployment distroless)
+  + ejemplo runnable `examples/guide/17m-static.fitz`. LSP: los kwargs
+  `static_dir`/`static_prefix` en la completion de `@server`.
+
+### Notes
+- **Cierra FITZ-02 y el Hito 3/4 entero del norte MatHelp**
+  (`docs/norte-mathelp.md`). Habilita **T3** (PWA instalable: favicon +
+  `manifest.webmanifest`).
+- Tests: 8 unit `static_files` + 2 unit `http` (`resolved_static_prefix` /
+  `if_none_match_matches`) + 6 unit `codegen` (prelude/route/embed/collect) + 2
+  E2E (`fitz02_static_disk_parity_content_type_etag_304_traversal`,
+  `fitz02_embed_static_serves_without_dir_on_disk`). Ejemplo `17m-static.fitz`
+  sumado al smoke `GUIDE_EXAMPLES_COMPILE`.
+- MVP: sin directory index (un dir → 404); embed sin `Last-Modified` (no hay
+  mtime en memoria, sí ETag idéntico); assets relativos al working dir del proceso
+  (runtime) / del build (embed).
+
 ## [v0.50.0] — 2026-08-20 — Hito 3/4 del norte MatHelp: `Map.remove`, `is_in(<var>)`, paridad form-urlencoded, y limpieza de codegen
 
 Continuación del backlog de MatHelp (`docs/norte-mathelp.md`) sobre

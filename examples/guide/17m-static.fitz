@@ -1,0 +1,30 @@
+// Cap 17, sub-sección "Archivos estáticos" (FITZ-02).
+//
+// Sirve archivos estáticos desde un directorio con `@server(static_dir=,
+// static_prefix=)`: Content-Type por extensión, ETag + If-None-Match →
+// 304, Cache-Control, Last-Modified, y path-traversal bloqueado.
+//
+// Paridad bit-a-bit `fitz run` ↔ `fitz build`. Con
+// `fitz build --embed-static` los assets se hornean dentro del binario
+// (`include_bytes!`) y sirve sin el directorio en disco (distroless).
+//
+// Para probarlo, creá un `./public` al lado (relativo al working dir):
+//   mkdir -p public/css
+//   echo '<!doctype html><h1>hola</h1>' > public/index.html
+//   echo 'body{color:teal}'             > public/css/app.css
+//   fitz run examples/guide/17m-static.fitz
+//   curl -i http://127.0.0.1:43952/static/index.html
+//   curl -i http://127.0.0.1:43952/static/css/app.css
+//   # ETag → If-None-Match → 304:
+//   curl -i -H 'If-None-Match: "<el-etag>"' http://127.0.0.1:43952/static/index.html
+//   # traversal bloqueado:
+//   curl -i http://127.0.0.1:43952/static/%2e%2e/secret   # → 404
+//
+// Embebido en el binario (sirve sin ./public en disco):
+//   fitz build --embed-static examples/guide/17m-static.fitz
+
+@get("/health")
+fn health() -> Str => "ok"
+
+@server(43952, static_dir="./public", static_prefix="/static")
+fn main() => 0

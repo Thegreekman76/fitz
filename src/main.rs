@@ -122,6 +122,14 @@ enum Commands {
         /// `--bundle-pip <pkg>`: pip accumulates them.
         #[arg(long = "bundle-pip-requirements", value_name = "FILE")]
         bundle_pip_requirements: Vec<PathBuf>,
+        /// FITZ-02 — Embed the `@server(static_dir=...)` assets into
+        /// the binary with `include_bytes!`, so it serves its own
+        /// frontend with no directory on disk (distroless-friendly).
+        /// Read at build time relative to the current working
+        /// directory. No effect if the program has no
+        /// `@server(static_dir=...)`.
+        #[arg(long = "embed-static")]
+        embed_static: bool,
     },
     /// Type-check and syntax-check. With no file, reads the manifest
     /// (Phase 9.y.2) and checks the `[bin].main`.
@@ -671,6 +679,7 @@ fn main() {
             bundle_python,
             bundle_pip,
             bundle_pip_requirements,
+            embed_static,
         } => {
             // Phase 11.5.b — parse --target early so we can pass it
             // to resolve_entry and reject unknown values with a
@@ -739,6 +748,7 @@ fn main() {
                     flag_defaults,
                     bundle_pip,
                     bundle_pip_requirements,
+                    embed_static,
                 );
             } else {
                 build_file(
@@ -746,6 +756,7 @@ fn main() {
                     override_dest.as_deref(),
                     dep_registry,
                     flag_defaults,
+                    embed_static,
                 );
             }
         }
@@ -2591,6 +2602,8 @@ fn build_file(
     override_dest: Option<&std::path::Path>,
     dep_registry: manifest::DepRegistry,
     flag_defaults: std::collections::BTreeMap<String, bool>,
+    // FITZ-02 — `--embed-static`. Threaded to `codegen::generate_project`.
+    embed_static: bool,
 ) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
@@ -2689,6 +2702,7 @@ fn build_file(
         &types,
         dep_registry,
         flag_defaults,
+        embed_static,
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -2883,6 +2897,8 @@ fn build_file_with_bundle(
     flag_defaults: std::collections::BTreeMap<String, bool>,
     bundle_pip: Vec<String>,
     bundle_pip_requirements: Vec<PathBuf>,
+    // FITZ-02 — `--embed-static`. Threaded to `codegen::generate_project`.
+    embed_static: bool,
 ) {
     // --- Early validation: supported host triple ---
     let triple = match pbs::host_triple() {
@@ -3025,6 +3041,7 @@ fn build_file_with_bundle(
         &types,
         dep_registry,
         flag_defaults,
+        embed_static,
     ) {
         Ok(p) => p,
         Err(e) => {

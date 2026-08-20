@@ -3013,6 +3013,10 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     // sub-sección "Respuestas con Content-Type custom". Cubre RSS
     // XML + robots.txt + SVG + PDF binario en un solo programa.
     "17l-response-custom.fitz",
+    // FITZ-02 (v0.51.0) — cap 17 sub-sección "Archivos estáticos".
+    // `@server(static_dir=, static_prefix=)`. El smoke solo compila
+    // (no ejecuta), así que no necesita el `./public` en disco.
+    "17m-static.fitz",
     "18-docs.fitz",
     "19-async.fitz",
     "19b-paralelismo.fitz",
@@ -15696,4 +15700,324 @@ fn run_build_parity_corpus_fitz14() {
         "divergencias de paridad `fitz run` ↔ `fitz build` (FITZ-14):\n{}",
         mismatches.join("\n\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// FITZ-02 — static file serving (`@server(static_dir=..., static_prefix=...)`)
+// ---------------------------------------------------------------------------
+
+/// FITZ-02 — extracts a header value (case-insensitive name) from a raw
+/// HTTP response headers block.
+fn extract_static_header(headers: &str, name: &str) -> Option<String> {
+    let lname = name.to_ascii_lowercase();
+    for line in headers.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().to_ascii_lowercase() == lname {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// FITZ-02 — creates a temp dir with a `<stem>.fitz` serving `./public`
+/// (plus a `secret.txt` OUTSIDE public to prove traversal cannot reach
+/// it) at `port` under `prefix`, and returns the dir.
+fn static_setup(stem: &str, port: u16, prefix: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("fitz-static-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("public").join("css")).expect("mk public/css");
+    std::fs::write(
+        dir.join("public").join("index.html"),
+        b"<!doctype html><h1>hi fitz</h1>",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("public").join("css").join("app.css"),
+        b"body{color:teal}",
+    )
+    .unwrap();
+    std::fs::write(dir.join("secret.txt"), b"TOP SECRET").unwrap();
+    let src = format!(
+        "@get(\"/health\")\nfn health() -> Str => \"ok\"\n\n\
+         @server({}, static_dir=\"./public\", static_prefix=\"{}\")\nfn main() => 0\n",
+        port, prefix
+    );
+    std::fs::write(dir.join(format!("{}.fitz", stem)), src).unwrap();
+    dir
+}
+
+/// FITZ-02 — waits until `port` is free to bind (used between two
+/// sequential server spawns on the same port, e.g. run vs binary).
+fn wait_static_port_free(port: u16) {
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        if std::net::TcpListener::bind(&addr).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// FITZ-02 — a spawned static server, killed on drop. Keeps one server
+/// alive across multiple requests so the port is not rebound per request.
+struct StaticServer {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl StaticServer {
+    fn spawn(mut cmd: Command, port: u16) -> Self {
+        use std::process::Stdio;
+        wait_static_port_free(port);
+        let child = cmd
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn static server");
+        let addr = format!("127.0.0.1:{}", port);
+        let start = std::time::Instant::now();
+        let mut connected = false;
+        while start.elapsed() < std::time::Duration::from_secs(8) {
+            if std::net::TcpStream::connect(&addr).is_ok() {
+                connected = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            connected,
+            "static server did not open port {} within 8s",
+            port
+        );
+        StaticServer { child, port }
+    }
+
+    /// GET `path` with optional extra request headers. Returns
+    /// `(status, headers_string, body_bytes)`.
+    fn get(&self, path: &str, extra_headers: &[(&str, &str)]) -> (u16, String, Vec<u8>) {
+        use std::io::{Read, Write};
+        let addr = format!("127.0.0.1:{}", self.port);
+        let mut req = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+            path, addr
+        );
+        for (k, v) in extra_headers {
+            req.push_str(&format!("{}: {}\r\n", k, v));
+        }
+        req.push_str("\r\n");
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect static");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .ok();
+        stream
+            .write_all(req.as_bytes())
+            .expect("send static request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let split = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or(buf.len());
+        let body = if split + 4 <= buf.len() {
+            buf[split + 4..].to_vec()
+        } else {
+            Vec::new()
+        };
+        let headers = String::from_utf8_lossy(&buf[..split]).into_owned();
+        let status = headers
+            .lines()
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (status, headers, body)
+    }
+}
+
+impl Drop for StaticServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn fitz02_static_disk_parity_content_type_etag_304_traversal() {
+    // FITZ-02 — the whole disk-serving surface in one build:
+    //   * Content-Type by extension + content-based ETag,
+    //   * bit-for-bit parity `fitz run` ↔ native binary (same ETag+body),
+    //   * `If-None-Match` → 304,
+    //   * `../` traversal blocked (cannot leak a file outside the dir),
+    //   * missing file → 404,
+    //   * a user route still works alongside the static wildcard.
+    let port = 43941;
+    let stem = "fitz02-disk";
+    let dir = static_setup(stem, port, "/static");
+    let src_path = dir.join(format!("{}.fitz", stem));
+
+    let build = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .current_dir(&dir)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
+    assert!(bin.exists(), "binary {} missing", bin.display());
+
+    // --- fitz run (interpreter) ---
+    let (r_status, r_headers, r_body) = {
+        let mut cmd = Command::new(fitz_bin());
+        cmd.args(["run"]).arg(&src_path).current_dir(&dir);
+        let srv = StaticServer::spawn(cmd, port);
+        srv.get("/static/css/app.css", &[])
+    };
+    assert_eq!(r_status, 200, "run: css 200");
+    assert!(
+        r_headers
+            .to_lowercase()
+            .contains("content-type: text/css; charset=utf-8"),
+        "run headers must carry text/css Content-Type: {}",
+        r_headers
+    );
+    let etag = extract_static_header(&r_headers, "etag").expect("run response carries an ETag");
+    assert!(
+        r_headers.to_lowercase().contains("cache-control:"),
+        "run response carries Cache-Control: {}",
+        r_headers
+    );
+
+    wait_static_port_free(port);
+
+    // --- native binary: parity + 304 + traversal + missing + user route ---
+    let mut cmd = Command::new(&bin);
+    cmd.current_dir(&dir);
+    let srv = StaticServer::spawn(cmd, port);
+
+    let (b_status, b_headers, b_body) = srv.get("/static/css/app.css", &[]);
+    assert_eq!(b_status, 200, "binary: css 200");
+    // Parity: identical status, ETag, and body between run and build.
+    assert_eq!(r_status, b_status, "status parity run↔build");
+    assert_eq!(
+        etag,
+        extract_static_header(&b_headers, "etag").expect("binary ETag"),
+        "ETag parity run↔build (content-based)"
+    );
+    assert_eq!(r_body, b_body, "body parity run↔build");
+
+    // 304 with matching If-None-Match.
+    let (s304, h304, b304) = srv.get("/static/css/app.css", &[("If-None-Match", &etag)]);
+    assert_eq!(s304, 304, "matching If-None-Match → 304");
+    assert!(b304.is_empty(), "304 has no body");
+    assert!(
+        h304.to_lowercase().contains("etag:"),
+        "304 carries the ETag: {}",
+        h304
+    );
+
+    // Traversal blocked — must not leak secret.txt outside ./public.
+    let (strav, _, btrav) = srv.get("/static/%2e%2e/secret.txt", &[]);
+    assert_eq!(strav, 404, "encoded `..` traversal must be blocked");
+    assert!(
+        !String::from_utf8_lossy(&btrav).contains("TOP SECRET"),
+        "the file outside the static dir must never be served"
+    );
+
+    // Missing file → 404.
+    let (smiss, _, _) = srv.get("/static/nope.txt", &[]);
+    assert_eq!(smiss, 404, "missing file → 404");
+
+    // The user's own route still works alongside the static wildcard.
+    let (shealth, _, bhealth) = srv.get("/health", &[]);
+    assert_eq!(shealth, 200, "user route /health still works");
+    assert!(
+        String::from_utf8_lossy(&bhealth).contains("ok"),
+        "/health returns ok"
+    );
+}
+
+#[test]
+fn fitz02_embed_static_serves_without_dir_on_disk() {
+    // FITZ-02 — `fitz build --embed-static` bakes the assets into the
+    // binary with `include_bytes!`. The binary serves its own frontend
+    // from a directory that has NO `public/` on disk (distroless case),
+    // with the same content-based ETag as the disk build, and traversal
+    // still blocked.
+    let port = 43942;
+    let stem = "fitz02-embed";
+    let dir = static_setup(stem, port, "/static");
+    let src_path = dir.join(format!("{}.fitz", stem));
+
+    let build = Command::new(fitz_bin())
+        .args(["build", "--embed-static"])
+        .arg(&src_path)
+        .current_dir(&dir)
+        .output()
+        .expect("invoke fitz build --embed-static");
+    assert!(
+        build.status.success(),
+        "fitz build --embed-static failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binary {} missing", bin.display());
+
+    // Copy the binary to a CLEAN dir with NO public/ and run from there.
+    let clean = std::env::temp_dir().join(format!("fitz-static-{}-clean", stem));
+    let _ = std::fs::remove_dir_all(&clean);
+    std::fs::create_dir_all(&clean).unwrap();
+    let clean_bin = clean.join(&bin_name);
+    std::fs::copy(&bin, &clean_bin).expect("copy embed binary");
+    assert!(
+        !clean.join("public").exists(),
+        "the clean dir must have no public/"
+    );
+
+    let mut cmd = Command::new(&clean_bin);
+    cmd.current_dir(&clean);
+    let srv = StaticServer::spawn(cmd, port);
+
+    let (s, h, b) = srv.get("/static/index.html", &[]);
+    assert_eq!(s, 200, "embed serves index.html without a dir on disk");
+    assert!(
+        h.to_lowercase().contains("content-type: text/html"),
+        "embed index.html has html Content-Type: {}",
+        h
+    );
+    assert!(
+        String::from_utf8_lossy(&b).contains("<h1>hi fitz</h1>"),
+        "embed served the real bytes: {:?}",
+        String::from_utf8_lossy(&b)
+    );
+
+    let (scss, hcss, _) = srv.get("/static/css/app.css", &[]);
+    assert_eq!(scss, 200, "embed serves nested css");
+    assert!(
+        hcss.to_lowercase().contains("etag:"),
+        "embed css carries an ETag: {}",
+        hcss
+    );
+
+    // Traversal + missing still 404 in embed mode.
+    let (strav, _, _) = srv.get("/static/%2e%2e/secret.txt", &[]);
+    assert_eq!(strav, 404, "embed: traversal blocked");
+    let (smiss, _, _) = srv.get("/static/nope.txt", &[]);
+    assert_eq!(smiss, 404, "embed: missing → 404");
 }

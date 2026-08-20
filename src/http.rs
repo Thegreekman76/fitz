@@ -479,6 +479,22 @@ pub struct ServerConfig {
     /// shares the same port + transport as the rest of the app (NOT
     /// a separate port).
     pub prometheus_enabled: bool,
+    /// FITZ-02 (2026-08) — Directory to serve static files from, e.g.
+    /// `@server(static_dir="./public")`. Relative to the process
+    /// working directory. `None` disables static serving. When set,
+    /// `build_router_with_asyncapi` mounts a wildcard route under
+    /// `static_prefix` that serves files with Content-Type by
+    /// extension, a content-based ETag (`If-None-Match` → 304),
+    /// `Cache-Control`, and `Last-Modified`, with path-traversal
+    /// blocked (`../` → 404, plus a canonicalize+containment check).
+    pub static_dir: Option<String>,
+    /// FITZ-02 (2026-08) — URL prefix the static files are served
+    /// under, e.g. `@server(static_prefix="/static")`. Defaults to
+    /// `/static` when `static_dir` is set but no prefix is given. A
+    /// request to `<prefix>/<rel>` serves `<static_dir>/<rel>`. Use
+    /// `"/"` to serve at the root (exact system routes like
+    /// `/healthz` still win over the wildcard).
+    pub static_prefix: Option<String>,
 }
 
 impl ServerConfig {
@@ -493,6 +509,33 @@ impl ServerConfig {
             shutdown_timeout_secs: 30,
             observability_enabled: true,
             prometheus_enabled: false,
+            static_dir: None,
+            static_prefix: None,
+        }
+    }
+
+    /// FITZ-02 — Resolves the effective URL prefix for static
+    /// serving, normalized to start with `/` and not end with `/`
+    /// (except the root `/`). Returns `/static` as the default when a
+    /// `static_dir` is set but no prefix. Callers should only use
+    /// this when `static_dir.is_some()`.
+    pub fn resolved_static_prefix(&self) -> String {
+        let raw = self
+            .static_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/static");
+        let with_lead = if raw.starts_with('/') {
+            raw.to_string()
+        } else {
+            format!("/{raw}")
+        };
+        let trimmed = with_lead.trim_end_matches('/');
+        if trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            trimmed.to_string()
         }
     }
 
@@ -2557,6 +2600,35 @@ pub fn build_router_with_asyncapi(
         }
     }
 
+    // FITZ-02 — Static file serving. When `@server(static_dir=...)` is
+    // set, mount a wildcard route under the prefix that serves files
+    // from disk with Content-Type/ETag/Cache-Control/Last-Modified and
+    // path-traversal protection. Mounted BEFORE the access-log layer so
+    // static hits are logged like any other request. Exact system
+    // routes (`/healthz`, `/docs`, ...) still win over the `{*path}`
+    // wildcard by matchit precedence.
+    {
+        let cfg = registry.resolved_config();
+        if let Some(dir) = cfg.static_dir.clone() {
+            let prefix = cfg.resolved_static_prefix();
+            let route_pattern = if prefix == "/" {
+                "/{*fitz_static_path}".to_string()
+            } else {
+                format!("{}/{{*fitz_static_path}}", prefix)
+            };
+            let dir_path = std::path::PathBuf::from(dir);
+            router = router.route(
+                &route_pattern,
+                axum::routing::get(
+                    move |AxumPath(rel): AxumPath<String>, headers: axum::http::HeaderMap| {
+                        let dir_path = dir_path.clone();
+                        async move { serve_static_from_disk(dir_path, rel, headers).await }
+                    },
+                ),
+            );
+        }
+    }
+
     // v0.10.28 — Opt-in access log. The layer is only mounted if
     // the mode is active; when Off, the Router stays 100% as before
     // (zero overhead, not even the middleware indirection).
@@ -3681,6 +3753,110 @@ fn outcome_to_response(outcome: HandlerOutcome) -> Response {
         }
     }
     resp
+}
+
+/// FITZ-02 — 404 response for a missing/blocked static asset. Plain
+/// text body so a browser shows something sensible; no ETag.
+fn static_not_found() -> Response {
+    let mut resp = Response::new(Body::from("404 Not Found"));
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp
+}
+
+/// FITZ-02 — Compares an incoming `If-None-Match` header value against
+/// the file's current ETag. Handles `*` (matches anything), a
+/// comma-separated list of candidates, and the `W/` weak prefix on
+/// either side.
+fn if_none_match_matches(header: &str, etag: &str) -> bool {
+    let etag_core = etag.trim().trim_start_matches("W/");
+    for candidate in header.split(',') {
+        let c = candidate.trim();
+        if c == "*" || c.trim_start_matches("W/") == etag_core {
+            return true;
+        }
+    }
+    false
+}
+
+/// FITZ-02 — Serves a static file from disk for the runtime
+/// (`fitz run`). `dir` is the configured `static_dir` (relative to the
+/// process CWD); `rel` is the request path captured after the static
+/// prefix. Applies Content-Type by extension, a content-based ETag
+/// (`If-None-Match` → 304), `Cache-Control`, and `Last-Modified`. Path
+/// traversal is blocked both lexically (`is_safe_relative`) and via
+/// canonicalize+containment (which also rejects symlink escapes and
+/// non-existent files as 404). This is the exact behaviour the codegen
+/// `STATIC_PRELUDE` mirrors so `fitz run` and `fitz build` match.
+async fn serve_static_from_disk(
+    dir: std::path::PathBuf,
+    rel: String,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use crate::static_files;
+
+    if !static_files::is_safe_relative(&rel) {
+        return static_not_found();
+    }
+    let candidate = dir.join(&rel);
+    let (canon_file, canon_dir) = match (candidate.canonicalize(), dir.canonicalize()) {
+        (Ok(f), Ok(d)) => (f, d),
+        _ => return static_not_found(),
+    };
+    if !canon_file.starts_with(&canon_dir) || canon_file.is_dir() {
+        return static_not_found();
+    }
+    let bytes = match std::fs::read(&canon_file) {
+        Ok(b) => b,
+        Err(_) => return static_not_found(),
+    };
+
+    let etag = static_files::compute_etag(&bytes);
+    let cache_control = "public, max-age=3600";
+
+    if let Some(inm) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if if_none_match_matches(inm, &etag) {
+            // 304 Not Modified: no body, no Content-Type; only the
+            // validators the client needs to keep caching.
+            let mut resp = Response::new(Body::empty());
+            *resp.status_mut() = StatusCode::NOT_MODIFIED;
+            if let Ok(v) = HeaderValue::try_from(etag.as_str()) {
+                resp.headers_mut().insert(axum::http::header::ETAG, v);
+            }
+            resp.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=3600"),
+            );
+            return resp;
+        }
+    }
+
+    let content_type = static_files::content_type_for(&rel);
+    let mut extra = vec![
+        ("ETag".to_string(), etag),
+        ("Cache-Control".to_string(), cache_control.to_string()),
+    ];
+    let last_modified_secs = std::fs::metadata(&canon_file)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    if let Some(secs) = last_modified_secs {
+        extra.push(("Last-Modified".to_string(), static_files::http_date(secs)));
+    }
+
+    outcome_to_response(HandlerOutcome::custom_binary(
+        200,
+        bytes,
+        content_type.to_string(),
+        extra,
+    ))
 }
 
 /// Builds the `Value::Instance` of type `Request` the runtime
@@ -5001,6 +5177,11 @@ pub fn serve_on_runtime(
         }
         if crate::observability::prometheus_handle().is_some() {
             eprintln!("   GET /metrics       (Prometheus exposition format)");
+        }
+        if let Some(dir) = &resolved_config.static_dir {
+            let prefix = resolved_config.resolved_static_prefix();
+            let sep = if prefix == "/" { "" } else { "/" };
+            eprintln!("   GET {prefix}{sep}*         (estáticos desde {dir})");
         }
         // Phase 9.w.3 — starts the cron scheduler before
         // axum::serve. Tasks run detached on the same tokio
@@ -6601,6 +6782,8 @@ mod tests {
             shutdown_timeout_secs: 30,
             observability_enabled: true,
             prometheus_enabled: false,
+            static_dir: None,
+            static_prefix: None,
         };
         let addr = c.to_socket_addr().unwrap();
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
@@ -6617,6 +6800,8 @@ mod tests {
             shutdown_timeout_secs: 30,
             observability_enabled: true,
             prometheus_enabled: false,
+            static_dir: None,
+            static_prefix: None,
         };
         let err = c.to_socket_addr().unwrap_err();
         assert!(err.contains("not-an-ip"));
@@ -6634,6 +6819,8 @@ mod tests {
                 shutdown_timeout_secs: 30,
                 observability_enabled: true,
                 prometheus_enabled: false,
+                static_dir: None,
+                static_prefix: None,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
@@ -6645,12 +6832,41 @@ mod tests {
                 shutdown_timeout_secs: 30,
                 observability_enabled: true,
                 prometheus_enabled: false,
+                static_dir: None,
+                static_prefix: None,
             };
             let err = set_server_config(second).unwrap_err();
             // The error carries the existing config, not the new
             // one.
             assert_eq!(err, first);
         });
+    }
+
+    #[test]
+    fn fitz02_resolved_static_prefix_normalizes() {
+        let mk = |p: Option<&str>| {
+            let mut c = ServerConfig::default_addr();
+            c.static_prefix = p.map(|s| s.to_string());
+            c.resolved_static_prefix()
+        };
+        assert_eq!(mk(None), "/static");
+        assert_eq!(mk(Some("/static")), "/static");
+        assert_eq!(mk(Some("static")), "/static");
+        assert_eq!(mk(Some("/assets/")), "/assets");
+        assert_eq!(mk(Some("files")), "/files");
+        assert_eq!(mk(Some("/")), "/");
+        assert_eq!(mk(Some("  /x  ")), "/x");
+    }
+
+    #[test]
+    fn fitz02_if_none_match_matches_star_list_and_weak() {
+        let etag = "\"abc123\"";
+        assert!(if_none_match_matches("*", etag));
+        assert!(if_none_match_matches("\"abc123\"", etag));
+        assert!(if_none_match_matches("\"other\", \"abc123\"", etag));
+        assert!(if_none_match_matches("W/\"abc123\"", etag));
+        assert!(!if_none_match_matches("\"nope\"", etag));
+        assert!(!if_none_match_matches("", etag));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6668,6 +6884,8 @@ mod tests {
             shutdown_timeout_secs: 30,
             observability_enabled: true,
             prometheus_enabled: false,
+            static_dir: None,
+            static_prefix: None,
         });
         let resolved = reg.resolved_config();
         assert_eq!(resolved.port, 80);

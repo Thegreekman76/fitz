@@ -2375,9 +2375,13 @@ fn decorator_completions() -> Vec<CompletionItem> {
              **Kwargs**: `port=<Int>`, `host=<Str>` (v0.15.13+ — same parameters as the positionals, conflict if both are passed), \
              `docs=<Bool>` (default true), `api_version=<Str>`, \
              `ws_heartbeat_secs=<Int>` (default 30), `shutdown_timeout_secs=<Int>` (default 30), \
-             `observability=<Bool>` (default true), `prometheus=<Bool>` (default false — opt-in for the /metrics endpoint).\n\n\
+             `observability=<Bool>` (default true), `prometheus=<Bool>` (default false — opt-in for the /metrics endpoint), \
+             `static_dir=<Str>` (serve static files from a directory), `static_prefix=<Str>` (default \"/static\").\n\n\
              **Canonical Docker pattern**: `@server(host=\"0.0.0.0\", port=8080, prometheus=true)`. \
-             The `127.0.0.1` default does not accept connections from the Docker network.",
+             The `127.0.0.1` default does not accept connections from the Docker network.\n\n\
+             **Static files** (FITZ-02): `@server(3000, static_dir=\"./public\", static_prefix=\"/static\")` \
+             serves files with Content-Type + ETag + 304 + Cache-Control + Last-Modified and traversal blocked. \
+             `fitz build --embed-static` bakes the assets into the binary (distroless-friendly).",
         ),
         (
             "header",

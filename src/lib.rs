@@ -55,6 +55,7 @@ pub mod pyi_loader; // 8-pyi.B (v0.9.57) — auto pickup of adjacent .pyi stubs
 pub mod pyi_stub; // pyi-stubs (v0.9.39) — .pyi parser (PEP 484/561 subset)
 pub mod rand; // FITZ-01 (2026-08) — `rand.*` (CSPRNG) + `rand.seeded(N)` (reproducible)
 pub mod smtp; // Mini-tanda SMTP builtin (2026-06-19) — outbound `smtp.send(opts)`
+pub mod static_files; // FITZ-02 (2026-08) — shared pure logic for `@server(static_dir=...)` serving
 pub mod templates; // Phase 4 Y-B, Session 1.c — `fitz new --template <name>` scaffolding
 pub mod testing; // Phase 9.z.2 — built-in testing (registry + @test + asserts)
 pub mod types; // Phase 5.2 — resolved type system + base checker

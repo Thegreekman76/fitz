@@ -107,6 +107,11 @@ pub fn generate_project(
     type_info: &crate::types::TypeInfo,
     dep_registry: crate::manifest::DepRegistry,
     flag_defaults: std::collections::BTreeMap<String, bool>,
+    // FITZ-02 — `--embed-static`: bake the `static_dir` assets into the
+    // binary with `include_bytes!` so it serves its own frontend with
+    // no directory on disk (distroless-friendly). Ignored if there is
+    // no `@server(static_dir=...)`.
+    embed_static: bool,
 ) -> Result<ProjectArtifacts, FitzError> {
     let raw_stem = src_path
         .file_stem()
@@ -389,6 +394,7 @@ pub fn generate_project(
         &python_imports,
         uses_flags,
         &flag_defaults,
+        embed_static,
     )?;
 
     Ok(ProjectArtifacts {
@@ -2311,6 +2317,76 @@ fn inject_getrandom_dep(toml: String) -> String {
 
 /// FITZ-03 — detects any `<module>.<field>(...)` call in the main program (used
 /// to gate module preludes like `fs`). Generic; walks the full AST.
+/// FITZ-02 — Walks `static_dir` recursively at build time and returns
+/// `(relative_key, absolute_path)` for every file, so the codegen can
+/// bake them with `include_bytes!` for `--embed-static`. The key uses
+/// forward slashes (matching the request path the handler looks up) and
+/// the absolute path uses forward slashes too (valid for `include_bytes!`
+/// on every platform, and avoids escaping backslashes in the emitted Rust
+/// literal). Sorted for reproducible output. `static_dir` is resolved
+/// relative to the build working directory (same semantics as the runtime
+/// serving path, which is relative to the process CWD).
+fn collect_static_assets(static_dir: &str) -> Result<Vec<(String, String)>, FitzError> {
+    let abs_root = std::fs::canonicalize(static_dir).map_err(|e| {
+        FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!("--embed-static: cannot read static_dir '{static_dir}': {e}"),
+        )
+    })?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut stack = vec![abs_root.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|e| {
+            FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0,
+                0,
+                format!(
+                    "--embed-static: cannot read directory '{}': {}",
+                    dir.display(),
+                    e
+                ),
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!("--embed-static: {e}"),
+                )
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let rel = path.strip_prefix(&abs_root).unwrap_or(&path);
+                let key = rel
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let mut abs = path.to_string_lossy().replace('\\', "/");
+                // Windows `canonicalize` returns a `\\?\` verbatim path
+                // (`//?/` once slashes are normalized). `include_bytes!`
+                // accepts it, but a clean drive path reads better in the
+                // generated source. Strip the prefix (UNC → `//`).
+                if let Some(rest) = abs.strip_prefix("//?/UNC/") {
+                    abs = format!("//{rest}");
+                } else if let Some(rest) = abs.strip_prefix("//?/") {
+                    abs = rest.to_string();
+                }
+                out.push((key, abs));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 fn program_calls_module(program: &Program, module: &str) -> bool {
     use crate::ast::StrPart;
     fn walk_expr(e: &Expr, module: &str, found: &mut bool) {
@@ -2540,6 +2616,217 @@ fn __fitz_fs_mkdir_all(path: &str) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| format!("fs.mkdir_all: `{}`: {}", path, e))
 }
 "#;
+
+/// FITZ-02 — pure static-serving helpers, mirrored **literally** from
+/// `src/static_files.rs` so `fitz build` produces byte-identical
+/// responses to `fitz run` (Content-Type table, ETag algorithm,
+/// HTTP-date, traversal check). Shared responder `__fitz_static_respond`
+/// handles the ETag / `If-None-Match` → 304 / `Cache-Control` /
+/// `Last-Modified` logic for both the disk and embed handlers. Uses
+/// only `std` + `axum` (already in scope for any HTTP program) — no
+/// extra deps.
+const STATIC_PRELUDE_HELPERS: &str = r##"
+fn __fitz_static_content_type(path: &str) -> &'static str {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let ext = match name.rsplit_once('.') {
+        Some((_, e)) if !e.is_empty() => e.to_ascii_lowercase(),
+        _ => return "application/octet-stream",
+    };
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" | "map" => "application/json",
+        "webmanifest" => "application/manifest+json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "bmp" => "image/bmp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "eot" => "application/vnd.ms-fontobject",
+        "wasm" => "application/wasm",
+        "txt" => "text/plain; charset=utf-8",
+        "md" => "text/markdown; charset=utf-8",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "csv" => "text/csv; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+fn __fitz_static_etag(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("\"{:016x}\"", h)
+}
+fn __fitz_static_safe_relative(rel: &str) -> bool {
+    if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
+        return false;
+    }
+    for comp in rel.split(['/', '\\']) {
+        if comp.is_empty() || comp == "." || comp == ".." || comp.contains('\0') {
+            return false;
+        }
+    }
+    true
+}
+fn __fitz_static_http_date(secs: u64) -> String {
+    const WDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (hh, mi, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let wd = (((days % 7) + 4) % 7 + 7) % 7;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+        WDAYS[wd as usize], d, MONTHS[(m - 1) as usize], y, hh, mi, ss
+    )
+}
+fn __fitz_static_inm_matches(header: &str, etag: &str) -> bool {
+    let etag_core = etag.trim().trim_start_matches("W/");
+    for candidate in header.split(',') {
+        let c = candidate.trim();
+        if c == "*" || c.trim_start_matches("W/") == etag_core {
+            return true;
+        }
+    }
+    false
+}
+fn __fitz_static_not_found() -> axum::response::Response {
+    let mut resp = axum::response::Response::new(axum::body::Body::from("404 Not Found"));
+    *resp.status_mut() = axum::http::StatusCode::NOT_FOUND;
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp
+}
+fn __fitz_static_respond(
+    rel: &str,
+    bytes: Vec<u8>,
+    headers: &axum::http::HeaderMap,
+    last_modified_secs: Option<u64>,
+) -> axum::response::Response {
+    let etag = __fitz_static_etag(&bytes);
+    if let Some(inm) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if __fitz_static_inm_matches(inm, &etag) {
+            let mut resp = axum::response::Response::new(axum::body::Body::empty());
+            *resp.status_mut() = axum::http::StatusCode::NOT_MODIFIED;
+            if let Ok(v) = axum::http::HeaderValue::try_from(etag.as_str()) {
+                resp.headers_mut().insert(axum::http::header::ETAG, v);
+            }
+            resp.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=3600"),
+            );
+            return resp;
+        }
+    }
+    let ct = __fitz_static_content_type(rel);
+    let mut resp = axum::response::Response::new(axum::body::Body::from(bytes));
+    *resp.status_mut() = axum::http::StatusCode::OK;
+    if let Ok(v) = axum::http::HeaderValue::try_from(ct) {
+        resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = axum::http::HeaderValue::try_from(etag.as_str()) {
+        resp.headers_mut().insert(axum::http::header::ETAG, v);
+    }
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("public, max-age=3600"),
+    );
+    if let Some(secs) = last_modified_secs {
+        if let Ok(v) = axum::http::HeaderValue::try_from(__fitz_static_http_date(secs).as_str()) {
+            resp.headers_mut().insert(axum::http::header::LAST_MODIFIED, v);
+        }
+    }
+    resp
+}
+"##;
+
+/// FITZ-02 — disk-serving handler (default `fitz build`). Reads from
+/// `__FITZ_STATIC_DIR__` (replaced at emission time with the configured
+/// dir), with the same traversal protection (`safe_relative` +
+/// canonicalize+containment) as the interpreter's `serve_static_from_disk`.
+const STATIC_PRELUDE_DISK_HANDLER: &str = r##"
+async fn __fitz_static_handler(
+    axum::extract::Path(rel): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if !__fitz_static_safe_relative(&rel) {
+        return __fitz_static_not_found();
+    }
+    let dir = std::path::PathBuf::from(__FITZ_STATIC_DIR__);
+    let candidate = dir.join(&rel);
+    let (canon_file, canon_dir) = match (candidate.canonicalize(), dir.canonicalize()) {
+        (Ok(f), Ok(d)) => (f, d),
+        _ => return __fitz_static_not_found(),
+    };
+    if !canon_file.starts_with(&canon_dir) || canon_file.is_dir() {
+        return __fitz_static_not_found();
+    }
+    let bytes = match std::fs::read(&canon_file) {
+        Ok(b) => b,
+        Err(_) => return __fitz_static_not_found(),
+    };
+    let last_modified_secs = std::fs::metadata(&canon_file)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    __fitz_static_respond(&rel, bytes, &headers, last_modified_secs)
+}
+"##;
+
+/// FITZ-02 — embed-serving handler (`fitz build --embed-static`). Serves
+/// from the `__FITZ_STATIC_ASSETS` table baked into the binary with
+/// `include_bytes!`. No disk access, no `Last-Modified` (there is no
+/// file mtime at runtime). `safe_relative` still rejects traversal, and
+/// a missing key is a plain 404.
+const STATIC_PRELUDE_EMBED_HANDLER: &str = r##"
+async fn __fitz_static_handler(
+    axum::extract::Path(rel): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if !__fitz_static_safe_relative(&rel) {
+        return __fitz_static_not_found();
+    }
+    let normalized = rel.replace('\\', "/");
+    match __FITZ_STATIC_ASSETS.iter().find(|(k, _)| *k == normalized) {
+        Some((_, bytes)) => __fitz_static_respond(&rel, bytes.to_vec(), &headers, None),
+        None => __fitz_static_not_found(),
+    }
+}
+"##;
 
 /// FITZ-04 — locale-aware number formatting helpers, emitted when the program
 /// uses `num.*`. Byte-identical to `src/num.rs` (paridad run↔build).
@@ -7888,6 +8175,9 @@ pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzErr
         &python_imports,
         uses_flags,
         &flag_defaults,
+        // FITZ-02 — the `generate_rust` test/helper path never embeds
+        // static assets (no CLI flag there).
+        false,
     )
 }
 
@@ -7998,6 +8288,7 @@ fn auto_register_relation_targets(
     synth
 }
 
+#[allow(clippy::too_many_arguments)] // 8 params: threading `embed_static` (FITZ-02)
 fn generate_main_rs(
     program: &Program,
     env: &TypeEnv,
@@ -8006,6 +8297,8 @@ fn generate_main_rs(
     python_imports: &[PythonImport],
     uses_flags: bool,
     flag_defaults: &std::collections::BTreeMap<String, bool>,
+    // FITZ-02 — `--embed-static`. See `generate_project`.
+    embed_static: bool,
 ) -> Result<String, FitzError> {
     // Phase 8.7.1 — Python imports are split out here and processed
     // as PyO3 bindings (they do NOT go to the loader). The validator
@@ -8139,6 +8432,9 @@ fn generate_main_rs(
     ctx.uses_date_or_uuid = uses_date_or_uuid;
     ctx.uses_http_client = uses_http_client;
     ctx.uses_smtp = uses_smtp;
+    // FITZ-02 — `--embed-static`. The dir/prefix/assets are filled in
+    // below from the parsed `@server(static_dir=...)` decorator.
+    ctx.embed_static = embed_static;
     // FITZ-01 — rand usage (main program; cross-module rand in codegen is a
     // follow-up). `uses_rand` gates the core prelude, `uses_rand_global` the
     // OS-entropy global RNG + getrandom.
@@ -8230,6 +8526,19 @@ fn generate_main_rs(
     ctx.pre_register_fns(program)?;
 
     let partitioned = partition_program_stmts(program)?;
+    // FITZ-02 — stash the static config parsed from `@server(...)` so
+    // `emit_static_prelude` and `gen_http_main` can consult it. When
+    // embedding, walk the directory now (build-time) and collect the
+    // assets to bake with `include_bytes!`.
+    if let Some(sc) = &partitioned.server_config {
+        if let Some(dir) = &sc.static_dir {
+            ctx.static_dir = Some(dir.clone());
+            ctx.static_prefix = sc.resolved_static_prefix();
+            if ctx.embed_static {
+                ctx.static_assets = collect_static_assets(dir)?;
+            }
+        }
+    }
     resolve_state_var_types(&mut ctx, program, &partitioned.main_stmts, env, has_http)?;
     emit_main_rs_body(&mut ctx, program, loader, &partitioned, has_http)?;
 
@@ -8814,6 +9123,9 @@ fn emit_main_rs_body(
     ctx.emit_rand_prelude();
     ctx.emit_fs_prelude();
     ctx.emit_num_prelude();
+    // FITZ-02 — static-serving prelude (`__fitz_static_*` + route
+    // builder). Only when `@server(static_dir=...)` is set.
+    ctx.emit_static_prelude();
     // Phase 10.1.c — `db` module prelude: opaque types
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + async helpers for connect/query/exec/close.
@@ -9517,6 +9829,16 @@ struct ServerConfigArgs {
     /// parallel to the runtime field
     /// `crate::http::ServerConfig::prometheus_enabled`.
     prometheus_enabled: bool,
+    /// FITZ-02 — directory to serve static files from
+    /// (`@server(static_dir="./public")`). `None` disables static
+    /// serving. Bit-for-bit parallel to the runtime field
+    /// `crate::http::ServerConfig::static_dir`.
+    static_dir: Option<String>,
+    /// FITZ-02 — URL prefix for static serving
+    /// (`@server(static_prefix="/static")`). Defaults to `/static` when
+    /// `static_dir` is set but no prefix. Bit-for-bit parallel to the
+    /// runtime field `crate::http::ServerConfig::static_prefix`.
+    static_prefix: Option<String>,
 }
 
 impl Default for ServerConfigArgs {
@@ -9530,6 +9852,33 @@ impl Default for ServerConfigArgs {
             shutdown_timeout_secs: 30,
             observability_enabled: true,
             prometheus_enabled: false,
+            static_dir: None,
+            static_prefix: None,
+        }
+    }
+}
+
+impl ServerConfigArgs {
+    /// FITZ-02 — normalizes the static URL prefix the same way the
+    /// runtime `ServerConfig::resolved_static_prefix` does: starts with
+    /// `/`, no trailing `/` (except root `/`), default `/static`.
+    fn resolved_static_prefix(&self) -> String {
+        let raw = self
+            .static_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/static");
+        let with_lead = if raw.starts_with('/') {
+            raw.to_string()
+        } else {
+            format!("/{raw}")
+        };
+        let trimmed = with_lead.trim_end_matches('/');
+        if trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            trimmed.to_string()
         }
     }
 }
@@ -9793,18 +10142,79 @@ fn parse_server_decorator(
                     ));
                 }
             },
+            // FITZ-02 — bit-for-bit parallel to the interpreter runtime
+            // kwargs. `static_dir` enables static serving; `static_prefix`
+            // (default "/static") is the URL prefix.
+            "static_dir" => match value_expr {
+                Expr::Str(s, _) if !s.is_empty() => {
+                    cfg.static_dir = Some(s.clone());
+                }
+                Expr::Str(_, _) => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        "@server: kwarg 'static_dir' cannot be an empty string".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: kwarg 'static_dir' must be a Str literal, received {:?}",
+                            value_expr
+                        ),
+                    ));
+                }
+            },
+            "static_prefix" => match value_expr {
+                Expr::Str(s, _) if !s.is_empty() => {
+                    cfg.static_prefix = Some(s.clone());
+                }
+                Expr::Str(_, _) => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        "@server: kwarg 'static_prefix' cannot be an empty string".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: kwarg 'static_prefix' must be a Str literal, received {:?}",
+                            value_expr
+                        ),
+                    ));
+                }
+            },
             other => {
                 return Err(FitzError::new(
                     ErrorKind::TypeError,
                     0,
                     0,
                     format!(
-                        "@server: unrecognized kwarg '{}'. Supported: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
+                        "@server: unrecognized kwarg '{}'. Supported: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus, static_dir, static_prefix.",
                         other
                     ),
                 ));
             }
         }
+    }
+    // FITZ-02 — `static_prefix` without `static_dir` does nothing.
+    if cfg.static_prefix.is_some() && cfg.static_dir.is_none() {
+        return Err(FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            "@server: kwarg 'static_prefix' requires 'static_dir' (nothing to serve without a directory)."
+                .to_string(),
+        ));
     }
     Ok(cfg)
 }
@@ -10423,6 +10833,17 @@ struct CodegenCtx<'a> {
     uses_fs: bool,
     /// FITZ-04 — `true` if the program uses any `num.*` (gates the `num` prelude).
     uses_num: bool,
+    /// FITZ-02 — static file serving. `static_dir`/`static_prefix` come
+    /// from `@server(static_dir=..., static_prefix=...)`; `embed_static`
+    /// from `fitz build --embed-static`. When `static_dir` is `Some`,
+    /// `emit_static_prelude` emits the `__fitz_static_*` handler and
+    /// `gen_http_main` merges the route. When `embed_static` is true,
+    /// `static_assets` holds `(relative_key, absolute_path)` pairs baked
+    /// into the binary with `include_bytes!`.
+    embed_static: bool,
+    static_dir: Option<String>,
+    static_prefix: String,
+    static_assets: Vec<(String, String)>,
     /// `true` if the program calls the `to_json(x) -> Str` builtin.
     /// Enables emission of `JSON_SERIALIZE_PRELUDE` (the axum-free
     /// serialization core) + per-type `impl __ToFitzJson` even without
@@ -10715,6 +11136,10 @@ impl<'a> CodegenCtx<'a> {
             uses_rand_global: false,
             uses_fs: false,
             uses_num: false,
+            embed_static: false,
+            static_dir: None,
+            static_prefix: "/static".to_string(),
+            static_assets: Vec::new(),
             uses_to_json: false,
             cron_jobs_info: Vec::new(),
             every_jobs_info: Vec::new(),
@@ -12754,6 +13179,54 @@ impl __FitzRetryConfig {
             self.emit(NUM_PRELUDE);
             self.emit("\n");
         }
+    }
+
+    /// FITZ-02 — emits the static-serving prelude when the program has
+    /// `@server(static_dir=...)`. Always emits the shared pure helpers,
+    /// then either the disk handler (dir baked in) or the embed handler
+    /// (`__FITZ_STATIC_ASSETS` map baked in with `include_bytes!`), then
+    /// the `__fitz_static_route()` builder that `gen_http_main` merges.
+    fn emit_static_prelude(&mut self) {
+        let Some(dir) = self.static_dir.clone() else {
+            return;
+        };
+        let prefix = self.static_prefix.clone();
+        let route_pattern = if prefix == "/" {
+            "/{*fitz_static_path}".to_string()
+        } else {
+            format!("{}/{{*fitz_static_path}}", prefix)
+        };
+
+        self.emit(STATIC_PRELUDE_HELPERS);
+        self.emit("\n");
+
+        if self.embed_static {
+            let mut map = String::from("static __FITZ_STATIC_ASSETS: &[(&str, &[u8])] = &[\n");
+            for (key, abs) in &self.static_assets {
+                map.push_str(&format!(
+                    "    ({}, include_bytes!({})),\n",
+                    rust_str_literal(key),
+                    rust_str_literal(abs),
+                ));
+            }
+            map.push_str("];\n");
+            self.emit(&map);
+            self.emit(STATIC_PRELUDE_EMBED_HANDLER);
+            self.emit("\n");
+        } else {
+            self.emit(
+                &STATIC_PRELUDE_DISK_HANDLER
+                    .replace("__FITZ_STATIC_DIR__", &rust_str_literal(&dir)),
+            );
+            self.emit("\n");
+        }
+
+        self.emit(&format!(
+            "fn __fitz_static_route() -> axum::Router {{\n    \
+             axum::Router::new().route({}, axum::routing::get(__fitz_static_handler))\n}}\n",
+            rust_str_literal(&route_pattern),
+        ));
+        self.emit("\n");
     }
 
     /// `__fitz_db_runtime` (declared as `mod ... ;`) + aliases
@@ -36047,6 +36520,13 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             self.emit_indent();
             self.emit("    .merge(__fitz_prometheus_route())\n");
         }
+        // FITZ-02 — static file serving. Mount the wildcard route under
+        // the configured prefix. Exact system/user routes win over the
+        // `{*path}` wildcard by matchit precedence.
+        if self.static_dir.is_some() {
+            self.emit_indent();
+            self.emit("    .merge(__fitz_static_route())\n");
+        }
         self.emit_indent();
         self.emit(";\n");
 
@@ -43583,6 +44063,7 @@ async fn get_u(id: Int) -> Result<U> {
             &types_info,
             crate::manifest::DepRegistry::new(),
             std::collections::BTreeMap::new(),
+            false,
         )
         .expect("generate_project OK");
         // Look for utils.rs among the mod_files emitted by the loader.
@@ -44136,6 +44617,139 @@ async fn get_u(id: Int) -> Result<U> {
             cargo.contains("metrics-exporter-prometheus"),
             "Cargo.toml HTTP+Prometheus must include metrics-exporter-prometheus: {}",
             cargo
+        );
+    }
+
+    #[test]
+    fn fitz02_static_disk_emits_prelude_route_and_merge() {
+        // FITZ-02 — `@server(static_dir=...)` emits the static prelude
+        // (pure helpers + disk handler with the dir baked in + route
+        // builder) and `gen_http_main` merges `__fitz_static_route()`.
+        let src = "@get(\"/x\")\nfn h() -> Str => \"ok\"\n\
+                   @server(3000, static_dir=\"./public\")\nfn main() => 0\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
+        assert!(
+            code.contains("fn __fitz_static_route() -> axum::Router"),
+            "expected the static route builder: {}",
+            code
+        );
+        assert!(
+            code.contains("async fn __fitz_static_handler("),
+            "expected the static handler: {}",
+            code
+        );
+        assert!(
+            code.contains("std::path::PathBuf::from(\"./public\")"),
+            "expected the disk dir baked into the handler: {}",
+            code
+        );
+        assert!(
+            code.contains("/static/{*fitz_static_path}"),
+            "expected the default /static wildcard route pattern: {}",
+            code
+        );
+        assert!(
+            code.contains(".merge(__fitz_static_route())"),
+            "expected the static route merged into the Router: {}",
+            code
+        );
+        assert!(
+            code.contains("fn __fitz_static_content_type("),
+            "expected the shared content-type helper: {}",
+            code
+        );
+        // No embed table in the default (non-embed) build.
+        assert!(
+            !code.contains("__FITZ_STATIC_ASSETS"),
+            "the non-embed build must NOT bake an asset table: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn fitz02_static_custom_prefix_root_and_path() {
+        // FITZ-02 — a custom prefix bakes into the route pattern; `/`
+        // (root) serves at the root wildcard.
+        let custom = gen("@get(\"/x\")\nfn h() -> Str => \"ok\"\n\
+                          @server(3000, static_dir=\"assets\", static_prefix=\"/files\")\nfn main() => 0\n")
+        .unwrap();
+        assert!(
+            custom.contains("/files/{*fitz_static_path}"),
+            "custom prefix should bake into the route: {}",
+            custom
+        );
+        let root = gen("@get(\"/x\")\nfn h() -> Str => \"ok\"\n\
+                        @server(3000, static_dir=\"pub\", static_prefix=\"/\")\nfn main() => 0\n")
+        .unwrap();
+        assert!(
+            root.contains("\"/{*fitz_static_path}\""),
+            "root prefix should serve at the root wildcard: {}",
+            root
+        );
+    }
+
+    #[test]
+    fn fitz02_no_static_dir_emits_no_static_prelude() {
+        // FITZ-02 — a plain HTTP program without `static_dir` must be
+        // byte-compatible: no static prelude, no route merge.
+        let code =
+            gen("@get(\"/x\")\nfn h() -> Str => \"ok\"\n@server(3000)\nfn main() => 0\n").unwrap();
+        assert!(
+            !code.contains("__fitz_static_route"),
+            "no static prelude without static_dir: {}",
+            code
+        );
+        assert!(
+            !code.contains(".merge(__fitz_static_route())"),
+            "no static route merge without static_dir: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn fitz02_static_prefix_without_dir_is_an_error() {
+        // FITZ-02 — `static_prefix` without `static_dir` is rejected.
+        let err = gen("@server(3000, static_prefix=\"/x\")\nfn main() => 0\n")
+            .expect_err("expected an error");
+        assert!(
+            err.to_string().contains("static_prefix"),
+            "error should mention static_prefix: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fitz02_collect_static_assets_walks_and_sorts() {
+        // FITZ-02 — the build-time asset walker returns sorted
+        // (relative_key, absolute_path) pairs with forward-slash keys.
+        let dir = std::env::temp_dir().join("fitz02-collect-unit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("css")).unwrap();
+        std::fs::write(dir.join("index.html"), b"<h1>hi</h1>").unwrap();
+        std::fs::write(dir.join("css/app.css"), b"body{}").unwrap();
+        let assets = collect_static_assets(dir.to_str().unwrap()).expect("walk OK");
+        let keys: Vec<&str> = assets.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["css/app.css", "index.html"],
+            "sorted forward-slash keys"
+        );
+        assert!(
+            assets.iter().all(|(_, abs)| !abs.contains('\\')),
+            "absolute paths use forward slashes: {:?}",
+            assets
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fitz02_collect_static_assets_missing_dir_is_error() {
+        let err =
+            collect_static_assets("this/dir/does/not/exist/fitz02").expect_err("expected an error");
+        assert!(
+            err.to_string().contains("static_dir"),
+            "error should cite the static_dir: {}",
+            err
         );
     }
 
@@ -49129,6 +49743,7 @@ async fn get_u(id: Int) -> Result<U> {
             &types_info,
             crate::manifest::DepRegistry::new(),
             std::collections::BTreeMap::new(),
+            false,
         )
         .unwrap();
         assert!(
@@ -49162,6 +49777,7 @@ async fn get_u(id: Int) -> Result<U> {
             &types_info,
             crate::manifest::DepRegistry::new(),
             std::collections::BTreeMap::new(),
+            false,
         )
         .unwrap();
         assert!(

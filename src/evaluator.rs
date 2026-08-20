@@ -1863,14 +1863,62 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
+            // FITZ-02 — static file serving. `static_dir` (required to
+            // enable) is the directory served from disk, relative to
+            // the process working directory. `static_prefix` (optional,
+            // default "/static") is the URL prefix.
+            "static_dir" => match value_expr {
+                Expr::Str(s, _) if !s.is_empty() => {
+                    config.static_dir = Some(s.clone());
+                }
+                Expr::Str(_, _) => {
+                    return Err(err(format!(
+                        "@server on fn '{}': kwarg 'static_dir' cannot be an empty string",
+                        fn_name,
+                    )));
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server on fn '{}': kwarg 'static_dir' must be Str literal, received {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
+            "static_prefix" => match value_expr {
+                Expr::Str(s, _) if !s.is_empty() => {
+                    config.static_prefix = Some(s.clone());
+                }
+                Expr::Str(_, _) => {
+                    return Err(err(format!(
+                        "@server on fn '{}': kwarg 'static_prefix' cannot be an empty string",
+                        fn_name,
+                    )));
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server on fn '{}': kwarg 'static_prefix' must be Str literal, received {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
             other => {
                 return Err(err(format!(
                     "@server on fn '{}': kwarg '{}' not recognized. \
-                     Supported: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
+                     Supported: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus, static_dir, static_prefix.",
                     fn_name, other,
                 )));
             }
         }
+    }
+
+    // FITZ-02 — a `static_prefix` without a `static_dir` does nothing;
+    // flag it as a likely mistake instead of silently ignoring it.
+    if config.static_prefix.is_some() && config.static_dir.is_none() {
+        return Err(err(format!(
+            "@server on fn '{}': kwarg 'static_prefix' requires 'static_dir' \
+             (there is nothing to serve without a directory).",
+            fn_name,
+        )));
     }
 
     if let Err(existing) = set_server_config(config) {

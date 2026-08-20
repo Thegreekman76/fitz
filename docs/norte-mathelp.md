@@ -67,7 +67,7 @@ Filas `FLV-*` viven en `fitz-liveviews/docs/norte-mathelp.md`.
 | 6  | FITZ-05  | API de cookies (`@cookie` + `Response.cookies`) | Ya resuelto | Alto        | M     | Bajo   | —                    |
 | 7  | FITZ-03  | Módulo `fs`                             | Confirmado          | Alto        | M     | Bajo   | habilita **T1**      |
 | 8  | FITZ-04  | Formateo de números con locale          | Parcial (paridad OK)| Alto        | M     | Bajo   | **T1**               |
-| 11 | FITZ-02  | Servido de estáticos (`@server(static_dir=)`) | Confirmado    | Medio       | M     | Bajo   | habilita **T3**      |
+| 11 | FITZ-02  | Servido de estáticos (`@server(static_dir=)`) | Ya resuelto   | Medio       | M     | Bajo   | habilita **T3**      |
 | 13 | FITZ-13  | `Map.remove` `[antes FITZ-09]`          | Ya resuelto         | Medio       | S     | Bajo   | **desbloquea FLV-03**|
 | 19 | FITZ-06  | `.preload()` en el intérprete (error claro) | Ya resuelto (MVP)| Medio       | M     | Bajo   | **T2**               |
 | 20 | FITZ-07  | `.is_in(<var>)` → `= ANY($n)`           | Ya resuelto         | Bajo        | S     | Bajo   | —                    |
@@ -392,8 +392,24 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-02 · Servido de archivos estáticos
 
-- [ ] Implementado
-- **Estado:** Confirmado.
+- [x] Implementado (2026-08-20, v0.51.0) — `@server(port, static_dir="./public", static_prefix="/static")`
+  con módulo compartido `src/static_files.rs` (Content-Type por extensión, ETag basado en
+  contenido, HTTP-date, `is_safe_relative`), intérprete (`src/http.rs`: handler wildcard bajo el
+  prefijo, `If-None-Match` → 304, Cache-Control, Last-Modified, path-traversal bloqueado
+  lexical + canonicalize+containment), y **codegen con paridad bit-a-bit** (`STATIC_PRELUDE_*`
+  con handler de disco Y de embed, `.merge(__fitz_static_route())`; los `__fitz_static_*` mirror
+  literal de `static_files.rs`). Flag `fitz build --embed-static` hornea los assets en el binario
+  con `include_bytes!` → sirve su propio frontend sin el dir en disco (distroless). Checker sin
+  cambios (`@server` es opaco al checker). LSP completion de `@server` cita los kwargs nuevos.
+  Guía cap 17 "Archivos estáticos" + nota deployment distroless + ejemplo `17m-static.fitz`.
+  Tests: 8 unit `static_files` + 2 unit http (`resolved_static_prefix`/`if_none_match_matches`)
+  + 6 unit codegen (prelude/route/embed/collect) + 2 E2E (`fitz02_static_disk_parity_content_type_etag_304_traversal`
+  paridad run↔build + 304 + traversal + missing + user-route; `fitz02_embed_static_serves_without_dir_on_disk`).
+  Validado a mano con curl: `fitz run`, `fitz build` (disco, ETag bit-a-bit), `fitz build --embed-static`
+  (sin `public/`). **Cierra Hito 3/4 entero. Habilita T3 (PWA instalable).** MVP: sin
+  directory index (un dir → 404); embed sin Last-Modified (no hay mtime en memoria); assets
+  resueltos relativos al working dir del proceso (runtime) / del build (embed).
+- **Estado:** Ya resuelto.
 - **Evidencia:** `src/evaluator.rs:1573-1744` (allowlist cerrada de kwargs de `@server`, error en `:1740`);
   grep `ServeDir|static_dir|@static` → 0. Boilerplates fullstack con nginx aparte
   (`boilerplates/taskhub/docker-compose.yml:92-101`).
@@ -580,8 +596,9 @@ cazado las tres solo. Un lenguaje que a veces se comporta distinto al compilar e
 FITZ-09, FITZ-10, FITZ-06 (los bugs) + FITZ-14 (la red).
 
 ### T3 · Mobile como ciudadano de primera
-Del lado de **fitz core**: **FITZ-02** (static → `manifest.webmanifest` → instalable). El resto (reconnect,
-viewport, touch, cards) vive en fitz-liveviews (`FLV-04`, `FLV-01`, `FLV-05`; `FLV-06` ya resuelto).
+Del lado de **fitz core**: **FITZ-02** (static → `manifest.webmanifest` → instalable) — **cerrado en
+v0.51.0**. El resto (reconnect, viewport, touch, cards) vive en fitz-liveviews (`FLV-04`, `FLV-01`,
+`FLV-05`; `FLV-06` ya resuelto).
 
 ---
 
@@ -595,9 +612,9 @@ protegidos. `FITZ-09` además destraba el binario nativo de todo lo que use fitz
 **Hito 2 — Deployment desbloqueado + login zero-JS + i18n correcto.**
 `FITZ-11 (git en la imagen, 1 línea)` + `FITZ-05 (cookies)` + `FITZ-03 (fs)` + `FITZ-04 (locale num)`.
 
-**Hito 3 — Mobile + eviction.**
-`FITZ-02 (static → T3)` + `FITZ-13 (Map.remove → desbloquea FLV-03)`. (Los quick wins de liveviews van
-en su propio hito — ver archivo hermano.)
+**Hito 3 — Mobile + eviction.** ✅ CERRADO (v0.50.0 + v0.51.0)
+`FITZ-02 (static → T3)` **[v0.51.0]** + `FITZ-13 (Map.remove → desbloquea FLV-03)` **[v0.50.0]**. (Los
+quick wins de liveviews van en su propio hito — ver archivo hermano.)
 
 **Hito 4 — Robustez y ruido.**
 `FITZ-06 (preload en intérprete o error claro)` + `FITZ-07 (is_in var)` + `FITZ-12 (paréntesis)`.
@@ -634,7 +651,7 @@ en su propio hito — ver archivo hermano.)
 | Cookie de sesión/idioma | `cookies.fitz` (`set_cookie`/`read_cookie`) copiado del admin | FITZ-05 | Fácil |
 | Números es-AR | `fmt.fitz` con la firma de `num.format`/`num.percent`/`num.currency`. **Ningún número crudo en la UI** | FITZ-04 | Fácil |
 | Catálogos i18n | `locale_<code>.fitz` generados por script desde JSON | FITZ-03 | Fácil |
-| Assets estáticos | `assets.fitz` con un `@get` por archivo | FITZ-02 | Medio |
+| ~~Assets estáticos~~ ✅ | ~~`assets.fitz` con un `@get` por archivo~~ → `@server(static_dir=)` (v0.51.0) | FITZ-02 | — |
 | `is_in` con lista calculada | `db.query(... = ANY($1))` crudo, aislado en una función | FITZ-07 | Trivial |
 | `List<Any>` inferido | anotar `let xs: List<Str> = []` | FITZ-10 | Trivial |
 
