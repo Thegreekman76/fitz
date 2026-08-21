@@ -2974,9 +2974,7 @@ mod tests {
         {
             conds.push(cond_raw.clone());
             match else_children {
-                Some(kids)
-                    if kids.len() == 1 && matches!(&kids[0], TemplateNode::If { .. }) =>
-                {
+                Some(kids) if kids.len() == 1 && matches!(&kids[0], TemplateNode::If { .. }) => {
                     node = &kids[0];
                 }
                 _ => break,
