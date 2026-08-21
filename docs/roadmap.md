@@ -2,6 +2,16 @@
 
 ---
 
+## v0.56.0 — Codegen: map literal `Map<Str,Any>` no-vacío en top-level de módulo ✅ CERRADO (2026-08-21)
+
+**Hito**: cierra el residual conocido de v0.55, la última pieza del dogfooding de MatHelp. Un `let STORE: Map<Str, Any> = { "k": 10 }` (literal no-vacío) en el top-level de un módulo no compilaba: `gen_module_top_let` emitía el literal vía `gen_expr` sin el hint de la anotación → `Vec<(String, i64)>`, y `coerce` no tiene un arm `Map<K,V>→Map<K,Any>` que envuelva las entradas → `E0308`.
+
+Fix (`src/codegen.rs`, `gen_module_top_let`): resuelve la anotación antes de la RHS y, si es `Map<_, Any>`/`Nullable<Map<_, Any>>`, pasa el hint a `gen_map_lit_with_hint` (paralelo a `gen_assign`), emitiendo `Vec<(__FitzValue, __FitzValue)>`.
+
+**Verificación pre-bump**: fmt + clippy (default + lsp) limpios, lib **4195**, smoke `GUIDE_EXAMPLES_COMPILE` verde, 1 E2E nuevo. Bump Cargo.toml `0.55.0` → `0.56.0` + extensión VSCode. **Cierra el bloque de bugs de codegen del dogfooding de MatHelp** (v0.53 `@cookie`@`@ws`, v0.54 cookies cross-module, v0.55 `.keys()`, v0.56 map literal).
+
+---
+
 ## v0.55.0 — Codegen: `Map<Str,Any>.keys()`/`.values()` desenvuelve el lado concreto ✅ CERRADO (2026-08-21)
 
 **Hito**: cierra un bug de codegen descubierto **dogfooding MatHelp** al bumpear fitz-liveviews a v0.50.0. `dispatch_to_all` (FLV-08) itera `Map<Str,Any>.keys()` + `.starts_with`; como `Map<Str,Any>` se representa `Vec<(__FitzValue,__FitzValue)>`, `.keys()` emitía keys `__FitzValue` → `E0599`/`E0308`. Rompía el build nativo de cualquier proyecto con liveviews v0.50. Misma familia Any-no-coercionado.

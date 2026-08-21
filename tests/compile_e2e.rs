@@ -15053,6 +15053,42 @@ fn count_prefixed(prefix: Str) -> Int {
 }
 
 #[test]
+fn v055_nonempty_map_str_any_literal_at_module_top_level() {
+    // v0.55.0 residual (found dogfooding MatHelp) — a NON-EMPTY `Map<Str, Any>`
+    // literal at a module's top level (`let STORE: Map<Str, Any> = { "k": 10 }`)
+    // was emitted via `gen_expr` WITHOUT the annotation hint, so it produced
+    // `Vec<(String, i64)>` and then relied on `coerce` (no `Map<K,V>→Map<K,Any>`
+    // arm that wraps entries) → rustc E0308 (`expected __FitzValue, found
+    // String/i64`). Fix: `gen_module_top_let` resolves the annotation first and
+    // passes it as a hint to `gen_map_lit_with_hint` (parallel to `gen_assign`),
+    // emitting `Vec<(__FitzValue, __FitzValue)>`. Exercises the literal fix + the
+    // `.keys()` unwrap together.
+    let main = "\
+from store import count_prefixed
+print(count_prefixed(\"board:\"))
+";
+    let store = "\
+let STORE: Map<Str, Any> = { \"board:1\": 10, \"board:2\": 20, \"chip:9\": 5 }
+fn count_prefixed(prefix: Str) -> Int {
+    let n = 0
+    for key in STORE.keys() {
+        if (key.starts_with(prefix)) {
+            n = n + 1
+        }
+    }
+    return n
+}
+";
+    let (out, code) = build_and_run_multi(
+        "v055-nonempty-map-str-any-literal",
+        main,
+        &[("store.fitz", store)],
+    );
+    assert_eq!(code, 0, "binary should exit 0, out:\n{out}");
+    assert_eq!(out.trim(), "2", "should count the 2 `board:`-prefixed keys");
+}
+
+#[test]
 fn v019_response_in_result_ok_signature_matches_wrapper() {
     // Bug 2 — When the user-fn returns `Result<Response>` and uses
     // `?` propagation, the codegen falls into the legacy `response_mode`

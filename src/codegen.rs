@@ -18059,18 +18059,46 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             ));
         };
 
-        // Generate the RHS Rust code without emitting it yet.
-        // This gives us the inferred Fitz type and the
-        // expression's Rust code to use in the const/fn.
-        let (rhs_code, rhs_ty) = self.gen_expr(value)?;
-
-        let declared_ty = match type_ {
-            Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
+        // Resolve the declared type FIRST so a `Map<_, Any>` annotation can
+        // hint the map-literal codegen (parallel to `gen_assign`). Without the
+        // hint, a module-level `let X: Map<Str, Any> = { "k": 10 }` emits
+        // `Vec<(String, i64)>` and then relies on `coerce` — which has no
+        // `Map<K,V> → Map<K,Any>` arm that wraps entries in `__FitzValue` → rustc
+        // E0308. The hint makes `gen_map_lit_with_hint` emit
+        // `Vec<(__FitzValue, __FitzValue)>` directly. (v0.55 residual, found
+        // dogfooding MatHelp.)
+        let declared_ty_opt: Option<Type> = match type_ {
+            Some(t) => Some(resolve_type_expr(t, self.env).map_err(|e| {
                 self.err_at(
                     value.span(),
                     format!("let `{}`: annotation: {}", name, e.message),
                 )
-            })?,
+            })?),
+            None => None,
+        };
+
+        // Generate the RHS Rust code without emitting it yet.
+        // This gives us the inferred Fitz type and the
+        // expression's Rust code to use in the const/fn.
+        let (rhs_code, rhs_ty) = match (value, &declared_ty_opt) {
+            (Expr::Map(pairs, span), Some(Type::Map(_, hv)))
+                if matches!(hv.as_ref(), Type::Any) =>
+            {
+                self.gen_map_lit_with_hint(pairs, *span, declared_ty_opt.as_ref())?
+            }
+            (Expr::Map(pairs, span), Some(Type::Nullable(inner)))
+                if matches!(
+                    inner.as_ref(),
+                    Type::Map(_, ref v) if matches!(v.as_ref(), Type::Any)
+                ) =>
+            {
+                self.gen_map_lit_with_hint(pairs, *span, declared_ty_opt.as_ref())?
+            }
+            _ => self.gen_expr(value)?,
+        };
+
+        let declared_ty = match &declared_ty_opt {
+            Some(t) => t.clone(),
             None => rhs_ty.clone(),
         };
 

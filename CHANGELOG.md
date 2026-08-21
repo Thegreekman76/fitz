@@ -9,6 +9,36 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.56.0] — 2026-08-21 — Codegen: map literal `Map<Str,Any>` no-vacío en top-level de módulo (cierra el residual de v0.55)
+
+Cierra el residual conocido de v0.55 — la última pieza del dogfooding de MatHelp.
+Un map literal `Map<Str, Any>` **no-vacío** en el top-level de un módulo
+(`let STORE: Map<Str, Any> = { "k": 10 }`) no compilaba con `fitz build`:
+`gen_module_top_let` emitía el literal vía `gen_expr` SIN el hint de la
+anotación, produciendo `Vec<(String, i64)>` (el tipo inferido del literal), y
+después confiaba en `coerce` — que no tiene un arm `Map<K,V> → Map<K,Any>` que
+envuelva las entradas → rustc `E0308` (`expected __FitzValue, found String/i64`).
+Los `let` locales (vía `gen_assign`) y los maps construidos vacíos + `m[k] = v`
+no lo sufrían.
+
+### Fixed
+- **`gen_module_top_let`** resuelve la anotación ANTES de generar la RHS y, si es
+  `Map<_, Any>` (o `Nullable<Map<_, Any>>`), pasa el hint a
+  `gen_map_lit_with_hint` (paralelo a `gen_assign`), que emite
+  `Vec<(__FitzValue, __FitzValue)>` con las entradas envueltas. El import
+  cross-module de `__FitzValue` lo cubre el content-scan.
+
+### Notes
+- Test: `v055_nonempty_map_str_any_literal_at_module_top_level` (el patrón EXACTO
+  que falló primero: literal no-vacío top-level de módulo + `.keys()` +
+  `.starts_with`, corre y cuenta bien).
+- Verificación pre-bump: fmt + clippy (default + lsp) limpios, lib **4195**,
+  smoke `GUIDE_EXAMPLES_COMPILE` verde. Sin cambios de LSP/grammar. Bump
+  Cargo.toml 0.55.0 → 0.56.0 + extensión VSCode.
+- **Cierra el bloque de bugs de codegen encontrados dogfoodeando MatHelp**:
+  `@cookie` sobre `@ws` (v0.53), cookies cross-module (v0.54), `Map<Str,Any>.keys()`
+  (v0.55) y map literal `Map<Str,Any>` no-vacío (v0.56).
+
 ## [v0.55.0] — 2026-08-21 — Codegen: `Map<Str,Any>.keys()`/`.values()` desenvuelve el lado concreto (destraba liveviews v0.50 nativo)
 
 Cierra un bug de codegen (`fitz build`) **descubierto haciendo dogfooding de
