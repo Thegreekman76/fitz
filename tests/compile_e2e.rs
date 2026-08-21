@@ -14957,12 +14957,61 @@ fn rss_feed() -> Response => Response {
         feed_rs.display()
     );
     let emitted = std::fs::read_to_string(&feed_rs).expect("read feed.rs");
+    // v0.53.0 — the import list grew to include `Cookie, CookieData` (the
+    // cross-module cookie fix), so match the names rather than the exact set.
     assert!(
-        emitted.contains("use crate::{Response, ResponseData};")
-            || emitted.contains("use crate::Response;")
-                && emitted.contains("use crate::ResponseData;"),
-        "expected `use crate::{{Response, ResponseData}};` in emitted feed.rs, got:\n{}",
+        emitted.contains("use crate::{Response, ResponseData")
+            || (emitted.contains("use crate::Response;")
+                && emitted.contains("use crate::ResponseData;")),
+        "expected `use crate::{{Response, ResponseData, ...}};` in emitted feed.rs, got:\n{}",
         emitted
+    );
+}
+
+#[test]
+fn v053_response_cookies_cross_module_emits_serialize_import() {
+    // FITZ-05 FASE B cross-module (2026-08-21, found dogfooding MatHelp) — a
+    // module whose handler returns `Response { cookies: [...] }` emits the
+    // `Response`→axum conversion, whose cookie loop calls
+    // `__fitz_serialize_set_cookie`. That helper lives in main.rs's HTTP
+    // prelude; before the fix it was a private `fn` and the module's `.rs`
+    // had no `use crate::__fitz_serialize_set_cookie;` → rustc E0425
+    // (`cannot find function`). Same family as W23 (`use crate::__FitzValue`).
+    // The fix makes the helper `pub(crate)` and imports it into modules that
+    // use the Response built-in. Exact shape that blocked MatHelp's native
+    // build (`src/assets.rs`).
+    let main = "\
+from pages import landing
+@server(43953) fn main() => 0
+";
+    let pages = "\
+@get(\"/\")
+fn landing() -> Response => Response {
+    content_type: \"text/html\",
+    body: \"<h1>hi</h1>\",
+    cookies: [ Cookie { name: \"lang\", value: \"es-AR\", max_age: 86400 } ],
+}
+";
+    let _dir = build_expect_ok_multi(
+        "v053-response-cookies-cross-module",
+        main,
+        &[("pages.fitz", pages)],
+    );
+    let stem = sanitize_stem("v053-response-cookies-cross-module");
+    let pages_rs = std::path::PathBuf::from("target")
+        .join("fitz-build")
+        .join(&stem)
+        .join("src")
+        .join("pages.rs");
+    assert!(
+        pages_rs.exists(),
+        "emitted pages.rs not found at {}",
+        pages_rs.display()
+    );
+    let emitted = std::fs::read_to_string(&pages_rs).expect("read pages.rs");
+    assert!(
+        emitted.contains("use crate::__fitz_serialize_set_cookie;"),
+        "expected `use crate::__fitz_serialize_set_cookie;` in emitted pages.rs"
     );
 }
 

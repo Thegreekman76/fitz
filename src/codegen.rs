@@ -7243,9 +7243,24 @@ fn generate_module_rs_with_bindings(
     // (the user-fn body might not literally name them).
     let module_uses_response_builtin_local = program_uses_response_builtin(program);
     if module_uses_response_builtin_local {
+        // FITZ-05 FASE B cross-module (2026-08-21) — a module that builds a
+        // `Response` emits its `Response`→axum conversion, whose cookie loop
+        // calls `__fitz_serialize_set_cookie` (the Set-Cookie serializer that
+        // lives in main.rs's HTTP prelude). Import it — the write-path twin of
+        // `__fitz_parse_cookie` above. Two gaps closed here:
+        //   #1 calling the serializer (any module returning a `Response`) →
+        //      `use crate::__fitz_serialize_set_cookie;` (else rustc E0425).
+        //   #2 building a `Cookie { ... }` literal in the module (e.g. a login
+        //      handler setting a session cookie) → `use crate::{Cookie,
+        //      CookieData};` with both `pub(crate)` in the prelude (else E0422
+        //      `cannot find struct CookieData`). A Response-only module never
+        //      names them (they flow anonymously via `ResponseData.cookies`),
+        //      so the extra imports are `#[allow(unused_imports)]`.
         ctx.emit(
             "#[allow(unused_imports)]\n\
-             use crate::{Response, ResponseData};\n\n",
+             use crate::{Response, ResponseData, Cookie, CookieData};\n\
+             #[allow(unused_imports)]\n\
+             use crate::__fitz_serialize_set_cookie;\n\n",
         );
     }
 
@@ -37725,18 +37740,18 @@ impl __ToFitzJson for ResponseData {
 /// `evaluator::register_builtins` / `types::register_http_builtin_types`.
 #[derive(Clone, PartialEq)]
 #[allow(dead_code)]
-struct CookieData {
-    name: String,
-    value: String,
-    path: String,
-    http_only: bool,
-    secure: bool,
-    same_site: String,
-    max_age: Option<i64>,
-    domain: Option<String>,
+pub(crate) struct CookieData {
+    pub(crate) name: String,
+    pub(crate) value: String,
+    pub(crate) path: String,
+    pub(crate) http_only: bool,
+    pub(crate) secure: bool,
+    pub(crate) same_site: String,
+    pub(crate) max_age: Option<i64>,
+    pub(crate) domain: Option<String>,
 }
 #[allow(dead_code)]
-type Cookie = std::sync::Arc<std::sync::Mutex<CookieData>>;
+pub(crate) type Cookie = std::sync::Arc<std::sync::Mutex<CookieData>>;
 
 impl std::fmt::Display for CookieData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -37781,7 +37796,7 @@ impl __ToFitzJson for CookieData {
 /// ↔ `fitz build`). Attribute order: name=value; Path; Domain;
 /// Max-Age; HttpOnly; Secure; SameSite.
 #[allow(dead_code)]
-fn __fitz_serialize_set_cookie(c: &CookieData) -> String {
+pub(crate) fn __fitz_serialize_set_cookie(c: &CookieData) -> String {
     let mut s = format!("{}={}", c.name, c.value);
     if !c.path.is_empty() {
         s.push_str("; Path=");

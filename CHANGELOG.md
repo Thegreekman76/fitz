@@ -9,6 +9,44 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.54.0] — 2026-08-21 — Codegen: cookies cross-module en `fitz build` (destraba el binario nativo de MatHelp)
+
+Cierra un bug de codegen (`fitz build`) **descubierto haciendo dogfooding de
+MatHelp**: un módulo importado que construye o serializa cookies no compilaba a
+binario nativo, aunque `fitz check`/`fitz run` pasaran. Misma familia que
+W23/W18/W11 (helper/tipo emitido en el crate root, módulo que lo usa sin el
+`use crate::...`). **No es regresión de v0.53.0** — es el path de *escritura*
+(`Response.cookies`), independiente del path de *lectura* WS que cerró v0.53.0.
+Destraba la deuda más pesada de MatHelp: correr el **binario nativo** en Docker
+(~9x perf + distroless) en vez del intérprete.
+
+### Fixed
+- **Cookies cross-module en `fitz build`** — dos gaps del path de escritura,
+  ambos en módulos importados que usan el built-in `Response`:
+  - **Gap #1 — llamar al serializador**: cualquier módulo cuyo handler retorna
+    un `Response` emite la conversión `Response`→axum, cuyo loop de cookies llama
+    `__fitz_serialize_set_cookie`. Ese helper vivía en el preludio HTTP del crate
+    root como `fn` privado y el `.rs` del módulo no lo importaba → rustc `E0425`
+    (`cannot find function`). Fix: el helper pasa a `pub(crate)` y se emite
+    `use crate::__fitz_serialize_set_cookie;` en los módulos que usan `Response`
+    (gemelo de escritura de `__fitz_parse_cookie`, que ya se importaba).
+  - **Gap #2 — construir un `Cookie { ... }` literal** en un módulo (p. ej. un
+    handler de login que setea la cookie de sesión) → rustc `E0422`
+    (`cannot find struct CookieData`). Fix: `struct CookieData` y `type Cookie`
+    (+ sus campos) pasan a `pub(crate)` y los módulos que usan `Response`
+    importan `use crate::{Response, ResponseData, Cookie, CookieData};`.
+
+### Notes
+- Tests: 1 E2E nuevo (`v053_response_cookies_cross_module_emits_serialize_import`,
+  módulo que retorna `Response { cookies: [Cookie {...}] }` importado por main) +
+  `v019_response_cross_module_emits_imports` reajustado al nuevo import.
+  **Validado end-to-end**: MatHelp (`d:\MathHelp`) ahora compila a binario nativo
+  (`fitz build` → `✓ mathelp.exe`), donde antes fallaba con el `E0425` de
+  `__fitz_serialize_set_cookie` en `src/assets.rs`.
+- Verificación pre-bump: fmt + clippy (default + lsp) limpios, lib verde,
+  smoke `GUIDE_EXAMPLES_COMPILE` verde. Sin cambios de LSP/grammar (fix interno
+  del codegen). Bump Cargo.toml 0.53.0 → 0.54.0 + extensión VSCode.
+
 ## [v0.53.0] — 2026-08-21 — FITZ-05 residual: `@cookie` sobre `@ws` (cierra la última deuda del backlog MatHelp)
 
 Cierra el residual de **FITZ-05** descubierto durante FLV-09 de fitz-liveviews:
