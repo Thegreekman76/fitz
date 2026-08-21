@@ -9,6 +9,41 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.55.0] — 2026-08-21 — Codegen: `Map<Str,Any>.keys()`/`.values()` desenvuelve el lado concreto (destraba liveviews v0.50 nativo)
+
+Cierra un bug de codegen (`fitz build`) **descubierto haciendo dogfooding de
+MatHelp** al bumpear fitz-liveviews a v0.50.0. Su `dispatch_to_all` (FLV-08,
+nuevo en v0.50) hace `for key in COMPONENT_STATE_STORE.keys()` sobre un
+`Map<Str, Any>` y llama `key.starts_with(...)`. Como un `Map<Str, Any>` se
+representa `Vec<(__FitzValue, __FitzValue)>`, `.keys()` emitía keys `__FitzValue`
+en vez de `Str` → rustc `E0599` (`no method starts_with`) / `E0308`. **Rompía el
+build nativo de cualquier proyecto con liveviews v0.50** (el codegen compila
+todas las fns del módulo, aunque no se usen).
+
+### Fixed
+- **`Map<K, Any>.keys()` / `Map<Any, V>.values()`** — cuando la rep del map es
+  `Vec<(__FitzValue, __FitzValue)>` (porque el OTRO lado es `Any`) pero ESTE lado
+  es un primitivo concreto, `.keys()`/`.values()` ahora desenvuelven cada
+  elemento a su tipo declarado (`__fv_to_string`/`_i64`/`_f64`/`_bool`), en vez
+  de emitir el `__FitzValue` crudo. Helper nuevo `fv_unwrap_expr`. Un lado `Any`
+  mantiene `.clone()` (es correctamente un `__FitzValue`); los maps totalmente
+  concretos (`Map<Str, Str>`, etc.) emiten byte-idéntico. Cross-module cubierto
+  por el content-scan que ya importa `__fv_to_*`.
+
+### Notes
+- Tests: 1 E2E nuevo `v055_map_str_any_keys_string_methods_in_module` (módulo con
+  `Map<Str, Any>` construido vacío + index-assign — el patrón de liveviews —
+  iterando `.keys()` con `.starts_with`, corre y cuenta bien). **Validado en el
+  caso real**: MatHelp compila a binario nativo contra liveviews v0.50.0 (antes
+  fallaba con el `E0599`/`E0308` de `dispatch_to_all`).
+- Verificación pre-bump: fmt + clippy (default + lsp) limpios, lib **4195**,
+  smoke `GUIDE_EXAMPLES_COMPILE` verde. Sin cambios de LSP/grammar. Bump
+  Cargo.toml 0.54.0 → 0.55.0 + extensión VSCode.
+- **Deuda residual conocida** (follow-up): un map literal `Map<Str, Any>`
+  **no-vacío** (`{ "k": 10 }`) no coacciona sus entradas a `__FitzValue`
+  (`E0308: expected __FitzValue, found String/i64`). liveviews lo evita
+  construyendo el store vacío + index-assign. Se cierra en un release aparte.
+
 ## [v0.54.0] — 2026-08-21 — Codegen: cookies cross-module en `fitz build` (destraba el binario nativo de MatHelp)
 
 Cierra un bug de codegen (`fitz build`) **descubierto haciendo dogfooding de

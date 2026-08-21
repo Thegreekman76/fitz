@@ -2,6 +2,16 @@
 
 ---
 
+## v0.55.0 — Codegen: `Map<Str,Any>.keys()`/`.values()` desenvuelve el lado concreto ✅ CERRADO (2026-08-21)
+
+**Hito**: cierra un bug de codegen descubierto **dogfooding MatHelp** al bumpear fitz-liveviews a v0.50.0. `dispatch_to_all` (FLV-08) itera `Map<Str,Any>.keys()` + `.starts_with`; como `Map<Str,Any>` se representa `Vec<(__FitzValue,__FitzValue)>`, `.keys()` emitía keys `__FitzValue` → `E0599`/`E0308`. Rompía el build nativo de cualquier proyecto con liveviews v0.50. Misma familia Any-no-coercionado.
+
+Fix en `src/codegen.rs` (arms `.keys()`/`.values()` de `Type::Map`): cuando la rep usa `__FitzValue` (k o v es Any) pero ESTE lado es primitivo concreto, se desenvuelve con `fv_unwrap_expr` (`__fv_to_string`/`_i64`/`_f64`/`_bool`). Lado `Any` mantiene `.clone()`; maps concretos byte-idénticos. Cross-module cubierto por el content-scan de `__fv_to_*`.
+
+**Verificación pre-bump**: fmt + clippy (default + lsp) limpios, lib **4195**, smoke `GUIDE_EXAMPLES_COMPILE` verde, 1 E2E nuevo, **MatHelp compila nativo contra liveviews v0.50.0**. Bump Cargo.toml `0.54.0` → `0.55.0` + extensión VSCode. Sin cambios de LSP/grammar. **Deuda residual (follow-up)**: map literal `Map<Str,Any>` no-vacío no coacciona entradas a `__FitzValue`.
+
+---
+
 ## v0.54.0 — Codegen: cookies cross-module en `fitz build` ✅ CERRADO (2026-08-21)
 
 **Hito**: cierra un bug de codegen descubierto haciendo **dogfooding de MatHelp** — un módulo importado que construye o serializa cookies no compilaba a binario nativo (aunque `fitz check`/`fitz run` pasaran). Misma familia que W23/W18/W11 (helper/tipo del crate root sin el `use crate::...` en el módulo). Destraba el binario nativo de MatHelp (~9x + distroless en Docker). **No es regresión de v0.53.0** — es el path de *escritura* (`Response.cookies`), independiente del path de *lectura* WS de v0.53.0.

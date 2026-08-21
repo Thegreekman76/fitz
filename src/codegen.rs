@@ -29407,19 +29407,40 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             (Type::Map(k, v), "has") => self.gen_map_has(&obj_code, k, v, args),
             // FITZ-13 — `remove(key) -> Bool` (true if the key existed).
             (Type::Map(k, v), "remove") => self.gen_map_remove(&obj_code, k, v, args),
-            (Type::Map(k, _), "keys") => {
+            (Type::Map(k, v), "keys") => {
                 check_method_arity(method, args, 0)?;
+                // v0.55.0 — when the map's rep is `Vec<(__FitzValue, __FitzValue)>`
+                // (k or v is Any) but the KEY is concrete, the tuple's `.0` is a
+                // `__FitzValue` wrapping the concrete key; unwrap it so callers
+                // that use the key as its real type (e.g. `key.starts_with(...)`
+                // on a `Map<Str, Any>`) compile.
+                let map_uses_fv = rust_type_for(k, self.env)? == "__FitzValue"
+                    || rust_type_for(v, self.env)? == "__FitzValue";
+                let key_expr = if map_uses_fv {
+                    fv_unwrap_expr("__k", k, self.env)
+                } else {
+                    "__k.clone()".to_string()
+                };
                 let code = format!(
-                    "Arc::new(Mutex::new(({}).lock().unwrap().iter().map(|(__k, _)| __k.clone()).collect::<Vec<_>>()))",
-                    obj_code
+                    "Arc::new(Mutex::new(({}).lock().unwrap().iter().map(|(__k, _)| {}).collect::<Vec<_>>()))",
+                    obj_code, key_expr
                 );
                 Ok((code, Type::List(Box::new((**k).clone()))))
             }
-            (Type::Map(_, v), "values") => {
+            (Type::Map(k, v), "values") => {
                 check_method_arity(method, args, 0)?;
+                // v0.55.0 — symmetric to `.keys()`: a concrete value side wrapped
+                // as `__FitzValue` (because the KEY is Any) gets unwrapped.
+                let map_uses_fv = rust_type_for(k, self.env)? == "__FitzValue"
+                    || rust_type_for(v, self.env)? == "__FitzValue";
+                let val_expr = if map_uses_fv {
+                    fv_unwrap_expr("__v", v, self.env)
+                } else {
+                    "__v.clone()".to_string()
+                };
                 let code = format!(
-                    "Arc::new(Mutex::new(({}).lock().unwrap().iter().map(|(_, __v)| __v.clone()).collect::<Vec<_>>()))",
-                    obj_code
+                    "Arc::new(Mutex::new(({}).lock().unwrap().iter().map(|(_, __v)| {}).collect::<Vec<_>>()))",
+                    obj_code, val_expr
                 );
                 Ok((code, Type::List(Box::new((**v).clone()))))
             }
@@ -40575,6 +40596,25 @@ fn narrow_null_check_codegen(
         return Some((name, (**inner).clone()));
     }
     None
+}
+
+/// v0.55.0 — unwraps a `__FitzValue` tuple element back to its declared
+/// concrete Fitz type. Used by `Map.keys()`/`.values()` when the map's
+/// runtime rep is `Vec<(__FitzValue, __FitzValue)>` (because the OTHER side is
+/// `Any`) but THIS side is a concrete primitive. Without the unwrap,
+/// `Map<Str, Any>.keys()` yields `__FitzValue` keys and string methods on them
+/// fail (rustc E0599 `no method starts_with` / E0308). Found dogfooding
+/// fitz-liveviews' `dispatch_to_all` (`for key in COMPONENT_STATE_STORE.keys()`
+/// over a `Map<Str, Any>`). Non-primitive / `Any` targets keep `.clone()`
+/// (an `Any` side IS a `__FitzValue`, which is correct).
+fn fv_unwrap_expr(elem: &str, ty: &Type, env: &TypeEnv) -> String {
+    match rust_type_for(ty, env).ok().as_deref() {
+        Some("i64") => format!("__fv_to_i64(&{elem})"),
+        Some("f64") => format!("__fv_to_f64(&{elem})"),
+        Some("String") => format!("__fv_to_string(&{elem})"),
+        Some("bool") => format!("__fv_to_bool(&{elem})"),
+        _ => format!("{elem}.clone()"),
+    }
 }
 
 fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {

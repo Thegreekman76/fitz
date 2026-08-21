@@ -15016,6 +15016,43 @@ fn landing() -> Response => Response {
 }
 
 #[test]
+fn v055_map_str_any_keys_string_methods_in_module() {
+    // v0.55.0 (found dogfooding fitz-liveviews' `dispatch_to_all`) — iterating
+    // `Map<Str, Any>.keys()` and calling a `Str` method (`.starts_with`) on the
+    // key must compile AND produce the right value. The map's runtime rep is
+    // `Vec<(__FitzValue, __FitzValue)>` (because the value is `Any`), so
+    // `.keys()` used to yield `__FitzValue` keys → rustc E0599 (`no method
+    // starts_with`) / E0308. The fix unwraps the concrete key type in `.keys()`
+    // (and imports `__fv_to_string` cross-module). Cross-module because the real
+    // case is in a liveviews module fn, not main.
+    let main = "\
+from store import count_prefixed
+print(count_prefixed(\"board:\"))
+";
+    // Built empty + index-assigned, exactly like fitz-liveviews'
+    // `COMPONENT_STATE_STORE` (avoids the separate non-empty `Map<Str, Any>`
+    // literal coercion, isolating the `.keys()` unwrap under test).
+    let store = "\
+fn count_prefixed(prefix: Str) -> Int {
+    let store: Map<Str, Any> = {}
+    store[\"board:1\"] = 10
+    store[\"board:2\"] = 20
+    store[\"chip:9\"] = 5
+    let n = 0
+    for key in store.keys() {
+        if (key.starts_with(prefix)) {
+            n = n + 1
+        }
+    }
+    return n
+}
+";
+    let (out, code) = build_and_run_multi("v055-map-str-any-keys", main, &[("store.fitz", store)]);
+    assert_eq!(code, 0, "binary should exit 0, out:\n{out}");
+    assert_eq!(out.trim(), "2", "should count the 2 `board:`-prefixed keys");
+}
+
+#[test]
 fn v019_response_in_result_ok_signature_matches_wrapper() {
     // Bug 2 — When the user-fn returns `Result<Response>` and uses
     // `?` propagation, the codegen falls into the legacy `response_mode`
