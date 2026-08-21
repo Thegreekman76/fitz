@@ -10790,18 +10790,22 @@ print(\"count={count()}\")\n\
         String::from_utf8_lossy(&output.stderr),
     );
 
-    // El `let ps` NO debe llevar la anotación degradada
-    // `Vec<__FitzValue>` — se omite para que Rust infiera el tipo
-    // concreto del RHS.
+    // FITZ-15 (v0.57) SUPERSEDE el workaround de omisión de W20: ahora el
+    // nominal `Patch` (leaf del ret type `List<Patch>` de la fn importada) se
+    // auto-registra (`auto_register_imported_fn_ret_nominals`), así que el
+    // codegen emite el tipo CONCRETO `Vec<Patch>` + el `use plib::{Patch,
+    // PatchData}`, en vez de omitir la anotación. La intención original de W20
+    // se mantiene intacta: nunca degradar a `Vec<__FitzValue>`. El binario
+    // corre igual (`count=2`).
     let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
     let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
     assert!(
-        content.contains("let mut ps = make_patches()"),
-        "main.rs debe emitir `let mut ps = make_patches()` sin anotación (W20)"
+        content.contains("let mut ps: Arc<Mutex<Vec<Patch>>> = make_patches()"),
+        "main.rs debe emitir `ps` con el tipo concreto `Vec<Patch>` (W20 + FITZ-15)"
     );
     assert!(
-        !content.contains("let mut ps: Arc<Mutex<Vec<__FitzValue>>>"),
-        "main.rs NO debe anotar `ps` como `Vec<__FitzValue>` (W20)"
+        !content.contains("Vec<__FitzValue>"),
+        "main.rs NO debe degradar `ps` a `Vec<__FitzValue>` (W20)"
     );
 
     // El binario debe correr y contar 2.
@@ -10817,6 +10821,178 @@ print(\"count={count()}\")\n\
     assert!(
         out.contains("count=2"),
         "salida esperada `count=2`, fue: {:?}",
+        out
+    );
+}
+
+#[test]
+fn fitz15_cross_module_fn_ret_nominal_infers_type_without_importing() {
+    // FITZ-15 (v0.57, MatHelp dogfooding) — un binding cuyo tipo es un
+    // nominal retornado (transitivamente) por una fn IMPORTADA, cuando el
+    // nominal NO está importado en el módulo consumidor, se degradaba a
+    // `Any` en el codegen → `field access .id over Any` en `fitz build`
+    // (aunque `fitz check` lo resuelve por el TypeEnv global del grafo). El
+    // `match`/`?` era incidental. Caso real: `read_session` (auth) devolviendo
+    // `Family` (models) usado en `perfiles.fitz` sin importar `Family`.
+    //
+    // **Fix**: `auto_register_imported_fn_ret_nominals` auto-registra el
+    // nominal + copia sus fields (paralelo a `auto_register_relation_targets`
+    // de v0.45) y emite el `use <mod>::{T, TData}` (Paso 2, CLI puro). Cubre
+    // `Result<Foo>`, `Result<List<Foo>>`, etc. (la recolección recursa).
+    let stem = "fitz15_fn_ret_nominal";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // models.fitz — define Foo.
+    std::fs::write(dir.join("models.fitz"), "type Foo {\n    id: Int = 0\n}\n")
+        .expect("escribir models.fitz");
+
+    // data.fitz — importa Foo, expone fns que lo retornan (Foo y List<Foo>).
+    std::fs::write(
+        dir.join("data.fitz"),
+        "from models import Foo\n\
+         \n\
+         async fn get_foo() -> Result<Foo> {\n\
+             return Ok(Foo { id: 5 })\n\
+         }\n\
+         \n\
+         async fn get_foos() -> Result<List<Foo>> {\n\
+             return Ok([Foo { id: 7 }, Foo { id: 9 }])\n\
+         }\n",
+    )
+    .expect("escribir data.fitz");
+
+    // main.fitz — importa SOLO las fns (NO Foo). Usa match (como MatHelp) + un
+    // acceso a field sobre el elemento de la lista.
+    let main_src = "\
+from data import get_foo, get_foos\n\
+\n\
+async fn one() -> Int {\n\
+    let f = match get_foo().await {\n\
+        Ok(x) => x,\n\
+        Err(_) => return 0,\n\
+    }\n\
+    return f.id\n\
+}\n\
+\n\
+async fn first_of_list() -> Int {\n\
+    let fs = match get_foos().await {\n\
+        Ok(v) => v,\n\
+        Err(_) => return 0,\n\
+    }\n\
+    return fs[0].id\n\
+}\n\
+\n\
+let a = one().await\n\
+let b = first_of_list().await\n\
+print(\"one={a} list={b}\")\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (FITZ-15):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Paso 2 del fix (CLI puro): el struct de Foo se trae a scope con un `use`.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+    assert!(
+        content.contains("Foo, FooData"),
+        "main.rs debe emitir `use ...::{{Foo, FooData}}` (FITZ-15 Paso 2)"
+    );
+
+    // El binario debe correr: field access sobre el nominal cross-module y
+    // sobre el elemento de la List<Foo> resuelven al tipo concreto.
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+    let run = Command::new(&bin).output().expect("correr binario");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("one=5 list=7"),
+        "salida esperada `one=5 list=7`, fue: {:?}",
+        out
+    );
+}
+
+#[test]
+fn fitz16_match_result_any_arm_coerces_to_primitive() {
+    // FITZ-16 (v0.57, MatHelp dogfooding) — un `match` sobre `Result<Any>` (de
+    // `Map<Str,Any>.get(...)` o `jwt.decode` → `Map<Str,__FitzValue>`) cuyo arm
+    // `Ok(v) => v` produce `Any` y cuyo arm `Err(_) => <primitivo>` fija el LUB
+    // en un primitivo concreto: el arm `Ok` NO coaccionaba `__FitzValue` → el
+    // primitivo → `E0308 expected String, found __FitzValue` en `fitz build`
+    // (aunque `fitz check` pasa). Caso real: `pid_from_token` de MatHelp leyendo
+    // un claim del JWT decodeado.
+    //
+    // **Fix**: `gen_match` coacciona cada arm `Any` con `coerce(Any →
+    // primitivo)` cuando el LUB es un primitivo concreto (Str/Int/Float/Bool),
+    // reusando el `__fv_to_*` de `Map<Str,Any>.keys()`.
+    let stem = "fitz16_match_any_coerce";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let main_src = "\
+fn read_str(m: Map<Str, Any>) -> Str {\n\
+    return match m.get(\"k\") {\n\
+        Ok(v) => v,\n\
+        Err(_) => \"\",\n\
+    }\n\
+}\n\
+\n\
+fn read_int(m: Map<Str, Any>) -> Int {\n\
+    return match m.get(\"n\") {\n\
+        Ok(v) => v,\n\
+        Err(_) => 0,\n\
+    }\n\
+}\n\
+\n\
+let data: Map<Str, Any> = {}\n\
+data[\"k\"] = \"hola\"\n\
+data[\"n\"] = 42\n\
+print(\"s={read_str(data)} n={read_int(data)}\")\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invoke fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build failed (FITZ-16):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+    let run = Command::new(&bin).output().expect("correr binario");
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        out.contains("s=hola n=42"),
+        "salida esperada `s=hola n=42`, fue: {:?}",
         out
     );
 }

@@ -694,3 +694,84 @@ quick wins de liveviews van en su propio hito — ver archivo hermano.)
 
 El principio: **workarounds fáciles de borrar.** El más caro de arrastrar es el del intérprete-en-Docker
 (FITZ-09) — pero es un comentario; el día que `T?` compile, descomentás y ganás perf + distroless.
+
+---
+
+## Hallazgos de F1 (auth y perfiles) — 2026-08-21, core v0.56.0
+
+Dos divergencias más de la clase **check✓/build✗** (misma familia que FITZ-09/10),
+las dos en `match` sobre `Result`. Encontradas construyendo el login + sesión JWT de
+MatHelp. Ambas tienen workaround trivial ya aplicado en la app (aislado y comentado con
+el ID); el autor pidió cerrarlas en el core.
+
+### FITZ-15 — un nominal retornado por una fn importada, no en scope del módulo consumidor, se degrada a `Any` en codegen
+
+- [x] **CERRADO en v0.57** (`src/codegen.rs`: `auto_register_imported_fn_ret_nominals`
+  + Paso 2 en `emit_main_rs_body`). Test `fitz15_cross_module_fn_ret_nominal_infers_type_without_importing`
+  + W20 convergió a la solución completa (tipo concreto `Vec<Patch>` en vez de omitir la anotación).
+  Verificado: repro CLI + `match` + `Result<List<Foo>>`, 4195 unit + smoke 290 ejemplos verdes,
+  y **MatHelp compila a binario nativo en HTTP sin el workaround** (`perfiles.fitz` sin importar
+  `Family`). La limpieza del workaround en MatHelp se hace al bumpear su fitz a v0.57.
+- **Síntoma:** `fitz check` pasa; `fitz build` corta con
+  `field access .id over Any: only supported on instances of custom types`.
+- **Diagnóstico (corregido tras repro):** NO es sobre `match` ni arms divergentes — eso fue
+  incidental. El bug es **cross-module**: un valor cuyo tipo es un nominal retornado
+  (transitivamente) por una fn importada, cuando el nominal **no está importado en el módulo
+  que lo consume**, se degrada a `Any` en el codegen. El checker lo resuelve (tiene el `TypeEnv`
+  global del grafo de módulos); el codegen tiene env por-módulo que no incluye el nominal.
+- **Repro mínimo (`d:\fitz\target\scratch-fitz15\proj\`):**
+  ```fitz
+  // models.fitz:  type Foo { id: Int = 0 }
+  // data.fitz:    from models import Foo
+  //              async fn get_foo() -> Result<Foo> { return Ok(Foo { id: 5 }) }
+  // main.fitz — NO importa Foo:
+  from data import get_foo
+  async fn run() -> Result<Int> {
+      let f = get_foo().await?     // f: Foo, pero Foo no está en scope → Any
+      return Ok(f.id)              // <- ".id over Any" en build (check pasa)
+  }
+  ```
+  Con `match` o con `?` da igual. `List<Foo>` cross-module rompe en rustc con `__FitzValue`
+  (sub-caso, ver W19/W20). En MatHelp fue `read_session` (de `auth.fitz`) devolviendo `Family`
+  (de `models.fitz`) usado en `perfiles.fitz`, que no importaba `Family`.
+- **Workaround REAL:** importar el nominal en el módulo consumidor (`from models import Foo`).
+  Basta el import — **anotar el binding NO alcanza** (`let f: Foo = …` da `unknown type Foo`
+  en check si no está importado). En MatHelp: se sumó `Family` al `from models import …` de
+  `perfiles.fitz`. (La anotación `let fam: Family` que también se puso es redundante y se saca
+  al cerrar esto.)
+- **Fix esperado:** extender el auto-registro de nominales cross-module que ya hace
+  **`auto_register_relation_targets`** (v0.26.1, `src/codegen.rs`, para targets de
+  `@has_many`/`@belongs_to`) para que también recorra los **ret types de las fns importadas**
+  que el módulo usa (y sus nominales anidados en `Result`/`List`/`Option`), auto-registre esos
+  `TypeId` + copie fields + emita el `use <mod>::{T, TData}`. Es la misma maquinaria; falta el
+  trigger nuevo.
+
+### FITZ-16 — el arm `Ok(v) => v` de un `match` sobre `Result<Map<Str,__FitzValue>>` no coacciona a `Str`
+
+- [x] **CERRADO en v0.57** (`src/codegen.rs`: `gen_match` coacciona cada arm `Any`
+  con `coerce(Any → primitivo)` cuando el LUB es Str/Int/Float/Bool, reusando el
+  `__fv_to_*` de `Map<Str,Any>.keys()`). Test `fitz16_match_result_any_arm_coerces_to_primitive`.
+  Verificado: repro Str+Int paridad `fitz run`↔binario, 4195 unit + smoke 290 verdes.
+  Habilita la forma natural `match claims.get(k) { Ok(v)=>v, Err(_)=>"" }` sin el
+  workaround `Err(_) => return ""` + anotación. Limpieza en MatHelp `pid_from_token`.
+- **Síntoma:** `fitz build` corta con `E0308 expected String, found __FitzValue` sobre el arm
+  `Ok(v) => v` de un `match claims.get(k)`, donde `claims` viene de `jwt.decode` (→ `Map<Str,__FitzValue>`).
+- **Repro (MatHelp `src/auth.fitz`, `pid_from_token`):**
+  ```fitz
+  let claims = jwt.decode(token, jwt_secret())?   // Map<Str, __FitzValue>
+  return match claims.get("pid") {
+      Ok(v) => v,          // <- __FitzValue, la fn retorna Str: E0308
+      Err(_) => "",
+  }
+  ```
+- **Observación:** la coerción `__FitzValue → Str` SÍ se aplica cuando (a) el binding está
+  anotado `: Str` **y** (b) el arm `Err` **diverge** (dejando `Ok` como único arm productivo).
+  Falla cuando ambos arms producen valor (`Ok(v)=>v` vs `Err(_)=>""`), porque el match debe
+  unificar `__FitzValue` con `String` y el codegen no inserta la conversión en el arm `Ok`.
+- **Workaround aplicado:** hacer diverger el `Err` + anotar el binding —
+  `let pid: Str = match claims.get("pid") { Ok(v)=>v, Err(_)=>return "" }`. Idéntico patrón que
+  `read_session` para el claim `email`.
+- **Fix esperado:** cuando un arm de `match` produce `__FitzValue` (Map/List `Any`) y el tipo
+  destino del match/binding es un primitivo concreto, emitir la conversión (`__fv_to_string`/etc,
+  la misma que ya usa `Map<Str,Any>.keys()` desde v0.55) en el arm, no solo en el camino con
+  arm divergente.

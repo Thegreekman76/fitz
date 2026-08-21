@@ -9,6 +9,38 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.57.0] — 2026-08-21 — Codegen: nominales cross-módulo de fns importadas + coerción `__FitzValue` en `match` (dogfooding MatHelp F1)
+
+Dos fixes de codegen de la clase **check✓/build✗** (`fitz check` pasa, `fitz build`
+rompe) encontrados construyendo la auth de MatHelp (F1 — registro/login/perfiles).
+Ambos con paridad `fitz run` ↔ binario. Detalle en `docs/norte-mathelp.md` → FITZ-15/16.
+
+### Fixed
+- **FITZ-15 — un nominal retornado por una fn importada, no en scope del módulo
+  consumidor, se degradaba a `Any`.** Un `let x = imported_fn().await` (o con `?`,
+  o `match`) cuyo ret type es un nominal que el módulo consumidor NO importa hacía
+  que el codegen degradara `x` a `Any` (`remap_imported_nominals` devuelve `Any`
+  cuando `env.lookup(name)` es `None`), y `x.field` abortaba con `.field over Any` —
+  aunque `fitz check` lo resuelve por el `TypeEnv` global del grafo de módulos.
+  Nueva `auto_register_imported_fn_ret_nominals` (paralela a
+  `auto_register_relation_targets` de v0.45): auto-registra el nominal + copia sus
+  fields + emite el `use <mod>::{T, TData}`, recursando en
+  `Result`/`List`/`Nullable`/`Map`/`Tuple`/`Function`/`Future`. Converge con W20
+  hacia la solución completa (tipo concreto en vez de omitir la anotación).
+- **FITZ-16 — el arm `Ok(v) => v` de un `match` sobre `Result<Any>` no coaccionaba
+  a un primitivo.** `match m.get("k") { Ok(v) => v, Err(_) => "" }` con
+  `m: Map<Str, Any>` (o `jwt.decode` → `Map<Str,__FitzValue>`): el arm `Ok` es
+  `__FitzValue`, que no unifica con `String`/`i64`/etc → `E0308`, aunque el arm
+  `Err` fija el LUB en un primitivo. `gen_match` ahora coacciona cada arm `Any` con
+  `coerce(Any → primitivo)` cuando el LUB es Str/Int/Float/Bool (reusa el
+  `__fv_to_*` de `Map<Str,Any>.keys()`). Habilita la forma natural sin el
+  workaround `Err(_) => return ""` + anotación.
+
+Verificado: repros + tests E2E (`fitz15_cross_module_fn_ret_nominal_infers_type_without_importing`,
+`fitz16_match_result_any_arm_coerces_to_primitive`) + W20 actualizado, 4195 unit +
+smoke 290 ejemplos verdes, y **MatHelp F1 compila a binario nativo sin ninguno de
+los dos workarounds** (validado end-to-end con curl).
+
 ## [v0.56.0] — 2026-08-21 — Codegen: map literal `Map<Str,Any>` no-vacío en top-level de módulo (cierra el residual de v0.55)
 
 Cierra el residual conocido de v0.55 — la última pieza del dogfooding de MatHelp.

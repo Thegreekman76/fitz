@@ -6956,8 +6956,18 @@ fn generate_module_rs_with_bindings(
     // registration as `generate_main_rs`, for a `.preload(...)`/navigation
     // living in a MODULE (not the entry). Local clone of the env + shadow.
     let mut owned_env = env.clone();
-    let synth_rel_targets =
+    let mut synth_rel_targets =
         auto_register_relation_targets(&mut owned_env, local_bindings, loaded_modules);
+    // FITZ-15 (v0.57) — same cross-module auto-registration for nominals in
+    // imported fns' return types, for a module (not the entry) that consumes
+    // an imported fn returning a nominal it does not import. The `use` decl is
+    // emitted by `emit_module_use_decls` (which already covers synth bindings),
+    // so no CLI-path emission is needed here.
+    synth_rel_targets.extend(auto_register_imported_fn_ret_nominals(
+        &mut owned_env,
+        local_bindings,
+        loaded_modules,
+    ));
     let env = &owned_env;
     let mut ctx = CodegenCtx::new_for_module(env, &type_info);
     // B20 — the cron-store hoist set is consulted by
@@ -8303,6 +8313,113 @@ fn auto_register_relation_targets(
     synth
 }
 
+/// FITZ-15 (v0.57) — cross-module auto-registration for nominals that appear
+/// in the RETURN TYPE of an imported fn, parallel to
+/// `auto_register_relation_targets` (which only covers ORM relation targets).
+///
+/// A `let x = imported_fn().await` (or with `?`, or `match`) whose ret type is
+/// a nominal NOT imported to this module would otherwise degrade `x` to `Any`
+/// in codegen: `remap_imported_nominals` returns `Type::Any` when
+/// `env.lookup(name)` is `None`, and `x.field` then aborts with
+/// `.field over Any` — even though `fitz check` resolves it via the global
+/// `TypeEnv` of the module graph. This mints the `TypeId` (in the local env
+/// clone) + returns a synthetic `Named{kind:Type}` binding so
+/// `pre_register_types` copies the nominal's fields. Recurses into
+/// `Result`/`List`/`Nullable`/`Map`/`Tuple`/`Function`/`Future` so
+/// `Result<List<Foo>>` etc. are covered (parallel to `remap_imported_nominals`).
+fn auto_register_imported_fn_ret_nominals(
+    env: &mut TypeEnv,
+    bindings: &HashMap<String, ResolvedBinding>,
+    modules: &[LoadedModule],
+) -> Vec<(String, ResolvedBinding)> {
+    fn collect_nominal_ids(ty: &Type, out: &mut Vec<TypeId>) {
+        match ty {
+            Type::Nominal(id) => out.push(*id),
+            Type::Nullable(inner) | Type::List(inner) | Type::Future(inner) => {
+                collect_nominal_ids(inner, out)
+            }
+            Type::Map(k, v) => {
+                collect_nominal_ids(k, out);
+                collect_nominal_ids(v, out);
+            }
+            Type::Tuple(items) => {
+                for t in items {
+                    collect_nominal_ids(t, out);
+                }
+            }
+            Type::Result { ok, err } => {
+                collect_nominal_ids(ok, out);
+                collect_nominal_ids(err, out);
+            }
+            Type::Function { params, ret } => {
+                for p in params {
+                    collect_nominal_ids(p, out);
+                }
+                collect_nominal_ids(ret, out);
+            }
+            _ => {}
+        }
+    }
+
+    let mut synth: Vec<(String, ResolvedBinding)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for binding in bindings.values() {
+        let ResolvedBinding::Named {
+            module_index,
+            item,
+            kind: NamedKind::Fn,
+        } = binding
+        else {
+            continue;
+        };
+        let Some(owner) = modules.get(*module_index) else {
+            continue;
+        };
+        let Some(sig) = owner.fn_sigs.get(item) else {
+            continue;
+        };
+        let mut ids: Vec<TypeId> = Vec::new();
+        collect_nominal_ids(&sig.ret, &mut ids);
+        // Resolve each nominal id → name in the OWNER module (same resolution
+        // as `imported_nominal_name`: defined types first, then re-imported).
+        let names: Vec<String> = ids
+            .iter()
+            .filter_map(|id| {
+                owner
+                    .type_sigs
+                    .iter()
+                    .find(|(_, s)| s.id == *id)
+                    .map(|(n, _)| n.clone())
+                    .or_else(|| owner.nominal_names.get(id).cloned())
+            })
+            .collect();
+        for name in names {
+            if !seen.insert(name.clone()) {
+                continue; // already decided for this name
+            }
+            if env.lookup(&name).is_some() {
+                continue; // already registered (imported / local / rel-target)
+            }
+            // The module that DEFINES the nominal (has its fields).
+            let Some(def_idx) = modules.iter().position(|m| m.type_sigs.contains_key(&name)) else {
+                continue; // no module defines it — leave the pre-existing error
+            };
+            if env.declare_nominal(name.clone()).is_err() {
+                continue;
+            }
+            synth.push((
+                name.clone(),
+                ResolvedBinding::Named {
+                    module_index: def_idx,
+                    item: name,
+                    kind: NamedKind::Type,
+                },
+            ));
+        }
+    }
+    synth
+}
+
 #[allow(clippy::too_many_arguments)] // 8 params: threading `embed_static` (FITZ-02)
 fn generate_main_rs(
     program: &Program,
@@ -8418,11 +8535,28 @@ fn generate_main_rs(
     // copies each target's fields + `TableMetadata`. Shadowing `env` keeps
     // the rest of this fn (ctx + `resolve_state_var_types`) consistent.
     let mut owned_env = env.clone();
-    let synth_rel_targets =
+    let mut synth_rel_targets =
         auto_register_relation_targets(&mut owned_env, &loader.bindings, &loader.modules);
+    // FITZ-15 (v0.57) — same cross-module auto-registration for nominals in
+    // the RETURN TYPE of imported fns (not just ORM relation targets). Runs on
+    // the SAME env clone, so it sees the rel-target registrations and its
+    // `env.lookup` guard skips duplicates. Merged into `synth_rel_targets` so
+    // `pre_register_types` copies the nominal's fields.
+    let synth_fn_ret =
+        auto_register_imported_fn_ret_nominals(&mut owned_env, &loader.bindings, &loader.modules);
+    synth_rel_targets.extend(synth_fn_ret.iter().cloned());
     let env = &owned_env;
 
     let mut ctx = CodegenCtx::new(env, type_info);
+    // FITZ-15 — stash (name, defining-module-index) so `emit_main_rs_body`
+    // can emit `use <mod>::{T, TData}` in the CLI-only path (see the field).
+    ctx.synth_fn_ret_use = synth_fn_ret
+        .iter()
+        .filter_map(|(name, b)| match b {
+            ResolvedBinding::Named { module_index, .. } => Some((name.clone(), *module_index)),
+            _ => None,
+        })
+        .collect();
     ctx.uses_async = uses_async;
     ctx.uses_python = uses_python;
     // Phase 8.7.1 transitive-bis — in main, `uses_python` and
@@ -9196,6 +9330,28 @@ fn emit_main_rs_body(
     // modules via `crate::__fitz_py_to_*` (the module-output
     // post-processing prefixes `crate::` automatically).
     ctx.emit_helpers_for_imported_types(loader, true, has_http || ctx.uses_to_json)?;
+
+    // FITZ-15 (v0.57) — in a pure-CLI program, `emit_helpers_for_imported_types`
+    // returns early (it only emits `use <mod>::{T, TData}` when
+    // http/python/to_json). So a nominal used only via an imported fn's return
+    // type has no `use` for its struct, and the `let mut x: Foo` we now emit
+    // would not compile. Emit the `use` here, gated to the SAME CLI-only
+    // condition (in http/python/to_json, emit_helpers already emitted it →
+    // avoid a duplicate `use` / E0252).
+    if !(has_http || ctx.uses_to_json || ctx.uses_python || ctx.synth_fn_ret_use.is_empty()) {
+        let synth = ctx.synth_fn_ret_use.clone();
+        for (name, def_idx) in &synth {
+            if let Some(m) = loader.modules.get(*def_idx) {
+                let qual = mod_qualifier_of(&m.rel_path);
+                writeln!(
+                    &mut ctx.output,
+                    "#[allow(unused_imports)]\nuse {qual}::{{{n}, {n}Data}};",
+                    n = name,
+                )
+                .unwrap();
+            }
+        }
+    }
 
     // Cd mini-batch (F12 fix) — hoist the top-level
     // `let X = <const-eval>` from the main file that top-level fns
@@ -10550,6 +10706,13 @@ struct CodegenCtx<'a> {
     /// `gen_method_call` to resolve `instance.method(args)` and by
     /// `gen_type_def` to emit `impl FooData { ... }`.
     type_methods: HashMap<String, Vec<crate::ast::MethodDef>>,
+    /// FITZ-15 (v0.57) — synthetic nominals auto-registered from imported
+    /// fns' return types (`auto_register_imported_fn_ret_nominals`), as
+    /// `(name, defining_module_index)`. In a pure-CLI program these have no
+    /// `use <mod>::{T, TData}` (emit_helpers_for_imported_types returns early),
+    /// so `emit_main_rs_body` emits it, gated to the CLI-only case. Empty in
+    /// module mode (there `emit_module_use_decls` covers it).
+    synth_fn_ret_use: Vec<(String, usize)>,
     /// Top-level consts/statics of the module itself (5b.5): name →
     /// Fitz type. They let the body of a module fn reference them.
     /// In main mode, this stays empty (top-level `let`s are local
@@ -11106,6 +11269,7 @@ impl<'a> CodegenCtx<'a> {
             fields_by_id: HashMap::new(),
             imported_table_metadata: HashMap::new(),
             type_methods: HashMap::new(),
+            synth_fn_ret_use: Vec::new(),
             own_consts: HashMap::new(),
             module_bindings: HashMap::new(),
             loaded_modules: Vec::new(),
@@ -31411,6 +31575,27 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     _ => {
                         arm_bodies[i] = format!("Some({})", arm_bodies[i]);
                     }
+                }
+            }
+        }
+
+        // FITZ-16 (v0.57) — when the LUB settles on a concrete primitive
+        // (Str/Int/Float/Bool) but a non-divergent arm produces `Any`, that
+        // arm's Rust type is `__FitzValue`, which does not unify with
+        // `String`/`i64`/etc → E0308. Canonical case:
+        //   `match m.get("k") { Ok(v) => v, Err(_) => "" }`
+        // where `m: Map<Str, Any>` (or `jwt.decode` → `Map<Str,__FitzValue>`),
+        // so `m.get(...)` is `Result<Any>` and the `Ok(v)` arm is `Any`, while
+        // the `Err` arm pins the LUB to `Str`. Coerce each such arm with
+        // `coerce(Any → primitive)` (the same `__fv_to_*` unwrap used for
+        // `Map<Str,Any>.keys()`). Divergent and non-`Any` arms are untouched,
+        // so a primitive match without an `Any` arm is byte-identical. Mutually
+        // exclusive with the Nullable rewrite above (a `result_ty` is either
+        // primitive or Nullable, never both).
+        if matches!(&result_ty, Type::Str | Type::Int | Type::Float | Type::Bool) {
+            for i in 0..arm_bodies.len() {
+                if !arm_divergent[i] && matches!(arm_tys[i], Type::Any) {
+                    arm_bodies[i] = coerce(&arm_bodies[i], &Type::Any, &result_ty, self.env);
                 }
             }
         }
