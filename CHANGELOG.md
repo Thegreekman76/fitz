@@ -9,6 +9,46 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.53.0] — 2026-08-21 — FITZ-05 residual: `@cookie` sobre `@ws` (cierra la última deuda del backlog MatHelp)
+
+Cierra el residual de **FITZ-05** descubierto durante FLV-09 de fitz-liveviews:
+un `@cookie(name="X")` sobre un handler `@ws("/...")` fallaba el chequeo de
+aridad y, aunque pasara, el binding runtime no leía la cookie del handshake.
+La lectura de cookies ahora funciona igual en HTTP y en WebSockets (el upgrade
+WS **es** una request HTTP), con paridad bit-a-bit `fitz run` ↔ `fitz build`.
+Elimina el workaround del admin (`@header(name="cookie")` + `locale_from_cookie`).
+
+### Added
+- **`@cookie(name="X")` sobre `@ws`** — un param del handler WS recibe el valor
+  de la cookie nombrada, parseada del header `Cookie` del handshake de upgrade,
+  paralelo a `@header`. `Str?` tolera la ausencia (`null`); `Str` requerida que
+  falta **rechaza el handshake** (no hay 400 post-upgrade: en runtime cierra la
+  conn, en codegen 400 pre-upgrade). Tres cambios coordinados:
+  - **Checker** (`src/types.rs`, `check_ws_handler`) — suma `cookie_count` a la
+    aridad esperada (`1 WsConn + 1 User + 1 por @header + 1 por @cookie`).
+  - **Runtime WS** (`src/http.rs`, `build_ws_method_router`) — clona
+    `route.cookies` y bindea la cookie con `parse_cookie_header` desde los
+    headers del handshake, con el mismo manejo de error post-upgrade que
+    `@header` (unregister + abort de la conn).
+  - **Codegen WS** (`src/codegen.rs`, `gen_ws_handler_wrapper`) — emite el
+    binding con `__fitz_parse_cookie` desde el `HeaderMap` del upgrade, con OR
+    en el gate del `move` de la closure.
+- **Completion `@cookie` en la LSP** (`src/lsp.rs`) — faltaba desde FASE A (solo
+  estaba el tipo built-in `Cookie`); ahora el decorator se autocompleta con la
+  forma `cookie(name="…")`.
+
+### Notes
+- Tests: 3 unit del checker (`ws_handler_with_cookie_accepts_extra_param`,
+  `ws_handler_cookie_and_header_and_auth_arity`, `ws_handler_missing_cookie_param_is_error`)
+  + 1 E2E de compilación (`ws_handler_with_cookie_builds_fitz05`). `lib` **4195**
+  verde; smoke `GUIDE_EXAMPLES_COMPILE` verde; paridad run↔build validada con un
+  cliente WS que manda `Cookie: lang=es` en el handshake (idéntico en intérprete
+  y binario nativo). fmt + clippy (default + lsp) limpios.
+- Guía cap 17 "Cookies y sesiones" precisa el matiz de `@ws`. Grammar TextMate
+  sin cambios (los decoradores caen bajo la regla genérica `@<ident>`).
+- **Con esto el backlog MatHelp queda cerrado entero** — todos los `FITZ-*`
+  (core) y `FLV-*` (liveviews) de `docs/norte-mathelp.md`.
+
 ## [v0.52.0] — 2026-08-20 — `.fitzv`: cadenas `{#elseif}` (FLV-07) + error claro por `<style>`/`<script>` en el template (FLV-02)
 
 Dos mejoras del pipeline de single-file components `.fitzv` (`src/view/`),

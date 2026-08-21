@@ -33973,11 +33973,45 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             }
         }
 
+        // FITZ-05 — `@cookie(...)` params parse the named cookie from the
+        // handshake `Cookie` header (parallel to `@header`; the WS upgrade IS
+        // an HTTP request). Bound BEFORE the upgrade so a missing required
+        // cookie can 400 pre-upgrade; the `move` closure captures the bindings.
+        let ws_cookie_specs = crate::openapi::cookies_from_decorators(decorators, params);
+        for (ck_name, fitz_name, is_nullable) in &ws_cookie_specs {
+            if *is_nullable {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: Option<String> = __hmap.get(\"cookie\").and_then(|v| v.to_str().ok()).and_then(|__raw| __fitz_parse_cookie(__raw, \"{}\"));",
+                    fitz_name, ck_name,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: String = match __hmap.get(\"cookie\").and_then(|v| v.to_str().ok()).and_then(|__raw| __fitz_parse_cookie(__raw, \"{}\")) {{",
+                    fitz_name, ck_name,
+                )
+                .unwrap();
+                self.emit("        Some(v) => v,\n");
+                self.emit("        None => return (\n");
+                self.emit("            axum::http::StatusCode::BAD_REQUEST,\n");
+                writeln!(
+                    &mut self.output,
+                    "            axum::Json(serde_json::json!({{\"error\": \"cookie '{}': missing — is required\"}})),",
+                    ck_name,
+                )
+                .unwrap();
+                self.emit("        ).into_response(),\n");
+                self.emit("    };\n");
+            }
+        }
+
         // Upgrade closure.
-        // The `move` captures `__user` and any `@header` bindings when they
-        // apply (including when there is only `@requires` without
+        // The `move` captures `__user` and any `@header`/`@cookie` bindings
+        // when they apply (including when there is only `@requires` without
         // `@authenticated`).
-        if has_auth_decorator || !ws_header_specs.is_empty() {
+        if has_auth_decorator || !ws_header_specs.is_empty() || !ws_cookie_specs.is_empty() {
             self.emit("    ws.on_upgrade(move |__socket| async move {\n");
         } else {
             self.emit("    ws.on_upgrade(|__socket| async move {\n");

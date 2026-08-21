@@ -15458,6 +15458,34 @@ fn ws_handler_with_header_builds() {
     );
 }
 
+/// FITZ-05 (2026-08-21) — a `@cookie(name="X")` param on a `@ws` handler reads
+/// the named cookie from the handshake `Cookie` header. Verifies `fitz build`
+/// emits a valid WS wrapper (binds the cookie via `__fitz_parse_cookie` from the
+/// HeaderMap + forwards it to the handler in declared order). Previously the WS
+/// path had no cookie block (only `@header`), so a `@cookie @ws` failed the
+/// arity check. Nullable → Option; required → 400 pre-upgrade. run↔build parity
+/// validated manually (cookie value bound; nullable missing → Null).
+#[test]
+fn ws_handler_with_cookie_builds_fitz05() {
+    build_expect_ok(
+        "ws-handler-with-cookie-fitz05",
+        "@cookie(name=\"lang\")\n\
+         @ws(\"/live/x\")\n\
+         async fn sock(ws: WsConn<Str>, lang: Str?) {\n\
+         \x20   let loc = match lang {\n\
+         \x20       null => \"en\",\n\
+         \x20       l => l,\n\
+         \x20   }\n\
+         \x20   ws.send(\"locale {loc}\")?\n\
+         \x20   loop {\n\
+         \x20       let _m = ws.recv()?\n\
+         \x20   }\n\
+         }\n\
+         @server(3903)\n\
+         fn main() => 0\n",
+    );
+}
+
 /// FITZ-05 (2026-08) — a `@cookie(name="X")` handler compiles to a native binary
 /// (the HTTP wrapper parses the named cookie from the incoming `Cookie` header
 /// via `__fitz_parse_cookie`). Nullable → Option; required → 400 if missing.

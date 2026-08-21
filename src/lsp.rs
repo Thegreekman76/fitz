@@ -2395,6 +2395,12 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "@header(name) — handler param bound from a header",
             "The handler param receives the value of the HTTP header. Only Str or Str?.",
         ),
+        (
+            "cookie",
+            "cookie(name=\"${1:cookie-name}\")",
+            "@cookie(name=\"X\") — handler param bound from a cookie",
+            "The handler param receives the value of the named cookie (parsed from the `Cookie` header). Works on @get/@post/@ws (the WS upgrade is HTTP). Only Str or Str?; with into=\"alias\" you rename the param.",
+        ),
         // Middleware / CORS
         (
             "middleware",

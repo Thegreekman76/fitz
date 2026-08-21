@@ -3329,6 +3329,9 @@ fn build_ws_method_router(
             // Phase 9.w.2-ws-headers — `@header(...)` params on a `@ws` handler
             // read the handshake headers (the WS upgrade IS an HTTP request).
             let header_specs = route.headers.clone();
+            // FITZ-05 — `@cookie(...)` params on a `@ws` handler read the named
+            // cookie from the handshake `Cookie` header (parallel to `@header`).
+            let cookie_specs = route.cookies.clone();
             // Handler env — Value::Function carries it as `closure`.
             // recv() uses it to resolve nominal T and coerce Map →
             // Instance.
@@ -3392,6 +3395,27 @@ fn build_ws_method_router(
                                 eprintln!(
                                     "WS handler '{}': required header '{}' missing, closing conn",
                                     handler_name, hdr.http_name,
+                                );
+                                broadcaster.unregister(&endpoint, conn_id);
+                                writer_task.abort();
+                                return;
+                            }
+                        }
+                    } else if let Some(ck) = cookie_specs.iter().find(|c| &c.param_name == name) {
+                        // FITZ-05 — `@cookie(...)` param — parse the named cookie
+                        // from the handshake `Cookie` header. Missing + nullable →
+                        // Null; missing + required → close the conn (we can't 400
+                        // post-upgrade, same as the `@header` branch above).
+                        let val = raw_headers
+                            .get("cookie")
+                            .and_then(|raw| parse_cookie_header(raw, &ck.http_name));
+                        match (val, ck.is_nullable) {
+                            (Some(v), _) => args.push(Value::Str(v)),
+                            (None, true) => args.push(Value::Null),
+                            (None, false) => {
+                                eprintln!(
+                                    "WS handler '{}': required cookie '{}' missing, closing conn",
+                                    handler_name, ck.http_name,
                                 );
                                 broadcaster.unregister(&endpoint, conn_id);
                                 writer_task.abort();

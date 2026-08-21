@@ -11527,15 +11527,17 @@ fn check_ws_handler(
     let has_auth = decorators
         .iter()
         .any(|d| matches!(d.name.as_str(), "authenticated" | "admin"));
-    // Each `@header(...)` reads one handshake header into its own param
-    // (the WS upgrade IS an HTTP request), so it adds to the expected count.
+    // Each `@header(...)` / `@cookie(...)` reads one handshake header/cookie
+    // into its own param (the WS upgrade IS an HTTP request), so each adds
+    // to the expected count.
     let header_count = decorators.iter().filter(|d| d.name == "header").count();
-    let expected_params = 1 + if has_auth { 1 } else { 0 } + header_count;
+    let cookie_count = decorators.iter().filter(|d| d.name == "cookie").count();
+    let expected_params = 1 + if has_auth { 1 } else { 0 } + header_count + cookie_count;
     if params.len() != expected_params {
         let extra = if has_auth {
-            " (1 `WsConn<T>` + 1 User param from `@auth_provider` + 1 per `@header`)"
+            " (1 `WsConn<T>` + 1 User param from `@auth_provider` + 1 per `@header`/`@cookie`)"
         } else {
-            " (1 `WsConn<T>` + 1 per `@header`)"
+            " (1 `WsConn<T>` + 1 per `@header`/`@cookie`)"
         };
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -19953,6 +19955,41 @@ print(total)
     fn ws_handler_missing_header_param_is_error() {
         // A `@header` with no matching param → arity mismatch.
         let src = "@header(name=\"cookie\")\n\
+                   @ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>) -> Null { return null }";
+        assert_auth_err(src, "expects");
+    }
+
+    #[test]
+    fn ws_handler_with_cookie_accepts_extra_param() {
+        // FITZ-05 — `@cookie(...)` on a `@ws` handler reads the handshake
+        // cookie into its own param (the WS upgrade IS an HTTP request), so
+        // the checker counts it toward the arity, parallel to `@header`.
+        let src = "@cookie(name=\"lang\")\n\
+                   @ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>, lang: Str?) -> Null { return null }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_handler_cookie_and_header_and_auth_arity() {
+        // FITZ-05 — `@cookie` + `@header` + auth stack on `@ws`: the arity is
+        // 1 WsConn + 1 User + 1 per header + 1 per cookie.
+        let src = "@auth_provider\n\
+                   fn provider(headers: Map<Str, Str>) -> Result<User> => Err(\"no\")\n\
+                   type User { id: Int, role: Str }\n\
+                   @authenticated\n\
+                   @header(name=\"x-trace\")\n\
+                   @cookie(name=\"lang\")\n\
+                   @ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>, user: User, trace: Str?, lang: Str?) -> Null { return null }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_handler_missing_cookie_param_is_error() {
+        // FITZ-05 — a `@cookie` with no matching param → arity mismatch.
+        let src = "@cookie(name=\"lang\")\n\
                    @ws(\"/c\")\n\
                    async fn h(conn: WsConn<Str>) -> Null { return null }";
         assert_auth_err(src, "expects");

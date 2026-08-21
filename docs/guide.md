@@ -7577,8 +7577,10 @@ por decorador (`@cookie`) y **escribir** por el campo `cookies` de un
 un parámetro del handler. El tipo del parámetro debe ser `Str` (400 si
 la cookie falta) o `Str?` (`null` si falta). Funciona sobre
 `@get`/`@post`/`@delete`/… y también sobre `@ws` (el upgrade es una
-request HTTP). El nombre del parámetro es el de la cookie; con
-`into="alias"` lo renombrás.
+request HTTP: la cookie se lee del `Cookie` del handshake). El nombre del
+parámetro es el de la cookie; con `into="alias"` lo renombrás. Sobre
+`@ws`, una cookie requerida (`Str`) que falta rechaza el handshake (no
+hay 400 después del upgrade); usá `Str?` si querés tolerar su ausencia.
 
 ```fitz
 @cookie(name="session")

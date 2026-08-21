@@ -2,6 +2,22 @@
 
 ---
 
+## v0.53.0 — FITZ-05 residual: `@cookie` sobre `@ws` ✅ CERRADO (2026-08-21)
+
+**Hito**: cierra el residual de **FITZ-05** (descubierto durante FLV-09 de fitz-liveviews) — `@cookie(name="X")` ya funciona sobre handlers `@ws`, igual que sobre HTTP (el upgrade WS **es** una request HTTP). **Con esto el backlog MatHelp queda cerrado entero** (todos los `FITZ-*` core + `FLV-*` liveviews). Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+Tres cambios coordinados, paralelos al binding de `@header` en el path WS:
+- **Checker** (`src/types.rs`, `check_ws_handler`) — suma `cookie_count` a la aridad esperada (`1 WsConn + 1 User + 1 por @header + 1 por @cookie`).
+- **Runtime WS** (`src/http.rs`, `build_ws_method_router`) — clona `route.cookies` y bindea la cookie con `parse_cookie_header` desde el header `Cookie` del handshake; nullable → Null, requerida faltante → cierra la conn (no 400 post-upgrade).
+- **Codegen WS** (`src/codegen.rs`, `gen_ws_handler_wrapper`) — emite el binding con `__fitz_parse_cookie` desde el `HeaderMap` del upgrade + OR en el gate del `move`.
+- **LSP** — completion `@cookie(name="…")` (faltaba desde FASE A). Grammar TextMate sin cambios (regla genérica `@<ident>`).
+
+Elimina el workaround del admin (`@header(name="cookie")` + `locale_from_cookie`). Guía cap 17 precisa el matiz de `@ws`.
+
+**Verificación pre-bump**: fmt + clippy (default + lsp) limpios, lib **4195** verde, 3 unit checker + 1 E2E compile verdes, smoke `GUIDE_EXAMPLES_COMPILE` verde, paridad run↔build validada con cliente WS (`Cookie: lang=es`). Bump Cargo.toml `0.52.0` → `0.53.0` + extensión VSCode.
+
+---
+
 ## v0.52.0 — `.fitzv`: `{#elseif}` (FLV-07) + error claro `<style>`/`<script>` (FLV-02) ✅ CERRADO (2026-08-20)
 
 **Hito**: dos mejoras del pipeline de single-file components `.fitzv` (`src/view/`) pedidas por [fitz-liveviews](https://github.com/Thegreekman76/fitz-liveviews) (norte MatHelp). Ambas son cambios del **parser de templates** — cero cambios en AST, checker, ni los dos emisores (SSR + client-WASM).
