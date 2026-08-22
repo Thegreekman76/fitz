@@ -84,7 +84,7 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-01 · Módulo `rand`
 
-- [x] Implementado (2026-08-20) — módulo `src/rand.rs` (SplitMix64 fijo, no el crate `rand`), `Value::RandGen` + `Type::RandGen`, intérprete + **codegen con paridad bit-a-bit** (`RAND_PRELUDE_CORE`/`_GLOBAL`, getrandom inyectado en Cargo.toml para el path global), checker (`rand` = `Type::Any`, codegen re-deriva `RandGen`), LSP completions, ejemplo runnable `13w-random.fitz`, test E2E de reproducibilidad + smoke verde. **Limitaciones del MVP** (follow-ups, NO divergencias silenciosas): (a) `rand` en codegen solo en el programa principal (cross-module = follow-up; el intérprete ya lo soporta); (b) el receptor de un método `RandGen` debe ser una var local (`let r = rand.seeded(...)`), no un receptor complejo; (c) un `match r.sample(...) { Ok(v) => v, Err(_) => "x" }` heterogéneo en posición de valor cae al gap pre-existente de "bare Any en CLI" (usar matches homogéneos o en posición de statement).
+- [x] Implementado (2026-08-20) — módulo `src/rand.rs` (SplitMix64 fijo, no el crate `rand`), `Value::RandGen` + `Type::RandGen`, intérprete + **codegen con paridad bit-a-bit** (`RAND_PRELUDE_CORE`/`_GLOBAL`, getrandom inyectado en Cargo.toml para el path global), checker (`rand` = `Type::Any`, codegen re-deriva `RandGen`), LSP completions, ejemplo runnable `13w-random.fitz`, test E2E de reproducibilidad + smoke verde. **Limitaciones del MVP** (follow-ups, NO divergencias silenciosas): (a) ~~`rand` en codegen solo en el programa principal~~ **CERRADO 2026-08-22** (dogfooding MatHelp F2 — los generadores viven en `gen_arith.fitz`, módulo importado): el crate root emite `RAND_PRELUDE_CORE`/`_GLOBAL` + `getrandom` si CUALQUIER módulo usa `rand.*` (OR con `loader.modules`, patrón SMTP/Response/DB), y cada módulo importado emite `use crate::{__FitzRng, ...}` / los `__fitz_rand_g_*` globales. Idéntico fix para `num` (FITZ-04: `NUM_PRELUDE` + `use crate::{__fitz_num_*}`). `LoadedModule` suma `uses_rand`/`uses_rand_global`/`uses_num`; 6 sitios en `src/codegen.rs`; validado con MatHelp compilando a binario nativo. (b) el receptor de un método `RandGen` debe ser una var local (`let r = rand.seeded(...)`), no un receptor complejo — **y un `RandGen` NO cruza un límite de función** (ni param ni return): el checker no conoce `RandGen` como tipo nombrable (`g: RandGen` → "unknown type") y sin anotar el codegen no lo infiere (`fitz build` → "parameter `g` requires a type annotation"). Workaround: mantené `rand.seeded(...)` + todas las tiradas dentro de una misma fn, con helpers puros sobre los enteros ya tirados (así lo hace `gen_arith.fitz`); (c) un `match r.sample(...) { Ok(v) => v, Err(_) => "x" }` heterogéneo en posición de valor cae al gap pre-existente de "bare Any en CLI" (usar matches homogéneos o en posición de statement).
 - **Estado:** Confirmado.
 - **Evidencia:** `src/evaluator.rs:246-304` (`builtin_names()` — lista cerrada, no hay `rand`);
   `src/lsp.rs:4204-4239` (módulos built-in, no hay `rand`); `src/value.rs:699` (única fuente de azar =
@@ -775,3 +775,100 @@ el ID); el autor pidió cerrarlas en el core.
   destino del match/binding es un primitivo concreto, emitir la conversión (`__fv_to_string`/etc,
   la misma que ya usa `Map<Str,Any>.keys()` desde v0.55) en el arm, no solo en el camino con
   arm divergente.
+
+### FITZ-17 · Checker: bloque `{ }` sin `return` con tipo de retorno no-nullable → `null` silencioso — CERRADO
+
+- [x] Cerrado 2026-08-22 (fitz v0.58) — helper recursivo `block_always_returns`/
+  `stmt_always_returns`/`expr_always_returns` en `src/types.rs` (baja sobre
+  `if` con ambas ramas, `match` con todos los arms, `loop` divergente,
+  `return`/`break`/`continue`); el brazo `Stmt::FnDef` de `check_stmt` emite un
+  error cuando el tipo de retorno declarado NO es `Any`/`Null`/nullable, el
+  handler no es HTTP-like, y el cuerpo puede caer por el final. Cuerpos arrow
+  (`=> expr`) desugaran a `[Stmt::Return]` → pasan; un `match`/`if` cuyos arms
+  todos `return` pasa. Blast radius verificado ≈ 0 (todos los ejemplos del core
+  Y la lib de fitz-liveviews usan `return`/`=>`; lib 4195 + smoke 290 verdes).
+- **Síntoma:** una fn con cuerpo de bloque `{ }` (no arrow `=>`) cuyo último statement es una
+  expresión "pelada" (sin `return`) declara `-> T` no-nullable, pasa `fitz check` ✓, y devuelve
+  `null` en runtime — tanto `fitz run` como el codegen. El return implícito del último expr NO
+  existe en cuerpos de bloque (sí en `=>`), pero el checker no exige el `return`.
+- **Repro (mínimo, single-file `fitz run`):**
+  ```fitz
+  fn a() -> Int { 5 }                                          // -> null, no 5
+  fn s(op: Str) -> Str { match op { "a" => "X", _ => "?" } }   // -> null
+  print("{a()}")     // null
+  ```
+  `fn a() -> Int { return 5 }` y `fn a() -> Int => 5` andan bien.
+- **Por qué importa (T2, check✓/run-da-null):** la clase más peligrosa — no hay error en ninguna
+  etapa, la fn simplemente rinde `null` y el bug aparece lejos del origen (un `.field` sobre el
+  null, una comparación que nunca matchea). En MatHelp lo pegaron `op_symbol` y `build_exercise`
+  (ambas con un `match` pelado como cuerpo); costó bisectar porque el síntoma visible (`gen_mix`
+  → null) estaba a tres saltos de la fn culpable.
+- **Fix esperado:** el checker debe rechazar un cuerpo de bloque que no garantiza `return` en
+  todos los caminos cuando el tipo de retorno declarado NO es nullable (ni `Null`). Análisis de
+  retorno estándar: cada rama terminal (`if`/`match` sin fall-through, o el último stmt) debe ser
+  un `return`, o `break`/`continue`/loop infinito, etc. Mensaje sugerido: "la función declara
+  `-> Int` pero un camino del cuerpo no retorna un valor (¿falta `return`?)". Alternativa más
+  grande (soportar return implícito del último expr en bloques `{}`) se descarta: rompe la
+  distinción semántica `=>` vs `{}`.
+- **No es workaround en la app:** el idiom correcto ya es `return <expr>` (o el arrow). MatHelp
+  está corregido; el valor de la ficha es cerrar el gap del checker para el próximo usuario.
+
+### FITZ-18 · Codegen: `getrandom` no se inyecta si el Cargo.toml ya menciona el substring (auth + rand global) — CERRADO
+
+- [x] Cerrado 2026-08-22 — dogfooding de MatHelp F2.
+- **Síntoma:** un programa que usa auth (Argon2 → `rand_core = { features = ["getrandom"] }`)
+  **y** `rand` global (`rand.int`/`rand.bytes`) compila mal: el prelude emite
+  `getrandom::getrandom(...)` pero el dep `getrandom = "0.2"` nunca entra al Cargo.toml → `E0433
+  cannot find module or crate getrandom`.
+- **Causa:** `inject_getrandom_dep` chequeaba `toml.contains("getrandom")` como idempotencia. El
+  feature `["getrandom"]` de `rand_core` (que arrastra el auth) contiene ese substring → falso
+  positivo → la función retorna sin agregar la línea de dep real.
+- **Fix:** el chequeo ahora matchea la LÍNEA de dep (`getrandom =`/`getrandom ` al inicio de línea,
+  trim), no el substring. Solo dispara ante un dep `getrandom` real, no ante el nombre de un feature.
+
+### FITZ-19 · Codegen: un `@ws` que usa `?` no cerraba con `Ok(())` al caer por el final (E0308) — CERRADO
+
+- [x] Cerrado 2026-08-22 (fitz v0.58) — `gen_top_fn` (`src/codegen.rs`) ahora,
+  cuando `is_ws_handler && body_has_try`, emite `#[allow(unreachable_code)]` en
+  la firma + un `Ok(())` de cola (paralelo al `None` tail-fall de middleware).
+  Antes solo compilaba un `@ws` que terminara en un `loop {}` divergente; ahora
+  un handler que cae por el final (gate con `match`, limpieza tras el loop) cierra
+  con `Ok(())`. El `Ok(())` es código muerto (eliminado por rustc) cuando el body
+  diverge, así que no cambia el output de los handlers idiomáticos. Nota
+  histórica del síntoma original: un `return` pelado adentro emitía `return ()`.
+  MatHelp F2 usa el idiom limpio (loop con `break` + `flv_evict` de limpieza).
+- **Síntoma:** un handler `@ws` que usa `?` (sobre `ws.send`) se compila como `-> Result<(),
+  String>`. Un `return` PELADO (sin valor) adentro emite `return ()` en vez de `return Ok(())` →
+  `E0308 mismatched types`. El codegen ya agrega el `Ok(())` implícito al final del handler, pero
+  no traduce un `return` explícito intermedio.
+- **Workaround (idiom):** no usar `return` suelto en un `@ws`; estructurar la salida temprana con
+  `match` anidado (los arms de error hacen `let _ = ws.send(...)` sin `?`, y el codegen cierra con
+  `Ok(())`). Es como lo hacen el clock/admin de liveviews. MatHelp F2 usa este idiom.
+- **Fix esperado:** en un handler `@ws`/`@background` con tipo de retorno Result sintetizado,
+  emitir `return Ok(())` para un `return` pelado (paralelo al `Ok(())` implícito del final).
+
+### FITZ-20 · Loader: un archivo de `tests/` no podía importar módulos de `src/` — CERRADO
+
+- [x] Cerrado 2026-08-22 (fitz v0.58) — hallazgo de dogfooding de MatHelp F2
+  (tests de generadores).
+- **Síntoma:** un `from gen_arith import X` en `tests/foo.fitz` NO resolvía —
+  `fitz test` computaba `base_dir = tests/` y el `import_root` fallback era el
+  mismo dir, así que buscaba `tests/gen_arith.fitz`. La única vía para tocar
+  código de `src/` era `from <pkg> import X` (auto-self-import del `[lib].entry`),
+  pero Fitz NO reexporta imports, así que el `[lib].entry` tenía que DEFINIR el
+  símbolo — forzando o wrappers o apuntar el `[lib].entry` a un módulo concreto
+  (raro: el "lib" del paquete siendo el módulo de generadores).
+- **Fix:** el runner de `fitz test` ahora pasa el dir del `[lib].entry`/`[bin].main`
+  (`src/`) como `import_root` fallback del loader. `TestSource` suma
+  `import_root: Option<PathBuf>` (`None` en single-file `--file`);
+  `discover_test_sources_from_manifest` lo deriva del entry;
+  `eval_test_source` lo threadea a la nueva `evaluator::
+  eval_with_base_import_root_and_deps(program, base_dir, import_root,
+  dep_registry)` (que instala el loader con `import_root` separado vía
+  `install_loader_with_root`). Ahora `from <src-module> import X` resuelve a
+  `src/<module>.fitz` (base_dir primero, después import_root). MatHelp revirtió
+  el `[lib].entry` a un `src/lib.fitz` limpio y sus tests importan `gen_arith`
+  directo.
+- **Deuda residual (menor):** sigue sin haber re-export de imports; un test que
+  quiera un símbolo de un submódulo profundo (no un hermano directo de `src/`)
+  cae fuera del fallback single-level. Suficiente para el caso 90%.

@@ -4510,6 +4510,11 @@ fn find_local_manifest_or_exit() -> PathBuf {
 struct TestSource {
     path: PathBuf,
     label: Option<String>,
+    /// FITZ-20 — the manifest entry's dir (`src/`), passed to the loader as the
+    /// `import_root` fallback so a `tests/*.fitz` can `from <src-module> import
+    /// X` (resolving to `src/<module>.fitz`). `None` in single-file (`--file`)
+    /// mode, where imports resolve relative to the test file's own dir.
+    import_root: Option<PathBuf>,
 }
 
 /// Entry point of the `fitz test` sub-command (Phase 9.z.2.b).
@@ -4535,6 +4540,7 @@ fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
                 vec![TestSource {
                     path: p,
                     label: None,
+                    import_root: None,
                 }],
                 manifest::DepRegistry::new(),
             )
@@ -4563,11 +4569,14 @@ fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
                 let res = match &src.label {
                     Some(label) => {
                         testing::with_test_source_async(label.clone(), || async {
-                            eval_test_source(&src.path, &dep_registry).await
+                            eval_test_source(&src.path, src.import_root.as_deref(), &dep_registry)
+                                .await
                         })
                         .await
                     }
-                    None => eval_test_source(&src.path, &dep_registry).await,
+                    None => {
+                        eval_test_source(&src.path, src.import_root.as_deref(), &dep_registry).await
+                    }
                 };
                 if let Err(e) = res {
                     eprintln!("✗ error cargando {}: {}", src.path.display(), e);
@@ -4655,6 +4664,17 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
         }
     }
 
+    // FITZ-20 — the manifest entry's dir (`src/`) becomes each test's loader
+    // `import_root` fallback, so a `tests/*.fitz` can `from <src-module> import
+    // X`. Derived from `[lib].entry` or `[bin].main` (both live in `src/`).
+    let entry_dir: Option<PathBuf> = match (&parsed_manifest.lib, parsed_manifest.bins.first()) {
+        (Some(lib), _) => Some(lib.entry.clone()),
+        (None, Some(bin)) => Some(bin.main.clone()),
+        (None, None) => None,
+    }
+    .map(|rel| manifest_dir.join(rel))
+    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
     // First we collect the top-level `tests/*.fitz` of the
     // manifest dir (non-recursive). Alphabetical order for
     // reproducibility.
@@ -4675,6 +4695,7 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
                 integration_sources.push(TestSource {
                     path,
                     label: Some(format!("tests/{}", file_name)),
+                    import_root: entry_dir.clone(),
                 });
             }
         }
@@ -4712,6 +4733,7 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
                 sources.push(TestSource {
                     path,
                     label: Some(rel),
+                    import_root: entry_dir.clone(),
                 });
             }
         }
@@ -4731,6 +4753,7 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
 /// parallel to `fitz run` single-file.
 async fn eval_test_source(
     path: &std::path::Path,
+    import_root: Option<&std::path::Path>,
     dep_registry: &manifest::DepRegistry,
 ) -> Result<(), String> {
     let source = fs::read_to_string(path).map_err(|e| format!("no se pudo leer: {e}"))?;
@@ -4752,9 +4775,22 @@ async fn eval_test_source(
 
     let base_dir = base_dir_for_stub_lookup(path);
 
-    evaluator::eval_with_base_and_deps(program, base_dir, dep_registry.clone())
+    // FITZ-20 — a manifest-mode test carries the entry's `src/` dir as its
+    // `import_root` fallback, so `from <src-module> import X` resolves. Single-
+    // file (`--file`) tests have `None` and keep the base_dir-only resolution.
+    match import_root {
+        Some(root) => evaluator::eval_with_base_import_root_and_deps(
+            program,
+            base_dir,
+            root.to_path_buf(),
+            dep_registry.clone(),
+        )
         .await
-        .map_err(|e| format!("{e}"))
+        .map_err(|e| format!("{e}")),
+        None => evaluator::eval_with_base_and_deps(program, base_dir, dep_registry.clone())
+            .await
+            .map_err(|e| format!("{e}")),
+    }
 }
 
 /// Runs `f` on a dedicated large-stack thread and returns its

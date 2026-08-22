@@ -9,6 +9,41 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.58.0] — 2026-08-22 — `rand`/`num` cross-módulo en codegen + checker missing-return + `@ws` fall-through + tests importan `src/` (dogfooding MatHelp F2)
+
+Cinco hallazgos del core encontrados construyendo el **primer juego de MatHelp
+F2** (contrarreloj de las cuatro operaciones: generadores `rand.seeded`,
+formateo `num` por locale, LiveComponent, cronómetro por WebSocket, persistencia
+a Postgres). El juego compila a binario nativo y corre en **paridad bit-a-bit
+`fitz run` ↔ binario**. Detalle en `docs/norte-mathelp.md` → FITZ-01/17/18/19/20.
+
+- **`rand`/`num` cross-módulo en `fitz build` (FITZ-01(a), FITZ-04)** — un
+  módulo IMPORTADO que usa `rand.*` (`rand.seeded`, `rand.int`, métodos de
+  `RandGen`) o `num.*` (`num.format`/`percent`/`currency`) fallaba con
+  `E0425 cannot find __FitzRng`/`__fitz_num_format` (el prelude se emitía en el
+  crate root pero el módulo no recibía el `use crate::{...}`). Ahora el crate
+  root emite los preludes si CUALQUIER módulo los usa (OR con `loader.modules`,
+  patrón SMTP/Response/DB) y cada módulo importado emite su `use crate::{...}`.
+  `LoadedModule` suma `uses_rand`/`uses_rand_global`/`uses_num`.
+- **`getrandom` no inyectado con auth + rand global (FITZ-18)** — el chequeo de
+  idempotencia `contains("getrandom")` daba falso positivo por el feature
+  `["getrandom"]` de `rand_core` (que arrastra el auth) → el dep `getrandom`
+  nunca entraba al Cargo.toml. Ahora matchea la línea de dep real.
+- **Checker: bloque `{ }` sin `return` con retorno no-nullable (FITZ-17)** — una
+  fn con cuerpo de bloque cuyo último statement es una expresión pelada (`fn a()
+  -> Int { 5 }`, un `match` sin `return`) pasaba `fitz check` pero devolvía
+  `null` en runtime (clase T2: check✓/run-da-null). El bloque `{ }` NO retorna
+  su última expresión (solo el arrow `=>`). Ahora el checker lo rechaza. Blast
+  radius verificado ≈ 0 (todos los ejemplos + fitz-liveviews usan `return`/`=>`).
+- **`@ws` con `?` + fall-through (FITZ-19)** — un handler `@ws` que usa `?` se
+  compila `-> Result<(), String>`; si el cuerpo caía por el final (gate con
+  `match`, limpieza tras el loop) rompía con E0308. Ahora el codegen cierra con
+  `Ok(())` (código muerto cuando el body diverge). Antes solo compilaba un `@ws`
+  que terminara en un `loop {}` divergente.
+- **Tests de `tests/` importan módulos de `src/` (FITZ-20)** — un `from
+  gen_arith import X` en `tests/foo.fitz` no resolvía. Ahora el runner de `fitz
+  test` pasa el dir del entry (`src/`) como `import_root` fallback del loader.
+
 ## [v0.57.0] — 2026-08-21 — Codegen: nominales cross-módulo de fns importadas + coerción `__FitzValue` en `match` (dogfooding MatHelp F1)
 
 Dos fixes de codegen de la clase **check✓/build✗** (`fitz check` pasa, `fitz build`

@@ -422,7 +422,9 @@ pub fn generate_project(
             // FITZ-01 — global `rand.*` (non-`seeded`) needs OS entropy via
             // `getrandom`. Injected post-hoc to avoid threading a positional
             // arg through `cargo_toml_for` + all its test call sites.
-            if rand_usage(program).1 {
+            // Cross-module (2026-08-22): ORed with any loaded module so a
+            // module's `rand.int(...)` pulls in `getrandom` too.
+            if rand_usage(program).1 || loader.modules.iter().any(|m| m.uses_rand_global) {
                 inject_getrandom_dep(__ct)
             } else {
                 __ct
@@ -2295,7 +2297,15 @@ fn rand_usage(program: &Program) -> (bool, bool) {
 /// Injects `getrandom = "0.2"` into a generated Cargo.toml (for the global RNG
 /// seed + `rand.bytes`). Idempotent; ensures a `[dependencies]` section exists.
 fn inject_getrandom_dep(toml: String) -> String {
-    if toml.contains("getrandom") {
+    // Idempotency check must match the actual DEP LINE (`getrandom = ...`), NOT
+    // the substring "getrandom" — otherwise a program that also uses auth pulls
+    // `rand_core = { features = ["getrandom"] }`, whose feature name contains the
+    // substring, giving a false positive → the real `getrandom = "0.2"` dep is
+    // never added → `getrandom::getrandom(...)` in the emitted prelude fails to
+    // link (E0433). Found via MatHelp F2 (auth + global `rand.int`).
+    if toml.lines().any(|l| {
+        l.trim_start().starts_with("getrandom ") || l.trim_start().starts_with("getrandom=")
+    }) {
         return toml;
     }
     let dep_line = "getrandom = \"0.2\"\n";
@@ -5256,6 +5266,21 @@ struct LoadedModule {
     /// with its own flag so `JSON_SERIALIZE_PRELUDE` + `serde_json` are
     /// emitted when a module body serializes (parallel to `uses_smtp`).
     uses_to_json: bool,
+    /// FITZ-01 cross-module (2026-08-22) — `true` if this module uses any
+    /// `rand.*` (gates `RAND_PRELUDE_CORE`/`__FitzRng` in the crate root);
+    /// `uses_rand_global` is `true` for any non-`seeded` call (gates
+    /// `RAND_PRELUDE_GLOBAL` + `getrandom`). The main ORs these so the
+    /// prelude lives in the crate root when a module body (e.g. a generator
+    /// `gen_arith.fitz` calling `rand.seeded(...)`) uses `rand`; the module's
+    /// emitted code references `use crate::{__FitzRng, ...}`.
+    uses_rand: bool,
+    uses_rand_global: bool,
+    /// FITZ-04 cross-module (2026-08-22) — `true` if this module calls
+    /// `num.*` (locale-aware formatting). The main ORs it so `NUM_PRELUDE`
+    /// lives in the crate root when a module body (e.g. `fmt.fitz` calling
+    /// `num.format(...)`) uses `num`; the module references
+    /// `use crate::{__fitz_num_*}`.
+    uses_num: bool,
     /// Facet #1 (cross-module nominal identity) — `TypeId → canonical
     /// name` for EVERY nominal registered in this module's TypeEnv,
     /// both types DEFINED in the module and types the module IMPORTED
@@ -6112,6 +6137,12 @@ impl ModuleLoader {
         // prelude when at least one module references SMTP.
         let module_uses_smtp = program_uses_smtp(&module_program);
         let module_uses_to_json = program_uses_to_json(&module_program);
+        // FITZ-01/FITZ-04 cross-module (2026-08-22) — detect `rand.*` /
+        // `num.*` in this module so the main ORs the flags and emits the
+        // preludes when at least one module references them (parallel to
+        // module_uses_smtp).
+        let (module_uses_rand, module_uses_rand_global) = rand_usage(&module_program);
+        let module_uses_num = program_calls_module(&module_program, "num");
         // W12 (v0.10.8) — detect `@auth_provider` declared IN this
         // module. If the module has it, we expose
         // `(fn_name, is_async, user_type_name)` to the main so
@@ -6229,6 +6260,9 @@ impl ModuleLoader {
             uses_http_client: module_uses_http_client,
             uses_smtp: module_uses_smtp,
             uses_to_json: module_uses_to_json,
+            uses_rand: module_uses_rand,
+            uses_rand_global: module_uses_rand_global,
+            uses_num: module_uses_num,
             nominal_names: module_nominal_names,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
@@ -7234,6 +7268,40 @@ fn generate_module_rs_with_bindings(
              use crate::{SmtpResult, SmtpResultData};\n\
              #[allow(unused_imports)]\n\
              use crate::{__fitz_smtp_send, __FitzSmtpSendOpts};\n\n",
+        );
+    }
+
+    // FITZ-01 cross-module (2026-08-22) — when this module uses `rand.*`, the
+    // `RAND_PRELUDE_CORE` (`__FitzRng` + SplitMix64 helpers) lives in the crate
+    // root, so the module must `use crate::{...}` to reference them. Emitting
+    // `use crate::__FitzRng` covers `rand.seeded(...)` (→ `__FitzRng::new`) and
+    // the seeded methods (`.next_int`/`.next_float`/`.next_bool`); the free fns
+    // come along `#[allow(unused_imports)]` for completeness. A non-`seeded`
+    // call additionally needs the global helpers from `RAND_PRELUDE_GLOBAL`.
+    let (module_uses_rand_local, module_uses_rand_global_local) = rand_usage(program);
+    if module_uses_rand_local {
+        ctx.uses_rand = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__FitzRng, __fitz_splitmix64, __fitz_rand_int, __fitz_rand_float, __fitz_rand_bool};\n\n",
+        );
+        if module_uses_rand_global_local {
+            ctx.uses_rand_global = true;
+            ctx.emit(
+                "#[allow(unused_imports)]\n\
+                 use crate::{__FITZ_RAND_GLOBAL, __fitz_rand_g_int, __fitz_rand_g_float, __fitz_rand_g_bool, __fitz_rand_bytes};\n\n",
+            );
+        }
+    }
+
+    // FITZ-04 cross-module (2026-08-22) — when this module calls `num.*`, the
+    // `NUM_PRELUDE` lives in the crate root; import all 7 helpers (the 3 public
+    // `format`/`percent`/`currency` plus the 4 internal helpers they call).
+    if program_calls_module(program, "num") {
+        ctx.uses_num = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__fitz_num_format, __fitz_num_percent, __fitz_num_currency, __fitz_num_locale, __fitz_num_currency_symbol, __fitz_num_group_int, __fitz_num_apply_locale};\n\n",
         );
     }
 
@@ -8584,16 +8652,22 @@ fn generate_main_rs(
     // FITZ-02 — `--embed-static`. The dir/prefix/assets are filled in
     // below from the parsed `@server(static_dir=...)` decorator.
     ctx.embed_static = embed_static;
-    // FITZ-01 — rand usage (main program; cross-module rand in codegen is a
-    // follow-up). `uses_rand` gates the core prelude, `uses_rand_global` the
-    // OS-entropy global RNG + getrandom.
-    let (uses_rand, uses_rand_global) = rand_usage(program);
-    ctx.uses_rand = uses_rand;
-    ctx.uses_rand_global = uses_rand_global;
+    // FITZ-01 — rand usage. `uses_rand` gates the core prelude,
+    // `uses_rand_global` the OS-entropy global RNG + getrandom. Cross-module
+    // (2026-08-22): ORed with any loaded module so a generator like
+    // `gen_arith.fitz` calling `rand.seeded(...)` gets `__FitzRng` emitted in
+    // the crate root even when main itself never touches `rand`.
+    let (main_uses_rand, main_uses_rand_global) = rand_usage(program);
+    ctx.uses_rand = main_uses_rand || loader.modules.iter().any(|m| m.uses_rand);
+    ctx.uses_rand_global =
+        main_uses_rand_global || loader.modules.iter().any(|m| m.uses_rand_global);
     // FITZ-03 — fs usage (main program; cross-module fs is a follow-up).
     ctx.uses_fs = program_calls_module(program, "fs");
-    // FITZ-04 — num usage (locale-aware formatting).
-    ctx.uses_num = program_calls_module(program, "num");
+    // FITZ-04 — num usage (locale-aware formatting). Cross-module (2026-08-22):
+    // ORed with any loaded module so `fmt.fitz` calling `num.format(...)` gets
+    // `NUM_PRELUDE` emitted in the crate root.
+    ctx.uses_num =
+        program_calls_module(program, "num") || loader.modules.iter().any(|m| m.uses_num);
     ctx.uses_to_json = uses_to_json;
     // 10.8.7 (v0.10.8) — pre-scan of the `ws_broadcast(endpoint, msg)`
     // builtin in main. Set BEFORE emit_prelude so that
@@ -17503,7 +17577,12 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // of auth that always rejects), the `None` is
         // unreachable and rustc would emit a warning. The
         // attribute is zero-overhead.
-        if is_middleware {
+        // FITZ-19 — a `@ws` handler that uses `?` is emitted `-> Result<(),
+        // String>` and gets a trailing `Ok(())` (see the body-close tail-fall
+        // below). The idiomatic handler ends in a divergent `loop {}`, so that
+        // `Ok(())` is unreachable and rustc would warn — same situation as a
+        // middleware's trailing `None`. The attribute is zero-overhead.
+        if is_middleware || (is_ws_handler && body_has_try) {
             self.emit("#[allow(unreachable_code)]\n");
         }
         let pub_kw = self.pub_prefix();
@@ -17718,6 +17797,17 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         if is_middleware {
             self.emit_indent();
             self.emit("None\n");
+        }
+        // FITZ-19 — a `@ws` handler that uses `?` is `-> Result<(), String>`.
+        // If its body falls through the end (a `match`-based gate, cleanup after
+        // the recv loop, etc.) without an explicit terminal, Rust would complain
+        // "expected Result<(), String>, found ()". Emit a trailing `Ok(())` —
+        // dead code (eliminated by rustc) when the body diverges via a `loop {}`
+        // that only exits through `?`, which is the idiomatic shape. Parallel to
+        // the middleware `None` tail-fall above.
+        if is_ws_handler && body_has_try {
+            self.emit_indent();
+            self.emit("Ok(())\n");
         }
         self.response_mode = saved_response_mode;
         self.in_middleware_fn = saved_in_middleware;

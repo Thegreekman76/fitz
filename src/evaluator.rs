@@ -179,7 +179,26 @@ pub async fn eval_with_base_and_deps(
     base_dir: PathBuf,
     dep_registry: crate::manifest::DepRegistry,
 ) -> FitzResult<()> {
-    install_loader(base_dir, dep_registry);
+    let import_root = base_dir.clone();
+    eval_with_base_import_root_and_deps(program, base_dir, import_root, dep_registry).await
+}
+
+/// FITZ-20 — like `eval_with_base_and_deps`, but anchors the loader's
+/// `import_root` fallback to a directory SEPARATE from `base_dir`. Imports
+/// resolve relative to `base_dir` first, then fall back to `import_root`.
+///
+/// Used by `fitz test`: a test file in `tests/` has `base_dir = tests/`, but
+/// `from gen_arith import X` should resolve to the sibling `src/gen_arith.fitz`,
+/// so `import_root` is set to the manifest entry's dir (`src/`). Without this a
+/// test could only reach `src/` code through the package name (`from <pkg>
+/// import X`), which requires the lib entry to DEFINE the symbol (no re-export).
+pub async fn eval_with_base_import_root_and_deps(
+    program: Program,
+    base_dir: PathBuf,
+    import_root: PathBuf,
+    dep_registry: crate::manifest::DepRegistry,
+) -> FitzResult<()> {
+    install_loader_with_root(base_dir, import_root, dep_registry);
     // Guard to always uninstall the loader — even on panic.
     // If the program ends with an error, we still want to clean up the
     // thread_local so a subsequent `eval` starts fresh.
@@ -2878,15 +2897,25 @@ impl Drop for DepthGuard {
 }
 
 fn install_loader(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) {
+    let import_root = base_dir.clone();
+    install_loader_with_root(base_dir, import_root, dep_registry);
+}
+
+fn install_loader_with_root(
+    base_dir: PathBuf,
+    import_root: PathBuf,
+    dep_registry: crate::manifest::DepRegistry,
+) {
     LOADER.with(|cell| {
         // Mini-phase loader-absolute (Step 4 post-boilerplates) — the
-        // `import_root` is fixed to the initial `base_dir` (parent of
-        // the entry file) and is NOT modified by nested loads. Acts
-        // as a fallback for imports that don't resolve relative to
-        // the importer.
+        // `import_root` acts as a fallback for imports that don't resolve
+        // relative to the importer's `base_dir`. Usually `import_root ==
+        // base_dir` (the entry's dir); FITZ-20 sets a separate `import_root`
+        // (the manifest entry's `src/` dir) for `fitz test`, so a test file in
+        // `tests/` can `from <src-module> import X`.
         *cell.borrow_mut() = Some(Loader {
-            base_dir: base_dir.clone(),
-            import_root: base_dir,
+            base_dir,
+            import_root,
             loading: Vec::new(),
             cache: HashMap::new(),
             dep_registry,

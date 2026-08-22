@@ -9937,6 +9937,55 @@ fn check_block(ctx: &mut CheckCtx, body: &[Stmt]) {
     }
 }
 
+/// FITZ-17 — does control leave this block WITHOUT falling through the end?
+/// (i.e. does every path end in a `return`/divergence?) A block-body `{ }` fn
+/// does NOT return its last expression implicitly (only the arrow `=>` does), so
+/// a body that falls through yields `Null` at runtime even if it declares a
+/// non-nullable return type. This drives the missing-return check on `Stmt::FnDef`.
+/// Arrow bodies desugar to `[Stmt::Return(...)]`, so they always pass.
+fn block_always_returns(body: &[Stmt]) -> bool {
+    match body.last() {
+        Some(s) => stmt_always_returns(s),
+        None => false,
+    }
+}
+
+fn stmt_always_returns(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(..) | Stmt::ReturnStatus { .. } | Stmt::Break(..) | Stmt::Continue(..) => true,
+        // A trailing `loop { }` diverges in the idiomatic case (it only exits
+        // via `?`/`return` propagating out, e.g. a `@ws` recv loop). Treating it
+        // as diverging avoids a false positive on that shape; the rare
+        // `loop { break }` fall-through is a tolerated miss (no false negative
+        // that matters — `?`/`return` are the normal exits).
+        Stmt::Loop { .. } => true,
+        Stmt::Expr(e, _) => expr_always_returns(e),
+        _ => false,
+    }
+}
+
+fn expr_always_returns(expr: &Expr) -> bool {
+    match expr {
+        // An `if` diverges only if BOTH branches do — a missing `else` can fall
+        // through.
+        Expr::If {
+            then,
+            else_: Some(else_body),
+            ..
+        } => block_always_returns(then) && block_always_returns(else_body),
+        Expr::If { .. } => false,
+        // A `match` diverges iff EVERY arm diverges. Arms that yield a value
+        // (`=> "+"`) do NOT — that value is discarded and control falls through
+        // (the `op_symbol { match ... }` bug). Arms that `return` do. An
+        // unmatched value panics at runtime (the codegen's synthetic arm), which
+        // also never falls through, so "all arms diverge" is sufficient.
+        Expr::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|a| block_always_returns(&a.body))
+        }
+        _ => false,
+    }
+}
+
 /// Check a block AND return the type of its tail — the value the block
 /// produces when used as an expression. Mirrors the per-arm logic in
 /// `Expr::Match`: the type of the last `Stmt::Expr`; `Type::Any` when the
@@ -10336,6 +10385,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
             };
+            // FITZ-17 — captured BEFORE `ret` is moved into `return_stack`: does
+            // this declared return type demand a value on every path? (`Any`/
+            // `Null`/nullable tolerate a fall-through Null.)
+            let ret_requires_return = !matches!(ret, Type::Any | Type::Null) && !ret.is_nullable();
             // "HTTP context" for the `Stmt::ReturnStatus` check:
             // HTTP handlers (`@get`/`@post`/`@put`/`@delete`/`@ws`) and
             // fns referenced by `@middleware(name)` in another FnDef.
@@ -10444,6 +10497,24 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 }
             }
             check_block(ctx, body);
+            // FITZ-17 — a block-body fn with a declared, non-nullable return type
+            // must `return` on every path. Fitz does NOT return a block's last
+            // expression implicitly (only the arrow `=>` does): `fn a() -> Int
+            // { 5 }` yields `Null` at runtime, and `fitz check` used to miss it
+            // (T2: check✓ / run-gives-null). Skipped when the return type is
+            // `Any`/`Null`/nullable (a fall-through Null is legitimate there) and
+            // for HTTP-like handlers (`@get`/`@post`/`@ws`… — polymorphic, use
+            // `return <status>`). Arrow bodies desugar to `[Stmt::Return]` and
+            // always pass; a `match`/`if` whose branches all `return` passes too.
+            if !is_http_handler && ret_requires_return && !block_always_returns(body) {
+                ctx.error_at(
+                    *fn_span,
+                    format!(
+                        "the function `{}` declares a non-nullable return type but a path through its body returns no value — a `{{ }}` block does NOT return its last expression (only the arrow `=>` does). Use `return <expr>` (or the arrow form `fn {}(...) => <expr>`).",
+                        fn_name, fn_name
+                    ),
+                );
+            }
             ctx.loop_depth = saved_loop_depth;
             ctx.inferred_returns.pop();
             ctx.return_stack.pop();
