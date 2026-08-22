@@ -9,6 +9,24 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.58.1] — 2026-08-22 — `RandGen` como tipo nombrable: cruza funciones (FITZ-01(b))
+
+Follow-up de v0.58.0 (dogfooding MatHelp). Un `RandGen` ahora puede viajar como
+parámetro y retorno de función. Detalle en `docs/norte-mathelp.md` → FITZ-01(b).
+
+### Added
+- **`RandGen` como tipo nombrable — cruza fn (FITZ-01(b))** — antes un `RandGen`
+  no podía viajar como parámetro ni retorno (`fn draw(g: RandGen, ...)` → el
+  checker daba "unknown type" y sin anotar el codegen no lo infería). Ahora
+  `resolve_type_expr` mapea `"RandGen" → Type::RandGen` e `infer_randgen_method`
+  tipa los 6 métodos (`int→Int`, `float→Float`, `bool→Bool`, `choice→Result<T>`,
+  `shuffle→List<T>`, `sample→Result<List<T>>`), así un `g` que llega por
+  parámetro tiene métodos tipados. Verificado check/run/build/binario idénticos.
+  2 unit tests `randgen_*_v0_58`.
+- **Backfill de tests de FITZ-17 (missing-return)** — la fix del checker salió en
+  v0.58.0 (`block_always_returns`) pero sus 4 unit tests `missing_return_*_v0_58`
+  quedaron sin commitear; entran acá.
+
 ## [v0.58.0] — 2026-08-22 — `rand`/`num` cross-módulo en codegen + checker missing-return + `@ws` fall-through + tests importan `src/` (dogfooding MatHelp F2)
 
 Cinco hallazgos del core encontrados construyendo el **primer juego de MatHelp

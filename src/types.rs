@@ -1414,6 +1414,11 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
         "Date" => Some(Type::Date),
         "DateTime" => Some(Type::DateTime),
         "Uuid" => Some(Type::Uuid),
+        // FITZ-01(b) — `RandGen` (the seeded generator from `rand.seeded(N)`)
+        // is nameable, so it can annotate a param/return and cross a fn
+        // boundary (`fn draw(g: RandGen) -> Int`). The codegen already maps
+        // `Type::RandGen -> __FitzRng`; typed methods live in `infer_randgen_method`.
+        "RandGen" => Some(Type::RandGen),
         _ => None,
     };
     if let Some(t) = prim {
@@ -6609,6 +6614,12 @@ fn infer_method_call(
         Type::Str => Some(infer_str_method(ctx, method, args_ty, span)),
         // Mini-batch Bytes — methods on Bytes.
         Type::Bytes => Some(infer_bytes_method(ctx, method, args_ty, span)),
+        // FITZ-01(b) — typed methods on a seeded `RandGen` (`g: RandGen`
+        // annotated). Lets a `RandGen` cross a fn boundary (`fn draw(g:
+        // RandGen) -> Int { return g.int(1, 6) }`). A local `let g =
+        // rand.seeded(...)` still types as `Any` (rand is Type::Any) and its
+        // methods stay gradual — only the explicit annotation opts into these.
+        Type::RandGen => Some(infer_randgen_method(ctx, method, args_ty, span)),
         // F13.D — universal methods over `Type::Any` for dynamic
         // type-check on heterogeneous. Return `Result<T>` if match,
         // `Result::Err(Str)` otherwise. `type_name()` returns `Str` directly.
@@ -9089,6 +9100,61 @@ fn infer_uuid_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
                 format!(
                     "`Uuid` does not have method `{}` (supported: to_str, is_nil)",
                     method
+                ),
+            );
+            Type::Any
+        }
+    }
+}
+
+/// FITZ-01(b) — typed method signatures for a `RandGen` receiver (annotated
+/// `g: RandGen`). Mirrors the runtime dispatch in `src/rand.rs`: `int(min,max)
+/// -> Int`, `float() -> Float`, `bool() -> Bool`, `choice(xs) -> Result<T>`,
+/// `shuffle(xs) -> List<T>`, `sample(xs, n) -> Result<List<T>>`. `T` is the
+/// element type of the `List` argument (Any if not a list).
+fn infer_randgen_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
+    // element type of the first arg when it's a List<T>
+    let elem = || match args_ty.first().map(|t| t.base()) {
+        Some(Type::List(t)) => (**t).clone(),
+        _ => Type::Any,
+    };
+    match method {
+        "int" => {
+            check_method_arity(ctx, "int", args_ty, 2, span);
+            Type::Int
+        }
+        "float" => {
+            check_method_arity(ctx, "float", args_ty, 0, span);
+            Type::Float
+        }
+        "bool" => {
+            check_method_arity(ctx, "bool", args_ty, 0, span);
+            Type::Bool
+        }
+        "choice" => {
+            check_method_arity(ctx, "choice", args_ty, 1, span);
+            Type::Result {
+                ok: Box::new(elem()),
+                err: Box::new(Type::Str),
+            }
+        }
+        "shuffle" => {
+            check_method_arity(ctx, "shuffle", args_ty, 1, span);
+            Type::List(Box::new(elem()))
+        }
+        "sample" => {
+            check_method_arity(ctx, "sample", args_ty, 2, span);
+            Type::Result {
+                ok: Box::new(Type::List(Box::new(elem()))),
+                err: Box::new(Type::Str),
+            }
+        }
+        other => {
+            ctx.error_at(
+                span,
+                format!(
+                    "`RandGen` has no method `{}` (supported: int, float, bool, choice, shuffle, sample)",
+                    other
                 ),
             );
             Type::Any
@@ -13857,6 +13923,76 @@ mod tests {
         let program = parse(tokens).expect("parse OK");
         let (_env, _types, _defs, errors) = check_program(&program);
         errors
+    }
+
+    // FITZ-01(b) (v0.58) — `RandGen` is a nameable type: it can annotate a
+    // param/return so a seeded generator crosses a fn boundary, with typed
+    // methods (int/shuffle/...).
+    #[test]
+    fn randgen_param_and_typed_methods_v0_58() {
+        let errors = errors_of(
+            "fn draw(g: RandGen, hi: Int) -> Int { return g.int(1, hi) }\n\
+             fn shuf(g: RandGen, xs: List<Int>) -> List<Int> { return g.shuffle(xs) }\n\
+             fn one(g: RandGen) -> Float { return g.float() }",
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn randgen_unknown_method_errors_v0_58() {
+        let errors = errors_of("fn f(g: RandGen) -> Int { return g.nope() }");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("RandGen") && e.message.contains("no method")),
+            "{:?}",
+            errors
+        );
+    }
+
+    // FITZ-17 (v0.58) — a block-body fn with a non-nullable return type must
+    // `return` on every path (a bare trailing expression is NOT an implicit
+    // return; only the arrow `=>` is).
+    #[test]
+    fn missing_return_bare_trailing_expr_errors_v0_58() {
+        let errors = errors_of("fn a() -> Int { 5 }");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("return no value")
+                    || e.message.contains("returns no value")),
+            "{:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn missing_return_bare_trailing_match_errors_v0_58() {
+        let errors = errors_of("fn s(op: Str) -> Str { match op { \"a\" => \"X\", _ => \"?\" } }");
+        assert!(!errors.is_empty(), "expected a missing-return error");
+    }
+
+    #[test]
+    fn explicit_return_and_arrow_pass_v0_58() {
+        // `return`, arrow, if-both-branches-return, match-all-arms-return: OK.
+        let errors = errors_of(
+            "fn a() -> Int { return 5 }\n\
+             fn b() -> Int => 5\n\
+             fn c(x: Int) -> Int { if (x > 0) { return 1 } else { return 2 } }\n\
+             fn d(op: Str) -> Str { return match op { \"a\" => \"X\", _ => \"?\" } }\n\
+             fn e(op: Str) -> Str { match op { \"a\" => return \"X\", _ => return \"?\" } }",
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn missing_return_skips_nullable_and_any_v0_58() {
+        // Nullable/Any return types tolerate a fall-through Null — no error.
+        let errors = errors_of(
+            "fn a() -> Int? { 5 }\n\
+             fn b(x: Int) { x }",
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
     }
 
     // #6 (v0.37.13) — CLI `@arg`/`@flag` param decorators.

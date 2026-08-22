@@ -2,6 +2,18 @@
 
 ---
 
+## v0.58.1 — `RandGen` como tipo nombrable: cruza funciones (FITZ-01(b)) ✅ CERRADO (2026-08-22)
+
+Follow-up de v0.58.0 (dogfooding MatHelp). Un `RandGen` ahora viaja como parámetro y retorno de función: `resolve_type_expr` mapea `"RandGen" → Type::RandGen` e `infer_randgen_method` tipa los 6 métodos (`int→Int`, `float→Float`, `bool→Bool`, `choice→Result<T>`, `shuffle→List<T>`, `sample→Result<List<T>>`) + brazo `Type::RandGen` en `infer_method_call`; antes el checker daba "unknown type" y sin anotar el codegen no lo infería. Verificado check/run/build/binario idénticos (scratch `fn draw(g: RandGen, hi: Int) -> Int { return g.int(1, hi) }`). 2 unit tests `randgen_*_v0_58` + backfill de los 4 tests `missing_return_*_v0_58` de FITZ-17 (la fix salió en v0.58.0 sin sus tests). lib 4201, smoke 290 verde, fmt + clippy (default + lsp) limpios. Cierra FITZ-01(b) de `docs/norte-mathelp.md`.
+
+## v0.58.0 — `rand`/`num` cross-módulo + checker missing-return + `@ws` fall-through + tests importan `src/` ✅ CERRADO (2026-08-22)
+
+**Hito**: cinco hallazgos del core construyendo el **primer juego de MatHelp (F2)** — el contrarreloj de las 4 operaciones (generadores `rand.seeded` deterministas, formateo `num` por locale, `Quiz.fitzv` LiveComponent, cronómetro server-pushed por WebSocket con `@background`+`spawn`+`sleep`, persistencia de cada respuesta a Postgres). El juego compila a binario nativo con paridad bit-a-bit `fitz run` ↔ binario, validado con un E2E completo (registro → perfil → `/jugar` SSR → WS con reloj 60→57 → responder → feedback → sesión+attempt persistidos). Fixes: **FITZ-01(a)/FITZ-04** (`rand`/`num` en módulos importados no emitían el `use crate::{...}` del prelude → E0425; ahora el crate root emite los preludes si cualquier módulo los usa + cada módulo su `use crate::{...}`, patrón SMTP/Response/DB); **FITZ-18** (`getrandom` no se inyectaba con auth+rand global por el falso positivo del `contains("getrandom")` vs el feature de `rand_core`); **FITZ-17** (checker rechaza un bloque `{}` sin `return` con retorno no-nullable — `fn a() -> Int { 5 }` devolvía `null`; clase T2 check✓/run-da-null; helper `block_always_returns`, blast radius ≈ 0); **FITZ-19** (un `@ws` con `?` que cae por el final cierra con `Ok(())`); **FITZ-20** (tests de `tests/` importan módulos de `src/` vía import_root fallback al dir del entry). Verificado: fmt + clippy (default + lsp) limpios, lib 4195/4360 (default/lsp), smoke 290, cli_e2e 136, openapi 3. Detalle en `docs/norte-mathelp.md` → FITZ-01/17/18/19/20.
+
+## v0.57.0 — Codegen: nominales cross-módulo de fns importadas (FITZ-15) + coerción `__FitzValue` en `match` (FITZ-16) ✅ CERRADO (2026-08-21)
+
+**Hito**: cierra dos fixes de codegen de la clase check✓/build✗ encontrados en la auth de MatHelp (F1). FITZ-15: un nominal retornado por una fn importada, no en scope del módulo consumidor, se degradaba a `Any` (auto-registro de los nominales del ret con `auto_register_imported_fn_ret_nominals`). FITZ-16: el arm `Ok(v) => v` de un `match` sobre `Result<Any>` no coaccionaba a un primitivo (coerción del arm `Any` cuando el LUB del match es `Str/Int/Float/Bool`). Detalle en `docs/norte-mathelp.md` → FITZ-15/16.
+
 ## v0.56.0 — Codegen: map literal `Map<Str,Any>` no-vacío en top-level de módulo ✅ CERRADO (2026-08-21)
 
 **Hito**: cierra el residual conocido de v0.55, la última pieza del dogfooding de MatHelp. Un `let STORE: Map<Str, Any> = { "k": 10 }` (literal no-vacío) en el top-level de un módulo no compilaba: `gen_module_top_let` emitía el literal vía `gen_expr` sin el hint de la anotación → `Vec<(String, i64)>`, y `coerce` no tiene un arm `Map<K,V>→Map<K,Any>` que envuelva las entradas → `E0308`.
