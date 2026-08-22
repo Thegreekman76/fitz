@@ -568,7 +568,7 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-08 · ENUM nativo de Postgres
 
-- [ ] Implementado
+- [ ] Implementado — **candidata segunda tanda (prioridad baja; `@check_constraint` cubre)**
 - **Estado:** Confirmado (prioridad baja).
 - **Evidencia:** `boilerplates/api-orm-full/src/models.fitz:24-26` (no soportado en ORM MVP).
   **`@check_constraint` SÍ existe** (`src/types.rs:3162-3228`, `src/migrations.rs:916-941`).
@@ -582,6 +582,54 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 - **Dependencias:** ninguna. **No prioritario** — `@check_constraint` cubre.
 - **Notas de diseño:** documentar el patrón `Str + @check_constraint` como camino recomendado hoy es más
   barato que el enum nativo.
+
+---
+
+### FITZ-21 · Loader: un test que se llama igual que el módulo que importa se auto-importa (ciclo)
+
+- [ ] Implementado — **🎯 candidata próxima tanda (fricciones DX/correctitud)**
+- **Estado:** Confirmado (repro). Descubierto en MatHelp F3 (motor adaptativo);
+  **re-pegado en MatHelp F4 (2026-08-22)**: `tests/keypad.fitz` con
+  `from keypad import ...` (apuntando a `src/keypad.fitz`) → ciclo; hubo que
+  renombrar a `tests/teclado.fitz`. Sigue siendo fricción real cada vez que se
+  agrega un módulo con su test homónimo.
+- **Impacto:** Bajo (workaround trivial: renombrar). Pero es un mensaje confuso.
+- **Evidencia:** `tests/engine.fitz` con `from engine import ...` (apuntando a `src/engine.fitz`)
+  falla `fitz test` con `Error — ciclo de imports detectado: tests/engine.fitz -> tests/engine.fitz`.
+  El fallback `import_root` (FITZ-20) resuelve primero el hermano en `tests/` (que es el propio
+  archivo) antes de caer a `src/`; como el hermano existe (es él mismo), nunca llega al `src/`.
+- **Repro mínimo:** `src/foo.fitz` con `fn bar() => 1`; `tests/foo.fitz` con
+  `from foo import bar` + un `@test`. `fitz test` → ciclo.
+- **Workaround (aplicado en la app):** nombrar el test distinto del módulo (`tests/motor.fitz`
+  en vez de `tests/engine.fitz`).
+- **Propuesta:** en la resolución sibling-first, saltar el archivo que se está cargando (self):
+  si el único candidato hermano es el propio archivo en curso, caer al `import_root` fallback.
+- **Archivos a tocar:** el loader del runner de `fitz test` (resolución `import_root`).
+- **Criterio de aceptación:** `tests/engine.fitz` con `from engine import X` resuelve a
+  `src/engine.fitz`, no a sí mismo.
+
+---
+
+### FITZ-22 · `fitz check` no caza aridad incorrecta en llamada a fn importada (check✓/build✗)
+
+- [ ] Implementado — **🎯 candidata próxima tanda (fricciones DX/correctitud)**
+- **Estado:** Confirmado (repro). Clase T2 (paridad `check`/`build`). Descubierto en MatHelp F3.
+- **Impacto:** Medio — es exactamente el patrón "pasa check, rompe build" que T2 quiere erradicar.
+  Un refactor de firma de una fn muy usada cross-módulo no se caza en `fitz check`; recién aparece
+  en `fitz build` (que sí valida aridad en el codegen).
+- **Evidencia:** en MatHelp, `gen_for` (10 params, en `src/gen_arith.fitz`) llamada con 6 args
+  desde `src/live_game.fitz` (`persistir_practica`): `fitz check` dijo "sin errores"; `fitz build`
+  cortó con `codegen: Error ... gen_for expects 10 argument(s), got 6`.
+- **Repro mínimo:** `src/m.fitz` con `fn f(a: Int, b: Int) -> Int => a + b`; otro módulo con
+  `from m import f` y `let x = f(1)`. `fitz check` pasa; `fitz build` falla por aridad.
+- **Hipótesis (a confirmar por el core):** el checker tipa las fns importadas de forma laxa (Any)
+  y no valida aridad cross-módulo; el codegen sí resuelve la firma real y valida.
+- **Propuesta:** el checker debería resolver la firma `Function{params, ret}` de una fn importada
+  (ya tiene la info del módulo) y validar aridad/tipos en el call site, como lo hace para fns del
+  mismo módulo (regla 5.3.2).
+- **Archivos a tocar:** `src/types.rs` (resolución de fns importadas + `Expr::Call`).
+- **Criterio de aceptación:** una llamada con aridad incorrecta a una fn importada es error de
+  `fitz check`, no solo de `fitz build`.
 
 ---
 
