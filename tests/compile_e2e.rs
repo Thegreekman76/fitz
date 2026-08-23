@@ -8700,6 +8700,32 @@ fn ws_codegen_auth_via_subprotocol_accepts_token() {
     assert_eq!(msg, "\"hola Ada\"");
 }
 
+/// FITZ-19 residual (2026-08) — a `@ws` handler that uses `?` compiles to
+/// `-> Result<(), String>`; an EXPLICIT bare `return` / `return null` inside a
+/// nested `match` arm (a common auth gate: `Err(_) => { return }`) used to emit
+/// `return ()`, which rustc rejects (E0308) against the `Result` return type.
+/// This blocked the native build of `examples/admin` in fitz-liveviews. The fix
+/// emits `return Ok(())`. Build-only (the shape, not a live socket).
+#[test]
+fn fitz19_ws_handler_bare_return_in_match_arm_builds() {
+    let src = "type Msg { text: Str }\n\
+               fn check() -> Result<Int> => Ok(1)\n\
+               @ws(\"/live\")\n\
+               async fn live(ws: WsConn<Msg>) {\n\
+                 let _u = match check() {\n\
+                   Ok(v) => v,\n\
+                   Err(_) => { return },\n\
+                 }\n\
+                 loop {\n\
+                   let m = ws.recv()?\n\
+                   ws.send(m)\n\
+                 }\n\
+               }\n\
+               @server(8099)\n\
+               fn main() => 0\n";
+    build_expect_ok("fitz19_ws_bare_return", src);
+}
+
 // ---------------------------------------------------------------------------
 // R.bug-deadlock — regression test (2026-05-21)
 // ---------------------------------------------------------------------------

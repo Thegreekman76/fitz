@@ -917,6 +917,16 @@ pub struct TypeEnv {
     /// skipped. Parallel to `imported_background_fns` (B10) and
     /// `imported_auth_provider` (W12).
     imported_live_components: Vec<ImportedLiveComponent>,
+    /// FITZ-22 — signatures of top-level fns brought in via `from <mod>
+    /// import <f>`, keyed by the LOCAL binding name (alias-aware). Pre-scanned
+    /// by the caller (`pre_scan_imported_fn_signatures`) via
+    /// `extract_fn_signatures` and merged in with `add_imported_fn_sigs`. The
+    /// checker's `Stmt::FromImport` handler consumes it to type the binding as
+    /// `Type::Function` so the call site validates arity/types (regla 5.3.2)
+    /// instead of typing the fn `Any` and accepting wrong-arity calls that
+    /// only fail in `fitz build`. Parallel to `imported_background_fns` (B10)
+    /// and `imported_auth_provider` (W12).
+    imported_fn_sigs: HashMap<String, ImportedFnSig>,
 }
 
 impl TypeEnv {
@@ -1134,6 +1144,19 @@ impl TypeEnv {
     /// in cross-module imports.
     pub fn imported_background_fns(&self) -> &HashSet<String> {
         &self.imported_background_fns
+    }
+
+    /// FITZ-22 — Registers signatures of top-level fns imported cross-module,
+    /// keyed by local binding name. Consumed by the `Stmt::FromImport` handler
+    /// to type each imported fn as `Type::Function` (arity/type validation).
+    pub fn add_imported_fn_sigs(&mut self, sigs: HashMap<String, ImportedFnSig>) {
+        self.imported_fn_sigs.extend(sigs);
+    }
+
+    /// FITZ-22 — Looks up the pre-scanned signature of an imported fn by its
+    /// local binding name.
+    fn imported_fn_sig(&self, name: &str) -> Option<&ImportedFnSig> {
+        self.imported_fn_sigs.get(name)
     }
 
     /// v0.19.5 — Registers names of fns referenced as
@@ -10732,20 +10755,53 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             let from_python = path.first().map(|s| s.as_str()) == Some("python");
             for (n, alias) in names {
                 let binding = alias.clone().unwrap_or_else(|| n.clone());
-                let ty = if from_python {
+                if from_python {
                     // The stub was loaded under the `binding` (alias if
                     // present, else name) — see `pyi_loader::load_callables`.
-                    match ctx.types.pyi_module(&binding) {
+                    let ty = match ctx.types.pyi_module(&binding) {
                         Some(id) => Type::Nominal(id),
                         None => Type::PyAny,
-                    }
+                    };
+                    ctx.declare_var(binding, ty, *span);
+                } else if let Some(sig) = ctx.types.imported_fn_sig(&binding).cloned() {
+                    // FITZ-22 — the imported name is a top-level fn whose real
+                    // signature was pre-scanned. Register it as `Type::Function`
+                    // (with defaults/varargs) so the call site validates
+                    // arity/types (regla 5.3.2), mirroring `preregister_fn_
+                    // signatures` for local fns. Without this the binding typed
+                    // `Any` and wrong-arity calls only failed in `fitz build`.
+                    let param_types: Vec<Type> = sig
+                        .params
+                        .iter()
+                        .map(|p| ann_to_type(p.as_ref(), ctx.types))
+                        .collect();
+                    let ret = match &sig.ret {
+                        Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
+                        None => Type::Any,
+                    };
+                    let outer_ret = if sig.is_async {
+                        Type::Future(Box::new(ret))
+                    } else {
+                        ret
+                    };
+                    ctx.declare_fn(
+                        binding,
+                        Type::Function {
+                            params: param_types,
+                            ret: Box::new(outer_ret),
+                        },
+                        *span,
+                        sig.defaults_count,
+                        sig.has_varargs,
+                    );
                 } else {
-                    Type::Any
-                };
-                // go-to-def on the binding jumps to the line of
-                // `from foo import ...` — remote cross-module def
-                // remains visible debt of the MVP.
-                ctx.declare_var(binding, ty, *span);
+                    // Other imported names (types brought in for StructLit,
+                    // values) — without more info, `Any` is the best we have.
+                    // go-to-def on the binding jumps to the line of
+                    // `from foo import ...` — remote cross-module def
+                    // remains visible debt of the MVP.
+                    ctx.declare_var(binding, Type::Any, *span);
+                }
             }
         }
 
@@ -11899,6 +11955,57 @@ pub fn extract_background_fn_names(program: &Program) -> Vec<String> {
         }
     }
     names
+}
+
+/// FITZ-22 — signature of a top-level fn from an imported module, kept with
+/// its annotations UNRESOLVED (`TypeExpr`) so the importer resolves them
+/// against its own `TypeEnv` (primitives resolve; nominals from the imported
+/// module fall to `Any` when not also imported — gradual-safe). Mirrors the
+/// arity/defaults/varargs info that `preregister_fn_signatures` computes for
+/// local fns. Consumed by the checker's `Stmt::FromImport` handler to type the
+/// imported binding as `Type::Function` and validate the call site (regla
+/// 5.3.2) instead of accepting wrong-arity calls that only fail in `fitz build`.
+#[derive(Debug, Clone)]
+pub struct ImportedFnSig {
+    pub params: Vec<Option<TypeExpr>>,
+    pub ret: Option<TypeExpr>,
+    pub is_async: bool,
+    pub defaults_count: usize,
+    pub has_varargs: bool,
+}
+
+/// FITZ-22 — extracts top-level fn signatures from an imported module's AST,
+/// keyed by fn name. Parallel to `extract_background_fn_names` /
+/// `extract_auth_provider_signature`; the caller
+/// (`pre_scan_imported_fn_signatures` in main.rs) maps them under the local
+/// binding name (honoring `import f as g`) and merges into the importer's
+/// `TypeEnv` via `add_imported_fn_sigs`.
+pub fn extract_fn_signatures(program: &Program) -> HashMap<String, ImportedFnSig> {
+    let mut out = HashMap::new();
+    for stmt in program {
+        if let Stmt::FnDef {
+            name,
+            params,
+            return_type,
+            is_async,
+            ..
+        } = stmt
+        {
+            let defaults_count = params.iter().filter(|p| p.default.is_some()).count();
+            let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
+            out.insert(
+                name.clone(),
+                ImportedFnSig {
+                    params: params.iter().map(|p| p.type_.clone()).collect(),
+                    ret: return_type.clone(),
+                    is_async: *is_async,
+                    defaults_count,
+                    has_varargs,
+                },
+            );
+        }
+    }
+    out
 }
 
 /// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Cross-module
@@ -15338,6 +15445,111 @@ mod tests {
                 combined
             );
         }
+    }
+
+    // ---- FITZ-22: arity/type validation of imported fns ----
+
+    /// Simulates the cross-module pre-scan (`pre_scan_imported_fn_signatures`
+    /// in main.rs) without file IO: extracts the module's fn signatures and
+    /// injects them into the importer's env before `check_with_env`, mirroring
+    /// `check_program_with_pyi_stubs_and_deps`. `module_src` fn names are the
+    /// `from m import <name>` bindings (no alias in these tests).
+    fn fitz22_check_importer(module_src: &str, importer_src: &str) -> Vec<FitzError> {
+        let mod_prog = parse(tokenize(module_src).expect("lex mod")).expect("parse mod");
+        let sigs = extract_fn_signatures(&mod_prog);
+        let program = parse(tokenize(importer_src).expect("lex")).expect("parse");
+        let (mut env, errors) = resolve_program(&program);
+        env.add_imported_fn_sigs(sigs);
+        let (_env, _t, _d, errs) = check_with_env(&program, env, errors);
+        errs
+    }
+
+    #[test]
+    fn fitz22_imported_fn_wrong_arity_is_checker_error() {
+        let errs = fitz22_check_importer(
+            "fn f(a: Int, b: Int) -> Int => a + b\n",
+            "from m import f\nlet x = f(1)\n",
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("`f` expects 2 argument(s)")),
+            "esperado error de aridad de `f`, hubo: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fitz22_imported_fn_correct_arity_no_error() {
+        let errs = fitz22_check_importer(
+            "fn f(a: Int, b: Int) -> Int => a + b\n",
+            "from m import f\nlet x = f(1, 2)\n",
+        );
+        assert!(errs.is_empty(), "esperado sin errores, hubo: {:?}", errs);
+    }
+
+    #[test]
+    fn fitz22_imported_fn_type_mismatch_is_checker_error() {
+        let errs = fitz22_check_importer(
+            "fn f(a: Int, b: Int) -> Int => a + b\n",
+            "from m import f\nlet x = f(\"x\", 2)\n",
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("argument 1 expects `Int`")),
+            "esperado mismatch de tipo, hubo: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fitz22_imported_fn_with_default_allows_omitted_arg() {
+        let errs = fitz22_check_importer(
+            "fn f(a: Int, b: Int = 0) -> Int => a + b\n",
+            "from m import f\nlet x = f(1)\n",
+        );
+        assert!(errs.is_empty(), "esperado sin errores, hubo: {:?}", errs);
+    }
+
+    #[test]
+    fn fitz22_imported_fn_varargs_accepts_extra_args() {
+        let errs = fitz22_check_importer(
+            "fn f(a: Int, ...rest) -> Int => a\n",
+            "from m import f\nlet x = f(1, 2, 3)\n",
+        );
+        assert!(errs.is_empty(), "esperado sin errores, hubo: {:?}", errs);
+    }
+
+    #[test]
+    fn fitz22_imported_fn_alias_wrong_arity_is_checker_error() {
+        // `from m import f as g` binds `g`; the pre-scan keys the sig under
+        // the local binding, so `g(1)` is still an arity error.
+        let mod_prog = parse(tokenize("fn f(a: Int, b: Int) -> Int => a + b\n").unwrap()).unwrap();
+        let mut sigs = extract_fn_signatures(&mod_prog);
+        // Re-key `f` -> `g` to simulate the alias mapping the pre-scan does.
+        let sig = sigs.remove("f").unwrap();
+        sigs.insert("g".to_string(), sig);
+        let program = parse(tokenize("from m import f as g\nlet x = g(1)\n").unwrap()).unwrap();
+        let (mut env, errors) = resolve_program(&program);
+        env.add_imported_fn_sigs(sigs);
+        let (_e, _t, _d, errs) = check_with_env(&program, env, errors);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("`g` expects 2 argument(s)")),
+            "esperado error de aridad de `g`, hubo: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fitz22_imported_fn_nominal_param_not_imported_no_false_positive() {
+        // The param type `User` lives in the module and is NOT imported by
+        // the caller → resolves to `Any` (gradual), so a correct-arity call
+        // does NOT produce a spurious type error (arity is still validated).
+        let errs = fitz22_check_importer(
+            "type User { id: Int }\nfn takes(u: User) -> Int => u.id\n",
+            "from m import takes\nfn w(x) -> Int => takes(x)\n",
+        );
+        assert!(errs.is_empty(), "esperado sin errores, hubo: {:?}", errs);
     }
 
     // ---- ident / scope ----

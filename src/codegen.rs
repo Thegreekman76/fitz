@@ -18736,6 +18736,35 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             ret_expected.clone()
         };
         let ret_expected = &resolved_ret;
+        // FITZ-19 continuation (2026-08) — an EXPLICIT bare `return` /
+        // `return null` inside a `@ws` handler that compiles to
+        // `Result<(), String>` (because it uses `?`) leaks `ret_expected =
+        // Null` through the nested `match`/`if` placeholder (see the recovery
+        // above, which only rescues Any/Nullable frames). The generic path
+        // would emit a bare `return ();`, which rustc rejects against the
+        // `Result<(), String>` return type (E0308) — this blocked the native
+        // build of `examples/admin` (its `@ws` socket handlers gate auth with
+        // `Err(_) => { return }`). Recover the enclosing `Result` frame from
+        // `ret_stack` and emit `return Ok(<null → ok>)` (= `Ok(())`). Only
+        // fires for `Expr::Null` against a Result frame — nested Ok/Err returns
+        // and normal fns stay untouched. Parallel to FITZ-19's trailing
+        // `Ok(())` tail-fall.
+        if !self.response_mode
+            && !self.in_middleware_fn
+            && matches!(ret_expected, Type::Null)
+            && matches!(e, Expr::Null(_))
+        {
+            if let Some(Type::Result { ok, .. }) = self.ret_stack.last() {
+                let ok = ok.clone();
+                let (inner_code, inner_ty) = self.gen_expr(e)?;
+                let coerced = coerce(&inner_code, &inner_ty, &ok, self.env);
+                self.emit_indent();
+                self.emit("return Ok(");
+                self.emit(&coerced);
+                self.emit(");\n");
+                return Ok(());
+            }
+        }
         // v0.9.53 8.7-ok-propagation: when ret_expected is
         // Result<T, E> and `e` is `Expr::Ok(inner)` /
         // `Expr::Err(inner)`, we propagate the T/E inside the

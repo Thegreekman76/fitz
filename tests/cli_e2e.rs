@@ -3495,3 +3495,84 @@ fn deuda_a_check_clean_multi_module_reports_all_and_exits_0() {
         "the walk must report every imported module as checked: {stdout}"
     );
 }
+
+// ---- FITZ-22: `fitz check` catches wrong-arity calls to imported fns ----
+
+/// A `from m import f` + wrong-arity call is now a `fitz check` error
+/// (regla 5.3.2 cross-module), not just a `fitz build` error.
+#[test]
+fn fitz22_check_catches_wrong_arity_imported_fn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(
+        &project,
+        "src/m.fitz",
+        "fn f(a: Int, b: Int) -> Int => a + b\n",
+    );
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from m import f\n\nlet x = f(1)\nprint(x)\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(
+        code, 1,
+        "wrong-arity import must fail check: {stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("`f` expects 2 argument(s)")
+            || stderr.contains("`f` expects 2 argument(s)"),
+        "expected arity error message, got:\n{stdout}\n{stderr}"
+    );
+}
+
+/// Regression guard: correct-arity imported call still passes.
+#[test]
+fn fitz22_check_correct_arity_imported_fn_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(
+        &project,
+        "src/m.fitz",
+        "fn f(a: Int, b: Int) -> Int => a + b\n",
+    );
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from m import f\n\nlet x = f(1, 2)\nprint(x)\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(
+        code, 0,
+        "correct-arity import must pass: {stderr}\n{stdout}"
+    );
+}
+
+// ---- FITZ-21: `fitz test` — a test homonymous with the module it imports ----
+
+/// `tests/foo.fitz` doing `from foo import bar` must resolve `foo` to the
+/// `src/foo.fitz` sibling (via import_root), NOT to itself (cycle).
+#[test]
+fn fitz21_test_homonymous_import_resolves_to_src_not_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(&project, "src/foo.fitz", "fn bar() -> Int => 1\n");
+    write_file(
+        &project,
+        "tests/foo.fitz",
+        "from foo import bar\n\n@test\nfn test_bar() {\n  assert_eq(bar(), 1)\n}\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["test"], &project);
+    assert_eq!(
+        code, 0,
+        "homonymous test import must resolve, not cycle: {stderr}\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("ciclo de imports") && !stderr.contains("ciclo de imports"),
+        "must not report an import cycle:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("test_bar") && stdout.contains("ok"),
+        "the test must run and pass:\n{stdout}"
+    );
+}

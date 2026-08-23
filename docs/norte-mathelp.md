@@ -587,7 +587,18 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-21 · Loader: un test que se llama igual que el módulo que importa se auto-importa (ciclo)
 
-- [ ] Implementado — **🎯 candidata próxima tanda (fricciones DX/correctitud)**
+- [x] **Cerrado 2026-08-23 (fitz v0.59)** — el `Loader` (`src/evaluator.rs`)
+  gana `entry_file: Option<PathBuf>` (el path canónico del archivo entry, que
+  se evalúa directo y nunca entra al stack `loading`). En el loop de
+  canonicalización de `load_module` se computa `self_path = loading.last()
+  .or(entry_file)` y se **saltea el candidato que canonicaliza al self**, así la
+  resolución sibling-first cae a `import_root` (`src/foo.fitz`) en vez de
+  ciclar/re-cargarse. `eval_with_base_import_root_and_deps` +
+  `install_loader_with_root` reciben el `entry_file`; el runner de `fitz test`
+  (`eval_test_source`) pasa `fs::canonicalize(path)`. Un ciclo mutuo A→B→A sigue
+  detectándose (self=B, candidato=A). Tests: 1 unit
+  (`fitz21_test_entry_homonymous_import_resolves_to_src_sibling`) + 1 cli_e2e
+  (`fitz21_test_homonymous_import_resolves_to_src_not_cycle`).
 - **Estado:** Confirmado (repro). Descubierto en MatHelp F3 (motor adaptativo);
   **re-pegado en MatHelp F4 (2026-08-22)**: `tests/keypad.fitz` con
   `from keypad import ...` (apuntando a `src/keypad.fitz`) → ciclo; hubo que
@@ -612,7 +623,18 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-22 · `fitz check` no caza aridad incorrecta en llamada a fn importada (check✓/build✗)
 
-- [ ] Implementado — **🎯 candidata próxima tanda (fricciones DX/correctitud)**
+- [x] **Cerrado 2026-08-23 (fitz v0.59)** — nuevo pre-scan
+  `pre_scan_imported_fn_signatures` (`src/main.rs`, paralelo a W12/B10) que, por
+  cada `from m import f`, resuelve la firma real de `fn f` (`extract_fn_signatures`
+  en `src/types.rs`), la mapea bajo el binding local (alias-aware) y la mete en
+  `TypeEnv.imported_fn_sigs`. El handler `Stmt::FromImport` del checker la registra
+  como `Type::Function` (con defaults/varargs) en vez de `Type::Any` → el call site
+  valida aridad/tipos con la maquinaria existente (regla 5.3.2). Un param nominal
+  no importado por el caller resuelve a `Any` (gradual-safe, sin falso positivo);
+  la aridad igual se valida. **Sin falsos positivos**: `fitz check examples/admin`
+  (importa todo el framework, multi-módulo) queda limpio. Tests: 7 unit
+  (`fitz22_*`: aridad, tipos, alias, default, varargs, nominal-no-importado) + 2
+  cli_e2e (`fitz22_check_catches_wrong_arity_imported_fn` + correct-arity guard).
 - **Estado:** Confirmado (repro). Clase T2 (paridad `check`/`build`). Descubierto en MatHelp F3.
 - **Impacto:** Medio — es exactamente el patrón "pasa check, rompe build" que T2 quiere erradicar.
   Un refactor de firma de una fn muy usada cross-módulo no se caza en `fitz check`; recién aparece
@@ -874,26 +896,33 @@ el ID); el autor pidió cerrarlas en el core.
 - **Fix:** el chequeo ahora matchea la LÍNEA de dep (`getrandom =`/`getrandom ` al inicio de línea,
   trim), no el substring. Solo dispara ante un dep `getrandom` real, no ante el nombre de un feature.
 
-### FITZ-19 · Codegen: un `@ws` que usa `?` no cerraba con `Ok(())` al caer por el final (E0308) — CERRADO
+### FITZ-19 · Codegen: un `@ws` que usa `?` no cerraba con `Ok(())` (tail + `return` explícito, E0308) — CERRADO ENTERO
 
-- [x] Cerrado 2026-08-22 (fitz v0.58) — `gen_top_fn` (`src/codegen.rs`) ahora,
-  cuando `is_ws_handler && body_has_try`, emite `#[allow(unreachable_code)]` en
-  la firma + un `Ok(())` de cola (paralelo al `None` tail-fall de middleware).
-  Antes solo compilaba un `@ws` que terminara en un `loop {}` divergente; ahora
-  un handler que cae por el final (gate con `match`, limpieza tras el loop) cierra
-  con `Ok(())`. El `Ok(())` es código muerto (eliminado por rustc) cuando el body
-  diverge, así que no cambia el output de los handlers idiomáticos. Nota
-  histórica del síntoma original: un `return` pelado adentro emitía `return ()`.
-  MatHelp F2 usa el idiom limpio (loop con `break` + `flv_evict` de limpieza).
-- **Síntoma:** un handler `@ws` que usa `?` (sobre `ws.send`) se compila como `-> Result<(),
-  String>`. Un `return` PELADO (sin valor) adentro emite `return ()` en vez de `return Ok(())` →
-  `E0308 mismatched types`. El codegen ya agrega el `Ok(())` implícito al final del handler, pero
-  no traduce un `return` explícito intermedio.
-- **Workaround (idiom):** no usar `return` suelto en un `@ws`; estructurar la salida temprana con
-  `match` anidado (los arms de error hacen `let _ = ws.send(...)` sin `?`, y el codegen cierra con
-  `Ok(())`). Es como lo hacen el clock/admin de liveviews. MatHelp F2 usa este idiom.
-- **Fix esperado:** en un handler `@ws`/`@background` con tipo de retorno Result sintetizado,
-  emitir `return Ok(())` para un `return` pelado (paralelo al `Ok(())` implícito del final).
+- [x] Tail fall-through cerrado 2026-08-22 (fitz v0.58) — `gen_top_fn`
+  (`src/codegen.rs`) ahora, cuando `is_ws_handler && body_has_try`, emite
+  `#[allow(unreachable_code)]` en la firma + un `Ok(())` de cola (paralelo al
+  `None` tail-fall de middleware). Antes solo compilaba un `@ws` que terminara
+  en un `loop {}` divergente; ahora un handler que cae por el final (gate con
+  `match`, limpieza tras el loop) cierra con `Ok(())`. El `Ok(())` es código
+  muerto (eliminado por rustc) cuando el body diverge.
+- [x] **Residual del `return` explícito cerrado 2026-08-23 (fitz v0.59)** —
+  hallazgo de la verificación de FLV-10 (`fitz build examples/admin`). El fix
+  del tail NO traducía un `return`/`return null` **explícito** intermedio: un
+  `Err(_) => { return }` (el auth gate de los `@ws` de admin —
+  `empleados_socket`/`departamentos_socket`) emitía `return ()` en vez de
+  `return Ok(())` → `E0308`, bloqueando el build nativo de admin (que **nunca**
+  se había buildeado — solo `fitz run`; la nota vieja "admin usa el idiom
+  limpio" era incorrecta). Fix en `gen_return` (`src/codegen.rs`): cuando
+  `ret_expected == Null && e == Expr::Null && ret_stack.last() == Result` →
+  emite `return Ok(<null→ok>)` (= `Ok(())`). Airtight-safe: ese patrón antes
+  emitía `return ()` → E0308 → no compilaba, así que solo arregla código antes
+  roto. Test: `fitz19_ws_handler_bare_return_in_match_arm_builds` (compile_e2e)
+  + `fitz build examples/admin` verde. **Cierra el `Fix esperado` de abajo.**
+- **Síntoma (histórico):** un handler `@ws` que usa `?` (sobre `ws.send`) se compila como
+  `-> Result<(), String>`. Un `return` PELADO (sin valor) adentro emitía `return ()` en vez de
+  `return Ok(())` → `E0308 mismatched types`.
+- **Fix (ambos casos):** en un handler `@ws` con tipo de retorno Result sintetizado, emitir
+  `Ok(())` tanto en el tail fall-through (v0.58) como en un `return` explícito pelado (v0.59).
 
 ### FITZ-20 · Loader: un archivo de `tests/` no podía importar módulos de `src/` — CERRADO
 

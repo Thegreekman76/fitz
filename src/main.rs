@@ -1773,6 +1773,14 @@ fn check_program_with_pyi_stubs_and_deps(
     if !live_comps.is_empty() {
         env.add_imported_live_components(live_comps);
     }
+    // FITZ-22 — cross-module fn signatures pre-scan. Types each imported
+    // fn as `Type::Function` so the checker validates arity/types at the
+    // call site (regla 5.3.2), catching wrong-arity calls that used to
+    // only fail in `fitz build`.
+    let fn_sigs = pre_scan_imported_fn_signatures(program, &base_dir, dep_registry);
+    if !fn_sigs.is_empty() {
+        env.add_imported_fn_sigs(fn_sigs);
+    }
     types::check_with_env(program, env, errors)
 }
 
@@ -2001,6 +2009,64 @@ fn pre_scan_imported_background_fns(
             continue;
         };
         out.extend(types::extract_background_fn_names(&module_program));
+    }
+    out
+}
+
+/// FITZ-22 — cross-module fn signatures pre-scan. For every `from <mod>
+/// import <f>[ as <g>]`, resolves the module's `.fitz`/`.fitzv`, parses it,
+/// extracts `fn <f>`'s signature, and maps it under the LOCAL binding name
+/// (`g` if aliased, else `f`). The checker's `Stmt::FromImport` handler
+/// consumes it (`env.imported_fn_sig`) to type the binding as
+/// `Type::Function`, so a wrong-arity call is caught by `fitz check` (regla
+/// 5.3.2) instead of only at `fitz build`.
+///
+/// **Error policy**: read/parse/view-transform errors are silenced (silent
+/// fallback — parallel to `pre_scan_imported_background_fns`). **MVP scope**:
+/// `from ... import` only (a namespace `import m` + `m.f()` is unaffected —
+/// the checker types module field access as `Any`) and a single level of
+/// depth, parallel to B10 / W12.
+fn pre_scan_imported_fn_signatures(
+    program: &ast::Program,
+    base_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> std::collections::HashMap<String, types::ImportedFnSig> {
+    let mut out: std::collections::HashMap<String, types::ImportedFnSig> =
+        std::collections::HashMap::new();
+    for stmt in program {
+        let ast::Stmt::FromImport { path, names, .. } = stmt else {
+            continue;
+        };
+        if path.first().map(String::as_str) == Some("python") {
+            continue;
+        }
+        let Some(file_path) = resolve_import_file_path(path, base_dir, dep_registry) else {
+            continue;
+        };
+        let Ok(source_raw) = fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let source = if fitz::view::is_fitzv_extension(&file_path) {
+            match fitz::view::transform_fitzv_source(&source_raw, &file_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            }
+        } else {
+            source_raw
+        };
+        let Ok(tokens) = lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = parser::parse(tokens) else {
+            continue;
+        };
+        let module_sigs = types::extract_fn_signatures(&module_program);
+        for (n, alias) in names {
+            if let Some(sig) = module_sigs.get(n) {
+                let binding = alias.clone().unwrap_or_else(|| n.clone());
+                out.insert(binding, sig.clone());
+            }
+        }
     }
     out
 }
@@ -4779,14 +4845,21 @@ async fn eval_test_source(
     // `import_root` fallback, so `from <src-module> import X` resolves. Single-
     // file (`--file`) tests have `None` and keep the base_dir-only resolution.
     match import_root {
-        Some(root) => evaluator::eval_with_base_import_root_and_deps(
-            program,
-            base_dir,
-            root.to_path_buf(),
-            dep_registry.clone(),
-        )
-        .await
-        .map_err(|e| format!("{e}")),
+        Some(root) => {
+            // FITZ-21 — pass the entry file (canonical) so the loader skips
+            // resolving `from foo import bar` to `tests/foo.fitz` itself,
+            // falling through to the `src/foo.fitz` sibling via `import_root`.
+            let entry_file = fs::canonicalize(path).ok();
+            evaluator::eval_with_base_import_root_and_deps(
+                program,
+                base_dir,
+                root.to_path_buf(),
+                entry_file,
+                dep_registry.clone(),
+            )
+            .await
+            .map_err(|e| format!("{e}"))
+        }
         None => evaluator::eval_with_base_and_deps(program, base_dir, dep_registry.clone())
             .await
             .map_err(|e| format!("{e}")),

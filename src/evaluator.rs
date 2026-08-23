@@ -180,7 +180,7 @@ pub async fn eval_with_base_and_deps(
     dep_registry: crate::manifest::DepRegistry,
 ) -> FitzResult<()> {
     let import_root = base_dir.clone();
-    eval_with_base_import_root_and_deps(program, base_dir, import_root, dep_registry).await
+    eval_with_base_import_root_and_deps(program, base_dir, import_root, None, dep_registry).await
 }
 
 /// FITZ-20 — like `eval_with_base_and_deps`, but anchors the loader's
@@ -192,13 +192,19 @@ pub async fn eval_with_base_and_deps(
 /// so `import_root` is set to the manifest entry's dir (`src/`). Without this a
 /// test could only reach `src/` code through the package name (`from <pkg>
 /// import X`), which requires the lib entry to DEFINE the symbol (no re-export).
+///
+/// FITZ-21 — `entry_file` is the canonical path of the entry program (when
+/// known, e.g. the `tests/*.fitz` file from the test runner). The loader uses
+/// it to skip resolving `from foo import bar` to the entry itself when a
+/// sibling of the same name is the entry file, falling through to `import_root`.
 pub async fn eval_with_base_import_root_and_deps(
     program: Program,
     base_dir: PathBuf,
     import_root: PathBuf,
+    entry_file: Option<PathBuf>,
     dep_registry: crate::manifest::DepRegistry,
 ) -> FitzResult<()> {
-    install_loader_with_root(base_dir, import_root, dep_registry);
+    install_loader_with_root(base_dir, import_root, entry_file, dep_registry);
     // Guard to always uninstall the loader — even on panic.
     // If the program ends with an error, we still want to clean up the
     // thread_local so a subsequent `eval` starts fresh.
@@ -2648,6 +2654,15 @@ struct Loader {
     /// doesn't exist. The fallback tries `<root>/src/types/user.fitz`
     /// (relative to `import_root = <root>/src/`) and that one exists.
     import_root: PathBuf,
+    /// FITZ-21 — canonical path of the ENTRY file being evaluated (the
+    /// file passed to `eval_with_base_import_root_and_deps`, not loaded
+    /// via `load_module` so it never enters the `loading` stack). Used to
+    /// skip the self candidate in sibling-first resolution: a `fitz test`
+    /// entry `tests/foo.fitz` doing `from foo import bar` must resolve to
+    /// the `src/foo.fitz` sibling via `import_root`, not to itself. `None`
+    /// outside the test runner (where `import_root == base_dir`, so there
+    /// is no meaningful fallback to skip toward).
+    entry_file: Option<PathBuf>,
     loading: Vec<PathBuf>,
     cache: HashMap<PathBuf, Value>,
     /// Phase 9.y.3.b — dep registry of the root project (`fitz.toml`
@@ -2898,12 +2913,13 @@ impl Drop for DepthGuard {
 
 fn install_loader(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) {
     let import_root = base_dir.clone();
-    install_loader_with_root(base_dir, import_root, dep_registry);
+    install_loader_with_root(base_dir, import_root, None, dep_registry);
 }
 
 fn install_loader_with_root(
     base_dir: PathBuf,
     import_root: PathBuf,
+    entry_file: Option<PathBuf>,
     dep_registry: crate::manifest::DepRegistry,
 ) {
     LOADER.with(|cell| {
@@ -2916,6 +2932,7 @@ fn install_loader_with_root(
         *cell.borrow_mut() = Some(Loader {
             base_dir,
             import_root,
+            entry_file,
             loading: Vec::new(),
             cache: HashMap::new(),
             dep_registry,
@@ -3062,9 +3079,25 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     // relative to import_root). The first one that canonicalizes OK
     // wins. If all fail, error citing the relative path (first
     // candidate) to preserve the historical message.
+    // FITZ-21 — the file currently being evaluated (self): the top of the
+    // `loading` stack while loading a nested module, or the entry file at the
+    // top level (the entry is evaluated directly, never pushed to `loading`).
+    // A `from foo import bar` from `tests/foo.fitz` resolves `foo` sibling-first
+    // to itself; skip that candidate so resolution falls through to the
+    // `import_root` fallback (`src/foo.fitz`) instead of cycling on / re-loading
+    // itself. A direct self-import has no valid meaning, so skipping is always
+    // safe (mutual cycles A→B→A still resolve — self is B, candidate is A).
+    let self_path: Option<PathBuf> = LOADER.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|l| l.loading.last().cloned().or_else(|| l.entry_file.clone()))
+    });
     let mut canonical_opt: Option<PathBuf> = None;
     for cand in &candidates {
         if let Ok(p) = fs::canonicalize(cand) {
+            if self_path.as_ref() == Some(&p) {
+                continue;
+            }
             canonical_opt = Some(p);
             break;
         }
@@ -26862,6 +26895,47 @@ f = to_json(true)
         res.unwrap();
         // Relative resolution: sub/bar.fitz (same dir as foo) wins.
         assert_eq!(env.lock().get("r"), Some(Value::Str("desde-sub".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fitz21_test_entry_homonymous_import_resolves_to_src_sibling() {
+        // FITZ-21 — a `fitz test` entry `tests/foo.fitz` doing
+        // `from foo import bar` must resolve `foo` to the `src/foo.fitz`
+        // sibling via `import_root`, NOT to itself (which cycles / re-loads
+        // the entry as a module). Mirrors the test-runner install: base_dir
+        // = tests/, import_root = src/, entry_file = tests/foo.fitz.
+        let dir = tempfile::tempdir().expect("creando tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(dir.path().join("src/foo.fitz"), "fn bar() -> Int => 1\n").unwrap();
+        let entry_src = "from foo import bar\nlet r = bar()\n";
+        std::fs::write(dir.path().join("tests/foo.fitz"), entry_src).unwrap();
+
+        let tokens = crate::lexer::tokenize(entry_src).unwrap();
+        let program = crate::parser::parse(tokens).unwrap();
+
+        let base_dir = dir.path().join("tests");
+        let import_root = dir.path().join("src");
+        let entry_file = std::fs::canonicalize(dir.path().join("tests/foo.fitz")).ok();
+        install_loader_with_root(
+            base_dir,
+            import_root,
+            entry_file,
+            crate::manifest::DepRegistry::new(),
+        );
+        let _guard = LoaderGuard;
+        let env = Environment::new();
+        register_builtins(&env);
+        let mut result: FitzResult<()> = Ok(());
+        for stmt in &program {
+            if let Err(signal) = eval_stmt(stmt, env.clone()).await {
+                result = Err(signal_to_error(signal));
+                break;
+            }
+        }
+        drop(dir);
+        result.expect("FITZ-21: homonymous test import must resolve to src sibling, not cycle");
+        assert_eq!(env.lock().get("r"), Some(Value::Int(1)));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -9,6 +9,56 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.59.0] — 2026-08-23 — Tanda deudas dogfooding: FITZ-21 (loader `fitz test`) + FITZ-22 (aridad cross-módulo en `fitz check`) + residual FITZ-19 (`return Ok(())` en `@ws`)
+
+Tanda de deudas del core encontradas dogfooteando MatHelp + fitz-liveviews.
+Detalle en `docs/norte-mathelp.md` → FITZ-21 / FITZ-22 / FITZ-19.
+
+### Fixed
+- **FITZ-21 — `fitz test`: un test homónimo del módulo que importa ya no cicla.**
+  El loader (`src/evaluator.rs`) gana `Loader.entry_file` (path canónico del
+  archivo entry, que se evalúa directo y nunca entra al stack `loading`). En el
+  loop de canonicalización de `load_module` se computa `self_path =
+  loading.last().or(entry_file)` y se **saltea el candidato que canonicaliza al
+  self**, así un `tests/foo.fitz` con `from foo import bar` resuelve al sibling
+  `src/foo.fitz` (vía `import_root`) en vez de ciclar. Un ciclo mutuo A→B→A
+  sigue detectándose (self=B, candidato=A). Threading:
+  `eval_with_base_import_root_and_deps` + `install_loader_with_root` reciben el
+  `entry_file`; `eval_test_source` (`src/main.rs`) pasa `fs::canonicalize(path)`.
+  1 unit + 1 cli_e2e.
+- **FITZ-22 — `fitz check` caza aridad/tipos incorrectos en llamadas a fns
+  importadas (erradica check✓/build✗).** Antes el checker tipaba toda fn
+  `from m import f` como `Type::Any` → el call site no validaba aridad (recién
+  fallaba en `fitz build`). Nuevo pre-scan `pre_scan_imported_fn_signatures`
+  (`src/main.rs`, paralelo a W12/B10) resuelve la firma real de cada fn
+  importada (`extract_fn_signatures` en `src/types.rs`), la mapea bajo el
+  binding local (alias-aware) en `TypeEnv.imported_fn_sigs`, y el handler
+  `Stmt::FromImport` la registra como `Type::Function` (con defaults/varargs) →
+  la maquinaria de validación existente (regla 5.3.2) valida el call site. Un
+  param nominal no importado por el caller resuelve a `Any` (gradual-safe, sin
+  falso positivo); la aridad igual se valida. Sin falsos positivos en
+  `examples/admin` de fitz-liveviews (importa todo el framework, multi-módulo).
+  7 unit + 2 cli_e2e.
+- **Residual de FITZ-19 — un `return` explícito en un `@ws` handler emite
+  `Ok(())`.** El fix de v0.58 cubrió el tail fall-through de un `@ws` que usa
+  `?` (compila a `Result<(), String>`), pero no un `return`/`return null`
+  **explícito** intermedio (el auth gate `Err(_) => { return }` de los sockets
+  de admin): emitía `return ()` → `E0308`, bloqueando `fitz build
+  examples/admin` (que nunca se había buildeado a nativo, solo `fitz run`). Fix
+  en `gen_return` (`src/codegen.rs`): cuando `ret_expected == Null && e ==
+  Expr::Null && ret_stack.last() == Result` → emite `return Ok(<null→ok>)`.
+  Airtight-safe: ese patrón antes no compilaba, así que solo arregla código
+  antes roto. 1 compile_e2e + `fitz build examples/admin` verde.
+
+### Verificación
+- `cargo test --lib` 4209 · `--features lsp` 4374 · clippy (default + lsp)
+  `-D warnings` limpio · fmt limpio · cli_e2e (FITZ-21/22) 3/3 · compile_e2e
+  targeted WS/Result/return/B16 12/12 · `fitz build examples/admin` (liveviews)
+  → binario nativo. (El smoke completo `GUIDE_EXAMPLES_COMPILE` no se corrió a
+  fondo por el estado del disco + caché en frío; el subconjunto targeted +
+  admin nativo + cero errores de tipo/codegen reales cubren la regresión de
+  `gen_return`.)
+
 ## [v0.58.1] — 2026-08-22 — `RandGen` como tipo nombrable: cruza funciones (FITZ-01(b))
 
 Follow-up de v0.58.0 (dogfooding MatHelp). Un `RandGen` ahora puede viajar como
