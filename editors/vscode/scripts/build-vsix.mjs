@@ -119,9 +119,18 @@ console.log(`▶ Copied ${path.relative(repoRoot, builtBinaryPath)} → ${path.r
 console.log("▶ npm run compile");
 execSync("npm run compile", { stdio: "inherit", cwd: extDir });
 
-// 4. vsce package con target.
-console.log(`▶ npx @vscode/vsce package --target ${vsceTarget}`);
-execSync(`npx --yes @vscode/vsce package --target ${vsceTarget}`, {
+// 4. vsce package con target. Preferí el `vsce` instalado en node_modules
+//    (rápido, sin red); `npx --yes` fuerza una resolución por red que se
+//    cuelga. Fallback a npx sólo si no está instalado localmente.
+const localVsce = path.join(
+  extDir, "node_modules", ".bin",
+  process.platform === "win32" ? "vsce.cmd" : "vsce",
+);
+const vsceCmd = fs.existsSync(localVsce)
+  ? `"${localVsce}"`
+  : "npx --yes @vscode/vsce";
+console.log(`▶ ${vsceCmd} package --target ${vsceTarget}`);
+execSync(`${vsceCmd} package --target ${vsceTarget}`, {
   stdio: "inherit",
   cwd: extDir,
 });
