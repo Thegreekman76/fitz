@@ -9,6 +9,29 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.59.1] — 2026-08-27 — FITZ-23: `list.push(<async>.await)` ya no sostiene el `MutexGuard` cruzando el `.await` — dogfooding MatHelp
+
+Fix de codegen de la clase check✓/build✗ encontrado dogfooteando MatHelp
+(tablero familiar). Detalle en `docs/norte-mathelp.md` → FITZ-23.
+
+### Fixed
+- **FITZ-23 — `list.push(<expr con .await>)` rompía `fitz build` en handlers
+  HTTP con `E0277: Handler not satisfied`.** El codegen emitía
+  `(xs).lock().unwrap().push((f(i)).await)` — en una llamada a método el
+  receptor se evalúa antes que el arg, así que el `MutexGuard` (`!Send`)
+  quedaba vivo cruzando el `.await`, volviendo `!Send` al future del handler.
+  Fix en `src/codegen.rs::gen_list_push` (patrón "compute first, lock last",
+  el mismo de `gen_index_assign`/`gen_map_remove`): cuando el arg tiene un
+  `.await`, se bindea a un local ANTES de lockear
+  (`{ let __push_v = <arg>; (xs).lock().unwrap().push(__push_v) }`). Gateado
+  por `expr_contains_await` → sin await el output es byte-idéntico. `push` era
+  el único método de List/Map afectado (los demás mutadores con args ya
+  bindeaban/snapshoteaban primero; el field-assign de Nominal no lo sufre porque
+  en una asignación Rust evalúa el RHS antes que el place del LHS). 2 unit
+  (`codegen::tests::fitz23_*`) + 1 E2E de compilación
+  (`compile_e2e::fitz23_list_push_await_in_handler_chain_builds`). MatHelp
+  revirtió el workaround (local intermedio) en `parent.fitz::tablero_familiar`.
+
 ## [v0.59.0] — 2026-08-23 — Tanda deudas dogfooding: FITZ-21 (loader `fitz test`) + FITZ-22 (aridad cross-módulo en `fitz check`) + residual FITZ-19 (`return Ok(())` en `@ws`)
 
 Tanda de deudas del core encontradas dogfooteando MatHelp + fitz-liveviews.

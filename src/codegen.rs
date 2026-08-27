@@ -30434,7 +30434,22 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         check_method_arity("push", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
         let coerced = coerce(&arg_code, &arg_ty, elem_ty, self.env);
-        let code = format!("({}).lock().unwrap().push({})", obj_code, coerced);
+        // FITZ-23 — if the pushed value `.await`s, bind it to a local
+        // BEFORE taking the lock. Otherwise `(xs).lock().unwrap().push(
+        // <...>.await)` holds the non-Send `MutexGuard` across the
+        // `.await`, making the enclosing future `!Send` — which breaks
+        // HTTP handlers (`E0277: Handler not satisfied`). Same "compute
+        // first, lock last" pattern as `gen_index_assign`/`gen_map_remove`.
+        // Gated on `expr_contains_await` so the common case stays
+        // byte-identical.
+        let code = if expr_contains_await(&args[0]) {
+            format!(
+                "{{ let __push_v = {}; ({}).lock().unwrap().push(__push_v) }}",
+                coerced, obj_code
+            )
+        } else {
+            format!("({}).lock().unwrap().push({})", obj_code, coerced)
+        };
         Ok((code, Type::Null))
     }
 
@@ -47986,6 +48001,45 @@ async fn get_u(id: Int) -> Result<U> {
         assert!(
             ast_test::contains_method_call(stmts, "push"),
             "expected `.push(...)`"
+        );
+    }
+
+    #[test]
+    fn fitz23_list_push_await_arg_hoists_before_lock() {
+        // A pushed value that `.await`s must be bound to a local BEFORE the
+        // lock, so the non-Send `MutexGuard` is not held across the `.await`
+        // (otherwise the enclosing future is `!Send` — breaks HTTP handlers).
+        let src = "async fn make(n: Int) -> Int {\n\
+                   \x20   return n\n}\n\n\
+                   async fn build() -> List<Int> {\n\
+                   \x20   let xs: List<Int> = []\n\
+                   \x20   xs.push(make(1).await)\n\
+                   \x20   return xs\n}\n";
+        let rust = gen(src).unwrap();
+        assert!(
+            rust.contains("let __push_v ="),
+            "expected the awaited push arg hoisted to a local; got:\n{rust}"
+        );
+        // The hoist (with the `.await`) must come BEFORE the locked push.
+        let hoist = rust.find("let __push_v =").expect("hoist present");
+        assert!(
+            rust[hoist..].contains(".lock().unwrap().push(__push_v)"),
+            "expected the locked push of the temp after the hoist; got:\n{rust}"
+        );
+    }
+
+    #[test]
+    fn fitz23_list_push_no_await_stays_byte_identical() {
+        // A push without an await keeps the inline form (byte-compat: the
+        // fix is gated on `expr_contains_await`).
+        let rust = gen("let xs: List<Int> = []\nxs.push(7)").unwrap();
+        assert!(
+            !rust.contains("__push_v"),
+            "a non-awaiting push must not hoist; got:\n{rust}"
+        );
+        assert!(
+            rust.contains(".lock().unwrap().push("),
+            "expected the inline `.lock().unwrap().push(...)`; got:\n{rust}"
         );
     }
 

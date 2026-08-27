@@ -8726,6 +8726,35 @@ fn fitz19_ws_handler_bare_return_in_match_arm_builds() {
     build_expect_ok("fitz19_ws_bare_return", src);
 }
 
+/// FITZ-23 — `list.push(<async_call>.await)` used to emit
+/// `(xs).lock().unwrap().push(<...>.await)`, holding the non-Send
+/// `MutexGuard` across the `.await`. That made the enclosing future
+/// `!Send`, which breaks HTTP handlers (`E0277: Handler not satisfied`).
+/// Discovered dogfooding MatHelp (`filas.push(fila_familiar(...).await)`
+/// in a `@get` handler chain); the workaround was a local intermediate.
+/// The fix hoists the awaited arg to a local before the lock. Build-only.
+#[test]
+fn fitz23_list_push_await_in_handler_chain_builds() {
+    let src = "async fn make(n: Int) -> Int {\n\
+               \x20   return n * 2\n\
+               }\n\
+               async fn build_list() -> List<Int> {\n\
+               \x20   let xs: List<Int> = []\n\
+               \x20   for i in 0..3 {\n\
+               \x20       xs.push(make(i).await)\n\
+               \x20   }\n\
+               \x20   return xs\n\
+               }\n\
+               @get(\"/x\")\n\
+               async fn handler() -> Str {\n\
+               \x20   let xs = build_list().await\n\
+               \x20   return \"len={xs.len()}\"\n\
+               }\n\
+               @server(8123)\n\
+               fn main() => 0\n";
+    build_expect_ok("fitz23_push_await", src);
+}
+
 // ---------------------------------------------------------------------------
 // R.bug-deadlock — regression test (2026-05-21)
 // ---------------------------------------------------------------------------

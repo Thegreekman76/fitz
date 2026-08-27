@@ -949,3 +949,41 @@ el ID); el autor pidió cerrarlas en el core.
 - **Deuda residual (menor):** sigue sin haber re-export de imports; un test que
   quiera un símbolo de un submódulo profundo (no un hermano directo de `src/`)
   cae fuera del fallback single-level. Suficiente para el caso 90%.
+
+### FITZ-23 · Codegen: `list.push(<async>.await)` sostiene el `MutexGuard` cruzando el `.await` (future `!Send`, rompe handlers HTTP) — CERRADO
+
+- [x] Cerrado 2026-08-27 (fitz v0.59.1) — hallazgo de dogfooding de MatHelp
+  (tablero familiar: `filas.push(fila_familiar(locale, p).await)`).
+- **Síntoma:** `list.push(<expr con .await>)` compilaba con `fitz check` y
+  corría en un contexto CLI, pero al usarlo (directa o indirectamente) desde
+  un handler `@get`/`@post`/`@ws` rompía `fitz build` con
+  `error[E0277]: the trait bound '... {__handler_X}: Handler<_, _>' is not
+  satisfied`. La causa: el codegen emitía
+  `(xs.clone()).lock().unwrap().push((make(i)).await)`. En Rust, en una llamada
+  a método `receptor.metodo(arg)`, el **receptor se evalúa antes que el arg**, así
+  que el `MutexGuard` temporal (`.lock().unwrap()`, `!Send`) queda vivo mientras
+  se evalúa el `arg` — y si el arg tiene un `.await`, el guard cruza el await →
+  el future del handler pasa a `!Send` → axum rechaza el `Handler`.
+- **Reproducción mínima:** un `async fn` con `xs.push(f(i).await)` en un `for`,
+  llamado desde un `@get`. `fitz build` → E0277.
+- **Fix (`src/codegen.rs::gen_list_push`):** patrón "compute first, lock last" —
+  cuando `expr_contains_await(&args[0])`, se bindea el valor a un local ANTES de
+  tomar el lock: `{ let __push_v = <arg>; (xs).lock().unwrap().push(__push_v) }`.
+  El `.await` corre antes de lockear, así el guard nunca cruza el await. Gateado
+  por `expr_contains_await` → el caso común (sin await) emite byte-idéntico. Es
+  el mismo patrón que ya usaban `gen_index_assign` (`xs[i] = v`, que además evita
+  el deadlock de re-entrancia) y `gen_map_remove` (bindea `__k` primero).
+- **Alcance:** `push` era el ÚNICO método de List/Map que insertaba el arg inline
+  con el guard vivo. Los demás mutadores con args ya eran seguros: `insert_at`/
+  `remove_at` snapshotean (`.lock().clone()`), `remove` bindea la key, index-assign
+  bindea `__val`/`__idx`. El field-assign de Nominal (`obj.f = <arg>.await`) NO
+  tiene el bug: en una **asignación** Rust evalúa el RHS antes que el place del
+  LHS, así que el await corre antes de tomar el lock (verificado: compila).
+- **Tests:** 2 unit en `codegen.rs` (`fitz23_list_push_await_arg_hoists_before_lock`
+  + `fitz23_list_push_no_await_stays_byte_identical`) + 1 E2E de compilación en
+  `tests/compile_e2e.rs` (`fitz23_list_push_await_in_handler_chain_builds`, el
+  patrón exacto de MatHelp: push con await en un loop, dentro de una async fn
+  llamada por un `@get`).
+- **MatHelp:** revirtió el workaround en `src/parent.fitz::tablero_familiar`
+  (el `let fila = fila_familiar(...).await` intermedio) a `filas.push(
+  fila_familiar(locale, p).await)` directo.
