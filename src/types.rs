@@ -5590,7 +5590,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             span,
         } => {
             let obj_ty = infer_expr(ctx, object);
-            match &obj_ty {
+            // Match on `base()` so a `T?` value resolves against T's
+            // fields (the null case is a runtime null-safety concern,
+            // orthogonal to "this type has no such field").
+            match obj_ty.base() {
                 Type::Nominal(id) => {
                     let info = ctx.types.info(*id);
                     let type_name = info.name.clone();
@@ -5623,9 +5626,28 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // explicitly. The runtime check via getattr already
                 // throws a clear AttributeError if the field doesn't exist.
                 Type::PyAny => Type::PyAny,
-                // Any other receiver: 5.3.4 covers it with built-in
-                // methods. For now Any.
-                _ => Type::Any,
+                // Gradual escape: untyped values AND native modules
+                // (`http`/`log`/`db`/`jwt`/...) bind as `Any`, so their
+                // `.member` access must stay open (method calls route
+                // through `Expr::Call`; bare field access here yields Any).
+                Type::Any => Type::Any,
+                // FITZ-24 — every remaining case is a concrete type with
+                // NO user-accessible fields (Str/Int/Float/Bool/List/Map/
+                // Result/Range/Bytes/Date/...). The runtime rejects bare
+                // field access on these ("only allowed on custom type
+                // instances or modules"); the checker must too, otherwise
+                // a typo like `s.raw` on a `Str` passes `fitz check` and
+                // only blows up at runtime (a `.method()` call already
+                // errors here via `infer_method_call`; a bare `.field`
+                // used to slip through as silent `Any`).
+                _ => {
+                    let ty_name = obj_ty.display(ctx.types);
+                    ctx.error_at(*span, format!(
+                        "field access `.{}` on a value of type `{}` — only allowed on custom type instances or modules",
+                        field, ty_name
+                    ));
+                    Type::Any
+                }
             }
         }
 
@@ -15842,6 +15864,86 @@ mod tests {
              let u = User { id: 1, name: \"x\" }\n\
              let i: Int = u.name",
             &["Int", "Str"],
+        );
+    }
+
+    // ---- FITZ-24 — bare field access on a fieldless concrete type ----
+
+    #[test]
+    fn fitz24_field_access_on_str_is_error() {
+        // `.raw` is not a field of Str. The runtime rejects it; the
+        // checker must too (a `.method()` call already errors, but a
+        // bare `.field` used to slip through as silent Any).
+        assert_error_with(
+            "let s: Str = \"hola\"\n\
+             let r = s.raw",
+            &["field access", "raw", "Str"],
+        );
+    }
+
+    #[test]
+    fn fitz24_field_access_on_int_is_error() {
+        assert_error_with(
+            "let n: Int = 5\n\
+             let a = n.foo",
+            &["field access", "foo", "Int"],
+        );
+    }
+
+    #[test]
+    fn fitz24_field_access_on_list_is_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let a = xs.first",
+            &["field access", "first", "List"],
+        );
+    }
+
+    #[test]
+    fn fitz24_field_access_on_nullable_primitive_is_error() {
+        // `Str?` has no fields whether null or the string.
+        assert_error_with(
+            "let s: Str? = \"x\"\n\
+             let r = s.raw",
+            &["field access", "raw", "Str?"],
+        );
+    }
+
+    #[test]
+    fn fitz24_valid_str_method_call_still_ok() {
+        // Regression: a genuine Str method call must still pass.
+        assert_ok(
+            "let s: Str = \"hola\"\n\
+             let u = s.upper()",
+        );
+    }
+
+    #[test]
+    fn fitz24_unknown_str_method_call_still_errors() {
+        // Regression: the method-call path is unchanged.
+        assert_error_with(
+            "let s: Str = \"hola\"\n\
+             let u = s.bogus()",
+            &["Str", "method", "bogus"],
+        );
+    }
+
+    #[test]
+    fn fitz24_nominal_field_access_still_ok() {
+        // Regression: field access on a custom type is unaffected.
+        assert_ok(
+            "type User { id: Int, name: Str }\n\
+             fn f(u: User) -> Str { return u.name }",
+        );
+    }
+
+    #[test]
+    fn fitz24_nullable_nominal_field_access_still_ok() {
+        // Regression: `User?` resolves against User's fields (null case
+        // is a runtime null-safety concern, not a "no such field" one).
+        assert_ok(
+            "type User { id: Int, name: Str }\n\
+             fn g(u: User?) -> Str { return u.name }",
         );
     }
 

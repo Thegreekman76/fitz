@@ -988,32 +988,40 @@ el ID); el autor pidió cerrarlas en el core.
   (el `let fila = fila_familiar(...).await` intermedio) a `filas.push(
   fila_familiar(locale, p).await)` directo.
 
-### FITZ-24 · `fitz check` no caza `.raw` sobre el `Str` que devuelve una fn de una DEP git (check✓/run✗)
+### FITZ-24 · `fitz check` no valida field-access (`.campo`) sobre tipos primitivos concretos (check✓/run✗) — CERRADO
 
-- [ ] **Abierto** — hermano de FITZ-22, pero para fns de una **dependencia git**
-  (no un módulo local). FITZ-22 cerró la validación de firmas cross-módulo
-  LOCALES (`pre_scan_imported_fn_signatures`); las fns de una dep git
-  (`from fitz_liveviews import h_join`) siguen tipándose `Type::Any` → un uso
-  incorrecto del valor de retorno no se caza en `fitz check`.
-- **Estado:** Confirmado (repro). Clase T2 (paridad `check`/`run`). Descubierto en
-  MatHelp al construir "editar perfil".
-- **Impacto:** Bajo-medio. El error de runtime es claro cuando se llega
-  (`field access .raw on a value of type Str`), pero `fitz check` da verde y el
-  fallo recién aparece como 500 en un handler HTTP (donde el runtime lo captura).
-- **Evidencia:** `h_join(items: List<Html>) -> Str` (de fitz_liveviews) devuelve
-  **Str**. En MatHelp, `opciones_modalidad_sel` hacía `h_join(...).raw` — `.raw`
-  sobre un `Str` panica en runtime. `fitz check src/perfiles.fitz` dijo "sin
-  errores"; `fitz run` devolvía 500 en `GET /perfiles/editar/{id}`. Diagnóstico:
-  el `.raw` es válido sobre `Html`/instancias/módulos, no sobre `Str`.
-- **Repro mínimo:** una dep con `fn h(x: List<Str>) -> Str { ... }`; el consumidor
-  hace `from dep import h` y `let s = h([...]).raw`. `fitz check` pasa; `fitz run`
-  panica con `field access .raw on a value of type Str`.
-- **Hipótesis (a confirmar por el core):** el pre-scan de FITZ-22 no resuelve las
-  firmas de fns de deps git (solo módulos locales del grafo), así que quedan `Any`
-  y el field-access sobre el retorno no se valida.
-- **Propuesta:** extender `pre_scan_imported_fn_signatures` para resolver también
-  las firmas de fns importadas desde deps del `fitz.toml` (el loader ya tiene el
-  path del `lib.entry` de cada dep), de modo que `.raw`/`.method()` sobre el
-  retorno tipado se valide en el checker.
-- **Criterio de aceptación:** `let s = h_join([...]).raw` (con `h_join -> Str` de
-  una dep) es error de `fitz check`, no un panic de runtime.
+- [x] **Cerrado 2026-08-28 (fitz v0.60)** — hallazgo de dogfooding de MatHelp
+  (editar perfil: `h_join(...).raw`, con `h_join(List<Html>) -> Str`).
+- **Diagnóstico real (la hipótesis inicial de "firmas de deps git" era ERRADA):**
+  el checker NO validaba el field-access `.campo` (sin paréntesis) sobre NINGÚN
+  tipo primitivo concreto — ni siquiera un `Str` LOCAL anotado. `let s: Str = "x";
+  let r = s.raw` pasaba `fitz check` (lo tipaba gradual → `Any`) pero el runtime lo
+  rechaza (`field access .raw on a value of type Str — only allowed on custom type
+  instances or modules`). La brecha era universal: no dependía de deps ni de
+  cross-módulo. El `h_join(...).raw` de MatHelp la destapó porque `h_join` devuelve
+  Str y la forma canónica correcta es SIN `.raw` (h_join ya concatena a Str) o
+  `html("...{ops}...").raw`.
+- **Asimetría que confirmó el bug:** un METHOD-CALL sobre un primitivo SÍ se cazaba
+  (`s.bogus()` → "`Str` does not have method `bogus`" vía `infer_method_call`); un
+  FIELD-ACCESS bare (`s.raw`) se colaba como `Any` silencioso — el arm `Expr::Field`
+  del checker tenía un fallthrough `_ => Type::Any` que tragaba todos los primitivos.
+- **Fix (`src/types.rs`, handler `Expr::Field` en `synthesize_expr`):** el match del
+  receptor pasa a `obj_ty.base()` (desenvuelve `Nullable` un nivel, así `User?.name`
+  resuelve contra los fields de `User`) con arms explícitos: `Nominal` (valida
+  fields, ya existía — campo desconocido sigue devolviendo `Any` silencioso, sin
+  falso positivo), `PyAny → PyAny` (chaining), `Any → Any` (escape gradual — cubre
+  los módulos nativos `http`/`log`/`db`/... que se bindean como `Any`), y el `_`
+  final (todo tipo concreto sin fields: Str/Int/Float/Bool/List/Map/Result/Range/
+  Bytes/Date/...) emite el error espejando el mensaje del runtime. `Expr::TupleField`
+  (`.0`/`.1`) es un variant separado → no lo toca.
+- **Sin falsos positivos:** `Nullable(Nominal).campoExistente` valida (no error);
+  `Nullable(Nominal).campoInexistente` sigue `Any` silencioso (comportamiento
+  previo); method-calls intactos; built-ins con fields (`HttpClientResponse`/
+  `Request`/`Response`/`File`/`SmtpResult`/`Cookie`) son `Type::Nominal` → caen en
+  el arm Nominal y se validan igual que antes. `fitz check` de MatHelp entero (30+
+  módulos) queda en 0 errores; smoke `GUIDE_EXAMPLES_COMPILE` verde.
+- **Tests:** 8 unit en `types.rs::tests::fitz24_*` (Str/Int/List field-access →
+  error; `Str?` nullable-de-primitivo → error; regresión: method-call válido,
+  method-call desconocido, Nominal, Nullable-Nominal).
+- **Criterio de aceptación (cumplido):** `let s: Str = "x"; s.raw` es error de
+  `fitz check`, no un panic de runtime.

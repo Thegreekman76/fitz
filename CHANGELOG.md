@@ -9,6 +9,30 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.60.0] — 2026-08-28 — FITZ-24: `fitz check` ahora valida el field-access (`.campo`) sobre tipos primitivos — dogfooding MatHelp
+
+### Added
+- **El checker rechaza `.campo` (field-access sin paréntesis) sobre tipos
+  primitivos concretos** (Str/Int/Float/Bool/List/Map/Result/Range/Bytes/Date/…).
+  Antes `let s: Str = "x"; let r = s.raw` pasaba `fitz check` (se tipaba gradual
+  como `Any`) pero el runtime lo rechazaba con un 500/panic
+  (`field access .raw on a value of type Str — only allowed on custom type
+  instances or modules`). Un método (`s.bogus()`) ya se cazaba; un field bare
+  (`s.raw`) se colaba. Ahora el checker lo caza estáticamente, espejando el
+  runtime. Descubierto dogfooteando MatHelp (`h_join(...).raw`, con
+  `h_join(List<Html>) -> Str`; la forma correcta es sin `.raw`).
+
+### Changed
+- El arm `Expr::Field` del checker matchea sobre `base()` — un `T?` resuelve
+  contra los fields de `T` (`User?.name` sigue válido; el caso null es una
+  cuestión de null-safety, ortogonal). Los built-ins con fields
+  (`HttpClientResponse`/`Request`/`Response`/`File`/`SmtpResult`/`Cookie`) son
+  `Type::Nominal` → no se ven afectados; los módulos nativos (`http`/`log`/`db`/…)
+  se bindean como `Any` → el escape gradual se preserva. `Expr::TupleField`
+  (`.0`/`.1`) es un variant separado → intacto. Sin falsos positivos: `fitz check`
+  de MatHelp entero (30+ módulos) queda en 0 errores; smoke de ~290 ejemplos verde.
+- 8 tests unitarios nuevos (`types.rs::tests::fitz24_*`).
+
 ## [v0.59.1] — 2026-08-27 — FITZ-23: `list.push(<async>.await)` ya no sostiene el `MutexGuard` cruzando el `.await` — dogfooding MatHelp
 
 Fix de codegen de la clase check✓/build✗ encontrado dogfooteando MatHelp
