@@ -9,6 +9,22 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.60.1] — 2026-09-14 — FITZ-25: el body `form-urlencoded` se decodifica como UTF-8 (no latin-1) — dogfooding MatHelp
+
+### Fixed
+- **El decoder de `application/x-www-form-urlencoded` interpretaba cada byte de un
+  `%XX` como codepoint latin-1** (`out.push(byte as char)`), produciendo mojibake
+  para cualquier valor no-ASCII: `%C3%A9` ("é") → "Ã©". Afectaba TODO campo de un
+  `<form>` POST con tildes/ñ/emoji. Ahora acumula los bytes en un `Vec<u8>` y hace
+  `String::from_utf8` al final; los chars literales se re-emiten como sus bytes
+  UTF-8; UTF-8 inválido → `Err` (no mojibake silencioso). El fix va en los **dos
+  decoders paralelos**: `src/http.rs::url_decode` (intérprete / `fitz run`) y
+  `src/codegen.rs` `HTTP_RUNTIME_PRELUDE` `__url_decode` (binario nativo /
+  `fitz build`). Descubierto en MatHelp: los nombres de familia y de perfil (José,
+  Muñoz, Iñaki) se guardaban corruptos. Tests:
+  `http::tests::fitz25_url_decode_utf8_multibyte` + refuerzo en
+  `codegen::tests::uc_http_prelude_emits_urlencoded_helpers`.
+
 ## [v0.60.0] — 2026-08-28 — FITZ-24: `fitz check` ahora valida el field-access (`.campo`) sobre tipos primitivos — dogfooding MatHelp
 
 ### Added

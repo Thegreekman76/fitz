@@ -38413,22 +38413,28 @@ pub(crate) fn __parse_urlencoded(bytes: &[u8]) -> Result<serde_json::Value, Stri
 }
 
 fn __url_decode(s: &str) -> Result<String, String> {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
+    // FITZ-25: accumulate BYTES and decode UTF-8 once. Pushing `byte as char`
+    // mapped each %XX byte to a Latin-1 codepoint → mojibake for non-ASCII values
+    // (`%C3%A9` "é" → "Ã©"). Must match the interpreter's url_decode (http.rs).
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
-            '+' => out.push(' '),
+            '+' => bytes.push(b' '),
             '%' => {
                 let h1 = chars.next().ok_or_else(|| "urlencoded: incomplete %XX".to_string())?;
                 let h2 = chars.next().ok_or_else(|| "urlencoded: incomplete %XX".to_string())?;
                 let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
                     .map_err(|_| format!("urlencoded: %{}{} is not valid hex", h1, h2))?;
-                out.push(byte as char);
+                bytes.push(byte);
             }
-            other => out.push(other),
+            other => {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
         }
     }
-    Ok(out)
+    String::from_utf8(bytes).map_err(|e| format!("urlencoded: invalid UTF-8: {}", e))
 }
 
 /// Mini-batch MP-Build — extracts the `boundary=<token>`
@@ -49685,6 +49691,16 @@ async fn get_u(id: Int) -> Result<U> {
         assert!(
             code.contains("fn __url_decode(s: &str)"),
             "expected helper `__url_decode` in the HTTP prelude"
+        );
+        // FITZ-25: the emitted __url_decode must accumulate BYTES and decode UTF-8
+        // (String::from_utf8), NOT push each %XX byte as a Latin-1 char (mojibake).
+        assert!(
+            code.contains("String::from_utf8(bytes)"),
+            "FITZ-25: emitted __url_decode must decode form values as UTF-8, not Latin-1"
+        );
+        assert!(
+            !code.contains("out.push(byte as char)"),
+            "FITZ-25: emitted __url_decode still has the Latin-1 mojibake bug"
         );
     }
 

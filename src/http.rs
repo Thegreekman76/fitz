@@ -4990,12 +4990,20 @@ fn b64_encode_standard(bytes: &[u8]) -> String {
 }
 
 fn url_decode(s: &str) -> Result<String, String> {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
+    // Accumulate BYTES (not chars) and decode UTF-8 once at the end. A `%XX`
+    // escape is a single byte of a possibly multi-byte UTF-8 sequence, so pushing
+    // `byte as char` (the old bug) mapped each byte to a Latin-1 codepoint and
+    // produced mojibake for any non-ASCII value (`%C3%A9` "é" → "Ã©"). Literal
+    // non-`%` chars are re-encoded to their UTF-8 bytes so the buffer is pure UTF-8.
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
     let mut idx: usize = 0;
     while let Some(c) = chars.next() {
         match c {
-            '+' => out.push(' '),
+            '+' => {
+                bytes.push(b' ');
+                idx += 1;
+            }
             '%' => {
                 let h1 = chars
                     .next()
@@ -5005,16 +5013,17 @@ fn url_decode(s: &str) -> Result<String, String> {
                     .ok_or_else(|| format!("urlencoded: incomplete %XX at offset {}", idx))?;
                 let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
                     .map_err(|_| format!("urlencoded: %{}{} is not valid hex", h1, h2))?;
-                // Accumulate bytes for multi-byte UTF-8 chars.
-                out.push(byte as char);
+                bytes.push(byte);
                 idx += 3;
-                continue;
             }
-            other => out.push(other),
+            other => {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                idx += 1;
+            }
         }
-        idx += 1;
     }
-    Ok(out)
+    String::from_utf8(bytes).map_err(|e| format!("urlencoded: invalid UTF-8: {}", e))
 }
 
 fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
@@ -5573,6 +5582,25 @@ mod tests {
     use super::*;
     use crate::ast::StrPart;
     use crate::value::shared;
+
+    // ---- FITZ-25 — url_decode must decode form values as UTF-8, not Latin-1 ----
+
+    #[test]
+    fn fitz25_url_decode_utf8_multibyte() {
+        // "José" = J o s + é(U+00E9, %C3%A9). The old code pushed each byte as a
+        // Latin-1 char → "JosÃ©" (mojibake). It must reconstruct "José".
+        assert_eq!(url_decode("Jos%C3%A9").unwrap(), "José");
+        // ñ (%C3%B1), and '+' → space.
+        assert_eq!(url_decode("Mu%C3%B1oz+Jos%C3%A9").unwrap(), "Muñoz José");
+        // 4-byte emoji (🎉 = U+1F389 = %F0%9F%8E%89) round-trips too.
+        assert_eq!(url_decode("%F0%9F%8E%89").unwrap(), "🎉");
+        // Pure ASCII is unchanged.
+        assert_eq!(url_decode("hello+world").unwrap(), "hello world");
+        // Literal non-% non-ASCII chars in the input keep their UTF-8 bytes.
+        assert_eq!(url_decode("café").unwrap(), "café");
+        // Invalid UTF-8 byte sequence is an error, not silent mojibake.
+        assert!(url_decode("%C3%28").is_err());
+    }
 
     // ---- FITZ-05 FASE B — Set-Cookie serialisation ----
 
