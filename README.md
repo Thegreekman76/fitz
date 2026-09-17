@@ -12,6 +12,133 @@
 > Un lenguaje de programación moderno, compilado y orientado a servicios web.
 > Nacido en la Patagonia. Construido con Rust.
 
+# Fitz
+
+A compiled language where HTTP, OpenAPI and a Postgres ORM live in the core.
+Write your API in one file, compile it to a single dependency-free binary.
+
+```fitz
+@table("tasks") type Task {
+    @primary id: Int = 0
+    title: Str
+    done: Bool = false
+}
+
+type TaskInput { title: Str }
+
+async fn open_db() -> Result<DbConn> {
+    let url = env_or("DATABASE_URL", "postgres://localhost/tasks")
+    return db.connect(url).await
+}
+
+@get("/tasks")
+async fn list_tasks() -> Result<List<Task>> {
+    let conn = open_db().await?
+    return Task.all(conn).await
+}
+
+@post("/tasks")
+async fn create_task(body: TaskInput) -> Result<Task> {
+    let conn = open_db().await?
+    return Task.insert(conn, Task { id: 0, title: body.title, done: false }).await
+}
+
+@server(3000)
+fn main() => 0
+```
+
+```bash
+fitz run app.fitz     # run it now (interpreter)
+fitz build app.fitz   # → single native binary, no runtime needed
+```
+
+That's a working REST API with typed request bodies, a Postgres ORM,
+and auto-generated OpenAPI docs at `/docs` — no libraries, no config.
+# Fitz
+
+A compiled language where HTTP, OpenAPI and a Postgres ORM live in the core.
+Write your API in one file, compile it to a single dependency-free binary.
+
+```fitz
+@table("tasks") type Task {
+    @primary id: Int = 0
+    title: Str
+    done: Bool = false
+}
+
+type TaskInput { title: Str }
+
+async fn open_db() -> Result<DbConn> {
+    let url = env_or("DATABASE_URL", "postgres://localhost/tasks")
+    return db.connect(url).await
+}
+
+@get("/tasks")
+async fn list_tasks() -> Result<List<Task>> {
+    let conn = open_db().await?
+    return Task.all(conn).await
+}
+
+@post("/tasks")
+async fn create_task(body: TaskInput) -> Result<Task> {
+    let conn = open_db().await?
+    return Task.insert(conn, Task { id: 0, title: body.title, done: false }).await
+}
+
+@server(3000)
+fn main() => 0
+```
+
+```bash
+fitz run app.fitz     # run it now (interpreter)
+fitz build app.fitz   # → single native binary, no runtime needed
+```
+
+That's a working REST API with typed request bodies, a Postgres ORM,
+and auto-generated OpenAPI docs at `/docs` — no libraries, no config.
+# Fitz
+
+A compiled language where HTTP, OpenAPI and a Postgres ORM live in the core.
+Write your API in one file, compile it to a single dependency-free binary.
+
+```fitz
+@table("tasks") type Task {
+    @primary id: Int = 0
+    title: Str
+    done: Bool = false
+}
+
+type TaskInput { title: Str }
+
+async fn open_db() -> Result<DbConn> {
+    let url = env_or("DATABASE_URL", "postgres://localhost/tasks")
+    return db.connect(url).await
+}
+
+@get("/tasks")
+async fn list_tasks() -> Result<List<Task>> {
+    let conn = open_db().await?
+    return Task.all(conn).await
+}
+
+@post("/tasks")
+async fn create_task(body: TaskInput) -> Result<Task> {
+    let conn = open_db().await?
+    return Task.insert(conn, Task { id: 0, title: body.title, done: false }).await
+}
+
+@server(3000)
+fn main() => 0
+```
+
+```bash
+fitz run app.fitz     # run it now (interpreter)
+fitz build app.fitz   # → single native binary, no runtime needed
+```
+
+That's a working REST API with typed request bodies, a Postgres ORM,
+and auto-generated OpenAPI docs at `/docs` — no libraries, no config.
+
 ```fitz
 // Un servicio HTTP, compilado a binario nativo, cero dependencias.
 
