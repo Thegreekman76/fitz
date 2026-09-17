@@ -13,13 +13,31 @@
 > Nacido en la Patagonia. Construido con Rust.
 
 ```fitz
-// Un servicio HTTP, compilado a binario nativo, cero dependencias.
+// Un CRUD REST completo: HTTP + ORM Postgres + OpenAPI, cero dependencias.
 
-type User { id: Int, name: Str, email: Str? }
+@table("tasks") type Task {
+    @primary id: Int = 0
+    title: Str
+    done: Bool = false
+}
 
-@get("/users/{id}")
-async fn get_user(id: Int) -> User {
-    return User { id: id, name: "ada", email: null }
+type TaskInput { title: Str }
+
+async fn open_db() -> Result<DbConn> {
+    let url = env_or("DATABASE_URL", "postgres://localhost/tasks")
+    return db.connect(url).await
+}
+
+@get("/tasks")
+async fn list_tasks() -> Result<List<Task>> {
+    let conn = open_db().await?
+    return Task.all(conn).await
+}
+
+@post("/tasks")
+async fn create_task(body: TaskInput) -> Result<Task> {
+    let conn = open_db().await?
+    return Task.insert(conn, Task { id: 0, title: body.title, done: false }).await
 }
 
 @server(3000)
@@ -27,10 +45,12 @@ fn main() => 0
 ```
 
 ```bash
-fitz run mi_app.fitz       # intérprete + checker estático
-fitz build mi_app.fitz     # binario nativo standalone (~5 MB)
-./mi_app                   # corre sin Fitz ni Rust en el destino
+fitz run app.fitz       # intérprete + checker estático
+fitz build app.fitz     # binario nativo standalone (~5 MB)
+./app                   # corre sin Fitz ni Rust en el destino
 ```
+
+El ORM Postgres, las docs OpenAPI en `/docs` y el binario único vienen en el core — sin libs, sin config.
 
 📖 **Documentación completa:** [thegreekman76.github.io/fitz](https://thegreekman76.github.io/fitz/)
 
