@@ -655,6 +655,173 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ---
 
+### FITZ-26 · `fitz check` no valida field-access sobre el retorno primitivo de una fn importada cross-módulo (check✓/run✗)
+
+- [ ] **Abierto.** Descubierto en MatHelp, Lote A (emails de registro), 2026-09-22.
+- **Estado:** Confirmado (repro). Clase check✓/run✗ — la MISMA familia que FITZ-24, pero cross-módulo.
+- **Impacto:** Medio. FITZ-24 (v0.60.0) cerró el field-access sobre primitivos concretos **locales**
+  (`let s: Str = "x"; s.raw` → error de check). Pero cuando el receptor es el **retorno de una fn
+  importada** cuya firma es primitiva, el checker no lo caza: pasa `fitz check` y explota en runtime
+  con `field access .raw on a value of type Str`.
+- **Evidencia:** en MatHelp `emails.fitz`, `flv(fam.display_name).raw` — `flv` está en fitz-liveviews
+  con firma `fn flv(s: Str) -> Str` (devuelve **Str**, no un `Html`; el `.raw` va sobre `html(...)`,
+  no sobre `flv(...)`). `fitz check` dio 0 fallas; en runtime el handler de registro devolvió 500.
+- **Repro mínimo:** `m.fitz` con `fn f(s: Str) -> Str => s`; otro módulo con `from m import f` y
+  `let r = f("x").raw`. `fitz check` pasa; `fitz run` rompe con field-access sobre Str.
+- **Hipótesis:** FITZ-22 (v0.59) ya resuelve la firma de la fn importada (`imported_fn_sigs`), pero el
+  refinamiento de FITZ-24 (field-access sobre primitivos concretos en `Expr::Field`) no dispara cuando
+  el receptor es el retorno de esa fn — probablemente porque ese nodo no llega tipado como el primitivo
+  concreto al chequeo de field, o la firma importada se sigue tratando laxa en ese punto.
+- **Propuesta:** cuando el receptor de un `Expr::Field` es una llamada a fn importada con retorno
+  primitivo resuelto (`Str`/`Int`/`Float`/`Bool`/…), aplicar la misma regla de FITZ-24 (error si no
+  es un tipo con campos). Reusa `imported_fn_sigs` de FITZ-22.
+- **Archivos a tocar:** `src/types.rs` (`Expr::Field` + resolución del tipo del receptor cuando es
+  `Expr::Call` a fn importada).
+- **Criterio de aceptación:** `f("x").raw` con `f` importada que retorna `Str` es error de `fitz check`.
+- **Workaround en MatHelp:** ninguno necesario — el código correcto usa `flv(x)` directo (Str ya
+  escapado). El ticket es para cerrar el hueco del checker, no un bug de la app.
+
+---
+
+### FITZ-27 · `spawn(fn())` desde un handler `@post` traga en silencio los errores de runtime de la task
+
+- [ ] **Abierto.** Descubierto en MatHelp, Lote A (emails de registro), 2026-09-22.
+- **Estado:** Confirmado (repro). Clase observabilidad/confiabilidad del runtime del intérprete.
+- **Impacto:** Alto para debugging. Un `spawn(g())` disparado desde un handler HTTP `@post`, si `g`
+  tiene un error de runtime, **la task muere sin log y el handler devuelve normal** (el 303 salió
+  perfecto). El bug quedó invisible: parecía que el spawn "no corría"; en realidad corría, fallaba y
+  el error se perdía. Recién al pasar a `.await` inline el error propagó (500) y se pudo diagnosticar.
+- **Evidencia:** en MatHelp `auth.fitz` `registro_post`, `spawn(signup_emails(fam))` donde
+  `signup_emails` tenía el bug de FITZ-26 (`flv(...).raw`): registro devolvía 303, cero logs, cero
+  error — la task moría en silencio. Con `.await` inline: 500 visible + diagnóstico.
+- **Repro mínimo:** un handler `@post` que hace `spawn(g())` donde `g` es `@background async fn` con
+  un error de runtime garantizado (p. ej. `.raw` sobre un Str). El POST responde OK; no hay log del
+  panic/error de la task.
+- **Hipótesis:** el `tokio::spawn` interno del intérprete descarta el `Result`/panic del `JoinHandle`
+  sin loguearlo. Comparar con el path `@ws`/`@cron`, que sí parecen loguear (o al menos el spawn de
+  `@cron` reporta fallos).
+- **Propuesta:** loguear (nivel `error`, estructurado, con el nombre de la fn spawnada y el trace_id
+  del request originante si aplica) cualquier error/panic de una task spawnada, en vez de tragarlo.
+  Idealmente unificado con cómo `@cron`/`@background` persistente reporta fallos.
+- **Archivos a tocar:** `src/evaluator.rs` (`eval_spawn_call` / el wrapper del `tokio::spawn`).
+- **Criterio de aceptación:** un error de runtime dentro de una fn spawnada produce un log de error
+  visible; el spawn deja de ser un agujero negro.
+- **Workaround en MatHelp:** `registro_post` usa `.await` inline en vez de `spawn` (best-effort,
+  rápido por el guard de `mailer`, correlacionado por trace_id). **Revertir a `spawn(signup_emails(fam))`
+  cuando FITZ-27 se cierre** (para no bloquear el alta con la latencia de Resend).
+
+---
+
+### FITZ-28 · Un `type` usado como body de un handler `@post`, definido DESPUÉS del handler en el mismo módulo, hace 500 en runtime (check✓/run✗)
+
+- [ ] **Abierto.** Descubierto en MatHelp, Lote B (recuperación de clave), 2026-09-22.
+- **Estado:** Confirmado (repro decisivo). Clase check✓/run✗ del intérprete (registro de rutas HTTP).
+- **Impacto:** Medio-alto en DX. `fitz check` pasa, pero el POST devuelve **500 antes de entrar al
+  handler** (ni el primer `log.info` del cuerpo dispara). El 500 no imprime detalle (lo traga el
+  panic-catch del wrapper HTTP), así que es dificilísimo de diagnosticar — costó ~4 reboots aislarlo.
+- **Evidencia:** en `recuperar.fitz` los `type PedirForm { email }` / `type ResetForm { password }`
+  estaban al FINAL del archivo, después de los `@post` que los reciben como body. `fitz check` 0
+  fallas; `POST /recuperar` → 500 sin ningún log. Al mover los dos `type` ARRIBA (antes de los
+  handlers, como en `auth.fitz`) → 200 y todo el flujo anda. Fue el único cambio entre el 500 y el 200.
+- **Contraste:** un handler `@get` con solo path params (`{id}/{token}`, sin body) sobre el mismo
+  módulo NO se ve afectado (respondía 200 con los `type` abajo). El problema es exclusivo del **body
+  type** (que el registro de la ruta resuelve al arrancar, y el forward-ref no está resuelto).
+- **Repro mínimo:** un módulo con `@post("/x") async fn h(input: Body) -> Response { ... }` y, MÁS
+  ABAJO en el mismo archivo, `type Body { campo: Str = "" }`. `fitz check` pasa; el POST hace 500.
+- **Hipótesis:** el registro de rutas del evaluador resuelve el `Value::Type` del body param al
+  procesar el decorator del handler (top-down). Si el `type` se define después, en ese punto no está
+  en el env → queda sin resolver, y la coerción del body urlencoded/JSON a ese type panica en el
+  request. Los `type` deberían hoistearse (pre-scan del módulo) antes de registrar las rutas, igual
+  que se pre-registran las firmas de fns.
+- **Propuesta:** pre-escanear los `Stmt::TypeDef` del módulo y registrarlos ANTES de procesar los
+  decoradores `@get`/`@post`/`@put`/`@delete`/`@ws` que puedan referenciarlos como body/param.
+  Alternativa mínima: que el 500 por body-type no resuelto sea un error claro (nombrando el type) en
+  vez de un panic mudo — o mejor, que `fitz check` lo cace (check✓/run✗).
+- **Archivos a tocar:** `src/evaluator.rs` (registro de rutas / resolución del body type del handler).
+- **Criterio de aceptación:** un body type definido después del handler en el mismo módulo funciona
+  en runtime (o, como mínimo, `fitz check` lo reporta en vez de romper con 500 mudo).
+- **Workaround en MatHelp:** definir los body types ANTES de los handlers que los usan (convención ya
+  presente en `auth.fitz`; aplicada en `recuperar.fitz`). Sin deuda de código pendiente — es una
+  convención de orden, no un workaround feo.
+
+---
+
+### FITZ-29 · Un `Map<Str, Any>` literal construido en un helper que retorna `Result<Map<Str, Any>>` no envuelve los valores en `__FitzValue` en `fitz build` (check✓/build✗)
+
+- [ ] **Abierto.** Descubierto en MatHelp, Lote D1 (export de datos), 2026-09-22.
+- **Estado:** Confirmado (repro real). Clase check✓/build✗ del codegen. Familia de los fixes
+  v0.10.4/v0.10.5/W1/v0.55/v0.56 sobre `Map<Str, Any>`, pero por un camino nuevo no cubierto.
+- **Impacto:** Medio. `fitz check` + `fitz run` OK (el intérprete arma el Map heterogéneo sin
+  problema); `fitz build` rompe con `error[E0308]: expected __FitzValue, found String` por cada
+  entrada del map.
+- **Evidencia:** en MatHelp `cuenta.fitz`, `async fn build_export(fam) -> Result<Map<Str, Any>>` con
+  `return Ok({"email": fam.email, "display_name": ..., "locale": ...})` (y listas de sub-maps). El
+  codegen representa `Map<Str, Any>` como `Vec<(__FitzValue, __FitzValue)>` pero emitió los valores
+  como `String` crudo — no los envolvió en `__FitzValue::Str(...)`. 6× E0308.
+- **Hipótesis:** el hint `Map<_, Any>` que dispara `gen_map_lit_with_hint` (que sí envuelve en
+  `__FitzValue`) NO se propaga a través de `Ok(...)` al map literal interno cuando la fn retorna
+  `Result<Map<Str, Any>>`. Los casos cubiertos (v0.55/v0.56) eran `let x: Map<Str,Any> = {...}` y
+  top-level de módulo; el `return Ok({...})` en una fn `-> Result<Map<Str,Any>>` es el hueco.
+- **Propuesta:** propagar el hint `Map<_, Any>` desde el return type `Result<Map<_,Any>>` a través del
+  `Ok(...)` hacia el map literal (y análogamente a través de `List`/nested).
+- **Workaround en MatHelp:** reemplazar el `Map<Str, Any>` por tipos nominales (`type ExportData {...}`)
+  que el codegen serializa a JSON limpio. Cerrado en la app (mejor tipado igual).
+
+---
+
+### FITZ-30 · Un `type` definido en un MÓDULO y retornado como JSON desde un handler de ESE módulo no recibe `impl __ToFitzJson` si tiene un campo nominal anidado no importado al main (check✓/build✗)
+
+- [ ] **Abierto.** Descubierto en MatHelp, Lote D1 (export de datos), 2026-09-22.
+- **Estado:** Confirmado (repro real, leído el codegen). Clase check✓/build✗. Extensión de W9/W17
+  (v0.10.7) a tipos planos (no-`@table`).
+- **Impacto:** Medio-alto (build roto). `error[E0599]: ExportDataData: __ToFitzJson is not satisfied`.
+- **Causa raíz (leída en `src/codegen.rs`):** `generate_module_rs_with_bindings` NO llama
+  `gen_type_http_impls` para los `type_defs` del módulo — solo el main lo hace (loop en ~9389) y las
+  impls de tipos de módulos las emite `emit_helpers_for_imported_types` (desde el main). Ese emisor,
+  al procesar un tipo de módulo con un campo nominal anidado (`family: ExportFamily`, sibling del
+  mismo módulo), corre `remap_imported_nominals`: si `ExportFamily` NO está importado en el main,
+  degrada el campo a `Type::Any` → `has_opaque_field` → **saltea** el `impl __ToFitzJson` de
+  `ExportData` → E0599. La lista `List<ExportProfile>` cae en la excepción W11 (List<Any> legítimo) y
+  no dispara el skip, pero el nominal anidado directo sí.
+- **Repro mínimo:** módulo `m.fitz` con `type Inner { x: Str }` + `type Outer { inner: Inner }` +
+  `@get("/x") async fn h() -> Result<Outer> { ... }`. El main NO importa Inner/Outer. `fitz check` OK;
+  `fitz build` → `OuterData: __ToFitzJson is not satisfied`.
+- **Propuesta:** (a) que `generate_module_rs_with_bindings` emita `gen_type_http_impls` para los tipos
+  locales del módulo cuando el módulo tiene HTTP (en vez de delegar 100% al main); o (b) auto-registrar
+  los nominales anidados alcanzables desde tipos retornados por handlers (paralelo a
+  `auto_register_relation_targets` de v0.45, que ya lo hace para relations `@table`).
+- **Workaround en MatHelp:** importar TODOS los tipos anidados al entry — `from cuenta import
+  ExportFamily, ExportProfile, ExportSession, ExportData` en main.fitz (patrón W17). Cerrado en la app.
+
+---
+
+### FITZ-31 · Una variable Fitz con nombre de keyword RESERVADA de Rust (`priv`, `move`, `ref`, …) rompe `fitz build` (check✓/build✗)
+
+- [ ] **Abierto.** Descubierto en MatHelp, Lote E1 (páginas legales), 2026-09-22.
+- **Estado:** Confirmado (repro real). Clase check✓/build✗ — el codegen no sanea nombres de variable
+  que colisionan con keywords reservadas de Rust.
+- **Impacto:** Bajo-medio pero muy confuso. `fitz check` + `fitz run` OK (`priv` es un identificador
+  Fitz válido); `fitz build` corta con `error: expected identifier, found reserved keyword \`priv\``.
+- **Evidencia:** en MatHelp `brand.fitz::footer`, `let priv = flv(t(locale, "legal.priv.titulo"))`
+  → el codegen emitió `let priv = ...;` en Rust → `priv` es keyword reservada de Rust → 2 errores.
+- **Repro mínimo:** `let priv = "x"` + usarla; `fitz check`/`run` OK, `fitz build` rompe. Idem con
+  otras reservadas de Rust que NO son keywords de Fitz: `move`, `ref`, `dyn`, `impl`, `trait`, `enum`,
+  `unsafe`, `where`, `box`, `become`, `final`, `override`, `virtual`, `yield`, `macro`, `union`, etc.
+- **Hipótesis:** el codegen mapea 1:1 el nombre de la variable Fitz al de Rust sin escapar/renombrar
+  las keywords reservadas de Rust. Fitz ya rechaza sus PROPIAS keywords como nombres, pero el conjunto
+  de reservadas de Rust es más grande.
+- **Asimetría observada (MatHelp E1 + E5):** los **params de fn/handler SÍ están chequeados** con un
+  error claro del codegen (`param: name \`ref\` is a reserved Rust keyword — rename in Fitz`), pero las
+  **variables `let` locales NO** (`let priv = ...` se cuela hasta rustc con el error críptico). El fix
+  debería cubrir ambos (params + locales + probablemente campos de type) con la lista completa de
+  reservadas de Rust, emitiendo `r#<name>` o renombrando.
+- **Propuesta:** en el codegen, cuando un identificador de variable local es una keyword (estricta o
+  reservada) de Rust, emitir el raw identifier `r#<name>` (o un prefijo `__fitz_<name>`). Cubrir la
+  lista completa de reservadas de Rust.
+- **Workaround en MatHelp:** renombrar la variable (`priv` → `pol_priv`). Cerrado en la app.
+
+---
+
 ## Épicos transversales
 
 ### T1 · La cadena del i18n
