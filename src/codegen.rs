@@ -8488,6 +8488,123 @@ fn auto_register_imported_fn_ret_nominals(
     synth
 }
 
+/// FITZ-30 (v0.61.0) — cross-module auto-registration for nominals nested in
+/// the FIELDS of module types, parallel to
+/// `auto_register_imported_fn_ret_nominals` (FITZ-15, which covers imported-fn
+/// return types) and `auto_register_relation_targets` (ORM relations).
+///
+/// A module `type Outer { inner: Inner }` returned as JSON from a handler of
+/// THAT module needs `impl __ToFitzJson for OuterData`. The main emits those
+/// impls via `emit_helpers_for_imported_types`, but if `Inner` isn't in the
+/// main's env, `remap_imported_nominals` degrades the `inner` field to
+/// `Type::Any`, `has_opaque_field` fires, and the `impl` for `Outer` is
+/// SKIPPED entirely → `error[E0599]: OuterData: __ToFitzJson is not
+/// satisfied`. This mints every nested nominal (transitively) reachable from
+/// the fields of any module type, so `remap_imported_nominals` resolves it and
+/// the impl is emitted. Only nominals that SOME module actually defines are
+/// minted — genuinely opaque fields (no defining module) keep degrading and
+/// the impl stays skipped, as before.
+fn auto_register_module_type_field_nominals(
+    env: &mut TypeEnv,
+    modules: &[LoadedModule],
+) -> Vec<(String, ResolvedBinding)> {
+    fn collect_nominal_ids(ty: &Type, out: &mut Vec<TypeId>) {
+        match ty {
+            Type::Nominal(id) => out.push(*id),
+            Type::Nullable(inner) | Type::List(inner) | Type::Future(inner) => {
+                collect_nominal_ids(inner, out)
+            }
+            Type::Map(k, v) => {
+                collect_nominal_ids(k, out);
+                collect_nominal_ids(v, out);
+            }
+            Type::Tuple(items) => {
+                for t in items {
+                    collect_nominal_ids(t, out);
+                }
+            }
+            Type::Result { ok, err } => {
+                collect_nominal_ids(ok, out);
+                collect_nominal_ids(err, out);
+            }
+            Type::Function { params, ret } => {
+                for p in params {
+                    collect_nominal_ids(p, out);
+                }
+                collect_nominal_ids(ret, out);
+            }
+            _ => {}
+        }
+    }
+
+    let mut synth: Vec<(String, ResolvedBinding)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Worklist of (owner module index, nominal id in that module) seeded from
+    // every nominal appearing in the fields of every module type. BFS so
+    // transitive nesting (Outer → Inner → Deeper) is closed.
+    let mut queue: std::collections::VecDeque<(usize, TypeId)> = std::collections::VecDeque::new();
+    for (mi, m) in modules.iter().enumerate() {
+        for sig in m.type_sigs.values() {
+            for f in &sig.fields {
+                let mut ids = Vec::new();
+                collect_nominal_ids(&f.type_, &mut ids);
+                for id in ids {
+                    queue.push_back((mi, id));
+                }
+            }
+        }
+    }
+    while let Some((owner_idx, id)) = queue.pop_front() {
+        let Some(owner) = modules.get(owner_idx) else {
+            continue;
+        };
+        // Resolve id → name in the OWNER module (defined types first, then
+        // re-imported nominal names) — same resolution as `remap_imported_nominals`.
+        let Some(name) = owner
+            .type_sigs
+            .iter()
+            .find(|(_, s)| s.id == id)
+            .map(|(n, _)| n.clone())
+            .or_else(|| owner.nominal_names.get(&id).cloned())
+        else {
+            continue;
+        };
+        if !seen.insert(name.clone()) {
+            continue; // already decided for this name
+        }
+        if env.lookup(&name).is_some() {
+            continue; // already registered (imported / local / other auto-register)
+        }
+        // The module that DEFINES the nominal (has its fields).
+        let Some(def_idx) = modules.iter().position(|m| m.type_sigs.contains_key(&name)) else {
+            continue; // no module defines it — leave the pre-existing degrade/skip
+        };
+        if env.declare_nominal(name.clone()).is_err() {
+            continue;
+        }
+        synth.push((
+            name.clone(),
+            ResolvedBinding::Named {
+                module_index: def_idx,
+                item: name.clone(),
+                kind: NamedKind::Type,
+            },
+        ));
+        // Transitivity: enqueue the nominals nested in THIS type's own fields
+        // (ids resolved against its defining module).
+        if let Some(def_sig) = modules[def_idx].type_sigs.get(&name) {
+            for f in &def_sig.fields {
+                let mut ids2 = Vec::new();
+                collect_nominal_ids(&f.type_, &mut ids2);
+                for id2 in ids2 {
+                    queue.push_back((def_idx, id2));
+                }
+            }
+        }
+    }
+    synth
+}
+
 #[allow(clippy::too_many_arguments)] // 8 params: threading `embed_static` (FITZ-02)
 fn generate_main_rs(
     program: &Program,
@@ -8613,6 +8730,14 @@ fn generate_main_rs(
     let synth_fn_ret =
         auto_register_imported_fn_ret_nominals(&mut owned_env, &loader.bindings, &loader.modules);
     synth_rel_targets.extend(synth_fn_ret.iter().cloned());
+    // FITZ-30 (v0.61.0) — auto-register nominals nested in the FIELDS of
+    // module types (e.g. `Outer { inner: Inner }` returned as JSON by a
+    // handler), so `emit_helpers_for_imported_types` doesn't skip the
+    // `impl __ToFitzJson` when `Inner` isn't imported to the main. Same env
+    // clone + `env.lookup` dedup guard as the two passes above.
+    let synth_field_noms =
+        auto_register_module_type_field_nominals(&mut owned_env, &loader.modules);
+    synth_rel_targets.extend(synth_field_noms.iter().cloned());
     let env = &owned_env;
 
     let mut ctx = CodegenCtx::new(env, type_info);
@@ -16364,14 +16489,16 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             } = stmt
             {
                 let fn_span = stmt.span();
-                // R2 (v0.10.14) — validate fn name + param names
-                // as Rust idents. Defense-in-depth against Rust
-                // reserved keywords that Fitz accepts as valid
-                // identifiers (e.g., `loop`/`type`/`fn`).
+                // R2 (v0.10.14) — validate the fn NAME as a Rust ident.
+                // Defense-in-depth against Rust reserved keywords that
+                // Fitz accepts as valid identifiers (e.g., `loop`/`type`/
+                // `fn`). FITZ-31 (v0.61.0) — param names are NO longer
+                // validated here: they are sanitized to raw identifiers
+                // (`r#priv`) at their declaration + every use, so a param
+                // named after a reserved Rust keyword now compiles instead
+                // of erroring (parity with `fitz run`). The fn name itself
+                // still errors (renaming a top-level fn is a bigger ask).
                 validate_rust_ident(name, "fn def")?;
-                for p in params {
-                    validate_rust_ident(&p.name, &format!("fn `{}`: param", name))?;
-                }
                 let params_tys: Vec<Type> = params
                     .iter()
                     .enumerate()
@@ -17598,7 +17725,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 self.emit(", ");
             }
             self.emit("mut ");
-            self.emit(&param.name);
+            self.emit(&sanitize_var_ident(&param.name));
             self.emit(": ");
             // P1 mini-batch (Mw.next codegen) — post mw second
             // param (`res: Response`) is emitted as
@@ -17986,7 +18113,9 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 .unwrap();
             }
             1 => {
-                let n = &names[0];
+                // FITZ-31 — sanitize the extracted binding so it matches the
+                // sanitized binding inside `rust_pat` (from `gen_pattern`).
+                let n = sanitize_var_ident(&names[0]);
                 writeln!(
                     &mut self.output,
                     "let mut {} = match __destr_scrut {{ {}{} => {}, _ => panic!(\"destructuring did not match the value\") }};",
@@ -17995,7 +18124,12 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 .unwrap();
             }
             _ => {
-                let joined = names.join(", ");
+                // FITZ-31 — same sanitization as the 1-binding branch.
+                let joined = names
+                    .iter()
+                    .map(|n| sanitize_var_ident(n))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 writeln!(
                     &mut self.output,
                     "let ({}) = match __destr_scrut {{ {}{} => ({}), _ => panic!(\"destructuring did not match the value\") }};",
@@ -18025,8 +18159,9 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         use crate::ast::Pattern;
         match pat {
             Pattern::Ident(name, _) => {
+                // FITZ-31 — raw-ident the destructured binding (scope key stays original).
                 self.declare_var(name.clone(), ty.clone());
-                Ok(name.clone())
+                Ok(sanitize_var_ident(name))
             }
             Pattern::Wildcard => Ok("_".to_string()),
             Pattern::Tuple(subs) => {
@@ -18131,7 +18266,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         // already in scope emits a plain `x = ...`.
         if !is_let && self.var_in_any_scope(name) {
             // Reassignment.
-            self.emit(name);
+            self.emit(&sanitize_var_ident(name));
             self.emit(" = ");
             self.emit(&final_rhs);
             self.emit(";\n");
@@ -18184,7 +18319,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     && rendered.contains("__FitzValue")
                     && rhs_is_concretely_typed;
                 self.emit("let mut ");
-                self.emit(name);
+                self.emit(&sanitize_var_ident(name));
                 if !omit_annotation {
                     self.emit(": ");
                     self.emit(&rendered);
@@ -18792,7 +18927,27 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         if !self.response_mode && !self.in_middleware_fn {
             if let Type::Result { ok: tok, err: terr } = ret_expected {
                 if let Expr::Ok(inner, _) = e {
-                    let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                    // FITZ-29 — propagate the `Map<_, Any>` hint from the
+                    // Result's Ok type through `Ok(...)` into a map literal,
+                    // so its entries are wrapped in `__FitzValue` (the
+                    // `Vec<(FV, FV)>` shape) instead of emitting raw
+                    // `String`/etc that `coerce` can't lift to `Map<_,Any>`.
+                    // Parallel to the ad-hoc hint detection in `gen_assign`;
+                    // fixes `return Ok({...})` in a fn `-> Result<Map<_,Any>>`.
+                    let ok_is_map_any = matches!(
+                        tok.as_ref(),
+                        Type::Map(_, v) if matches!(v.as_ref(), Type::Any)
+                    ) || matches!(
+                        tok.as_ref(),
+                        Type::Nullable(i)
+                            if matches!(i.as_ref(), Type::Map(_, v) if matches!(v.as_ref(), Type::Any))
+                    );
+                    let (inner_code, inner_ty) =
+                        if let (Expr::Map(pairs, span), true) = (inner.as_ref(), ok_is_map_any) {
+                            self.gen_map_lit_with_hint(pairs, *span, Some(tok.as_ref()))?
+                        } else {
+                            self.gen_expr(inner)?
+                        };
                     let coerced = coerce(&inner_code, &inner_ty, tok, self.env);
                     self.emit_indent();
                     self.emit("return Ok(");
@@ -19138,6 +19293,10 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
             let (binding, declared) = pattern_to_simple_binding(var, &Type::Int)
                 .map_err(|msg| self.err_at(iter.span(), msg))?;
             let mut_prefix = if binding == "_" { "" } else { "mut " };
+            // FITZ-31 — emit the loop var as a raw ident if it collides
+            // with a Rust keyword; `declared` keeps the original name as
+            // the scope key so uses re-sanitize consistently.
+            let binding = sanitize_var_ident(&binding);
             self.emit_indent();
             writeln!(
                 &mut self.output,
@@ -19188,7 +19347,8 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                             .iter()
                             .map(|(name, _)| {
                                 let prefix = if name == "_" { "" } else { "mut " };
-                                format!("{prefix}{name}")
+                                // FITZ-31 — raw-ident the destructured names.
+                                format!("{prefix}{}", sanitize_var_ident(name))
                             })
                             .collect();
                         // B17 fix: wrap with a block + bind the clone to a
@@ -19234,6 +19394,8 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 let (binding, declared) = pattern_to_simple_binding(var, &elem_ty)
                     .map_err(|msg| self.err_at(iter.span(), msg))?;
                 let mut_prefix = if binding == "_" { "" } else { "mut " };
+                // FITZ-31 — raw-ident the loop var (scope key stays original).
+                let binding = sanitize_var_ident(&binding);
                 // B17 fix: see comment above.
                 self.emit_indent();
                 self.emit("{\n");
@@ -19286,6 +19448,9 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                         // Detect wildcards and omit the `mut`.
                         let k_prefix = if kname == "_" { "" } else { "mut " };
                         let v_prefix = if vname == "_" { "" } else { "mut " };
+                        // FITZ-31 — raw-ident the k/v names (scope keys stay original).
+                        let kname = sanitize_var_ident(&kname);
+                        let vname = sanitize_var_ident(&vname);
                         // B17 fix: see comment above on the List branch.
                         self.emit_indent();
                         self.emit("{\n");
@@ -19364,10 +19529,12 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                             "let __for_snap = ({iter_code}).lock().unwrap().clone();"
                         )
                         .unwrap();
+                        // FITZ-31 — raw-ident the pair binding (scope key stays original).
+                        let emitted_name = sanitize_var_ident(name);
                         self.emit_indent();
                         writeln!(
                             &mut self.output,
-                            "{label_prefix}for mut {name} in __for_snap.into_iter() {{"
+                            "{label_prefix}for mut {emitted_name} in __for_snap.into_iter() {{"
                         )
                         .unwrap();
                         self.indent += 1;
@@ -19716,10 +19883,17 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 // value. Inefficient but correct. For Nominal the
                 // clone is of the `Rc`, so it is cheap and preserves
                 // aliasing — mutations remain visible.
+                // FITZ-31 — a local variable whose name collides with a
+                // reserved Rust keyword (`priv`, `move`, `ref`, ...) is
+                // emitted as a raw identifier (`r#priv`) so the native
+                // binary compiles. `lookup_var` keys on the original Fitz
+                // name; only the emitted text is sanitized here, matching
+                // the sanitized declaration in `gen_assign`.
+                let emitted = sanitize_var_ident(name);
                 let code = if needs_clone(&ty) {
-                    format!("{}.clone()", name)
+                    format!("{}.clone()", emitted)
                 } else {
-                    name.clone()
+                    emitted
                 };
                 Ok((code, ty))
             }
@@ -24575,7 +24749,8 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                         format!(
                             "__fitz_db_transaction(&{db}, move |{param}: __FitzDbConn| async move {{ {body} }})",
                             db = obj_code,
-                            param = param_name,
+                            // FITZ-31 — raw-ident the tx param if it collides with a Rust keyword.
+                            param = sanitize_var_ident(&param_name),
                             body = body_str,
                         ),
                         Type::Future(Box::new(Type::Result {
@@ -30090,7 +30265,12 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     type_name, method.name, p.name, e
                 ))
             })?;
-            rust_params.push(format!("{}: {}", p.name, rust_type_for(&pty, self.env)?));
+            // FITZ-31 — raw-ident method params colliding with Rust keywords.
+            rust_params.push(format!(
+                "{}: {}",
+                sanitize_var_ident(&p.name),
+                rust_type_for(&pty, self.env)?
+            ));
             param_types.push(pty);
         }
         let ret_ty_expr = method.return_type.as_ref().ok_or_else(|| {
@@ -30891,9 +31071,14 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         self.ret_stack.pop();
         result?;
 
+        // FITZ-31 — raw-ident the callback param if it collides with a
+        // Rust keyword; the body's uses re-sanitize via `Expr::Ident`.
         let code = format!(
             "|{}: {}| -> {} {{ {} }}",
-            param_name, param_ty_rs, ret_ty_rs, body_str
+            sanitize_var_ident(&param_name),
+            param_ty_rs,
+            ret_ty_rs,
+            body_str
         );
         Ok((code, ret_ty))
     }
@@ -31038,9 +31223,16 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         self.ret_stack.pop();
         result?;
 
+        // FITZ-31 — raw-ident the two callback params if they collide
+        // with Rust keywords; the body's uses re-sanitize via `Expr::Ident`.
         Ok(format!(
             "|{}: {}, {}: {}| -> {} {{ {} }}",
-            p0_name, p0_rs, p1_name, p1_rs, ret_rs, body_str
+            sanitize_var_ident(&p0_name),
+            p0_rs,
+            sanitize_var_ident(&p1_name),
+            p1_rs,
+            ret_rs,
+            body_str
         ))
     }
 
@@ -31154,7 +31346,14 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         let params_sig = params
             .iter()
             .zip(param_types.iter())
-            .map(|(p, t)| Ok(format!("{}: {}", p.name, rust_type_for(t, self.env)?)))
+            // FITZ-31 — raw-ident closure params colliding with Rust keywords.
+            .map(|(p, t)| {
+                Ok(format!(
+                    "{}: {}",
+                    sanitize_var_ident(&p.name),
+                    rust_type_for(t, self.env)?
+                ))
+            })
             .collect::<Result<Vec<_>, FitzError>>()?
             .join(", ");
         // Async-cl build mini-batch: for async closures, the closure
@@ -31198,7 +31397,9 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
         let mut clones = String::new();
         for (name, ty) in &captures {
             if needs_clone(ty) {
-                clones.push_str(&format!("let {0} = {0}.clone(); ", name));
+                // FITZ-31 — raw-ident the captured name on both sides.
+                let s = sanitize_var_ident(name);
+                clones.push_str(&format!("let {0} = {0}.clone(); ", s));
             }
         }
 
@@ -31826,19 +32027,21 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                 // (not Option). This unblocks `match obj { null => x,
                 // u => u.field }` which previously failed with rustc because
                 // `u` remained as `Option<T>` and `u.field` does not compile.
+                // FITZ-31 — emit the binding as a raw ident when it collides
+                // with a Rust keyword; `declare_var` keeps the original name.
                 if let Type::Nullable(inner) = scrut_ty {
                     self.declare_var(name.clone(), (**inner).clone());
-                    Ok((format!("Some({})", name), None))
+                    Ok((format!("Some({})", sanitize_var_ident(name)), None))
                 } else {
                     self.declare_var(name.clone(), scrut_ty.clone());
-                    Ok((name.clone(), None))
+                    Ok((sanitize_var_ident(name), None))
                 }
             }
             Pattern::Wildcard => Ok(("_".to_string(), None)),
             Pattern::OkBinding(name, _) => {
                 let bind_ty = ok_inner_ty.clone().unwrap_or(Type::Any);
                 self.declare_var(name.clone(), bind_ty);
-                Ok((format!("Ok({})", name), None))
+                Ok((format!("Ok({})", sanitize_var_ident(name)), None))
             }
             Pattern::ErrBinding(name, _) => {
                 // Re+ mini-batch — `Err(e)` types with the E of the
@@ -31849,7 +32052,7 @@ fn __fitz_bytes_from_hex(s: &str) -> Result<Vec<u8>, String> {
                     _ => Type::Str,
                 };
                 self.declare_var(name.clone(), bind_ty);
-                Ok((format!("Err({})", name), None))
+                Ok((format!("Err({})", sanitize_var_ident(name)), None))
             }
             Pattern::OkWildcard => Ok(("Ok(_)".to_string(), None)),
             Pattern::ErrWildcard => Ok(("Err(_)".to_string(), None)),
@@ -42322,25 +42525,63 @@ fn validate_rust_ident(name: &str, context: &str) -> Result<(), FitzError> {
             context
         )));
     }
-    // Subset of Rust keywords + Fitz-allowed that could collide.
-    // The Fitz parser doesn't reject them all; this defensive check
-    // catches the collision before `cargo build` with a Fitz-specific
-    // message (instead of the cryptic rustc error).
-    const RUST_RESERVED: &[&str] = &[
-        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
-        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
-        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
-        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
-        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
-        "union",
-    ];
-    if RUST_RESERVED.contains(&name) {
+    if is_rust_keyword(name) {
         return Err(err(format!(
             "{}: name `{}` is a reserved Rust keyword — cannot be used as an identifier in the native binary (rename in Fitz)",
             context, name
         )));
     }
     Ok(())
+}
+
+/// Canonical list of Rust strict + reserved keywords that would collide
+/// when a Fitz identifier is emitted 1:1 as a Rust identifier. The Fitz
+/// parser accepts many of these as valid identifiers (`priv`, `move`,
+/// `ref`, `dyn`, `impl`, ...) because they are NOT Fitz keywords; the
+/// codegen has to escape or rename them.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union",
+];
+
+/// Rust keywords that CANNOT be written as raw identifiers (`r#name`).
+/// `r#crate`/`r#self`/`r#Self`/`r#super` are rejected by rustc, and
+/// `r#true`/`r#false` are not valid either. For a Fitz variable named
+/// like one of these we rename with a deterministic prefix instead of
+/// using `r#`. (All are extremely unlikely as user variable names —
+/// `self`/`Self`/`true`/`false` are Fitz keywords/literals anyway.)
+const RUST_NON_RAW_KEYWORDS: &[&str] = &["crate", "self", "Self", "super", "true", "false"];
+
+fn is_rust_keyword(name: &str) -> bool {
+    RUST_KEYWORDS.contains(&name)
+}
+
+/// FITZ-31 (v0.61.0) — Sanitize a Fitz **variable/param/binding** name
+/// for emission as a Rust identifier. Fitz accepts many names that are
+/// reserved Rust keywords (`priv`, `move`, `ref`, `dyn`, `impl`,
+/// `trait`, `enum`, `unsafe`, `where`, `box`, `yield`, ...); those are
+/// emitted as raw identifiers `r#name` so the native binary compiles —
+/// parity with `fitz run`, where they are valid identifiers. The few
+/// keywords Rust forbids as raw identifiers (`crate`/`self`/`Self`/
+/// `super`/`true`/`false`) are renamed with a `__fitz_kw_` prefix.
+/// Non-keyword names pass through unchanged (the vast majority — zero
+/// overhead for normal identifiers).
+///
+/// Must be applied at BOTH the declaration and every use of the binding
+/// so the emitted Rust is consistent. The interpreter/scope bookkeeping
+/// keeps the ORIGINAL Fitz name as the key; only the emitted Rust text
+/// is transformed here.
+fn sanitize_var_ident(name: &str) -> String {
+    if RUST_NON_RAW_KEYWORDS.contains(&name) {
+        format!("__fitz_kw_{}", name)
+    } else if is_rust_keyword(name) {
+        format!("r#{}", name)
+    } else {
+        name.to_string()
+    }
 }
 
 /// R6 (v0.10.14) — emits `a <op> b` with a finiteness check at the end
@@ -56757,5 +56998,96 @@ fn go(n: Int) -> Str {\n  let _ = spawn(worker(n))\n  return \"ok\"\n}\n\
         assert!(!rust.contains("__fitz_run_persisted_spawn"));
         // The plain tokio::spawn path is still emitted.
         assert!(rust.contains("tokio::spawn"));
+    }
+
+    // -----------------------------------------------------------------
+    // FITZ-31 (v0.61.0) — Fitz variables named after reserved Rust
+    // keywords are emitted as raw identifiers (`r#priv`) so `fitz build`
+    // compiles them, matching `fitz run` (where they are valid names).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fitz31_sanitize_var_ident_raw_prefixes_rust_keywords() {
+        // r#-safe keywords get the raw prefix.
+        assert_eq!(sanitize_var_ident("priv"), "r#priv");
+        assert_eq!(sanitize_var_ident("move"), "r#move");
+        assert_eq!(sanitize_var_ident("ref"), "r#ref");
+        assert_eq!(sanitize_var_ident("dyn"), "r#dyn");
+        assert_eq!(sanitize_var_ident("impl"), "r#impl");
+        assert_eq!(sanitize_var_ident("trait"), "r#trait");
+        assert_eq!(sanitize_var_ident("box"), "r#box");
+        assert_eq!(sanitize_var_ident("yield"), "r#yield");
+        // Non-keyword names are untouched (zero overhead).
+        assert_eq!(sanitize_var_ident("name"), "name");
+        assert_eq!(sanitize_var_ident("_"), "_");
+        assert_eq!(sanitize_var_ident("user_id"), "user_id");
+    }
+
+    #[test]
+    fn fitz31_sanitize_var_ident_renames_non_raw_keywords() {
+        // `crate`/`self`/`Self`/`super`/`true`/`false` cannot be raw
+        // identifiers in Rust, so they are renamed with a prefix.
+        assert_eq!(sanitize_var_ident("crate"), "__fitz_kw_crate");
+        assert_eq!(sanitize_var_ident("self"), "__fitz_kw_self");
+        assert_eq!(sanitize_var_ident("Self"), "__fitz_kw_Self");
+        assert_eq!(sanitize_var_ident("super"), "__fitz_kw_super");
+    }
+
+    #[test]
+    fn fitz31_local_let_named_priv_emits_raw_ident() {
+        // The reported case: `let priv = ...` inside a fn (MatHelp
+        // `brand.fitz::footer`). Pre-fix this emitted `let mut priv`
+        // which rustc rejects. Now: `let mut r#priv` at decl + `r#priv`
+        // at use.
+        let rust = gen("fn label() -> Str {\n\
+             \x20   let priv = \"legal\"\n\
+             \x20   return priv\n\
+             }\n\
+             print(label())\n")
+        .expect("gen OK");
+        assert!(
+            rust.contains("r#priv"),
+            "expected `r#priv` in the emitted Rust, was:\n{}",
+            rust
+        );
+        assert!(
+            !rust.contains("let mut priv "),
+            "the raw `let mut priv` must NOT be emitted, was:\n{}",
+            rust
+        );
+    }
+
+    #[test]
+    fn fitz31_fn_param_named_ref_emits_raw_ident() {
+        // The asymmetry noted in the ticket: params used to ERROR; now
+        // they compile as raw idents (parity with locals + `fitz run`).
+        let rust = gen("fn echo(ref: Int) -> Int {\n\
+             \x20   return ref + 1\n\
+             }\n\
+             print(echo(2))\n")
+        .expect("gen OK");
+        assert!(
+            rust.contains("r#ref"),
+            "expected `r#ref` (param + use) in the emitted Rust, was:\n{}",
+            rust
+        );
+    }
+
+    #[test]
+    fn fitz31_for_var_and_match_binding_named_keywords_emit_raw() {
+        let rust = gen("fn run() -> Int {\n\
+             \x20   let total = 0\n\
+             \x20   for move in 0..3 {\n\
+             \x20       total = total + move\n\
+             \x20   }\n\
+             \x20   return total\n\
+             }\n\
+             print(run())\n")
+        .expect("gen OK");
+        assert!(
+            rust.contains("r#move"),
+            "expected `r#move` (for-loop var + use), was:\n{}",
+            rust
+        );
     }
 }

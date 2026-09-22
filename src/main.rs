@@ -2043,32 +2043,110 @@ fn pre_scan_imported_fn_signatures(
         let Some(file_path) = resolve_import_file_path(path, base_dir, dep_registry) else {
             continue;
         };
-        let Ok(source_raw) = fs::read_to_string(&file_path) else {
+        let Some(module_program) = read_parse_module_program(&file_path) else {
             continue;
         };
-        let source = if fitz::view::is_fitzv_extension(&file_path) {
-            match fitz::view::transform_fitzv_source(&source_raw, &file_path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            }
-        } else {
-            source_raw
-        };
-        let Ok(tokens) = lexer::tokenize(&source) else {
-            continue;
-        };
-        let Ok(module_program) = parser::parse(tokens) else {
-            continue;
-        };
-        let module_sigs = types::extract_fn_signatures(&module_program);
+        // The module's own directory anchors the resolution of its OWN
+        // imports (needed to follow re-exports).
+        let module_dir = file_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| base_dir.to_path_buf());
         for (n, alias) in names {
-            if let Some(sig) = module_sigs.get(n) {
+            // FITZ-26 — resolve the fn signature possibly through
+            // re-exports (`from internal import f` in the imported
+            // module's entry), not just direct `fn` definitions.
+            if let Some(sig) =
+                resolve_imported_fn_sig(n, &module_program, &module_dir, dep_registry, 4)
+            {
                 let binding = alias.clone().unwrap_or_else(|| n.clone());
-                out.insert(binding, sig.clone());
+                out.insert(binding, sig);
             }
         }
     }
     out
+}
+
+/// FITZ-26 — read + (view-transform) + tokenize + parse a module file
+/// into a `Program`, or `None` on any failure (silent fallback,
+/// parallel to the inline logic the pre-scans use). Shared by
+/// `pre_scan_imported_fn_signatures` and its re-export recursion.
+fn read_parse_module_program(file_path: &std::path::Path) -> Option<ast::Program> {
+    let source_raw = fs::read_to_string(file_path).ok()?;
+    let source = if fitz::view::is_fitzv_extension(file_path) {
+        fitz::view::transform_fitzv_source(&source_raw, file_path).ok()?
+    } else {
+        source_raw
+    };
+    let tokens = lexer::tokenize(&source).ok()?;
+    parser::parse(tokens).ok()
+}
+
+/// FITZ-26 — resolve the signature of an imported fn named `fn_name`
+/// within `module_program`. First looks for a direct `fn fn_name(...)`
+/// definition; if absent, follows a re-export (`from <sub> import
+/// fn_name [as ...]`) into the sub-module and recurses. `module_dir`
+/// anchors the resolution of the module's own (relative) imports, and
+/// `depth` bounds the recursion to break re-export cycles. Returns
+/// `None` if the fn can't be found within `depth` hops.
+///
+/// This fixes a `fitz check`✓/`fitz run`✗ gap (FITZ-26): a fn exposed
+/// by a dependency through a re-exporting entry point (e.g.
+/// fitz-liveviews' `flv`, defined in an internal submodule and
+/// re-exported from the lib entry) used to bind as `Type::Any` in the
+/// importer, so field access on its (primitive) return silently passed
+/// the checker and only failed at runtime.
+fn resolve_imported_fn_sig(
+    fn_name: &str,
+    module_program: &ast::Program,
+    module_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+    depth: usize,
+) -> Option<types::ImportedFnSig> {
+    // 1. Direct definition in this module.
+    let sigs = types::extract_fn_signatures(module_program);
+    if let Some(sig) = sigs.get(fn_name) {
+        return Some(sig.clone());
+    }
+    if depth == 0 {
+        return None;
+    }
+    // 2. Re-exported from a sub-module (`from <sub> import fn_name`).
+    for stmt in module_program {
+        let ast::Stmt::FromImport { path, names, .. } = stmt else {
+            continue;
+        };
+        if path.first().map(String::as_str) == Some("python") {
+            continue;
+        }
+        // Does this import re-export `fn_name` under that local name?
+        // We need the ORIGINAL name to look up in the sub-module.
+        let Some(orig_name) = names.iter().find_map(|(orig, alias)| {
+            if alias.as_deref().unwrap_or(orig) == fn_name {
+                Some(orig.clone())
+            } else {
+                None
+            }
+        }) else {
+            continue;
+        };
+        let Some(sub_path) = resolve_import_file_path(path, module_dir, dep_registry) else {
+            continue;
+        };
+        let Some(sub_program) = read_parse_module_program(&sub_path) else {
+            continue;
+        };
+        let sub_dir = sub_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| module_dir.to_path_buf());
+        if let Some(sig) =
+            resolve_imported_fn_sig(&orig_name, &sub_program, &sub_dir, dep_registry, depth - 1)
+        {
+            return Some(sig);
+        }
+    }
+    None
 }
 
 /// Phase 11.6.e continuation (§9.bb, 2026-07-16) — Scans each

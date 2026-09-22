@@ -174,6 +174,55 @@ pub async fn eval_with_base(program: Program, base_dir: PathBuf) -> FitzResult<(
 /// `dep_registry` resolved from `fitz.toml`. The loader consumes it so
 /// `from <dep-name> import X` resolves to the absolute `lib_entry`
 /// instead of falling back to a relative path from the importer.
+/// FITZ-28 — pre-register the top-level `type` definitions of a program
+/// in `env` BEFORE evaluating its statements top-down. Fixes a
+/// `fitz check`✓/`fitz run`✗ divergence: a `@post`/`@get`/... handler
+/// whose body param has a `type` defined LATER in the same file used to
+/// resolve the body type eagerly (in `register_http_route`) to `None`
+/// (the type wasn't in the env yet), so the request-time body coercion
+/// silently produced a free `Map` instead of the declared instance —
+/// the handler then failed on typed field access and returned a generic
+/// 500 with no useful detail.
+///
+/// Registering the `Value::Type` here is SAFE: it runs NO user code —
+/// `resolved_defaults` stays empty (field defaults remain lazy, evaluated
+/// per struct-lit / body coercion with the correct env, as before), so
+/// this does not change default evaluation order (PreF8.3). The top-down
+/// pass re-`define`s the same value idempotently, and modules'
+/// post-pass still fills `resolved_defaults`. `register_orm_type` is NOT
+/// called here (the top-down pass does it) — this only ensures the type
+/// is visible early for body-type resolution.
+fn preregister_type_defs(program: &[Stmt], env: &EnvRef) {
+    for stmt in program {
+        if let Stmt::TypeDef {
+            name,
+            fields,
+            methods,
+            decorators,
+            span,
+        } = stmt
+        {
+            let table_metadata =
+                if decorators.is_empty() && fields.iter().all(|f| f.decorators.is_empty()) {
+                    None
+                } else {
+                    crate::types::process_table_decorators(name, decorators, fields, *span)
+                        .ok()
+                        .flatten()
+                        .map(Box::new)
+                };
+            let t = Value::Type {
+                name: name.clone(),
+                fields: fields.clone(),
+                resolved_defaults: Vec::new(),
+                methods: methods.clone(),
+                table_metadata,
+            };
+            env.lock().define(name.clone(), t);
+        }
+    }
+}
+
 pub async fn eval_with_base_and_deps(
     program: Program,
     base_dir: PathBuf,
@@ -212,6 +261,12 @@ pub async fn eval_with_base_import_root_and_deps(
 
     let env = Environment::new();
     register_builtins(&env);
+
+    // FITZ-28 — hoist top-level `type` definitions BEFORE the top-down
+    // pass so an HTTP handler whose body param references a `type`
+    // defined LATER in the same file resolves the body type eagerly at
+    // route-registration time (instead of `None` → 500 at request time).
+    preregister_type_defs(&program, &env);
 
     for stmt in &program {
         if let Err(signal) = eval_stmt(stmt, env.clone()).await {
@@ -3269,6 +3324,10 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         .and_then(|n| n.to_str())
         .unwrap_or("<modulo>")
         .to_string();
+    // FITZ-28 — same type-hoisting as the main file: an imported module
+    // whose HTTP handler's body param references a `type` defined later
+    // in that module must resolve the body type at route-registration.
+    preregister_type_defs(&module_program, &module_env);
     let eval_result: EvalResult<()> =
         crate::testing::with_test_source_async(module_label, || async {
             for stmt in &module_program {
@@ -6247,7 +6306,8 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
     let handler_clone = handler;
     let fn_name_clone = fn_name.clone();
     let join_handle = tokio::spawn(async move {
-        match invoke_value(handler_clone, arg_values, &fn_name_clone, Span::ZERO).await {
+        let result = match invoke_value(handler_clone, arg_values, &fn_name_clone, Span::ZERO).await
+        {
             Ok(value) => {
                 // If the target fn was async, the value is a Future —
                 // we await it inside the task so the coroutine actually
@@ -6272,7 +6332,29 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
                     "spawn: the spawned task emitted an unexpected non-Error signal".to_string(),
                 )),
             },
+        };
+        // FITZ-27 — a spawned task is typically fire-and-forget: the
+        // caller (e.g. an `@post` handler) does NOT `.await` the returned
+        // Future, so the task runs detached and — pre-fix — a runtime
+        // error inside the spawned fn was dropped silently (the handler
+        // returned normally, no log, the failure invisible). Log it here,
+        // structured, with the spawned fn's name — parallel to how
+        // `@cron` (cron_jobs.rs) and `@background` persistent
+        // (background_jobs.rs) report their task failures. If the caller
+        // DID `.await` the Future the error also propagates upward — a
+        // double signal (one log + the propagation) we accept, since a
+        // spawn is fire-and-forget by convention.
+        if let Err(e) = &result {
+            emit_log_record(
+                "error",
+                "spawned task failed",
+                &[
+                    ("fn".to_string(), Value::Str(fn_name_clone.clone())),
+                    ("error".to_string(), Value::Str(e.message.clone())),
+                ],
+            );
         }
+        result
     });
     // Wrap the JoinHandle in a `Value::Future`. The Fitz Future
     // resolves when the task finishes; if the caller does not `.await`

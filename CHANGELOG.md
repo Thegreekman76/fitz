@@ -9,6 +9,50 @@ condensada para alguien que pregunta "¿qué cambió y cuándo?".
 Las versiones son retroactivas — Fitz todavía no publica releases
 formales; cada bump corresponde al cierre de una Fase del roadmap.
 
+## [v0.61.0] — 2026-09-22 — Tanda dogfooding MatHelp: FITZ-26 a FITZ-31 (6 gotchas del core)
+
+Tanda de 6 gotchas descubiertos construyendo MatHelp (app real en Fitz +
+fitz-liveviews). Cada uno reproducido con caso mínimo antes de tocar el core,
+cerrado con fix + test en su ficha (`docs/norte-mathelp.md`). Sin sintaxis
+nueva. Verificación completa verde: fmt + clippy (default + `--features lsp`)
+`-D warnings`, `cargo test --lib` 4226 / `--features lsp` 4391, cli_e2e +
+compile_e2e targeted (7) + openapi_e2e (3), `fitz check` de los 11 boilerplates,
+smoke `GUIDE_EXAMPLES_COMPILE` ~290 ejemplos (787s) verde.
+
+### Fixed
+
+- **FITZ-31** — una variable/param/binding con nombre de keyword RESERVADA de
+  Rust (`priv`, `move`, `ref`, `dyn`, `impl`, …) rompía `fitz build` con
+  `error: expected identifier, found reserved keyword`. Ahora el codegen emite
+  un raw identifier `r#<name>` (o renombra `__fitz_kw_<name>` las 6 que Rust no
+  admite como raw: `crate`/`self`/`Self`/`super`/`true`/`false`) en TODOS los
+  sitios de binding de variable (locals, params de fn/closure/método/callback,
+  for-loops, match bindings, destructure, transaction callback). Paridad total
+  `fitz check`✓/`fitz run`✓/`fitz build`✓; byte-idéntico para nombres normales.
+- **FITZ-30** — un `type` de un módulo con un campo nominal anidado no importado
+  al main, retornado como JSON por un handler de ese módulo, no recibía
+  `impl __ToFitzJson` (`error[E0599]: … is not satisfied`). Nuevo pase
+  `auto_register_module_type_field_nominals` (paralelo a v0.45/FITZ-15)
+  auto-registra los nominales anidados alcanzables, transitivamente.
+- **FITZ-29** — un `Map<Str, Any>` homogéneo (valores todos `Str`) retornado vía
+  `Ok(...)` desde una fn `-> Result<Map<Str, Any>>` emitía `String` crudo en vez
+  de `__FitzValue` (6× `E0308` en `fitz build`). `gen_return` ahora propaga el
+  hint `Map<_, Any>` a través del `Ok(...)` al map literal.
+- **FITZ-28** — un `type` usado como body de un handler `@post`, definido DESPUÉS
+  del handler en el mismo módulo, hacía 500 mudo en runtime (`fitz check` pasaba).
+  Nuevo pre-scan `preregister_type_defs` hoistea los `type` antes de evaluar los
+  stmts (main + módulos importados), sin ejecutar código de usuario.
+- **FITZ-27** — un `spawn(g())` fire-and-forget desde un handler `@post`, si `g`
+  fallaba en runtime, moría en silencio (sin log). El intérprete ahora loguea el
+  fallo (estructurado, nivel `error`, con el nombre de la fn), paralelo a
+  `@cron`/`@background`.
+- **FITZ-26** — `fitz check` no validaba el field-access (`.campo`) sobre el
+  retorno primitivo de una fn importada resuelta a través de un **re-export**
+  (`from internal import flv` en el lib entry, el patrón de fitz-liveviews):
+  pasaba check y explotaba en runtime. `pre_scan_imported_fn_signatures` ahora
+  sigue re-exports transitivos, así FITZ-24 dispara. (El sibling directo y la
+  path dep ya se cazaban.)
+
 ## [v0.60.1] — 2026-09-14 — FITZ-25: el body `form-urlencoded` se decodifica como UTF-8 (no latin-1) — dogfooding MatHelp
 
 ### Fixed

@@ -8756,6 +8756,204 @@ fn fitz23_list_push_await_in_handler_chain_builds() {
 }
 
 // ---------------------------------------------------------------------------
+// FITZ-31 (v0.61.0) — a Fitz variable/param/binding named after a reserved
+// Rust keyword (`priv`, `move`, `ref`, `dyn`, `impl`, ...) compiles to a raw
+// identifier (`r#priv`) so `fitz build` succeeds and produces the SAME output
+// as `fitz run` (where those names are valid identifiers). Pre-fix, `fitz
+// run` worked but `fitz build` broke with `error: expected identifier, found
+// reserved keyword \`priv\``.
+// ---------------------------------------------------------------------------
+#[test]
+fn fitz31_reserved_rust_keywords_as_vars_build_and_match_interpreter() {
+    // Covers locals, fn params, for-loop vars — all named after reserved
+    // Rust keywords that are NOT Fitz keywords.
+    let src = "fn bump(ref: Int) -> Int => ref + 1\n\
+               fn run() -> Int {\n\
+               \x20   let priv = 10\n\
+               \x20   let total = 0\n\
+               \x20   for move in 0..3 {\n\
+               \x20       total = total + move\n\
+               \x20   }\n\
+               \x20   let dyn = bump(priv)\n\
+               \x20   return total + dyn\n\
+               }\n\
+               print(\"result={run()}\")\n";
+    let (build_out, exit) = build_and_run("fitz31-reserved-kw", src);
+    assert_eq!(exit, 0, "binary should run cleanly, stdout: {}", build_out);
+    assert!(
+        build_out.contains("result=14"),
+        "expected `result=14` (for 0+1+2=3, dyn=bump(10)=11 → 14), was: {}",
+        build_out
+    );
+    // Parity: the interpreter must produce the exact same output.
+    let run_out = run_interpreter("fitz31-reserved-kw", src);
+    assert_eq!(
+        build_out.trim(),
+        run_out.trim(),
+        "fitz build and fitz run must match bit-for-bit"
+    );
+}
+
+#[test]
+fn fitz31_reserved_kw_in_match_binding_build_and_run_parity() {
+    // A match `Ok(...)`/`Err(...)`/ident binding named after a keyword.
+    let src = "fn parse(n: Int) -> Result<Int> {\n\
+               \x20   if (n > 0) {\n\
+               \x20       return Ok(n)\n\
+               \x20   }\n\
+               \x20   return Err(\"neg\")\n\
+               }\n\
+               fn run() -> Str {\n\
+               \x20   let r = parse(5)\n\
+               \x20   return match r {\n\
+               \x20       Ok(impl) => \"ok={impl}\",\n\
+               \x20       Err(dyn) => \"err={dyn}\",\n\
+               \x20   }\n\
+               }\n\
+               print(run())\n";
+    let (build_out, exit) = build_and_run("fitz31-match-kw", src);
+    assert_eq!(exit, 0, "binary should run cleanly, stdout: {}", build_out);
+    assert!(
+        build_out.contains("ok=5"),
+        "expected `ok=5`, was: {}",
+        build_out
+    );
+    let run_out = run_interpreter("fitz31-match-kw", src);
+    assert_eq!(
+        build_out.trim(),
+        run_out.trim(),
+        "fitz build and fitz run must match bit-for-bit"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FITZ-27 (v0.61.0) — a `spawn(g())` fire-and-forget task whose body hits a
+// runtime error used to die silently (no log). The interpreter now logs the
+// failure (structured, `error` level, with the spawned fn name) so the spawn
+// stops being a black hole.
+// ---------------------------------------------------------------------------
+#[test]
+fn fitz27_spawned_task_runtime_error_is_logged_not_swallowed() {
+    // `boom` divides by zero — a runtime error the checker does NOT catch
+    // (the type system doesn't evaluate values). It's spawned fire-and-forget
+    // (no `.await` of the spawn), and a top-level `sleep(...).await` gives the
+    // detached task time to run and fail before the program exits.
+    let src = "@background async fn boom() -> Null {\n\
+               \x20   let x = 1 / 0\n\
+               \x20   print(\"unreachable={x}\")\n\
+               \x20   return null\n\
+               }\n\
+               spawn(boom())\n\
+               sleep(500).await\n\
+               print(\"done\")\n";
+    let stem = sanitize_stem("fitz27-spawn-error-logged");
+    let dir = std::env::temp_dir().join(format!("fitz-run-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir run");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+    let output = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invoke fitz run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The program itself completes normally (the spawn is fire-and-forget).
+    assert!(
+        stdout.contains("done"),
+        "the program should complete (fire-and-forget), stdout: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("unreachable"),
+        "the spawned fn must have failed before printing, stdout: {}",
+        stdout
+    );
+    // The spawned task's runtime error is now logged (was swallowed pre-fix).
+    assert!(
+        stderr.contains("spawned task failed"),
+        "expected the spawned-failure log in stderr, was:\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stderr.contains("boom"),
+        "the log should name the spawned fn, stderr: {}",
+        stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FITZ-29 (v0.61.0) — a `Map<Str, Any>` literal returned via `Ok(...)` from a
+// fn `-> Result<Map<Str, Any>>` used to emit raw `String` values instead of
+// `__FitzValue`, breaking `fitz build` with `E0308: expected __FitzValue,
+// found String` (one per entry). The hint now propagates through `Ok(...)`.
+// ---------------------------------------------------------------------------
+#[test]
+fn fitz29_map_str_any_in_result_ok_builds_and_matches_interpreter() {
+    // The map values are all Str (homogeneous by content) but the target is
+    // `Map<Str, Any>` — the case that pre-fix emitted `Vec<(String, String)>`
+    // and failed to coerce to the `Vec<(__FitzValue, __FitzValue)>` shape.
+    let src = "fn build() -> Result<Map<Str, Any>> {\n\
+               \x20   let email = \"a@b.c\"\n\
+               \x20   return Ok({\"email\": email, \"display_name\": \"Ada\", \"locale\": \"es\"})\n\
+               }\n\
+               let r = build()\n\
+               match r {\n\
+               \x20   Ok(m) => print(\"len={m.len()}\"),\n\
+               \x20   Err(e) => print(\"err={e}\"),\n\
+               }\n";
+    let (build_out, exit) = build_and_run("fitz29-map-any-result", src);
+    assert_eq!(exit, 0, "binary should run cleanly, stdout: {}", build_out);
+    assert!(
+        build_out.contains("len=3"),
+        "expected the 3-entry map to build and run, was: {}",
+        build_out
+    );
+    let run_out = run_interpreter("fitz29-map-any-result", src);
+    assert_eq!(
+        build_out.trim(),
+        run_out.trim(),
+        "fitz build and fitz run must match bit-for-bit"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FITZ-30 (v0.61.0) — a `type` defined in a MODULE and returned as JSON by a
+// handler of that module didn't get `impl __ToFitzJson` when it had a nested
+// nominal field NOT imported to the main: `emit_helpers_for_imported_types`
+// degraded the field to `Any` and skipped the impl → `error[E0599]: OuterData:
+// __ToFitzJson is not satisfied`. The nested nominal is now auto-registered.
+// ---------------------------------------------------------------------------
+#[test]
+fn fitz30_module_type_nested_nominal_gets_to_json_impl() {
+    // `worker` defines `Inner` + `Outer { inner: Inner }` and a handler that
+    // returns `Result<Outer>` as JSON. The main imports the module by
+    // namespace and does NOT import `Inner`/`Outer` — the exact FITZ-30 shape.
+    let worker_src = "type Inner {\n\
+                      \x20   x: Str = \"\"\n\
+                      }\n\
+                      type Outer {\n\
+                      \x20   inner: Inner\n\
+                      }\n\
+                      @get(\"/x\")\n\
+                      async fn h() -> Result<Outer> {\n\
+                      \x20   return Ok(Outer { inner: Inner { x: \"hi\" } })\n\
+                      }\n";
+    let main_src = "import worker\n\
+                    @server(8199)\n\
+                    fn main() => 0\n";
+    // Just needs to COMPILE (the bug was a build-time E0599); the server
+    // binary never exits under `output()`, so we don't run it.
+    build_expect_ok_multi(
+        "fitz30-nested-nominal",
+        main_src,
+        &[("worker.fitz", worker_src)],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // R.bug-deadlock — regression test (2026-05-21)
 // ---------------------------------------------------------------------------
 

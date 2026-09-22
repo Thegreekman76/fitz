@@ -3548,6 +3548,60 @@ fn fitz22_check_correct_arity_imported_fn_passes() {
     );
 }
 
+// ---- FITZ-26: `fitz check` validates field-access on the primitive return
+//      of an imported fn resolved through a RE-EXPORT (transitive) ----
+
+/// FITZ-24 (v0.60.0) closed field-access on concrete primitives for LOCAL
+/// bindings and for DIRECT sibling imports (whose signature the FITZ-22
+/// pre-scan resolves). The remaining hole (FITZ-26): a fn exposed by a module
+/// through a re-export (`from internal import f` in the module's entry, the
+/// fitz-liveviews `flv` pattern) bound as `Type::Any` because the pre-scan only
+/// looked at direct `fn` definitions — so `f("x").raw` (f returns `Str`)
+/// silently passed `fitz check` and blew up at runtime.
+#[test]
+fn fitz26_check_catches_field_access_on_reexported_fn_str_return() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    // The module's entry RE-EXPORTS `f` from an internal submodule.
+    write_file(&project, "src/internal.fitz", "fn f(s: Str) -> Str => s\n");
+    write_file(&project, "src/facade.fitz", "from internal import f\n");
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from facade import f\n\nlet r = f(\"x\").raw\nprint(r)\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(
+        code, 1,
+        "field access on the Str return of a re-exported fn must fail check:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("field access `.raw`") || stderr.contains("field access `.raw`"),
+        "expected the FITZ-24 field-access error, got:\n{stdout}\n{stderr}"
+    );
+}
+
+/// Regression guard: a legitimate use of the re-exported fn (no bogus field
+/// access) still passes check — the pre-scan resolving the signature through
+/// the re-export must not introduce false positives.
+#[test]
+fn fitz26_check_reexported_fn_legitimate_use_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "app");
+    write_file(&project, "src/internal.fitz", "fn f(s: Str) -> Str => s\n");
+    write_file(&project, "src/facade.fitz", "from internal import f\n");
+    write_file(
+        &project,
+        "src/main.fitz",
+        "from facade import f\n\nlet r = f(\"x\")\nprint(r)\n",
+    );
+    let (stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(
+        code, 0,
+        "legitimate use of a re-exported fn must pass check:\n{stdout}\n{stderr}"
+    );
+}
+
 // ---- FITZ-21: `fitz test` — a test homonymous with the module it imports ----
 
 /// `tests/foo.fitz` doing `from foo import bar` must resolve `foo` to the

@@ -7357,6 +7357,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fitz28_body_type_defined_after_handler_resolves_and_returns_200() {
+        // FITZ-28 — a `@post` body param whose `type` is declared LATER
+        // in the same file. Pre-fix, `register_http_route` resolved the
+        // body type eagerly (top-down) → `None` → the body arrived as a
+        // free Map → `input.name` failed at runtime → generic 500.
+        // With the type-hoisting pre-scan the body type resolves and the
+        // handler gets a typed instance → 200.
+        let src = "\
+            @post(\"/x\")\n\
+            async fn h(input: Body) -> Str {\n\
+                return \"hi {input.name}\"\n\
+            }\n\
+            type Body {\n\
+                name: Str = \"\"\n\
+            }\n";
+        let (status, body) = run_oneshot_with_body(
+            src,
+            axum::http::Method::POST,
+            "/x",
+            Some("{\"name\": \"ada\"}"),
+        )
+        .await;
+        assert_eq!(status, 200, "body: {}", body);
+        assert!(
+            body.contains("ada"),
+            "expected the typed body field in the response, was: {}",
+            body
+        );
+    }
+
+    #[tokio::test]
     async fn e2e_fitz05_response_cookies_emit_multiple_set_cookie_headers() {
         // FITZ-05 FASE B — a handler returning `Response { cookies:
         // [Cookie {...}, Cookie {...}] }` emits TWO separate

@@ -4,6 +4,34 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟡 Deudas residuales derivadas de la tanda FITZ-26..31 (v0.61.0, 2026-09-22)
+
+Ninguna bloquea uso real; abren follow-ups menores.
+
+- **FITZ-31 — fn/type/field names + top-level consts con nombre de keyword reservada.**
+  El fix `sanitize_var_ident` cubre bindings de VARIABLE (locals, params, for-vars, match
+  bindings, destructure). Un `fn priv()` / `type ref {}` / un campo `field: Str` llamado
+  como keyword, o un `let priv = "x"` a nivel top-level (que se hoistea a `static`/`const`),
+  siguen con el error CLARO de `validate_rust_ident` (rename-guidance) en `fitz build`, no
+  con `r#`. Es una mejora sobre el error críptico de rustc, pero no compila. Extenderlo a
+  esos sitios requiere también sanear los `use`/`static`/`const`/campo-access + aliases de
+  import → más superficie. El caso reportado (variable local) queda cerrado.
+- **FITZ-29 — hueco paralelo `Ok([...])` con `Result<List<Any>>`.** El fix propaga el hint
+  `Map<_, Any>` a través de `Ok(...)`, pero el simétrico `return Ok([lista homogénea])` con
+  destino `Result<List<Any>>` no está cubierto: no existe `gen_list_lit_with_hint` (la
+  heterogeneidad de listas se decide sólo por contenido vía `lub`). Requiere un helper nuevo
+  análogo. El caso Map (el reportado) queda cerrado; el de List es un follow-up si aparece.
+- **FITZ-27 — trace_id del request en el log del spawn.** El log de una task spawnada que
+  falla lleva el nombre de la fn + el error, pero NO el trace_id del request originante: el
+  `SpanContext` es task-local de tokio y no se propaga automáticamente al `tokio::spawn`.
+  Correlacionarlo requiere capturar el `SpanContext` antes del spawn y re-instalarlo dentro
+  del task. Mejora futura de observabilidad.
+- **FITZ-26 — re-export desde OTRA dep (registry flat).** El pre-scan sigue re-exports
+  transitivos dentro de la misma lib (`from internal import f`). Un re-export desde una dep
+  distinta (`from otherdep import f` en el lib entry) no resolvería porque el `dep_registry`
+  es flat (transitive deps no soportadas — limitación pre-existente del PM). El caso común
+  (re-export desde sub-módulo de la misma lib, el de fitz-liveviews) queda cerrado.
+
 ## 🟢 Body `form-urlencoded` → tipo declarado en `fitz run` (CERRADO v0.50.0, 2026-08-20)
 
 **El gap (clase FITZ-14, paridad `run`↔`build`):** un handler `@post fn login(creds:

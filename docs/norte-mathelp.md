@@ -657,7 +657,19 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-26 · `fitz check` no valida field-access sobre el retorno primitivo de una fn importada cross-módulo (check✓/run✗)
 
-- [ ] **Abierto.** Descubierto en MatHelp, Lote A (emails de registro), 2026-09-22.
+- [x] **Cerrado (v0.61.0, 2026-09-22).** Descubierto en MatHelp, Lote A (emails de registro), 2026-09-22.
+- **Fix:** `pre_scan_imported_fn_signatures` (`src/main.rs`) ahora sigue re-exports
+  transitivos. El sibling plano YA se cazaba (el pre-scan resuelve la firma directa
+  → FITZ-24 dispara); el hueco real era el **re-export** (fitz-liveviews expone `flv`
+  vía `from internal import flv` en su lib entry). Cuando la fn no es un `fn` directo
+  del módulo importado, el nuevo helper recursivo `resolve_imported_fn_sig` busca el
+  `from <sub> import <fn>` que la re-exporta y resuelve la firma en el sub-módulo
+  (guard de profundidad = 4 contra ciclos; helper `read_parse_module_program`
+  compartido). Con la firma poblada, `f("x")` tipa `Str` y el field-access `.raw`
+  dispara el error de FITZ-24. Repro confirmado: sibling plano ya erraba; path dep
+  también; **re-export transitivo daba 0 errores → ahora erra**. Tests: 2 cli_e2e
+  (`fitz26_check_catches_field_access_on_reexported_fn_str_return` + regression guard
+  `..._legitimate_use_passes`).
 - **Estado:** Confirmado (repro). Clase check✓/run✗ — la MISMA familia que FITZ-24, pero cross-módulo.
 - **Impacto:** Medio. FITZ-24 (v0.60.0) cerró el field-access sobre primitivos concretos **locales**
   (`let s: Str = "x"; s.raw` → error de check). Pero cuando el receptor es el **retorno de una fn
@@ -685,7 +697,21 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-27 · `spawn(fn())` desde un handler `@post` traga en silencio los errores de runtime de la task
 
-- [ ] **Abierto.** Descubierto en MatHelp, Lote A (emails de registro), 2026-09-22.
+- [x] **Cerrado (v0.61.0, 2026-09-22).** Descubierto en MatHelp, Lote A (emails de registro), 2026-09-22.
+- **Fix:** `eval_spawn_call` (`src/evaluator.rs`) — en el camino in-memory del
+  `tokio::spawn`, cuando el resultado de la task es `Err`, se emite un log estructurado
+  `emit_log_record("error", "spawned task failed", …)` con el nombre de la fn spawnada
+  y el mensaje del error, ANTES de que el `Value::Future` se dropee sin awaitear
+  (fire-and-forget). Paralelo a cómo `@cron` (`cron_jobs.rs`) y `@background`
+  persistente (`background_jobs.rs`) reportan fallos de sus tasks. Si el caller SÍ
+  awaitea el Future, el error también propaga (doble señal aceptada, como fire-and-forget).
+  Test: E2E `fitz27_spawned_task_runtime_error_is_logged_not_swallowed` (spawn de una fn
+  con `1/0`, sin `.await`, + `sleep().await` para dar tiempo; verifica stderr contiene
+  `spawned task failed` + el nombre de la fn, y el programa completa normal).
+- **MatHelp:** cuando MatHelp bumpee a v0.61.0 puede revertir el workaround de `.await`
+  inline en `registro_post` a `spawn(signup_emails(fam))` — los errores de la task ya
+  no se tragan. (El trace_id del request originante en el log queda como mejora futura:
+  el `SpanContext` es task-local de tokio y no se propaga automáticamente al spawn.)
 - **Estado:** Confirmado (repro). Clase observabilidad/confiabilidad del runtime del intérprete.
 - **Impacto:** Alto para debugging. Un `spawn(g())` disparado desde un handler HTTP `@post`, si `g`
   tiene un error de runtime, **la task muere sin log y el handler devuelve normal** (el 303 salió
@@ -714,7 +740,20 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-28 · Un `type` usado como body de un handler `@post`, definido DESPUÉS del handler en el mismo módulo, hace 500 en runtime (check✓/run✗)
 
-- [ ] **Abierto.** Descubierto en MatHelp, Lote B (recuperación de clave), 2026-09-22.
+- [x] **Cerrado (v0.61.0, 2026-09-22).** Descubierto en MatHelp, Lote B (recuperación de clave), 2026-09-22.
+- **Fix:** nuevo helper `preregister_type_defs(program, env)` (`src/evaluator.rs`) que
+  registra los `Stmt::TypeDef` top-level ANTES del loop de evaluación top-down, en
+  AMBOS entry points: `eval_with_base_import_root_and_deps` (el main) y `load_module`
+  (módulos importados — el caso real de MatHelp `recuperar.fitz`). Es seguro: registra
+  el `Value::Type` con `resolved_defaults` VACÍO → no ejecuta código de usuario (los
+  defaults siguen lazy, evaluados por struct-lit / body coercion con el env correcto),
+  así NO cambia el orden de evaluación de defaults (PreF8.3). El loop top-down re-define
+  el mismo valor idempotente. Con el type disponible, `register_http_route` resuelve el
+  body param eager (deja de guardar `None` → deja de deserializar el body como Map libre
+  → el field-access typed del handler funciona → 200 en vez de 500). Test:
+  `fitz28_body_type_defined_after_handler_resolves_and_returns_200` (`src/http.rs`, vía
+  `run_oneshot_with_body`); **repro real confirmado**: sin el pre-scan → 500 con
+  `field access .name on a value of type Map`; con el pre-scan → 200.
 - **Estado:** Confirmado (repro decisivo). Clase check✓/run✗ del intérprete (registro de rutas HTTP).
 - **Impacto:** Medio-alto en DX. `fitz check` pasa, pero el POST devuelve **500 antes de entrar al
   handler** (ni el primer `log.info` del cuerpo dispara). El 500 no imprime detalle (lo traga el
@@ -748,7 +787,18 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-29 · Un `Map<Str, Any>` literal construido en un helper que retorna `Result<Map<Str, Any>>` no envuelve los valores en `__FitzValue` en `fitz build` (check✓/build✗)
 
-- [ ] **Abierto.** Descubierto en MatHelp, Lote D1 (export de datos), 2026-09-22.
+- [x] **Cerrado (v0.61.0, 2026-09-22).** Descubierto en MatHelp, Lote D1 (export de datos), 2026-09-22.
+- **Fix:** `gen_return` (`src/codegen.rs`), bloque de propagación `Ok/Err` — cuando el
+  return es `Ok(Expr::Map)` y el inner-type del `Result` esperado es `Map<_, Any>` (o
+  `Nullable(Map<_,Any>)`), se llama `gen_map_lit_with_hint(pairs, span, Some(tok))` en
+  vez de `gen_expr(inner)`, propagando el hint que envuelve cada entrada en `__FitzValue`
+  (shape `Vec<(FV, FV)>`). Replica el patrón ad-hoc de `gen_assign`/`gen_module_top_let`
+  (v0.55/v0.56); el hueco era exactamente el `return Ok({...})`. Repro confirmado: un map
+  **homogéneo por contenido** (todos Str) con destino `Map<Str,Any>` → pre-fix 6× E0308,
+  post-fix compila. Test: `fitz29_map_str_any_in_result_ok_builds_and_matches_interpreter`
+  (paridad run↔build). **Hueco paralelo NO cubierto** (deuda residual, ver deudas-post-5b):
+  `return Ok([...])` con destino `Result<List<Any>>` homogéneo — no existe
+  `gen_list_lit_with_hint`; requiere un helper nuevo. El caso Map (el reportado) queda cerrado.
 - **Estado:** Confirmado (repro real). Clase check✓/build✗ del codegen. Familia de los fixes
   v0.10.4/v0.10.5/W1/v0.55/v0.56 sobre `Map<Str, Any>`, pero por un camino nuevo no cubierto.
 - **Impacto:** Medio. `fitz check` + `fitz run` OK (el intérprete arma el Map heterogéneo sin
@@ -771,7 +821,22 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-30 · Un `type` definido en un MÓDULO y retornado como JSON desde un handler de ESE módulo no recibe `impl __ToFitzJson` si tiene un campo nominal anidado no importado al main (check✓/build✗)
 
-- [ ] **Abierto.** Descubierto en MatHelp, Lote D1 (export de datos), 2026-09-22.
+- [x] **Cerrado (v0.61.0, 2026-09-22).** Descubierto en MatHelp, Lote D1 (export de datos), 2026-09-22.
+- **Fix (Opción A — auto-registro, paralelo a v0.45/FITZ-15):** nuevo pase
+  `auto_register_module_type_field_nominals(env, modules)` (`src/codegen.rs`), enganchado
+  en `generate_main_rs` junto a `auto_register_relation_targets` /
+  `auto_register_imported_fn_ret_nominals`, mergeado a `synth_rel_targets`. Worklist BFS
+  que, sembrando desde los CAMPOS de todos los `type_sigs` de los módulos, mintea (con
+  `env.declare_nominal`) cada nominal anidado transitivamente alcanzable que algún módulo
+  DEFINE pero el env del main no tiene. Con el nominal registrado, `remap_imported_nominals`
+  deja de degradarlo a `Type::Any`, `has_opaque_field` da false, y
+  `emit_helpers_for_imported_types` emite `impl __ToFitzJson` para el tipo (antes lo
+  skipeaba → E0599). Sólo destraba nominales que algún módulo define; los genuinamente
+  opacos siguen degradando (sin regresión). Test E2E `fitz30_module_type_nested_nominal_gets_to_json_impl`
+  (proyecto worker+main: `Outer { inner: Inner }` retornado por `@get`, main importa el
+  módulo por namespace sin importar Inner/Outer). Repro confirmado: pre-fix E0599, post-fix
+  buildea. **MatHelp** puede revertir el workaround W17 (importar todos los tipos anidados
+  al entry).
 - **Estado:** Confirmado (repro real, leído el codegen). Clase check✓/build✗. Extensión de W9/W17
   (v0.10.7) a tipos planos (no-`@table`).
 - **Impacto:** Medio-alto (build roto). `error[E0599]: ExportDataData: __ToFitzJson is not satisfied`.
@@ -797,7 +862,23 @@ Impacto ∈ `Bloqueante` · `Alto` · `Medio` · `Bajo` · Costo ∈ `S` (horas)
 
 ### FITZ-31 · Una variable Fitz con nombre de keyword RESERVADA de Rust (`priv`, `move`, `ref`, …) rompe `fitz build` (check✓/build✗)
 
-- [ ] **Abierto.** Descubierto en MatHelp, Lote E1 (páginas legales), 2026-09-22.
+- [x] **Cerrado (v0.61.0, 2026-09-22).** Descubierto en MatHelp, Lote E1 (páginas legales), 2026-09-22.
+- **Fix:** helper `sanitize_var_ident(name)` (`src/codegen.rs`) — emite `r#<name>` para
+  keywords de Rust que admiten raw identifier (`priv`, `move`, `ref`, `dyn`, `impl`,
+  `trait`, `enum`, `unsafe`, `box`, `yield`, …), y renombra con prefijo `__fitz_kw_` las
+  6 que NO lo admiten (`crate`/`self`/`Self`/`super`/`true`/`false`). Lista canónica
+  `RUST_KEYWORDS` + `is_rust_keyword` compartida con `validate_rust_ident`. Aplicado en
+  TODOS los sitios de binding de variable: `let` decl + reassign + uso (`Expr::Ident`),
+  params de fn (se removió el `validate_rust_ident` que erraba — ahora compilan), todos
+  los for-loops (range/List/tuple/Map), match bindings (Ident/Ok/Err), closure/method/
+  callback params, capture rebind, transaction callback, y destructure. El scope-map
+  interno mantiene el nombre Fitz original como clave; sólo la emisión Rust se sanea →
+  decl y uso consistentes por construcción → byte-idéntico para nombres normales (smoke
+  ~290 verde). Los nombres de fn/type + campos de struct + top-level consts con nombre
+  reservado quedan con el error claro de `validate_rust_ident` (deuda residual menor, ver
+  deudas-post-5b). Elegido "que compile" (paridad run↔build total) sobre "error claro".
+  Tests: 5 unit (`sanitize_var_ident` + emisión) + 2 E2E de paridad
+  (`fitz31_reserved_rust_keywords_as_vars_build_and_match_interpreter` + `..._in_match_binding_...`).
 - **Estado:** Confirmado (repro real). Clase check✓/build✗ — el codegen no sanea nombres de variable
   que colisionan con keywords reservadas de Rust.
 - **Impacto:** Bajo-medio pero muy confuso. `fitz check` + `fitz run` OK (`priv` es un identificador
